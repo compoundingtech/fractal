@@ -1479,11 +1479,18 @@ def takes_input_files(wrapper):
 UNCOVERED = 'not signed'  # a crate left for CI (a test passed only on a retry): its row, and the check's unsigned flag
 
 
-def retried_tests(directory, junit, crate):
-    """The crate's tests that passed only on a retry in the report (scripts/ci-rust-test-result's `flaky` lines)."""
+def unsettled_tests(directory, junit, crate):
+    """(failed, retried): the crate's tests that failed every try and those that passed only on a retry in the report
+    (scripts/ci-rust-test-result's `FAIL` and `flaky` lines)."""
     done = subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result')], capture_output=True, text=True,
                           env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate))
-    return [line.split(' ', 1)[1] for line in done.stdout.splitlines() if line.startswith('flaky ')]
+    lines = [line.split(' ', 1) for line in done.stdout.splitlines() if ' ' in line]
+    return [name for status, name in lines if status == 'FAIL'], [name for status, name in lines if status == 'flaky']
+
+
+def name_tests(names):
+    """At most two test names without their binary, for a summary row."""
+    return ', '.join(name.split(' ', 1)[-1] for name in names[:2]) + (' ...' if len(names) > 2 else '')
 
 
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target, report=None):
@@ -1548,12 +1555,12 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                                           text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
         if not facts:
             return (f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'), []
-        flaky = retried_tests(directory, junit, crate)
-        if flaky:
+        failing, flaky = unsettled_tests(directory, junit, crate)
+        if flaky and not failing:
             # As CI's per-crate notes (scripts/ci-rust-test-notes): a crate with a test that passed only on a retry is not signed, so it
-            # stays uncovered and CI runs it. Not a failure of this run.
-            return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: '
-                    + ', '.join(name.split(' ', 1)[-1] for name in flaky[:2]) + (' ...' if len(flaky) > 2 else ''))[:200], UNCOVERED
+            # stays uncovered and CI runs it. Not a failure of this run. A test that failed every try is one, whatever else was retried:
+            # the crate goes on to its failing record below.
+            return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: {name_tests(flaky)}'[:200]), UNCOVERED
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
                 '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
@@ -1574,7 +1581,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
-            detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
+            detail = (f'{len(failing)} test(s) failed every try: {name_tests(failing)}' if failing else
+                      (signed.stderr.strip().splitlines() or ['failed'])[-1])[:160]
             return (f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail), None
         try:
             record = json.loads(signed.stderr[signed.stderr.index('{'):])
