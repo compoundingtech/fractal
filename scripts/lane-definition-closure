@@ -53,17 +53,21 @@ are kept by hand and left alone. Exit 2 for a usage error. Needs Python and git.
 """
 import argparse
 import ast
+import importlib.machinery
 import json
 import os
 import posixpath
 import re
 import subprocess
 import sys
+import types
 
 sys.dont_write_bytecode = True
 
 LANES = '.st/required-lanes.json'
 SKIP_POLICY = '.st/evidence-skip-policy.json'
+GATE = 'scripts/ci-evidence-gate'
+VERIFY_NAME = 'evidence-verify'  # beside this script: the selector the gate reads ci_inputs with
 
 # Lanes whose tests run in a copy of the tree that holds only their skip-policy inputs (scripts/ci-sparse-tree): a file outside the
 # copy cannot run in the lane, so the walk does not reach it.
@@ -815,6 +819,53 @@ def covered(path, declared):
     return any(path == d or path.startswith(d.rstrip('/') + '/') for d in declared)
 
 
+def protected_files(repo):
+    """The gate's PROTECTED files less its BASE_READ ones (scripts/ci-evidence-gate): the files whose change on main since a branch
+    point decides, for a check, whether the pull request's own tree is asked about. Read from the gate's source, not imported."""
+    source = repo.read(GATE)
+    found = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and getattr(node.targets[0], 'id', None) in ('PROTECTED', 'BASE_READ'):
+            found[node.targets[0].id] = set(ast.literal_eval(node.value))
+    return found.get('PROTECTED', set()) - found.get('BASE_READ', set())
+
+
+def undeclared_ci(closure, verdict, ci_inputs, protected):
+    """The protected files the lane executes or reads that its ci_inputs leave out. A selector (PATH::SELECTOR) covers only its own
+    part of PATH, so a lane that reads PATH itself must declare PATH; an excluded path (!PATH) is left out."""
+    plain = [d for d in ci_inputs if not d.startswith('!') and '::' not in d]
+    excluded = [d[1:] for d in ci_inputs if d.startswith('!')]
+    reached = (set(closure.files) | set(closure.paths()) | set(verdict)) & protected
+    return sorted(p for p in reached if not covered(p, plain) or covered(p, excluded))
+
+
+def unresolved_ci(repo, ci_inputs):
+    """The ci_inputs entries that name nothing in the tree, each with why: a path it lacks, or a job or JSON entry its file does not
+    have (read with scripts/evidence-verify's own selector, so the two cannot disagree). The gate treats such an entry as changed, so
+    the lane would always fall back: a renamed job or a typo, which this makes a --check failure rather than a silent one."""
+    loader = importlib.machinery.SourceFileLoader('evidence_verify', os.path.join(os.path.dirname(os.path.abspath(__file__)), VERIFY_NAME))
+    verify = types.ModuleType(loader.name)
+    loader.exec_module(verify)
+    found = []
+    for item in ci_inputs:
+        path, selector = item.partition('::')[::2]
+        if item.startswith('!') or item == '.':
+            continue
+        if path not in repo.files and (selector or path not in repo.dirs):
+            found.append((item, f'{path} is not in the tree'))
+            continue
+        if not selector:
+            continue
+        try:
+            part = verify.select_part(repo.read(path).decode(), path, selector)
+        except (verify.Failure, UnicodeDecodeError) as error:
+            found.append((item, str(error)))
+            continue
+        if part is None:
+            found.append((item, f'{path} has no {selector}'))
+    return found
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--root', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -855,8 +906,17 @@ def main(argv):
             missing_verdict = [p for p in sorted(verdict) if not covered(p, declared)]
             absent = [p for p in sorted(verdict) if p not in repo.files]
             config = [] if name in KEPT else closure.undeclared(verdict)  # a KEPT lane's tests read other lanes' configuration
-            if missing or missing_verdict or absent or config:
+            ci_inputs = lanes[name].get('ci_inputs')
+            ci_missing = undeclared_ci(closure, verdict, ci_inputs, protected_files(repo)) if ci_inputs is not None else []
+            ci_unresolved = unresolved_ci(repo, ci_inputs) if ci_inputs is not None else []
+            if missing or missing_verdict or absent or config or ci_missing or ci_unresolved:
                 failed = True
+            for item, why in ci_unresolved:
+                print(f'{name}: its ci_inputs entry {item} names nothing ({why}): fix it, or the gate treats it as changed and the lane '
+                      'always falls back to the merge tree')
+            for path in ci_missing:
+                print(f'{name}: it executes or reads the protected file {path}, which its ci_inputs do not declare: add it, or main changing '
+                      'it would keep a signature this lane may depend on')
             for path in config:
                 print(f'{name}: {path} is read as environment configuration by {closure.config[path]} but is neither executed nor '
                       'declared: add it to VERDICT_DATA with its reason')
@@ -870,7 +930,7 @@ def main(argv):
                 print(f'{name}: {len(missing_verdict)} verdict-data file(s) are not in its definition_paths:')
                 for path in missing_verdict:
                     print(f'  {path}   ({verdict[path]})')
-            if not missing and not missing_verdict and not absent and not config:
+            if not missing and not missing_verdict and not absent and not config and not ci_missing and not ci_unresolved:
                 print(f'{name}: the {len(closure.paths())} path(s) it executes and its {len(verdict)} verdict-data file(s) '
                       'are covered by its definition_paths')
         elif args.write:

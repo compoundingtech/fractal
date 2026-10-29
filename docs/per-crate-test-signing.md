@@ -133,8 +133,8 @@ and a stale pass is reused. Four controls, in order of when they bite:
 
 ## 8. As built in step 3 (policy, lane, verifier)
 
-- `.st/evidence-skip-policy.json`: `rust-tests` (shadow: `enforce` false, `pull_request` only, `sample_one_in` 5, no `inputs`: the keys are
-  per crate). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
+- `.st/evidence-skip-policy.json`: `rust-tests` (`pull_request` only, `sample_one_in` 1, no `inputs`: the keys are per crate; shadow with
+  `enforce` false until 2026-10-28, enforced since: a pull request skips rust-tests on per-crate notes). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
   `source_inputs`, `tests_run`, `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset` and `run_command_sha256`.
 - `.st/required-lanes.json` (since narrowed to what the lane's commands execute plus its verdict data, without `.st/rust-test-inputs.json`,
   which only the base's copy keys a note: docs/st3/gate-evidence.md, "Definition paths are what the lane executes, plus its verdict data"): the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
@@ -182,9 +182,10 @@ stage scripts). So about half the merges re-run a handful of crates and one in s
 - The test jobs are wired to it: `linux-tests` and its shards (and through them `linux-test-build`) skip when linux-gate's note OR every
   crate's per-crate note covers the tree; clippy and fleet compatibility still need linux-gate's own note. The linux-gate verdict accepts
   a skipped stage only when one of those gates decided skip and that stage's own rule says skip. Nothing changes while the rust-tests entry is
-  shadow (its gate never says skip). The enforce step is then the policy flip alone (`enforce: true`, `events: ["pull_request"]`,
-  sampled 1 in 5, merge queue unchanged), on its own trigger; before it, scripts/evidence-flip-ready must count the jobs that read
-  rust-tests' skip as its members, so a red they would hide is seen.
+  shadow (its gate never says skip). The enforce step was then the policy flip alone (`enforce: true`, `events: ["pull_request"]`,
+  every run (`sample_one_in` 1), merge queue unchanged, and the wrapper kind's `trust_levels` narrowed to host, agent and queue), on its
+  own trigger; before it, scripts/evidence-flip-ready counts the jobs that read rust-tests' skip as its members, so a red they would hide
+  is seen.
 
 ## 9. Signing time (measured 2026-10-24)
 
@@ -258,8 +259,10 @@ or the verifier's rules changes.
 ## 14. CI signs per-crate notes (2026-10-25)
 
 Until now only a local `scripts/fractal-test` push signed per-crate `rust-tests` notes, so a pull request whose crates were unchanged found a note
-only when someone had run it. CI now signs them too, with its own `fleet/ci` key, from the test shards' own nextest run. The policy entry
-stays in shadow (`enforce` false): this only produces notes.
+only when someone had run it. CI now signs them too, with its own `fleet/ci` key, from the test shards' own nextest run. These notes don't
+skip rust-tests for a pull request: since the check is enforced, the wrapper kind's `trust_levels` are host, agent and queue, so a pull
+request skips only on a note fractal-test signed on one of our hosts or an agent signed. CI's notes are still produced, published and
+verified.
 
 - **Where.** The test shards (`linux-tests`, `linux-tests-shard-2/3/4`) write nextest's JUnit report (`CI_TEST_JUNIT`) and
   `scripts/ci-rust-test-notes describe` (job, partition, attempt, how nextest ended, the dev shell digest, the system) and upload both as
@@ -286,7 +289,8 @@ stays in shadow (`enforce` false): this only produces notes.
   the digest of that command's output over the crate's part of the joined report, and the inputs `crate`, `source_inputs`, `tests_run`,
   `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset=workspace`, `run_command_sha256` (the tests stage command and the
   shard partitions) and the shards' dev shell digest as `toolchain_sha256`, plus the run's id, attempt, event, partitions and shard jobs.
-  `evidence-verify --members` accepts it as it accepts fractal-test's (fleet level: the wrapper rule, no lane).
+  `evidence-verify --members` verifies it as it does fractal-test's (the wrapper rule, no lane) and reports its level as fleet, which the
+  enforced policy does not trust for a pull request (`untrusted_level`).
 - **Published like the other CI notes.** `evidence-publish --checks rust-tests` files each record under the tree's tag and note and the
   input-keyed index refs (`refs/notes/evidence-input/rust-tests/<key>/<record>`, `refs/tags/evidence/input/rust-tests/<key>/<record>`) and
   pushes them. A signature that fails is reported in the job summary and the others are still published.
