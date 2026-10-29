@@ -10470,6 +10470,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(view) = views.get(step.spec.path.as_str()).copied() else {
                 continue;
             };
+            // A gate process that exits while its step is evaluated is seen running by the gate
+            // and ended by the liveness check after it, and its answer would be cancelled unread.
+            // A cancelled finally step must have had no live process before its evaluation too.
+            let ended_before_evaluation = run.phase == "final-cancelled"
+                && view.agentless
+                && view.status == "working"
+                && !self.step_has_live_process(&view.subject)?;
             // One step that fails records a fault on that step. The run's other steps and its
             // status are still evaluated.
             let step_changed = self
@@ -10838,6 +10845,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // and declarations. Once it only waits on evidence, cancellation must not hold
             // the mission's active-run slot until the step's execution budget expires.
             if step_changed == Some(false)
+                && ended_before_evaluation
                 && run.phase == "final-cancelled"
                 && view.agentless
                 && view.status == "working"
@@ -19848,6 +19856,7 @@ pub mod tests {
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
+    mod final_cancel_gate_exit;
     mod gate_on_demand;
     mod github_watch_selection;
     mod helper_launcher;
@@ -20257,11 +20266,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(observed_pty_status(&observation), "running");
     }
 
+    /// The exec a hook waits for, and what happens right after that exec is next observed.
+    type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Runs once, right after the named exec is next observed: its process ends just then.
+        after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         logs: Mutex<HashMap<String, String>>,
@@ -20504,7 +20518,19 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 !self.failed_observes.lock().unwrap().contains(runtime_id),
                 "fake observe failed"
             );
-            Ok(self.execs.lock().unwrap().get(runtime_id).cloned())
+            let observed = self.execs.lock().unwrap().get(runtime_id).cloned();
+            let after = {
+                let mut after = self.after_observe_exec.lock().unwrap();
+                if after.as_ref().is_some_and(|(id, _)| id == runtime_id) {
+                    after.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, after)) = after {
+                after();
+            }
+            Ok(observed)
         }
         fn start(&self, member: &MemberSpec) -> Result<()> {
             self.starts.lock().unwrap().push(member.runtime_id.clone());
