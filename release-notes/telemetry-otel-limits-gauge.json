@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "summary": "The observations OTLP exporter also sends account limits as a bounded gauge and counts the claims each node stores by kind and writer; the docs name the observation log as the full harness telemetry series",
+  "summary": "The observations OTLP exporter also sends account limits as a bounded gauge and the claims each node stores by kind and writer, counted as they are stored; the docs name the observation log as the full harness telemetry series",
   "replay": {
     "status": "none",
-    "detail": "No claim is written or replayed differently. The exporter reads the local observation log as before, and reads the kind, origin and body size of claims stored since its last export to count them."
+    "detail": "No claim is written or replayed differently. A trigger on claim insert adds to the node-local claim_writes totals in the same transaction; deleting claims never changes them."
   },
   "schema": {
-    "status": "none",
-    "detail": "No schema change."
+    "status": "changed",
+    "detail": "Adds the node-local table claim_writes (kind, writer, claims, bytes), the trigger claim_writes_insert AFTER INSERT ON claims, and the meta key claim_writes_since_unix_ms, created on open with IF NOT EXISTS. They are not replicated, not part of any claim, projection or checkpoint digest, and an older build ignores them."
   },
   "rules": {
     "status": "none",
@@ -15,11 +15,11 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "A node with [observations.otlp] configured also posts to the collector's /v1/metrics: st_account_limit_used_percent (gauge; driver, account, window) in the same batches as the log records, and st_claims_stored_total and st_claim_body_bytes_stored_total (delta sums; kind, writer) for the claims stored since its previous export, counted from the daemon's start. These counts are taken as claims are stored, so they stay a write rate after local trim deletes superseded claims. A batch's cursor still moves only when every signal is accepted. Without [observations.otlp] nothing runs, as before. No claim kind, field, wire or CLI contract changes."
+    "detail": "A node with [observations.otlp] configured also posts to the collector's /v1/metrics: st_account_limit_used_percent (gauge; driver, account, window; the newest measured reading per window), and st_claims_stored_total and st_claim_body_bytes_stored_total (cumulative sums from claim_writes_since_unix_ms; kind, writer) whenever the totals changed. The totals count each claim as it is stored, here or received, so they stay a true write rate after local trim deletes superseded claims. A batch's cursor still moves only when every signal is accepted. Without [observations.otlp] the totals are still kept but nothing is sent. No claim kind, field, wire or CLI contract changes."
   },
   "downtime": {
     "status": "none",
-    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+    "detail": "No restart beyond the normal upgrade. The table and trigger are created on open; counting starts then, with no backfill."
   },
   "manual": {
     "status": "none",
@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "No data recovery is needed. Reverting stops the gauge and the claim counters; the log records are unchanged."
+    "detail": "No data recovery is needed. Reverting stops the gauge and the counters; the claim_writes table, its trigger and the meta key stay and keep counting until dropped, harmlessly."
   }
 }

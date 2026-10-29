@@ -681,7 +681,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h82624af80f95 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h974bced4d1b5 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1348,6 +1348,22 @@ CREATE TABLE IF NOT EXISTS local_latest_slots (
     pending_local_id INTEGER,
     PRIMARY KEY (subject, kind, slot)
 );
+-- Every claim this node stores, written here or received, counted per kind and writing node
+-- in the transaction that inserts it. Deleting claims (trim, checkpoints) never lowers the
+-- totals, so the OpenTelemetry exporter reports a true write rate from them.
+CREATE TABLE IF NOT EXISTS claim_writes (
+    kind TEXT NOT NULL,
+    writer TEXT NOT NULL,
+    claims INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (kind, writer)
+) WITHOUT ROWID;
+INSERT OR IGNORE INTO meta(key, value) VALUES('claim_writes_since_unix_ms', CAST(strftime('%s','now') AS INTEGER) * 1000);
+CREATE TRIGGER IF NOT EXISTS claim_writes_insert AFTER INSERT ON claims BEGIN
+    INSERT OR IGNORE INTO claim_writes(kind, writer, claims, bytes) VALUES(NEW.kind, NEW.origin, 0, 0);
+    UPDATE claim_writes SET claims=claims+1, bytes=bytes+length(CAST(NEW.body AS BLOB))
+    WHERE kind=NEW.kind AND writer=NEW.origin;
+END;
 CREATE TABLE IF NOT EXISTS revision_proposals (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES mission_runs(id),
@@ -11141,25 +11157,24 @@ impl crate::otlp::ObservationSource for Store {
         })
     }
 
-    fn claim_index(&self) -> Result<u64> {
-        self.index()
-    }
-
-    fn claim_writes(&self, after: u64, through: u64) -> Result<Vec<crate::otlp::ClaimWrites>> {
+    fn claim_writes(&self) -> Result<(u128, Vec<crate::otlp::ClaimWrites>)> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(
-            "SELECT kind, origin, count(*), sum(length(CAST(body AS BLOB))) FROM claims
-             WHERE store_index>?1 AND store_index<=?2 GROUP BY kind, origin ORDER BY kind, origin",
-        )?;
-        let rows = statement.query_map(params![after as i64, through as i64], |row| {
+        let since = connection
+            .query_row("SELECT value FROM meta WHERE key='claim_writes_since_unix_ms'", [], |row| row.get::<_, String>(0))
+            .optional()?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let mut statement = connection
+            .prepare_cached("SELECT kind, writer, claims, bytes FROM claim_writes ORDER BY kind, writer")?;
+        let rows = statement.query_map([], |row| {
             Ok(crate::otlp::ClaimWrites {
                 kind: row.get(0)?,
                 writer: row.get(1)?,
                 claims: row.get::<_, i64>(2)?.max(0) as u64,
-                bytes: row.get::<_, Option<i64>>(3)?.unwrap_or(0).max(0) as u64,
+                bytes: row.get::<_, i64>(3)?.max(0) as u64,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        Ok((since, rows.collect::<Result<Vec<_>, _>>()?))
     }
 }
 

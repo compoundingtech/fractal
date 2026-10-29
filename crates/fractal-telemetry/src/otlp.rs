@@ -33,14 +33,13 @@ pub trait ObservationSource: Send + Sync + 'static {
         self: Arc<Self>,
         cursor: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
-    /// The store index of the newest stored claim.
-    fn claim_index(&self) -> Result<u64>;
-    /// Claims stored after store index `after` through `through`, written here or received,
-    /// counted per kind and writing node.
-    fn claim_writes(&self, after: u64, through: u64) -> Result<Vec<ClaimWrites>>;
+    /// When the source started counting stored claims (Unix milliseconds), and its totals per
+    /// kind and writing node since then. The totals grow as claims are stored and never fall
+    /// when claims are deleted.
+    fn claim_writes(&self) -> Result<(u128, Vec<ClaimWrites>)>;
 }
 
-/// Claims of one kind from one writing node stored in one export interval, and their body bytes.
+/// The claims of one kind from one writing node stored since counting started, and their body bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimWrites {
     pub kind: String,
@@ -48,9 +47,6 @@ pub struct ClaimWrites {
     pub claims: u64,
     pub bytes: u64,
 }
-
-/// The most store indexes counted in one claim-writes request.
-const CLAIM_WRITES_SPAN: u64 = 50_000;
 
 /// The most observations sent in one request.
 pub const OTLP_BATCH: usize = 512;
@@ -72,8 +68,8 @@ pub struct OtlpExporter {
     traces_url: String,
     headers: reqwest::header::HeaderMap,
     node: String,
-    /// The store index claim writes were counted through, and when; unset until the first export.
-    claims_counted: std::sync::Mutex<Option<(u64, u128)>>,
+    /// The claim-write totals last sent, so an export with nothing new stored sends none.
+    claims_sent: std::sync::Mutex<Vec<ClaimWrites>>,
 }
 
 impl OtlpExporter {
@@ -97,7 +93,7 @@ impl OtlpExporter {
             traces_url: format!("{}/v1/traces", config.endpoint.trim_end_matches('/')),
             headers,
             node: node.to_owned(),
-            claims_counted: std::sync::Mutex::new(None),
+            claims_sent: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -142,32 +138,19 @@ impl OtlpExporter {
         })
     }
 
-    /// Count the claims stored since the last export, per kind and writer, as delta counters.
-    /// They are counted as they are stored, so local trim deleting superseded claims later does
-    /// not change them. The first export only marks where counting starts.
+    /// Send the source's claim-write totals as cumulative counters when they changed. The source
+    /// counts each claim as it is stored, so trim deleting it later does not change the rate.
     async fn export_claim_writes<S: ObservationSource>(&self, store: &Arc<S>) -> Result<()> {
-        let now = smallclaims::store::now_ms();
-        let index = {
+        let (since, writes) = {
             let store = store.clone();
-            tokio::task::spawn_blocking(move || smallclaims::task_cpu::blocking("observations.export", || store.claim_index())).await??
+            tokio::task::spawn_blocking(move || smallclaims::task_cpu::blocking("observations.export", || store.claim_writes())).await??
         };
-        let Some((after, since)) = *self.claims_counted.lock().unwrap() else {
-            *self.claims_counted.lock().unwrap() = Some((index, now));
-            return Ok(());
-        };
-        let through = index.min(after.saturating_add(CLAIM_WRITES_SPAN));
-        if through <= after {
+        if writes.is_empty() || *self.claims_sent.lock().unwrap() == writes {
             return Ok(());
         }
-        let writes = {
-            let store = store.clone();
-            tokio::task::spawn_blocking(move || smallclaims::task_cpu::blocking("observations.export", || store.claim_writes(after, through)))
-                .await??
-        };
-        if let Some(metrics) = otlp_claim_write_metrics(&self.node, &writes, since, now) {
-            self.send(&self.metrics_url, &metrics).await?;
-        }
-        *self.claims_counted.lock().unwrap() = Some((through, now));
+        let metrics = otlp_claim_write_metrics(&self.node, &writes, since, smallclaims::store::now_ms());
+        self.send(&self.metrics_url, &metrics).await?;
+        *self.claims_sent.lock().unwrap() = writes;
         Ok(())
     }
 
@@ -485,7 +468,10 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
         for (window, field) in [("five_hour", "five_hour_percent"), ("weekly", "weekly_percent")] {
             if let Some(percent) = fields[field].as_f64() {
                 let key = (text(fields, "driver"), text(fields, "account"), window);
-                limits.insert(key, (measured, percent));
+                // Readings can arrive out of measured order; an equal time keeps the later one.
+                if limits.get(&key).is_none_or(|(newest, _)| measured >= *newest) {
+                    limits.insert(key, (measured, percent));
+                }
             }
         }
     }
@@ -514,13 +500,10 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
     }]}]}))
 }
 
-/// Claims stored on this node per kind and writing node, and their body bytes, as delta counters
-/// over `since..now` (Unix milliseconds). Both label sets are bounded: kinds by the schema,
+/// Claims stored on this node per kind and writing node, and their body bytes, as cumulative
+/// counters from `since` (Unix milliseconds). Both label sets are bounded: kinds by the schema,
 /// writers by the fleet's members.
-fn otlp_claim_write_metrics(node: &str, writes: &[ClaimWrites], since: u128, now: u128) -> Option<Value> {
-    if writes.is_empty() {
-        return None;
-    }
+fn otlp_claim_write_metrics(node: &str, writes: &[ClaimWrites], since: u128, now: u128) -> Value {
     let (started, ended) = ((since * 1_000_000).to_string(), (now.max(since + 1) * 1_000_000).to_string());
     let points = |value: fn(&ClaimWrites) -> u64| {
         writes
@@ -537,20 +520,20 @@ fn otlp_claim_write_metrics(node: &str, writes: &[ClaimWrites], since: u128, now
             })
             .collect::<Vec<_>>()
     };
-    Some(json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
+    json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
         "scope": {"name": "st"}, "metrics": [
             {
                 "name": "st_claims_stored_total", "unit": "{claim}",
                 "description": "Claims stored on this node, written here or received, by kind and writing node",
-                "sum": {"aggregationTemporality": 1, "isMonotonic": true, "dataPoints": points(|write| write.claims)},
+                "sum": {"aggregationTemporality": 2, "isMonotonic": true, "dataPoints": points(|write| write.claims)},
             },
             {
                 "name": "st_claim_body_bytes_stored_total", "unit": "By",
                 "description": "Body bytes of the claims stored on this node, by kind and writing node",
-                "sum": {"aggregationTemporality": 1, "isMonotonic": true, "dataPoints": points(|write| write.bytes)},
+                "sum": {"aggregationTemporality": 2, "isMonotonic": true, "dataPoints": points(|write| write.bytes)},
             },
         ],
-    }]}]}))
+    }]}]})
 }
 
 /// The exporter runs inside the daemon process, so observation logs and usage

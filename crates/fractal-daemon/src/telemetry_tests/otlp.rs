@@ -546,59 +546,114 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
     );
 }
 
-/// Claim writes are counted as they are stored, per kind and writing node, so a write rate stays
-/// measurable after local trim deletes superseded claims. The first export marks where counting
-/// starts; each claim is counted once, and an export with nothing new stored sends no counters.
+/// Claim writes are counted as they are stored, per kind and writing node, so the write rate
+/// stays true when claims are deleted before an export (as local trim does). The totals are
+/// cumulative from when counting started, and an export with nothing new stored sends none.
 #[tokio::test]
-async fn stored_claims_are_counted_once_per_kind_and_writer() {
+async fn stored_claims_are_counted_when_stored_even_if_deleted_before_export() {
     let (collector, endpoint) = start_collector().await;
     let store = Arc::new(Store::open_memory("node-a").unwrap());
-    let claim = |kind: &str, incarnation: &str| ClaimInput {
+    let claim = |incarnation: &str| ClaimInput {
         subject: "agent/node.ada".into(),
-        kind: kind.into(),
+        kind: "runtime.observed".into(),
         actor: Some("agent/node.ada".into()),
         fields: serde_json::from_value(json!({"status": "running", "incarnation_id": incarnation})).unwrap(),
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: None,
     };
-    store.append_claim(&claim("runtime.observed", "inc-1")).unwrap();
     let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    let stored = ["inc-1", "inc-2", "inc-3"].map(|incarnation| store.append_claim(&claim(incarnation)).unwrap());
+    let superseded = stored[0].id.clone();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h69066a2ded6a owner=fractal_daemon::telemetry_tests::otlp TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&superseded]).unwrap();
+    assert!(store.claim_by_id(&superseded).unwrap().is_none(), "the claim is gone before the export");
     exporter.export_once(&store).await.unwrap();
-    let mut sizes = Vec::new();
-    for incarnation in ["inc-2", "inc-3"] {
-        sizes.push(store.append_claim(&claim("runtime.observed", incarnation)).unwrap().body.to_string().len() as u64);
-    }
     exporter.export_once(&store).await.unwrap();
+    store.append_claim(&claim("inc-4")).unwrap();
     exporter.export_once(&store).await.unwrap();
     let requests = collector.requests.lock().unwrap();
-    let points = |name: &str| {
+    let series = |name: &str| {
         requests
             .iter()
             .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
             .flatten()
             .filter(|metric| metric["name"] == name)
-            .flat_map(|metric| metric["sum"]["dataPoints"].as_array().unwrap().clone())
-            .map(|point| {
-                let labels = point["attributes"]
+            .map(|metric| {
+                assert_eq!(metric["sum"]["aggregationTemporality"], 2, "cumulative");
+                metric["sum"]["dataPoints"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|attribute| attribute["value"]["stringValue"].as_str().unwrap().to_owned())
-                    .collect::<Vec<_>>();
-                (labels, point["asInt"].as_str().unwrap().parse::<u64>().unwrap())
+                    .filter(|point| point["attributes"][0]["value"]["stringValue"] == "runtime.observed")
+                    .map(|point| {
+                        assert_eq!(point["attributes"][1]["value"]["stringValue"], "node-a", "the writing node");
+                        (point["startTimeUnixNano"].as_str().unwrap().to_owned(), point["asInt"].as_str().unwrap().parse::<u64>().unwrap())
+                    })
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>()
     };
-    let labels = vec!["runtime.observed".to_owned(), "node-a".to_owned()];
+    let claims = series("st_claims_stored_total");
     assert_eq!(
-        points("st_claims_stored_total"),
-        [(labels.clone(), 2)],
-        "the two claims stored after counting started, once, with nothing sent for an idle export"
+        claims.iter().map(|points| points.iter().map(|(_, value)| *value).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        [vec![3], vec![4]],
+        "the deleted claim still counts, the idle export sends nothing, and the total grows"
     );
-    let bytes = points("st_claim_body_bytes_stored_total");
-    assert_eq!(bytes.len(), 1);
-    assert_eq!(bytes[0].0, labels);
-    let bodies = sizes.iter().sum::<u64>();
-    assert!((bodies / 2..=bodies * 2).contains(&bytes[0].1), "{bytes:?} measures the bodies {sizes:?}");
+    assert_eq!(claims[0][0].0, claims[1][0].0, "one start time for the cumulative series");
+    let bytes = series("st_claim_body_bytes_stored_total");
+    assert_eq!(bytes.len(), 2);
+    let body = stored[1].body.to_string().len() as u64;
+    assert!(bytes[0][0].1 >= 2 * body && bytes[1][0].1 > bytes[0][0].1, "{bytes:?} counts the three bodies of about {body} bytes, then a fourth");
+}
+
+/// The limits gauge carries each window's newest measured reading, even when an older reading
+/// is appended after a newer one.
+#[tokio::test]
+async fn the_limits_gauge_keeps_the_newest_measured_reading() {
+    use crate::store::append_limits_publication;
+    let (collector, endpoint) = start_collector().await;
+    let store = Arc::new(Store::open_memory("node-a").unwrap());
+    let start = smallclaims::store::now_ms();
+    for (subject, percent, measured) in [("agent/node.ada", 30.0, start + 60_000), ("agent/node.bea", 20.0, start)] {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"status": "running", "incarnation_id": "inc-1"})).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        append_limits_publication(
+            &store.graph,
+            &ClaimInput {
+                subject: subject.into(),
+                kind: "harness.limits".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"driver": "claude", "account": "claude/example",
+                    "incarnation_id": "inc-1", "five_hour_percent": percent, "measured_at_unix_ms": measured as u64}))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+            start + 120_000,
+            Some("inc-1"),
+        )
+        .unwrap();
+    }
+    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    exporter.export_once(&store).await.unwrap();
+    let requests = collector.requests.lock().unwrap();
+    let point = requests
+        .iter()
+        .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
+        .flatten()
+        .find(|metric| metric["name"] == "st_account_limit_used_percent")
+        .map(|metric| metric["gauge"]["dataPoints"][0].clone())
+        .unwrap();
+    assert_eq!(point["asDouble"], 30.0, "the newer measurement, appended first");
+    assert_eq!(point["timeUnixNano"], ((start + 60_000) * 1_000_000).to_string());
 }
