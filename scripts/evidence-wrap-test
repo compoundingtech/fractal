@@ -6,6 +6,8 @@
 """
 import base64
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -580,7 +582,10 @@ os.execv({real_git!r}, ['git', *args])
         noted = json.loads(done.stderr.decode()[done.stderr.decode().index('{'):])
         lane_inputs = json.loads(git(tmp / 'scratch.git', 'cat-file', 'blob', git(tmp / 'scratch.git', 'ls-tree', '-r', noted['record']).split()[2])
                                  )['predicate']['observed']['inputs']
-        verifier = __import__('importlib.machinery').machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         expected_digest = verifier.lane_definition(
             str(lane_repo), git(lane_repo, 'rev-parse', base + '^{tree}'), git(lane_repo, 'rev-parse', 'HEAD^{tree}'),
             verifier.lane_rules(git(lane_repo, 'show', base + ':.st/required-lanes.json'), 'linux-gate'))['sha256']

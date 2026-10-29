@@ -229,17 +229,16 @@ fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) ->
 fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
     let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
     if current.standby.is_some() { return Ok(true); }
-    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+    // The first earlier declaration that differs, or that does not parse, decides it.
+    let differs = store.oldest_claim_where(&schedule.subject, "intent.desired", |claim| {
         let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
-            return Ok(true);
+            return true;
         };
-        if previous.host != current.host || previous.standby.is_some()
+        previous.host != current.host || previous.standby.is_some()
             || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
-            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref()
+    })?;
+    Ok(differs.is_some())
 }
 
 fn schedule_progress_ready<'a>(
@@ -3782,9 +3781,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/provider-capacity-retries", &daemon, || {
             self.reconcile_provider_capacity_retries(&desired)
         });
-        self.isolate("stage/person-asks", &daemon, || {
-            self.store.reconcile_person_asks()
-        });
+        self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -4410,6 +4407,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn decide_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
         let mut started = None;
         let mut replaced = false;
+        // Whole history: the oldest running claim of this incarnation, and any other incarnation's.
         for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
             if claim.body.pointer("/fields/status").and_then(Value::as_str) != Some("running") {
                 continue;
@@ -5269,9 +5267,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             > HARNESS_READINESS_DEADLINE_MS
             || self
                 .store
-                .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?
-                .iter()
-                .any(|claim| {
+                .oldest_claim_where(&subject.subject, "runtime.reconcile-decision", |claim| {
                     claim
                         .body
                         .pointer("/fields/decision")
@@ -5279,7 +5275,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         == Some("channel-consent")
                         && claim.body.pointer("/fields/key").and_then(Value::as_str)
                             == Some(incarnation)
-                })
+                })?
+                .is_some()
         {
             return Ok(());
         }
@@ -5493,16 +5490,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         incarnation: &str,
     ) -> Result<Option<crate::model::ClaimRecord>> {
-        Ok(self
-            .store
-            .claims_for(subject, Some("runtime.observed"))?
-            .into_iter()
-            .rev()
-            .find(|claim| {
+        self.store
+            .newest_claim_where(subject, "runtime.observed", |claim| {
                 claim_incarnation(claim) == Some(incarnation)
                     && claim.body.pointer("/fields/status").and_then(Value::as_str)
                         == Some("running")
-            }))
+            })
     }
 
     fn prepare_fresh_context(
@@ -6764,10 +6757,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         DECLARATION_PARSES.with(|parses| parses.set(parses.get() + 1));
         let declared = self
             .store
-            .claims_for(subject, Some("intent.desired"))?
-            .into_iter()
-            .rev()
-            .find(|claim| claim.body.get("kind").and_then(Value::as_str) == Some("agent"))
+            .newest_claim_where(subject, "intent.desired", |claim| claim.body.get("kind").and_then(Value::as_str) == Some("agent"))?
             .and_then(|declaration| {
                 let checkout = declaration
                     .body
@@ -8212,10 +8202,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     let diagnostic = self
                         .store
-                        .claims_for(agent, Some("harness.diagnostic"))?
-                        .into_iter()
-                        .rev()
-                        .find(|claim| {
+                        .newest_claim_where(agent, "harness.diagnostic", |claim| {
                             // The driver can refuse before this owner records the launch.
                             let incarnation =
                                 observation.and_then(|item| item.incarnation_id.as_deref());
@@ -8229,7 +8216,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         claim.accepted_at_unix_ms >= suspension.requested_at_unix_ms
                                     }
                                 }
-                        });
+                        })?;
                     // A driver records why it could not resume as it ends; give that record a
                     // moment to land after the harness's last observation.
                     if diagnostic.is_none()
@@ -8333,8 +8320,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 claim.body["fields"]["action"].as_str(),
                 Some("suspend" | "resume" | "stop" | "terminate")
             ));
-        let retired = self.store.claims_for(&subject.subject, Some("agent.retired"))?
-            .into_iter().any(|claim| claim.store_index > request.store_index);
+        // Any retirement after the request: the newest one's store index says.
+        smallclaims::touched::note_read(|| subject.subject.clone());
+        let retired = self.store.newest_claim_index(&subject.subject, "agent.retired")?
+            > request.store_index;
         let reason = if self.store.selected_desired_token(&subject.subject)?.as_deref()
             != request.body.pointer("/evidence/0").and_then(Value::as_str)
         {
@@ -8954,12 +8943,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let decision_key = format!("codex-crash-loop:{token}");
         Ok(self
             .store
-            .claims_for(subject, Some("runtime.reconcile-decision"))?
-            .iter()
-            .any(|claim| {
+            .oldest_claim_where(subject, "runtime.reconcile-decision", |claim| {
                 claim.body.pointer("/fields/key").and_then(Value::as_str)
                     == Some(decision_key.as_str())
-            }))
+            })?
+            .is_some())
     }
 
     fn start_failures(&self, subject: &str, token: &str) -> Result<Vec<crate::model::ClaimRecord>> {
@@ -9055,6 +9043,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(first_launch) = first_launch else {
             return Ok(false);
         };
+        // Whole history: every incarnation that ever became ready, since readiness has no time bound.
         let ready = self
             .store
             .claims_for(&subject.subject, Some("harness.observed"))?
@@ -9073,17 +9062,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter_map(|claim| claim_incarnation(claim).map(str::to_owned))
             .collect::<BTreeSet<_>>();
         let now = now_ms();
-        let exits = self
-            .store
-            .claims_for(&subject.subject, Some("runtime.observed"))?
-            .into_iter()
-            .filter(|claim| {
-                matches!(
+        // Newest first, acceptance times only fall: once one is outside the window, so is every
+        // older one.
+        let mut windowed = Vec::new();
+        self.store
+            .claims_in_order(&subject.subject, "runtime.observed", true, |claim| {
+                if claim.accepted_at_unix_ms < first_launch
+                    || now.saturating_sub(claim.accepted_at_unix_ms) >= CODEX_CRASH_LOOP_INTERVAL_MS
+                {
+                    return false;
+                }
+                if matches!(
                     claim.body.pointer("/fields/status").and_then(Value::as_str),
                     Some("exited" | "vanished")
-                ) && claim.accepted_at_unix_ms >= first_launch
-                    && now.saturating_sub(claim.accepted_at_unix_ms) < CODEX_CRASH_LOOP_INTERVAL_MS
-            })
+                ) {
+                    windowed.push(claim.clone());
+                }
+                true
+            })?;
+        let exits = windowed
+            .into_iter()
             .filter_map(|claim| claim_incarnation(&claim).map(str::to_owned))
             .filter(|incarnation| {
                 !ready.contains(incarnation) && !trust_recovery.contains(incarnation)
@@ -9115,6 +9113,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if member.restart != RestartType::Always {
             return Ok(false);
         }
+        // Whole history: the count of every retry decision goes into the next one's key.
         let decisions = self
             .store
             .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?;
@@ -9247,11 +9246,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let key = format!("runtime-crash-loop:{token}");
         Ok(self
             .store
-            .claims_for(subject, Some("runtime.reconcile-decision"))?
-            .iter()
-            .any(|claim| {
+            .oldest_claim_where(subject, "runtime.reconcile-decision", |claim| {
                 claim.body.pointer("/fields/key").and_then(Value::as_str) == Some(key.as_str())
-            }))
+            })?
+            .is_some())
     }
 
     fn raise_runtime_crash_loop(&self, subject: &str, token: &str, reason: &str) -> Result<()> {
@@ -9286,12 +9284,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let decision_key = format!("codex-crash-loop:{token}");
         let existing = self
             .store
-            .claims_for(subject, Some("runtime.reconcile-decision"))?
-            .into_iter()
-            .find(|claim| {
+            .oldest_claim_where(subject, "runtime.reconcile-decision", |claim| {
                 claim.body.pointer("/fields/key").and_then(Value::as_str)
                     == Some(decision_key.as_str())
-            });
+            })?;
         let mut changed = false;
         if existing.is_none() {
             self.store.append_claim(&ClaimInput {
@@ -9346,6 +9342,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     == Some(desired_token.as_str())
             })
             .collect::<Vec<_>>();
+        // Whole history: the newest reset by store index, which is not canonical order; small.
         let resets = self
             .store
             .claims_for(&subject.subject, Some("runtime.restart-window-reset"))?;
@@ -9418,10 +9415,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if intensity.delay_ms > 0 {
             let observed_at = self
                 .store
-                .claims_for(&subject.subject, Some("runtime.observed"))?
-                .into_iter()
-                .rev()
-                .find(|claim| {
+                .newest_claim_where(&subject.subject, "runtime.observed", |claim| {
                     matches!(
                         claim.body.pointer("/fields/status").and_then(Value::as_str),
                         Some("exited" | "vanished")
@@ -9435,7 +9429,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .and_then(Value::as_str)
                                 == Some(incarnation)
                         })
-                })
+                })?
                 .map(|claim| claim.accepted_at_unix_ms)
                 .unwrap_or(now);
             let delayed = observed_at.saturating_add(intensity.delay_ms as u128);
@@ -12066,20 +12060,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(current) = metrics.get(metric_name) else {
             anyhow::bail!("the keep metric has no current value");
         };
+        let metric_of = |claim: &crate::model::ClaimRecord| {
+            claim
+                .body
+                .pointer(&format!("/fields/metrics/{metric_name}"))
+                .and_then(Value::as_f64)
+        };
         let prior = self
             .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .into_iter()
-            .filter(|claim| {
+            .newest_claim_where(loop_subject, "loop.round-result", |claim| {
                 claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("completed")
-            })
-            .filter_map(|claim| {
-                claim
-                    .body
-                    .pointer(&format!("/fields/metrics/{metric_name}"))
-                    .and_then(Value::as_f64)
-            })
-            .next_back();
+                    && metric_of(claim).is_some()
+            })?
+            .as_ref()
+            .and_then(metric_of);
         Ok(prior.is_none_or(|prior| {
             if metric.direction == "higher" {
                 current - prior >= metric.min_improvement
@@ -12092,26 +12086,26 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The feedback the next round reads: the latest outcome document, which says what the
     /// exit gates answered, else the feedback its last round result recorded.
     fn loop_prior_feedback(&self, loop_subject: &str) -> Result<String> {
+        let outcome_of = |claim: &crate::model::ClaimRecord| {
+            claim
+                .body
+                .pointer("/fields/feedback")
+                .and_then(Value::as_str)
+                .filter(|feedback| loop_outcome_reference(feedback).is_some())
+                .map(str::to_owned)
+        };
         if let Some(outcome) = self
             .store
-            .claims_for(loop_subject, Some("loop.state"))?
-            .iter()
-            .rev()
-            .find_map(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/feedback")
-                    .and_then(Value::as_str)
-                    .filter(|feedback| loop_outcome_reference(feedback).is_some())
-                    .map(str::to_owned)
-            })
+            .newest_claim_where(loop_subject, "loop.state", |claim| outcome_of(claim).is_some())?
+            .as_ref()
+            .and_then(outcome_of)
         {
             return Ok(outcome);
         }
         Ok(self
             .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .last()
+            .latest_claim(loop_subject, Some("loop.round-result"))?
+            .as_ref()
             .and_then(|claim| claim.body.pointer("/fields/feedback"))
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -12324,11 +12318,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         round: u32,
         candidate: Option<u32>,
     ) -> Result<Option<crate::model::ClaimRecord>> {
-        Ok(self
-            .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .into_iter()
-            .find(|claim| {
+        self.store
+            .oldest_claim_where(loop_subject, "loop.round-result", |claim| {
                 claim.body.pointer("/fields/round").and_then(Value::as_u64)
                     == Some(u64::from(round))
                     && claim
@@ -12336,7 +12327,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .pointer("/fields/candidate")
                         .and_then(Value::as_u64)
                         == candidate.map(u64::from)
-            }))
+            })
     }
 
     fn evaluate_for_each_loop(
@@ -12353,9 +12344,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             .expect("the caller selected a for-each loop");
         let snapshot = self
             .store
-            .claims_for(loop_subject, Some("loop.state"))?
-            .into_iter()
-            .find_map(|claim| claim.body.pointer("/fields/items").cloned());
+            .oldest_claim_where(loop_subject, "loop.state", |claim| {
+                claim.body.pointer("/fields/items").is_some()
+            })?
+            .and_then(|claim| claim.body.pointer("/fields/items").cloned());
         let items = if let Some(Value::Array(items)) = snapshot {
             items
         } else {
@@ -12723,6 +12715,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 active += 1;
             }
         }
+        // Whole history: every result of this round counts, and a round's results need not be
+        // contiguous in canonical order, so no read can stop early here.
         let all_results = self
             .store
             .claims_for(loop_subject, Some("loop.round-result"))?
@@ -13078,23 +13072,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let timed_out = self
             .store
-            .claims_for(&child.subject, Some("mission-run.state"))?
-            .iter()
-            .any(|claim| {
+            .oldest_claim_where(&child.subject, "mission-run.state", |claim| {
                 claim
                     .body
                     .pointer("/fields/reason")
                     .and_then(Value::as_str)
                     .is_some_and(|reason| reason.contains("timeout expired"))
-            });
+            })?
+            .is_some();
         if !timed_out {
             return Ok(false);
         }
         for step in &child.steps {
-            if !self
+            if self
                 .store
-                .claims_for(&step.subject, Some("work.claimed"))?
-                .is_empty()
+                .latest_claim(&step.subject, Some("work.claimed"))?
+                .is_some()
             {
                 return Ok(false);
             }
@@ -13109,6 +13102,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         candidate: Option<u32>,
         item_id: Option<&str>,
     ) -> Result<u32> {
+        // Whole history: the largest dispatch number, which need not be the newest claim's.
         Ok(self
             .store
             .claims_for(loop_subject, Some("loop.round-dispatch"))?
@@ -13253,17 +13247,21 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn repeated_loop_failures(&self, loop_subject: &str) -> Result<u32> {
-        Ok(self
-            .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .iter()
-            .rev()
-            .filter(|claim| claim.body.pointer("/fields/candidate").is_none())
-            .filter(|claim| claim.body.pointer("/fields/item").is_none())
-            .take_while(|claim| {
-                claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("failed")
-            })
-            .count() as u32)
+        // The plain rounds that failed in a row, newest first, up to the first that did not.
+        let mut failed = 0_u32;
+        self.store
+            .claims_in_order(loop_subject, "loop.round-result", true, |claim| {
+                if claim.body.pointer("/fields/candidate").is_some()
+                    || claim.body.pointer("/fields/item").is_some()
+                {
+                    return true;
+                }
+                let failure =
+                    claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("failed");
+                failed += u32::from(failure);
+                failure
+            })?;
+        Ok(failed)
     }
 
     fn mission_run_token_usage(&self, run: &MissionRunView) -> Result<u64> {
@@ -13286,9 +13284,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         loop_subject: &str,
         loop_spec: &LoopSpec,
     ) -> Result<(u64, BTreeMap<String, f64>)> {
-        let claims = self
-            .store
-            .claims_for(loop_subject, Some("loop.round-result"))?;
+        // With a keep metric the best of every completed round counts, so it reads them all.
+        let claims = if loop_spec.keep_metric.is_some() {
+            self.store.claims_for(loop_subject, Some("loop.round-result"))?
+        } else {
+            Vec::new()
+        };
+        let newest_completed;
         let selected = if let Some(metric_name) = &loop_spec.keep_metric {
             let metric = loop_spec
                 .metrics
@@ -13321,14 +13323,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
                 .map(|(claim, round, _)| (claim, round))
         } else {
-            claims
-                .iter()
-                .rfind(|claim| {
-                    claim.body.pointer("/fields/candidate").is_none()
-                        && claim.body.pointer("/fields/item").is_none()
-                        && claim.body.pointer("/fields/status").and_then(Value::as_str)
-                            == Some("completed")
-                })
+            newest_completed = self.store.newest_claim_where(loop_subject, "loop.round-result", |claim| {
+                claim.body.pointer("/fields/candidate").is_none()
+                    && claim.body.pointer("/fields/item").is_none()
+                    && claim.body.pointer("/fields/status").and_then(Value::as_str)
+                        == Some("completed")
+            })?;
+            newest_completed
+                .as_ref()
                 .and_then(|claim| {
                     claim
                         .body
@@ -13355,6 +13357,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn loop_stop_reason(&self, loop_subject: &str, loop_spec: &LoopSpec) -> Result<Option<String>> {
+        // Whole history: the token budget sums every round and the plateau folds over them.
         let results = self
             .store
             .claims_for(loop_subject, Some("loop.round-result"))?;
@@ -13420,6 +13423,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // One outcome per round, in order. The reference ends in the document's content
             // hash, so equal hashes mean equal metrics and equal exit gate answers.
             let mut outcomes: Vec<(&str, &str)> = Vec::new();
+            // Whole history: the outcomes fold in order, collapsing repeats.
             let states = self.store.claims_for(loop_subject, Some("loop.state"))?;
             for reference in states.iter().filter_map(|claim| {
                 claim
@@ -14667,16 +14671,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let claimant = self
             .store
-            .claims_for(subject, Some("work.claimed"))?
-            .into_iter()
-            .rev()
-            .find(|claim| {
+            .newest_claim_where(subject, "work.claimed", |claim| {
                 claim
                     .body
                     .pointer("/fields/attempt")
                     .and_then(Value::as_u64)
                     == Some(u64::from(attempt))
-            })
+            })?
             .and_then(|claim| {
                 claim
                     .body
@@ -14763,6 +14764,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.arm_step_deadline(&handle, &view.subject, remaining);
         }
         Ok(false)
+    }
+
+    /// End the asks whose owner ended and resolve the ones whose deadline passed. Nothing else
+    /// writes when an unanswered ask's deadline passes, so arm a wake for the next one.
+    fn reconcile_person_asks(&self) -> Result<bool> {
+        let pass = self.store.reconcile_person_asks_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
     }
 
     /// Wake the reconciler in `remaining` ms for `step`, unless the step already armed a wake at
@@ -15054,6 +15069,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(revision) = self.store.selected_desired_revision(&schedule.subject)? else {
             return Ok(());
         };
+        // Whole history: the largest occurrence reached, which both hosts write and catch-up can
+        // skip, so it need not be the newest claim's.
         let reached = self
             .store
             .claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
@@ -15128,12 +15145,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let scheduled_at = if spec.calendar.is_some() {
             self.store
-                .claims_for(&schedule.subject, Some("schedule.occurrence-scheduled"))?
-                .into_iter()
-                .find(|claim| {
+                .oldest_claim_where(&schedule.subject, "schedule.occurrence-scheduled", |claim| {
                     claim.body["fields"]["revision"].as_str() == Some(revision.as_str())
                         && claim.body["fields"]["occurrence"].as_u64() == Some(occurrence)
-                })
+                })?
                 .map(|claim| -> Result<i64> {
                     Ok(claim.body["fields"]["scheduled_at_unix_ms"]
                         .as_str()
@@ -15302,6 +15317,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
+                // Whole history: the largest occurrence reached, as in reconcile_schedule.
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
                     .filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max());
@@ -15541,6 +15557,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
                     continue;
                 }
+                // Whole history: it compares occurrence values from both hosts, which order does not bound.
                 let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
                 let other_reached = history.iter().any(|claim| claim.origin != self.host
                     && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
@@ -15824,6 +15841,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 == Some(true)
         };
         let released = if requests.iter().any(is_held) {
+            // Whole history: any held request may have been released at any time.
             self.store
                 .claims_for(&item.subject, Some("subscription.mission-request-released"))?
                 .into_iter()
@@ -16059,19 +16077,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         spec: &SubscriptionSpec,
         every_ms: u64,
     ) -> Result<()> {
-        let batches = self
+        let last = self
             .store
-            .claims_for(&item.subject, Some("subscription.batched"))?;
-        let sent = self
-            .store
-            .claims_for(&item.subject, Some("subscription.batch-sent"))?;
-        let last = sent.last();
-        let after = last
+            .latest_claim(&item.subject, Some("subscription.batch-sent"))?;
+        let last = last.as_ref();
+        let through = last
             .and_then(|claim| claim.body.pointer("/fields/through"))
-            .and_then(Value::as_str)
-            .and_then(|through| batches.iter().position(|claim| claim.id == through))
-            .map_or(0, |position| position + 1);
-        let pending = &batches[after.min(batches.len())..];
+            .and_then(Value::as_str);
+        // The batches after the last one sent, read back from the newest only as far as that one.
+        // When it is not found, every batch is pending, as when nothing was sent.
+        let mut pending = Vec::new();
+        self.store
+            .claims_in_order(&item.subject, "subscription.batched", true, |claim| {
+                if Some(claim.id.as_str()) == through {
+                    return false;
+                }
+                pending.push(claim.clone());
+                true
+            })?;
+        pending.reverse();
+        let pending = pending.as_slice();
         let mut deadlines = self
             .batch_deadlines
             .lock()
@@ -16963,11 +16988,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 format!(
                                     "{operation}:{reason}:{retry_at}:{}",
                                     store
-                                        .claims_for(&observer_subject, Some("observer.state"))
+                                        .newest_claim_where(&observer_subject, "observer.state", |claim| {
+                                            claim.body["fields"]["state"] == "healthy"
+                                        })
                                         .unwrap_or_default()
-                                        .into_iter()
-                                        .rev()
-                                        .find(|claim| claim.body["fields"]["state"] == "healthy")
                                         .map_or_else(|| "first".into(), |claim| claim.id)
                                 )
                                 .as_bytes(),
@@ -17756,10 +17780,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         Ok(self
             .store
-            .claims_for(subject, Some("runtime.observed"))?
-            .into_iter()
-            .rev()
-            .find(|claim| claim.actor.as_deref() == Some(subject))
+            .newest_claim_where(subject, "runtime.observed", |claim| claim.actor.as_deref() == Some(subject))?
             .and_then(|claim| {
                 claim
                     .body
@@ -19066,10 +19087,8 @@ pub fn append_fault_message(
 
 fn message_sent_at(store: &Store, message: &MessageView) -> Option<u128> {
     store
-        .claims_for(&message.subject, Some("message.sent"))
+        .oldest_claim_where(&message.subject, "message.sent", |_| true)
         .ok()?
-        .into_iter()
-        .next()
         .map(|claim| claim.accepted_at_unix_ms)
 }
 
@@ -19901,6 +19920,7 @@ pub mod tests {
     mod gate_on_demand;
     mod github_watch_selection;
     mod helper_launcher;
+    mod bounded_loop_reads;
     mod incremental_deadlines;
     #[cfg(test)]
     mod schedule_standby_parent;
@@ -38471,6 +38491,49 @@ mission "review" state="ready" {
   step "review" { agentless }
 }"#;
 
+    /// The host that starts a requested mission reads the request's discovery when the request
+    /// arrives, so an observation seals a request in the batch that holds its discovery, and the
+    /// two reach every member in one envelope.
+    #[test]
+    fn a_mission_request_travels_in_the_batch_of_its_discovery() {
+        let store = Store::open_memory("node").unwrap();
+        apply_source(&store, REDELIVERY_REVIEW_SOURCE, "review-mission");
+        let revision = store.mission_spec("review", None).unwrap().unwrap().revision;
+        let source = format!(
+            r#"version 2
+resource "repo" {{ kind "vcs.repository" }}
+observer "repo" {{ resource "resource/repo"; provider "github.repository"; locator "example/repo"; field "pull_requests" }}
+subscription "reviews" {{
+  observer "observer/repo"
+  on "pull_requests"
+  delivery "mission" {{ mission "review@{revision}"; resource "source"; workspace "/srv/reviews" }}
+}}"#
+        );
+        apply_source(&store, &source, "watch");
+        let observer_revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let subscriptions = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "subscription/reviews")
+            .map(|item| (item.subject, crate::graph::subscription_spec(&item.desired).unwrap()))
+            .collect::<Vec<_>>();
+        for pulls in [serde_json::json!([]), serde_json::json!([{"number": 4, "head": "a".repeat(40), "state": "open", "draft": false}])] {
+            store
+                .record_resource_observation("observer/repo", &observer_revision, None, "resource/repo", None,
+                    &serde_json::json!({"repository_id": 17, "pull_requests": pulls}), now_ms() + 60_000, &subscriptions, None)
+                .unwrap();
+        }
+        let request = store
+            .claims_for("subscription/reviews", Some("subscription.mission-requested"))
+            .unwrap()
+            .remove(0);
+        let discovery = request.body["fields"]["discovery"].as_str().unwrap();
+        let discovered = store.claim_by_id(discovery).unwrap().unwrap();
+        assert_eq!(discovered.kind, "resource.observed");
+        assert_eq!(request.batch_id, discovered.batch_id);
+    }
+
     #[test]
     fn replacement_intake_does_not_request_an_already_delivered_head() {
         let store = Store::open_memory("node").unwrap();
@@ -45897,6 +45960,8 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Repair simulator components".into(),
