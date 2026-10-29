@@ -115,6 +115,9 @@ LOCAL = {
     # One signature per workspace crate (docs/per-crate-test-signing.md): the recorded command is the small script that reads one crate's
     # result out of the run's JUnit report; the run itself is RUN_TESTS, for the crates that have no passing note for their key.
     'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
+    # The clippy stage alone, keyed by what it reads (docs/keyed-clippy.md). Opt-in while linux-gate's own run still includes clippy,
+    # so a default run never runs it twice: `--check linux-clippy` signs it.
+    'linux-clippy': ['nix', 'develop', '-c', 'bash', 'scripts/ci-clippy-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
@@ -126,14 +129,14 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
-BUILDS = frozenset({'linux-gate', 'fractal-web', RUST_TESTS})
+BUILDS = frozenset({'linux-gate', 'linux-clippy', 'fractal-web', RUST_TESTS})
 # rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
 # notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-OPT_IN = frozenset()
+OPT_IN = frozenset({'linux-clippy'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
-BASE_BOUND = frozenset({'linux-gate'})  # rust-tests is not: a test's result does not depend on the base
+BASE_BOUND = frozenset({'linux-gate', 'linux-clippy'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
 # play and app test, for a pull request. The verifier's shard-count and input-order rules read these.
 WEB = 'fractal-web'
@@ -1229,6 +1232,19 @@ def reap_stale():
     git('worktree', 'prune', check=False)
 
 
+def base_input_values(verifier, directory, tree, check, base, repository):
+    """{input: value} for the base policy's base_inputs of `check`, from the base's verifier (--project); {} when it has none or
+    cannot say (a note without them then covers no run whose policy asks for them: nothing is wrongly covered)."""
+    done = subprocess.run([sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--project',
+                           '--policy-from', base, '--repository', repository], capture_output=True, text=True)
+    try:
+        values = json.loads(done.stdout).get('base_inputs') if done.returncode == 0 else None
+    except (ValueError, AttributeError):
+        values = None
+    return {key: value for key, value in (values or {}).items() if isinstance(values, dict)
+            and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', key) and isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}|absent', value)}
+
+
 def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
     """(covered, why, record): the verifier's answer for `check` on `tree`; record is the covering note's record id, or None."""
     command = [sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--keys-from', base]
@@ -1519,11 +1535,18 @@ def takes_input_files(wrapper):
 UNCOVERED = 'not signed'  # a crate left for CI (a test passed only on a retry): its row, and the check's unsigned flag
 
 
-def retried_tests(directory, junit, crate):
-    """The crate's tests that passed only on a retry in the report (scripts/ci-rust-test-result's `flaky` lines)."""
+def unsettled_tests(directory, junit, crate):
+    """(failed, retried): the crate's tests that failed every try and those that passed only on a retry in the report
+    (scripts/ci-rust-test-result's `FAIL` and `flaky` lines)."""
     done = subprocess.run([sys.executable, str(directory / 'scripts/ci-rust-test-result')], capture_output=True, text=True,
                           env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate))
-    return [line.split(' ', 1)[1] for line in done.stdout.splitlines() if line.startswith('flaky ')]
+    lines = [line.split(' ', 1) for line in done.stdout.splitlines() if ' ' in line]
+    return [name for status, name in lines if status == 'FAIL'], [name for status, name in lines if status == 'flaky']
+
+
+def name_tests(names):
+    """At most two test names without their binary, for a summary row."""
+    return ', '.join(name.split(' ', 1)[-1] for name in names[:2]) + (' ...' if len(names) > 2 else '')
 
 
 def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes, target, report=None):
@@ -1588,12 +1611,12 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
                                           text=True, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate)).stdout or 'null')
         if not facts:
             return (f'rust-tests:{crate}', 'NOT SIGNED', 0, 'cannot read its result from the report'), []
-        flaky = retried_tests(directory, junit, crate)
-        if flaky:
+        failing, flaky = unsettled_tests(directory, junit, crate)
+        if flaky and not failing:
             # As CI's per-crate notes (scripts/ci-rust-test-notes): a crate with a test that passed only on a retry is not signed, so it
-            # stays uncovered and CI runs it. Not a failure of this run.
-            return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: '
-                    + ', '.join(name.split(' ', 1)[-1] for name in flaky[:2]) + (' ...' if len(flaky) > 2 else ''))[:200], UNCOVERED
+            # stays uncovered and CI runs it. Not a failure of this run. A test that failed every try is one, whatever else was retried:
+            # the crate goes on to its failing record below.
+            return (f'rust-tests:{crate}', UNCOVERED, 0, f'{len(flaky)} test(s) passed only on a retry, CI runs it: {name_tests(flaky)}'[:200]), UNCOVERED
         wrap = [sys.executable, tools['evidence-wrap'], '--check', 'rust-tests', '--attempt', args.attempt,
                 '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base,
                 '--input', f'crate={crate}', '--input', f'source_inputs={keys[crate]}', '--input', f'tests_run={facts["tests_run"]}',
@@ -1614,7 +1637,8 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
-            detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
+            detail = (f'{len(failing)} test(s) failed every try: {name_tests(failing)}' if failing else
+                      (signed.stderr.strip().splitlines() or ['failed'])[-1])[:160]
             return (f'rust-tests:{crate}', f'FAILED ({signed.returncode})', round(time.monotonic() - started), detail), None
         try:
             record = json.loads(signed.stderr[signed.stderr.index('{'):])
@@ -2229,6 +2253,10 @@ def main(argv):
                     # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
                     wrap += ['--input', f'clippy_base_sha={base_commit}']
                     environment['CLIPPY_BASE_SHA'] = base_commit
+                # The policy's base_inputs (a file at the base the verdict depends on: linux-clippy's clippy-baseline), as the base's
+                # verifier computes them for this base, the one the stage compared against.
+                wrap += [argument for key, value in base_input_values(tools['evidence-verify'], directory, tree, name, args.base,
+                                                                      repository).items() for argument in ('--input', f'{key}={value}')]
                 if name == WEB:
                     wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
