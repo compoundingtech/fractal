@@ -32,6 +32,7 @@ fn local_member(_name: &str) -> Store {
 #[derive(Clone, Debug)]
 enum Write {
     Observer { observer: u8, status: u8, cursor: Option<u8> },
+    Resource { resource: u8, state: u8 },
     Harness { seat: u8, incarnation: u8, state: u8, restamp: bool, provider_auth: Option<bool> },
 }
 
@@ -39,6 +40,7 @@ fn write() -> impl Strategy<Value = Write> {
     prop_oneof![
         (0..3u8, 0..3u8, proptest::option::of(0..4u8))
             .prop_map(|(observer, status, cursor)| Write::Observer { observer, status, cursor }),
+        (0..3u8, 0..3u8).prop_map(|(resource, state)| Write::Resource { resource, state }),
         (0..2u8, 0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
             |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
                 seat,
@@ -62,6 +64,15 @@ fn apply(store: &Store, write: &Write, n: usize) {
                 fields.insert("cursor".into(), json!(format!("cursor-{cursor}")));
             }
             (format!("observer/watch-{observer}"), "observer.observed", fields)
+        }
+        // As an observer writes it: no actor, and its observer named.
+        Write::Resource { resource, state } => {
+            let fields = BTreeMap::from([
+                ("kind".into(), json!("vcs.pull-request")),
+                ("state".into(), json!(["open", "merged", "closed"][usize::from(*state)])),
+                ("observer".into(), json!("observer/watch-0")),
+            ]);
+            (format!("resource/pr/{resource}"), "resource.observed", fields)
         }
         Write::Harness { seat, incarnation, state, restamp, provider_auth } => {
             let seat = SEATS[usize::from(*seat)];
@@ -117,6 +128,8 @@ fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     for observer in 0..3 {
         let newest = store.latest_claim(&format!("observer/watch-{observer}"), Some("observer.observed")).unwrap();
         seats.push(format!("observer/watch-{observer}: {:?}", newest.map(|claim| claim.body)));
+        let newest = store.latest_claim(&format!("resource/pr/{observer}"), Some("resource.observed")).unwrap();
+        seats.push(format!("resource/pr/{observer}: {:?}", newest.map(|claim| claim.body)));
     }
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
@@ -209,7 +222,7 @@ proptest! {
             .readers
             .get()
             .prepare(
-                "SELECT id FROM claims AS claim WHERE kind IN ('observer.observed', 'harness.observed')
+                "SELECT id FROM claims AS claim WHERE kind IN ('observer.observed', 'resource.observed', 'harness.observed')
                  AND store_index=(SELECT MAX(store_index) FROM claims AS newer
                                   WHERE newer.subject=claim.subject AND newer.kind=claim.kind)",
             )
