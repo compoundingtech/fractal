@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Test only: fractal-api-core's checked roster builds (checked_agent_cache and the draining-message fixture) build their cached and cold cards on a pinned snapshot, as the roster refresher does. Unpinned and outside a request, their card-fault reads kept a 25 ms wall bound, so on a loaded host one side could report \"fault status unknown\" and the other null.",
+  "summary": "Test only: fractal-api-core's checked roster builds (checked_agent_cache and the draining-message fixture) and agent_state_requires_current_harness_evidence_for_native_drivers build their cards on a pinned snapshot, as the roster refresher does. Unpinned and outside a request, their card-fault reads kept a 25 ms wall bound, so on a loaded host a card could miss its fault: one side of a cached/cold comparison reported \"fault status unknown\" and the other null, or a faulted agent stayed \"running\".",
   "replay": {
     "status": "none",
     "detail": "No record, signature or storage format changes."

@@ -10110,6 +10110,9 @@ fn agent_state_requires_current_harness_evidence_for_native_drivers() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();
+    // Cards build as the roster refresher does, on a pinned snapshot. Unpinned and outside a
+    // request, a card-fault read has a 25 ms wall bound that a loaded host can spend waiting.
+    let cards = |index: u64| store.read_snapshot(|_| client_agent_resources(&store, false, "snapshot", index)).unwrap();
     let source = r#"
 version 2
 mission "agent-health" state="ready" {
@@ -10168,8 +10171,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-runtime".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "starting");
     assert_eq!(resources[0]["host_id"], "host/node");
     assert!(resources[0]["last_activity_at"].is_null());
@@ -10195,8 +10197,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-ready".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
     assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
 
@@ -10209,7 +10210,7 @@ mission "agent-health" state="ready" {
         }).unwrap();
     };
     harness("claude", "incarnation-1", "agent-health-foreign-provider");
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["driver"], "codex");
     assert_eq!(resources[0]["state"], "starting");
     assert!(resources[0]["harness_state"].is_null(), "wrong-provider readiness must not survive the cached card");
@@ -10223,19 +10224,21 @@ mission "agent-health" state="ready" {
     let recorded = store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
     let repeated = store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
     assert_eq!(recorded.request, repeated.request);
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    // A loaded host can hold the card-fault read past 25 ms of wall time without CPU work.
+    Store::stall_next_card_fault_read_for_test(Duration::from_millis(50));
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "waiting");
     assert_eq!(resources[0]["harness_state"], "indeterminate");
     assert_eq!(resources[0]["blocked_on"], "channel");
     assert_eq!(resources[0]["fault"], fault.reason);
     harness("codex", "incarnation-1", "agent-health-superficial-ready");
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "waiting", "ready alone cannot clear a mailbox fault");
-    let historic = client_agent_resources(&store, false, "snapshot", healthy_cut).unwrap();
+    let historic = cards(healthy_cut);
     assert_eq!(historic[0]["state"], "running");
     assert!(historic[0]["fault"].is_null(), "the historical cut must not observe a later fault");
     store.recover_operational_failure(episode, "authenticated replay control", "agent-health-repaired").unwrap();
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "running");
     assert!(resources[0]["fault"].is_null());
     assert_eq!(resources[0]["next_work_id"], queued);
@@ -10258,8 +10261,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-ended".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "failed");
     store
         .append_claim(&ClaimInput {
@@ -10279,8 +10281,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-crashed".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(
         resources.len(),
         1,
