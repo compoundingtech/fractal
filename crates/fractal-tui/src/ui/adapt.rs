@@ -1811,7 +1811,7 @@ mod tests {
             "goals": ["Audit dependencies"],
             "steps": [
                 {"path": "scan", "title": "scan", "assignee": {"kind": "agent", "agent": "agent/example/auditor", "label": "Auditor"}, "after": [], "asks_you": false},
-                {"path": "merge", "title": "merge", "assignee": {"kind": "st", "agent": null, "label": "st"}, "after": ["scan"], "asks_you": true}
+                {"path": "merge", "title": "merge", "assignee": {"kind": "st", "agent": null, "label": "Fractal"}, "after": ["scan"], "asks_you": true}
             ],
             "agents": [{"id": "agent/example/auditor", "label": "Auditor", "harness": "codex", "host": "alder"}],
             "asks_you": 1
@@ -1823,6 +1823,7 @@ mod tests {
         assert_eq!(preview.name, "harbor/audit");
         assert_eq!(preview.goals, vec!["Audit dependencies"]);
         assert_eq!(preview.steps[0].assignee, "Auditor");
+        assert_eq!(preview.steps[1].assignee, "Fractal");
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents[0].harness, Harness::Codex);
@@ -1868,14 +1869,15 @@ mod tests {
 
     #[test]
     fn an_agent_named_st_keeps_its_launch_assignment_label() {
-        let normalized = json!({
-            "goals": [],
-            "display_order": ["scan"],
-            "steps": {
-                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/st"}, "dependencies": [], "gates": []}
-            }
-        });
-        let preview = preview("audit", &normalized);
+        // The card shows the label Fractal serves, never one rewritten from the agent's id.
+        let launch: fractal_client::AttentionLaunch = serde_json::from_value(json!({
+            "variant": "default", "goals": [], "asks_you": 0, "agents": [],
+            "steps": [{"path": "scan", "title": "scan", "assignee": {"kind": "agent", "agent": "agent/st", "label": "st"}, "after": [], "asks_you": false}]
+        }))
+        .unwrap();
+        let Load::Ready(preview) = launch_preview(Some(&launch), "audit") else {
+            panic!("Fractal previews this launch");
+        };
         assert_eq!(preview.steps[0].assignee, "st");
     }
 
