@@ -1,6 +1,0 @@
-{
-  "about": "Pull requests opened by these GitHub accounts are pre-signed (scripts/st-test --all --push origin) and never run the heavy checks in CI: an enforced check with no valid signature for its tree fails with what to do instead (scripts/ci-evidence-gate, refusal). Read from the BASE commit of the pull request, so a pull request cannot take itself off the list. Every other opener's pull requests, and every merge group, run CI as before.",
-  "openers": [
-    "myobie"
-  ]
-}
