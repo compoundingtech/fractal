@@ -921,7 +921,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.skip == 'true') }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && (needs.evidence-gate-fractal-web.outputs.skip == 'true' || needs.evidence-gate-fractal-web.outputs.refuse == 'true')) }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -1012,6 +1012,8 @@ export const fractalWebJobs = {
           RELEVANT: '${{ needs.fractal-web-changes.outputs.relevant }}',
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
           EVIDENCE_SKIP: '${{ needs.evidence-gate-fractal-web.outputs.skip }}',
+          // An unsigned signed-only pull request with web changes: execution did not run, and the check fails with what to do instead.
+          EVIDENCE_REFUSAL: "${{ needs.evidence-gate-fractal-web.outputs.refuse == 'true' && needs.evidence-gate-fractal-web.outputs.refusal || '' }}",
           EVENT_NAME: '${{ github.event_name }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),

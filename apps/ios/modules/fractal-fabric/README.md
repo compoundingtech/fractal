@@ -48,7 +48,7 @@ The Keychain holds a random 32 byte iroh secret under a separate service/account
 
 There are at most 16 concurrent local sessions. Writes stop at the pinned 4 MiB unacknowledged window (with one 8 KiB read overshoot); received bytes are acknowledged after delivery. Half-closes carry final offsets, and orderly completion sends the final Ack before closing QUIC. Stop attempts a bounded graceful drain, then forces teardown if the peer or local consumer stalls. A transport loss closes the local socket and never retries a mutation.
 
-The two local vendored patches make otherwise macOS-only networking code compile for iOS; their `ST-PATCH.md` files describe the changes and limitations. iOS enumerates interfaces via netdev, and Swift's `NWPathMonitor` triggers `Endpoint.network_change()`. Default-route and home-router metadata are unavailable in this proof. Simulator success does not establish device background behavior, route migration, NAT traversal, or production readiness.
+The two local vendored patches make otherwise macOS-only networking code compile for iOS; their `FRACTAL-PATCH.md` files describe the changes and limitations. iOS enumerates interfaces via netdev, and Swift's `NWPathMonitor` triggers `Endpoint.network_change()`. Default-route and home-router metadata are unavailable in this proof. Simulator success does not establish device background behavior, route migration, NAT traversal, or production readiness.
 
 ## Checks
 

@@ -1,4 +1,4 @@
-//! Process-local fixture tools. Only the separate `st3-fixture` executable enables fixture mode;
+//! Process-local fixture tools. Only the separate `fractal-fixture` executable enables fixture mode;
 //! the production CLI has no argument or environment switch for it.
 
 use std::path::{Path, PathBuf};

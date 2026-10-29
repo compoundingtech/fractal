@@ -836,7 +836,7 @@ pub fn play(
     let daemon = Daemon::start(&exe, &dir)?;
     let runner = Runner::new(exe.clone(), &demo, &dir, &work)?;
     let outcome = (|| {
-        runner.wait_for_daemon()?;
+        runner.wait_for_daemon(&config.client_socket())?;
         println!("Seeding {}…", demo.title.as_deref().unwrap_or(&demo.name));
         runner.seed(&demo)?;
         println!(
@@ -1119,9 +1119,25 @@ impl Runner {
         serde_json::from_str(&said).context("st answered with something other than JSON")
     }
 
-    fn wait_for_daemon(&self) -> Result<()> {
-        self.st(None, &["agents", "ls", "--daemon-wait", "60"])
-            .context("the demo's daemon did not start; its log is in the instance's state/st3-demo/daemon.log")?;
+    /// Wait up to a minute for the daemon at `socket` to answer its health check. The agents
+    /// roster and the other lists are published after the daemon starts listening, and a read
+    /// of one says "not ready" until then, so only the health answer says the daemon is up.
+    fn wait_for_daemon(&self, socket: &Path) -> Result<()> {
+        let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(
+            socket.to_owned(),
+        ))
+        .with_outage_wait(Duration::from_secs(60), false);
+        let health = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(client.get::<Value>("/v1/health"));
+        self.note(&format!(
+            "health → {}",
+            health.as_ref().map_or_else(|error| format!("{error:#}"), Value::to_string)
+        ));
+        health.context(
+            "the demo's daemon did not start; its log is in the instance's state/st3-demo/daemon.log",
+        )?;
         Ok(())
     }
 

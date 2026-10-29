@@ -10,5 +10,5 @@ serde_json = "1"
 sha2 = "0.10"
 
 [[bin]]
-name = "st3-client-codegen"
+name = "fractal-client-codegen"
 path = "src/main.rs"

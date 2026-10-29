@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse a Smalltalk rollout while any running PTY record lacks a boot identity."""
+"""Refuse a Fractal rollout while any running PTY record lacks a boot identity."""
 
 import argparse
 import json

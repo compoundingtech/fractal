@@ -17,8 +17,7 @@ use crate::message_body::BodyAttachment as _;
 pub const UPLOAD_BODY_LIMIT: usize = MAX_BLOB_BYTES + 4096;
 
 fn retention() -> Duration {
-    std::env::var("ST3_BLOB_RETENTION_HOURS")
-        .ok()
+    fractal_drivers::contracts::env("ST3_BLOB_RETENTION_HOURS")
         .and_then(|hours| hours.parse::<u64>().ok())
         .filter(|hours| *hours > 0)
         .map_or(blobs::DEFAULT_RETENTION, |hours| {
