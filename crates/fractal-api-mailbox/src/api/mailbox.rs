@@ -1583,10 +1583,16 @@ mod tests {
     /// No launch witness is synthesized: this exercises exact-lease continuity.
     fn admitted_title_fixture(state: &mut AppState, subject: &str) -> (AdmittedPtyFixture, Fence, Fence, NativeDeliveryPeer) {
         let name = subject.strip_prefix("agent/").unwrap();
-        let intent = crate::graph::parse_test_intent(
+        let mut intent = crate::graph::parse_test_intent(
             &format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"claude\" {{}} }}"),
             "node",
         ).unwrap();
+        // These pre-existing attachment tests use synthetic, unqualified subjects.
+        // Keep their address while retaining the parser's real physical runtime member.
+        let declared_subject = intent.subjects.keys().next().unwrap().clone();
+        let mut declaration = intent.subjects.remove(&declared_subject).unwrap();
+        declaration.subject = subject.into();
+        intent.subjects.insert(subject.into(), declaration);
         state.store.apply_internal(&intent, name).unwrap();
         let member = state.store.desired_subjects_named(&[subject.into()]).unwrap()
             .remove(0).member.unwrap();
@@ -1799,7 +1805,7 @@ mod tests {
         let owner = crate::mailbox::Authority { provider: "claude".into(), session: "protected-fixture".into(),
             sequence, pid: std::process::id(), process_token: fractal_runtime::process_start_token(std::process::id()).unwrap() };
         let current=state.store.bind_mailbox_with_lease(&Fence::new(subject,"current","delivery"), Some(&owner)).unwrap();
-        let candidate=current.clone();
+        let candidate=Fence::new(subject,"current","delivery");
         let peer=NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent:subject.into(),transport:"claude-channel",
             pid:std::process::id(),archives_inbox:false };
         let physical=fractal_drivers::claude_process::process(std::process::id()).unwrap();
@@ -1809,12 +1815,12 @@ mod tests {
             state.store.bind_mailbox(&candidate));
         assert!(rejected.is_err());
         state.store.check_mailbox(&current).unwrap();
-        // Explicit legacy admission is a separate compatibility branch, not primary proof.
+        // Without a launch witness, a new legacy candidate cannot replace live custody.
+        // Exact already-bound continuation is exercised separately by retention tests.
         let legacy=authority::with_claude_primary(&state,&candidate,&peer,None,||
-            state.store.bind_mailbox(&candidate)).unwrap();
-        assert!(legacy.1.is_none());
-        state.store.check_mailbox(&legacy.0).unwrap();
-        assert!(state.store.check_mailbox(&current).is_err());
+            state.store.bind_mailbox(&candidate));
+        assert!(legacy.is_err());
+        state.store.check_mailbox(&current).unwrap();
     }
 
     #[tokio::test]
