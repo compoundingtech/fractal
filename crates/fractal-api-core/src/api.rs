@@ -3362,6 +3362,13 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     }
 }
 
+/// Shared ownership filter for per-seat telemetry over the managed agents projection.
+/// Labels use the full subject unchanged, never a display name or a host-local alias.
+pub fn local_managed_agent_subject<'a>(item: &'a Value, local_host: &str) -> Option<&'a str> {
+    let subject = item["id"].as_str().filter(|id| id.starts_with("agent/"))?;
+    (item["host_id"].as_str() == Some(local_host)).then_some(subject)
+}
+
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
 /// counts. Assess the published inputs without constructing a card or delivery JSON.
 fn agent_delivery_presence(
@@ -3371,7 +3378,7 @@ fn agent_delivery_presence(
 ) -> Option<delivery_presence::Assessment> {
     const NATIVE_DRIVERS: [&str; 5] = ["claude", "codex", "opencode", "pi", "omp"];
     let driver = item["driver"].as_str().filter(|driver| NATIVE_DRIVERS.contains(driver))?;
-    if item["host_id"].as_str() != Some(local_host)
+    if local_managed_agent_subject(item, local_host).is_none()
         || !matches!(runtime, Some("running" | "waiting"))
     {
         return None;
@@ -3379,6 +3386,47 @@ fn agent_delivery_presence(
     Some(delivery_presence::assess_current(
         item["id"].as_str()?, driver, item["incarnation_id"].as_str(),
     ))
+}
+
+fn register_delivery_metrics(store: &Arc<Store>) {
+    if !crate::otel::metrics_enabled() { return; }
+    let store = Arc::downgrade(store);
+    opentelemetry::global::meter("st3")
+        .f64_observable_gauge("st.delivery.state_age")
+        .with_unit("s")
+        .with_description("Seconds since the first observation of the seat's delivery state in this daemon lifetime")
+        .with_callback(move |observer| {
+            let Some(store) = store.upgrade() else { return; };
+            let Some(publication) = store.agents_publication() else { return; };
+            let local_host = client_host_id(store.origin());
+            let now = client_now_ms();
+            for item in publication.rows() {
+                let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), &local_host) else { continue; };
+                let state = match assessment.state {
+                    "stale" => "stale",
+                    "refused" => "refused",
+                    "current" | "outdated" | "legacy" => "live",
+                    _ => continue,
+                };
+                // Never export arbitrary error text as a metric label.
+                let reason = if state == "refused" {
+                    match assessment.reason.as_deref().and_then(|r| r.strip_prefix("delivery refused: ")) {
+                        Some(code @ ("mailbox-runtime-indeterminate" | "stale-mailbox-session"
+                            | "mailbox-binding-conflict" | "mailbox-peer-mismatch"
+                            | "mailbox-not-authorized" | "recipient-retired")) => code,
+                        _ => "other",
+                    }
+                } else { "" };
+                if let Some(since) = assessment.since_unix_ms {
+                    observer.observe(now.saturating_sub(u128::from(since)) as f64 / 1000.0, &[
+                        opentelemetry::KeyValue::new("st.agent", item["id"].as_str().unwrap_or_default().to_owned()),
+                        opentelemetry::KeyValue::new("st.delivery.state", state),
+                        opentelemetry::KeyValue::new("st.delivery.reason", reason.to_owned()),
+                    ]);
+                }
+            }
+        })
+        .build();
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -8296,7 +8344,7 @@ fn doctor_report_with_operation_drift(
             let mut blocked = agents
                 .iter()
                 .filter(|agent| {
-                    agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
                         || agent.pointer("/delivery/reason").and_then(Value::as_str)
                             .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
                                 || reason.starts_with("ownership proof unavailable"))

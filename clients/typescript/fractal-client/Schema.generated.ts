@@ -645,7 +645,9 @@ export type AgentCheckoutEncoded = typeof AgentCheckout.Encoded
 export const AgentDelivery = /*#__PURE__*/ (() => Schema.Struct({
   "polled_seconds_ago": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
-  "state": Schema.Literals(["current","outdated","legacy","stale","unknown"]),
+  /** First observation of this delivery state in this daemon lifetime. Repeated bind refusals do not reset it. */
+  "since_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "First observation of this delivery state in this daemon lifetime. Repeated bind refusals do not reset it." }),
+  "state": Schema.Literals(["current","outdated","legacy","stale","refused","unknown"]),
   "transport": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
 }).annotate({ identifier: "AgentDelivery" }))()
 export type AgentDelivery = typeof AgentDelivery.Type

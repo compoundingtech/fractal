@@ -1849,6 +1849,8 @@ pub struct AgentDelivery {
     #[serde(default)]
     pub polled_seconds_ago: Option<u64>,
     #[serde(default)]
+    pub since_unix_ms: Option<u64>,
+    #[serde(default)]
     pub transport: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

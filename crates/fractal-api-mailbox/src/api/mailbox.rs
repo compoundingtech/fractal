@@ -152,6 +152,7 @@ pub async fn bind(
     let admission = fractal_drivers::harness_state::record_lock_admission(
         &authority::source_agent_dir(&state, &request),
     ).await.map_err(ApiError::internal)?;
+    let attempted = request.clone();
     let bound = authority_action(move || {
         let _admission = admission;
         authority::with_claude_primary(&bind_state, &request, &peer, None, || {
@@ -162,7 +163,15 @@ pub async fn bind(
         authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
-    }) }).await?;
+    }) }).await.map_err(|error| {
+        if crate::client::mailbox_bind_refusal(error.status.as_u16(), &error.code)
+        {
+            delivery_presence::bind_refused(&attempted, &error.code);
+            signal_local_change(&state);
+        }
+        error
+    })?;
+    delivery_presence::bind_recovered(&attempted);
     signal_local_change(&state);
     Ok(Json(bound.0))
 }

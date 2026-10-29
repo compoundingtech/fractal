@@ -177,7 +177,8 @@ export type AgentDeclaration = {
 export type AgentDelivery = {
   polled_seconds_ago?: number | null;
   reason?: string | null;
-  state: "current" | "outdated" | "legacy" | "stale" | "unknown";
+  since_unix_ms?: number | null;
+  state: "current" | "outdated" | "legacy" | "stale" | "refused" | "unknown";
   transport?: string | null;
 };
 

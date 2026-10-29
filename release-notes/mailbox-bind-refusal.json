@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make refused mailbox binds visible in driver warnings and seat delivery state",
+  "replay": { "status": "none", "detail": "Delivery presence remains daemon-local diagnostic state, not graph history or mailbox custody." },
+  "schema": { "status": "none", "detail": "No persisted schema or migration changes." },
+  "rules": { "status": "none", "detail": "Mailbox admission and ownership checks remain fail-closed. Refused channels retain their existing capped exponential retry." },
+  "compatibility": { "status": "changed", "detail": "AgentDelivery adds the refused state, a delivery refused: <code> reason, and nullable since_unix_ms: the first observation of this delivery state in this daemon lifetime. Repeated refusals do not reset it. The existing st3 OTLP meter exports observable gauge st.delivery.state_age (unit s), with st.agent=agents[].id, st.delivery.state=live|stale|refused and bounded st.delivery.reason. Each daemon samples only its own host's live native seats from the cached agents publication and shared delivery presence, with no store scan per scrape. Alert when state is stale or refused and gauge exceeds 600 seconds. Unknown, remote and ended seats are omitted." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout; no backfill." },
+  "manual": { "status": "none", "detail": "Read driver-api-warnings.log for refusal codes; shared agent delivery data exposes the same code to CLI, web and TUI consumers." },
+  "recovery": { "status": "none", "detail": "A successful bind clears refusal evidence. A new runtime incarnation does not inherit a predecessor's refusal. Daemon restart resets diagnostic state and its observed unhealthy duration." }
+}

@@ -114,29 +114,49 @@ impl Fence {
                     *self = bound;
                     return Ok(());
                 }
-                Err(error)
-                    if api_error_code(&error)
-                        .is_some_and(|code| !retryable_mailbox_bind_code(code)) =>
-                {
-                    return Err(error);
+                Err(error) => {
+                    if let Some((status, code, _, _)) = api_error_parts(&error)
+                        && mailbox_bind_refusal(status, code)
+                    {
+                        let _ = write_driver_log(&self.subject, &format!("warning: delivery refused: {code} (HTTP {status}); retrying"));
+                    }
+                    tokio::time::sleep(retry.failed(&error)).await;
                 }
-                Err(error) => tokio::time::sleep(retry.failed(&error)).await,
             }
         }
     }
 }
 
 fn retryable_mailbox_bind_code(code: &str) -> bool {
-    matches!(
-        code,
-        "internal"
-            | "database-busy"
-            | "database-locked"
-            | "mailbox-session-starting"
-            | "mailbox-authority-unavailable"
-            | "mailbox-runtime-indeterminate"
-    )
+    matches!(code, "internal" | "database-busy" | "database-locked"
+        | "mailbox-session-starting" | "mailbox-authority-unavailable"
+        | "mailbox-runtime-indeterminate")
 }
+
+/// Runtime indeterminacy needs an explicit diagnostic even though the channel retries it.
+pub fn mailbox_bind_refusal(status: u16, code: &str) -> bool {
+    (400..500).contains(&status)
+        && !matches!(status, 408 | 429)
+        && (!retryable_mailbox_bind_code(code) || code == "mailbox-runtime-indeterminate")
+}
+
+/// Driver notes never go to the terminal shared with the provider.
+pub fn write_driver_log(subject: &str, line: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .context("no state directory for driver warning")?;
+    let directory = state_home.join("st3");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600)
+        .open(directory.join("driver-api-warnings.log"))?;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+    writeln!(file, "{at} {subject} {}", line.replace('\n', " "))?;
+    Ok(())
+}
+
 
 /// The daemon route a replication worker hands a read to when it must forward it.
 pub const CLIENT_READ_FORWARD_PATH: &str = "/v1/internal/client-read/forward";
@@ -1721,6 +1741,36 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bind_422_warns_and_keeps_retrying() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        if std::env::var_os("FRACTAL_BIND_WARNING_TEST").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "client::tests::bind_422_warns_and_keeps_retrying", "--nocapture"])
+                .env("FRACTAL_BIND_WARNING_TEST", "1")
+                .env("XDG_STATE_HOME", root.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let log = std::fs::read_to_string(root.path().join("st3/driver-api-warnings.log")).unwrap();
+            assert!(log.contains("delivery refused: mailbox-runtime-indeterminate (HTTP 422)"), "{log}");
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Endpoint::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let _ = stream.read(&mut bytes).await.unwrap();
+            let body = r#"{"code":"mailbox-runtime-indeterminate","message":"forced refusal","details":{}}"#;
+            stream.write_all(format!("HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let mut fence = Fence::new("agent/example/refused-bind", "current", "delivery");
+        assert!(tokio::time::timeout(Duration::from_millis(250), fence.bind(&Client::new(endpoint))).await.is_err());
+        assert_eq!(fence.epoch, 0);
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn fabric_unix_http_roundtrip_carries_bearer_without_local_authority() {
