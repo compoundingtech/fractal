@@ -207,6 +207,9 @@ impl Ui {
     }
 
     pub(in crate::ui) fn navigation_key(&mut self, key: KeyEvent) -> bool {
+        if self.glasses.palette.is_some() {
+            return false;
+        }
         let Some(forward) = history_chord(key, self.keyboard_enhanced) else {
             return false;
         };
