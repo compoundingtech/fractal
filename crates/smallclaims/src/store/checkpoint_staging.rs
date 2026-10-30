@@ -554,7 +554,7 @@ impl StagedSet {
                     self.capture_protection(store, phase, cursor, bound)?
                 }
                 EARLIER_ENVELOPES if scoped => self.capture_writer_heads(store)?,
-                EARLIER_CLAIMS if scoped => self.capture_citers(store, cursor, bound)?,
+                EARLIER_CLAIMS if scoped => self.capture_citers(store)?,
                 EARLIER_ENVELOPES | EARLIER_CLAIMS => self.capture_earlier(store, phase, cursor, bound)?,
                 CAPTURED => {
                     // The last page's epoch check covers every page before it.

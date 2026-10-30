@@ -400,6 +400,11 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
                 .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
+        if authoritative {
+            // What a deleted claim cites, or what cites it, a local cut never needs again.
+            transaction.prepare_cached("DELETE FROM local_trim_citations WHERE citer=?1")?.execute([&claim.id])?;
+            transaction.prepare_cached("DELETE FROM local_trim_citations WHERE cited=?1")?.execute([&claim.id])?;
+        }
         super::principals::forget_claim_tx(transaction, &claim.id)?;
         // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
         // compiles every trigger program again. Per row that cost several times the delete.

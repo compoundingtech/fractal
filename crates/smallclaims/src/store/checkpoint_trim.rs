@@ -53,6 +53,8 @@ pub enum TrimFault {
     AfterTombstones,
     /// This many chunks are deleted.
     AfterChunk(usize),
+    /// This many pages of a local cut's citation catch-up are committed.
+    AfterCitationPages(usize),
     /// Every row is deleted and the checkpoint is not yet marked trimmed.
     BeforeFinish,
     /// The first deletion chunk starts with its time budget already spent.

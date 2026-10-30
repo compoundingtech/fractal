@@ -10,16 +10,11 @@
 //!   the few rows a repair writes;
 //! - each staged writer's newest envelope before the cut, for the writer's-newest guard, in place
 //!   of every earlier checkpoint's tombstones (which only the drop digest reads);
-//! - the citations of the claims the cut could drop, from the sealed claims written from the
-//!   oldest of them onward. A citer was written after its writer held what it cites, so by its
-//!   own clock it is newer, less the skew between two writers' clocks. By arrival it need not
-//!   be: replicated admission does not check evidence.
+//! - the citations of the claims the cut could drop, from the store's citation cache
+//!   (`local_trim_citations`), caught up first, counting a citer only if it is present and
+//!   sealed at the cut, as a full capture would stage it.
 use super::*;
 use crate::store::checkpoint::sealed_envelope_records_sql;
-
-/// How much earlier than the claim it cites a citer's accepted time may be: more than any skew
-/// between two writers' clocks.
-const CITER_SKEW_MS: u128 = 60 * 60 * 1000;
 
 impl StagedSet {
     fn scope_kinds(&self) -> &[String] {
@@ -271,64 +266,35 @@ impl StagedSet {
     }
 
     /// The citations of the claims the cut could drop (older than the newest of their slot):
-    /// every sealed claim from the oldest of them, less `CITER_SKEW_MS`, in accepted order. A
-    /// claim the capture staged already gave its citations. `bound` is where the scan starts,
-    /// `after` the store index of the last claim read.
-    pub(super) fn capture_citers(&self, store: &Store, after: i64, bound: Option<i64>) -> Result<()> {
-        let start = match bound {
-            Some(start) => start,
-            None => {
-                let kinds = self.scope_kinds();
-                let oldest: Option<i64> = self.staging.query_row(
-                    /* sqlite-large-value: allow-for-now lv-h6a717a686690 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!(
-                        "SELECT MIN(accepted_at) FROM claims AS claim
-                         WHERE first=1 AND slot IS NOT NULL AND kind IN ({})
-                           AND EXISTS(SELECT 1 FROM claims AS newer WHERE newer.slot=claim.slot AND newer.pos>claim.pos)",
-                        vec!["?"; kinds.len()].join(", ")
-                    ),
-                    rusqlite::params_from_iter(kinds),
-                    |row| row.get(0),
-                )?;
-                let transaction = self.staging.unchecked_transaction()?;
-                match oldest {
-                    Some(oldest) => {
-                        let start = u128::try_from(oldest)?.saturating_sub(CITER_SKEW_MS);
-                        Self::advance(&transaction, EARLIER_CLAIMS, 0, Some(accepted(start)?))?;
-                    }
-                    None => Self::advance(&transaction, CAPTURED, 0, None)?,
-                }
-                return Ok(transaction.commit()?);
-            }
-        };
+    /// the cache is caught up with every claim the store holds, then each candidate's citers
+    /// are read from it, and one counts only if it is present and sealed at the cut.
+    pub(super) fn capture_citers(&self, store: &Store) -> Result<()> {
+        store.catch_up_local_trim_citations()?;
+        let kinds = self.scope_kinds();
+        let candidates = self
+            .staging
+            .prepare(&format!(
+                "SELECT id FROM claims AS claim
+                 WHERE first=1 AND slot IS NOT NULL AND kind IN ({})
+                   AND EXISTS(SELECT 1 FROM claims AS newer WHERE newer.slot=claim.slot AND newer.pos>claim.pos)",
+                vec!["?"; kinds.len()].join(", ")
+            ))?
+            .query_map(rusqlite::params_from_iter(kinds), |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let cut = accepted(self.cut_unix_ms)?;
-        let sql = format!(
-            "SELECT {CLAIM_COLUMNS} FROM claims
-             WHERE (length(accepted_at_unix_ms), accepted_at_unix_ms, store_index) > (length(?1), ?1, ?2)
-               AND CAST(accepted_at_unix_ms AS INTEGER) < ?3
-             ORDER BY length(accepted_at_unix_ms), accepted_at_unix_ms, store_index LIMIT ?4"
-        );
-        let page = store.checkpoint_capture_page(self.epoch, || {
+        let cited = store.checkpoint_capture_page(self.epoch, || {
             let connection = store.readers.get();
-            // Resume after the last claim read, or begin at the start.
-            let from: String = if after == 0 {
-                start.to_string()
-            } else {
-                connection.query_row("SELECT accepted_at_unix_ms FROM claims WHERE store_index=?1", [after], |row| row.get(0))?
-            };
-            let claims = connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hee747c2d6453 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &sql)?
-                .query_map(params![from, after, cut, STAGING_PAGE], claim_from_row)?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            // Sealed as a full capture stages it: a record, not repaired, in an envelope before
-            // the cut and the seal row that holds no claim dated at or after the cut.
+            // Sealed as a full capture stages it: present, with a record, not repaired, in an
+            // envelope before the cut and the seal row that holds no claim dated at or after it.
             let mut sealed = connection.prepare_cached(
                 "SELECT EXISTS(
-                   SELECT 1 FROM replica_records records JOIN replica_envelopes envelopes
+                   SELECT 1 FROM claims citer JOIN batches ON batches.id=citer.batch_id
+                   JOIN replica_records records ON records.claim_id=citer.id
+                   JOIN replica_envelopes envelopes
                      ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
                        AND envelopes.envelope_hash=records.envelope_hash
-                   WHERE records.claim_id=?1 AND records.state<>'repaired'
+                   WHERE citer.id=?1 AND records.state<>'repaired'
                      AND envelopes.rowid <= ?2 AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3
-                     AND EXISTS(SELECT 1 FROM batches WHERE id=?4)
                      AND NOT EXISTS(
                        SELECT 1 FROM replica_records other CROSS JOIN claims late ON late.id=other.claim_id
                        JOIN batches ON batches.id=late.batch_id
@@ -336,38 +302,29 @@ impl StagedSet {
                          AND other.envelope_hash=records.envelope_hash AND other.state<>'repaired'
                          AND CAST(late.accepted_at_unix_ms AS INTEGER) >= ?3))",
             )?;
-            let mut citers = Vec::new();
-            for claim in claims {
-                let index = i64::try_from(claim.store_index)?;
-                if sealed.query_row(/* sqlite-large-value: allow-for-now lv-h1495d16054a5 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![claim.id, self.seal_rowid, cut, claim.batch_id], |row| row.get::<_, bool>(0))? {
-                    citers.push((index, Some(claim)));
-                } else {
-                    citers.push((index, None));
+            let mut cited = Vec::new();
+            for candidate in &candidates {
+                for citer in Store::local_trim_citers(&connection, candidate)? {
+                    if sealed.query_row(params![citer, self.seal_rowid, cut], |row| row.get::<_, bool>(0))? {
+                        cited.push(candidate.clone());
+                        break;
+                    }
                 }
             }
-            Ok(citers)
+            Ok(cited)
         })?;
         let transaction = self.staging.unchecked_transaction()?;
-        let Some(last) = page.last().map(|(index, _)| *index) else {
-            Self::advance(&transaction, CAPTURED, 0, None)?;
-            return Ok(transaction.commit()?);
-        };
         {
-            let mut staged = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?;
-            let mut cite = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d9eebe1e289 owner=smallclaims::store::checkpoint_staging::scoped TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO cited(id) VALUES (?1)")?;
-            for claim in page.into_iter().filter_map(|(_, claim)| claim) {
-                if staged.query_row(/* sqlite-large-value: allow-for-now lv-hc4acc58690a5 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, bool>(0))? {
-                    continue;
-                }
-                for id in &store.runtime.checkpoint_claim_facts(&claim).cites {
-                    cite.execute(/* sqlite-large-value: allow-for-now lv-h7257d86e40ef owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ [id])?;
-                }
+            let mut cite = transaction.prepare_cached("INSERT OR IGNORE INTO cited(id) VALUES (?1)")?;
+            for id in cited {
+                cite.execute([id])?;
             }
         }
-        Self::advance(&transaction, EARLIER_CLAIMS, last, Some(start))?;
+        Self::advance(&transaction, CAPTURED, 0, None)?;
         Ok(transaction.commit()?)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -371,6 +371,14 @@ enum Step {
     /// An earlier checkpoint's tombstone of one of this writer's envelopes, newer than any it
     /// holds (`newer`) or older: the writer's-newest guard reads tombstones too.
     Tombstone(bool),
+    /// A peer's claim citing the `nth` observer claim, written now and received only at the end
+    /// of the history: it arrives after later claims, with an older accepted time.
+    PeerCite(u8),
+    /// The citation cache caught up now, all the way or (`partial`) stopped after one page.
+    CatchUp(bool),
+    /// The `nth` claim retired as a local trim deletes it; with `stale`, its citation rows are
+    /// put back afterwards, as a binary that kept no cache would leave them.
+    Retire(u8, bool),
     /// Two observations of one observer in one batch: the older is not the newest of its slot
     /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
     Twice(u8),
@@ -385,10 +393,24 @@ fn step_strategy() -> impl Strategy<Value = Step> {
         1 => (0..3u8).prop_map(Step::Shared),
         1 => (0..3u8).prop_map(Step::Twice),
         1 => any::<bool>().prop_map(Step::Tombstone),
+        1 => any::<u8>().prop_map(Step::PeerCite),
+        1 => any::<bool>().prop_map(Step::CatchUp),
+        1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, stale)| Step::Retire(nth, stale)),
     ]
 }
 
-fn take_step(store: &Store, step: &Step, n: usize) {
+/// Everything `from` holds that `to` lacks, received and admitted as replication would.
+fn send(from: &Store, to: &Store) {
+    for _ in 0..64 {
+        let exchange = crate::store::tests_shared::exchange_from(from, &to.replication_inventory().unwrap());
+        if exchange.envelopes.is_empty() {
+            return;
+        }
+        crate::store::tests_shared::receive_and_project(to, from.origin(), &exchange);
+    }
+}
+
+fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
     let observed = || -> Vec<String> {
         store
             .readers
@@ -466,6 +488,88 @@ fn take_step(store: &Store, step: &Step, n: usize) {
                     params![format!("record/repaired-{n}"), n as i64, format!("claim/original-{n}"), id],
                 )
                 .unwrap();
+        }
+        Step::PeerCite(k) => {
+            let Some(id) = nth(*k) else { return };
+            // A writer cites what it holds.
+            store.seal_local_batches().unwrap();
+            send(store, peer);
+            peer.append_claim(&ClaimInput {
+                subject: "resource/pr/8".into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("kind".into(), json!("vcs.pull-request")),
+                    ("state".into(), json!("open")),
+                    ("observer".into(), json!("observer/watch-1")),
+                ]),
+                evidence: vec![id],
+                expected_subject: None,
+                idempotency_key: Some(format!("peer-{n}")),
+            })
+            .unwrap();
+        }
+        Step::CatchUp(partial) => {
+            if *partial {
+                store.set_trim_fault(Some(smallclaims::store::TrimFault::AfterCitationPages(1)));
+            }
+            let _ = store.catch_up_local_trim_citations();
+            store.set_trim_fault(None);
+        }
+        Step::Retire(k, stale) => {
+            let claims: Vec<ClaimRecord> = {
+                let connection = store.readers.get();
+                let sql = format!("SELECT {} FROM claims WHERE kind IN ('observer.observed', 'resource.observed') ORDER BY store_index", smallclaims::store::CLAIM_COLUMNS);
+                let mut statement = connection.prepare(&sql).unwrap();
+                statement.query_map([], smallclaims::store::claim_from_row).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+            };
+            if claims.is_empty() {
+                return;
+            }
+            let claim = &claims[usize::from(*k) % claims.len()];
+            let rows: Vec<(String, String)> = store
+                .readers
+                .get()
+                .prepare("SELECT cited, citer FROM local_trim_citations WHERE cited=?1 OR citer=?1")
+                .unwrap()
+                .query_map([&claim.id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            // A claim a projection row still names is one a trim keeps: retire only what may go.
+            transaction.execute_batch("SAVEPOINT retire").unwrap();
+            let retired = smallclaims::store::checkpoint::delete_dropped_rows_tx(
+                &transaction,
+                &[],
+                &[smallclaims::store::checkpoint::ClaimTombstone {
+                    id: claim.id.clone(),
+                    operation_id: None,
+                    writer: String::new(),
+                    sequence: 0,
+                    envelope_hash: String::new(),
+                    subject: claim.subject.clone(),
+                    kind: claim.kind.clone(),
+                    actor: claim.actor.clone(),
+                    predecessors: claim.predecessors.clone(),
+                    request_digest: None,
+                    accepted_at_unix_ms: claim.accepted_at_unix_ms,
+                }],
+            );
+            if retired.is_err() {
+                transaction.execute_batch("ROLLBACK TO retire; RELEASE retire").unwrap();
+                return;
+            }
+            transaction.execute_batch("RELEASE retire").unwrap();
+            if *stale {
+                for (cited, citer) in rows {
+                    transaction
+                        .execute("INSERT OR IGNORE INTO local_trim_citations(cited, citer) VALUES (?1, ?2)", params![cited, citer])
+                        .unwrap();
+                }
+            }
+            transaction.commit().unwrap();
         }
         Step::Tombstone(newer) => {
             let sequence = if *newer { 1_000_000 + n as i64 } else { 0 };
@@ -559,15 +663,20 @@ proptest! {
         let scratch = tempfile::tempdir().unwrap();
         let context = context(scratch.path(), 0);
         let store = local_member("alder");
+        let peer = Store::open_memory("birch").unwrap();
         for (n, step) in steps.iter().enumerate() {
-            take_step(&store, step, n);
+            take_step(&store, &peer, step, n);
         }
         store.seal_local_batches().unwrap();
+        // The peer's claims arrive last, after claims accepted later than theirs.
+        send(&peer, &store);
         let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
         let full = local_plan(&store, cut, &scratch.path().join("full"), false);
         let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
         prop_assert_eq!(&scoped.0, &full.0, "dropped claims");
         prop_assert_eq!(&scoped.1, &full.1, "dropped envelopes");
         prop_assert_eq!(&scoped.2, &full.2, "guard answers");
+        let check = store.verify_local_trim_citations().unwrap();
+        prop_assert!(check.missing.is_empty() && check.extra.is_empty(), "{:?}", check);
     }
 }
