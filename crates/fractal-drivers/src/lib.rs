@@ -49,6 +49,7 @@ pub mod context;
 pub mod contracts;
 pub mod delivery_ledger;
 pub mod ding;
+mod directory;
 pub mod direct_actor;
 pub mod driver;
 pub mod driver_diagnostic;
