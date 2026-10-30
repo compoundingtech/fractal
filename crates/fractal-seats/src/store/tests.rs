@@ -1347,6 +1347,8 @@ agent "worker.one" { workspace "/tmp"; command "true"; restart always; }
             .unwrap();
         controller
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/test".into(),
                 title: "Choose a date".into(),

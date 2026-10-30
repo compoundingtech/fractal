@@ -9595,6 +9595,24 @@
         "immutable": false,
         "reference": false
       },
+      "deadline_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "deadline_unix_ms": {
+        "value_type": "integer",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "default_answer": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "generation": {
         "value_type": "subject-reference",
         "required": false,
@@ -9728,6 +9746,12 @@
         "immutable": false,
         "reference": false
       },
+      "resolved_by": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
       "status": {
         "value_type": "string",
         "required": false,
@@ -9808,6 +9832,12 @@
         "reference": false
       },
       "key": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "resolved_by": {
         "value_type": "string",
         "required": false,
         "immutable": false,

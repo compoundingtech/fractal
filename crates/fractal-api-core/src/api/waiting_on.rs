@@ -1,18 +1,22 @@
-//! What a mission run waits on, read from state st already keeps current: the published work list
-//! (every open step with its holder, lease, last progress and wake), the published missions list's
-//! open human gates and agents roster, and the run's own steps' rows. It folds no claims and
-//! replays no history, so it costs what the run's steps are, never the store's size
-//! (docs/st3/waiting-on.md).
+//! What a mission run waits on, and the fleet's blocked runs grouped by cause, read from state st
+//! already keeps current: the published work list (every open step with its holder, lease, last
+//! progress and wake), the published missions list's open human gates and agents roster, and,
+//! for one run, its own steps' rows. Neither read folds claims or replays history, so each costs
+//! what the open work and the run's steps are, never the store's size (docs/st3/waiting-on.md).
 
 use crate::MissionsStore;
 use crate::PublishedViewsStore;
 use crate::WorkListStore;
 use super::*;
 use smallclaims::store::now_ms;
+use std::collections::HashMap;
 use crate::store::mission_list::MissionRows;
 use crate::store::published_list::{ListRead, Publication};
 use crate::store::work_list::{WorkRow, WorkRows};
-use crate::waiting_on::{RunSteps, RunVerdict, RunWaitingOn, StepSettled, StepWait, WaitKind, describe_age};
+use crate::waiting_on::{
+    BlockedGroup, BlockedRun, BlockedRuns, RunSteps, RunVerdict, RunWaitingOn, StepSettled, StepWait,
+    WaitKind, describe_age,
+};
 use fractal_ui_model::missions::{Fleet, Gate, Seat};
 
 /// How long a held step may go without progress, and a ready step without a claim, before it
@@ -27,7 +31,7 @@ pub struct WaitingOnQuery {
     pub quiet_after_ms: Option<u64>,
 }
 
-/// The published state the read uses, or why it cannot be served now.
+/// The published state both reads use, or why it cannot be served now.
 struct Sources {
     work: Arc<Publication<WorkRows>>,
     missions: Arc<Publication<MissionRows>>,
@@ -262,7 +266,7 @@ fn verdict(open: &[StepWait]) -> (RunVerdict, Option<WaitKind>) {
     (if cause.is_some() { RunVerdict::Waiting } else { RunVerdict::Moving }, cause)
 }
 
-/// One step's wait in words, as a run's reason says it.
+/// One step's wait in words, as a run's reason and a fleet line say it.
 pub fn describe(wait: &StepWait, now: u128) -> String {
     let age = wait.since_unix_ms.map(|since| describe_age(now.saturating_sub(since))).unwrap_or_default();
     let who = wait.who.as_deref().unwrap_or("nobody");
@@ -371,6 +375,58 @@ pub fn run_waiting_on(
     }
 }
 
+/// Every run with open work that is stalled or waiting, one line each, grouped by cause.
+pub fn blocked_runs(
+    work: &Publication<WorkRows>,
+    missions: &MissionRows,
+    now: u128,
+    quiet_after_ms: u64,
+) -> BlockedRuns {
+    let context = context(&work.rows, missions, now, quiet_after_ms);
+    let mut runs = HashMap::<&str, (Option<&str>, Vec<StepWait>)>::new();
+    for row in work.rows.rows.values() {
+        let entry = runs.entry(row.view.run.as_str()).or_insert_with(|| (row.value["mission_id"].as_str(), Vec::new()));
+        entry.1.push(classify(row, &context));
+    }
+    let runs_read = runs.len();
+    let mut groups = WaitKind::CAUSES
+        .iter()
+        .map(|cause| BlockedGroup { cause: *cause, runs: Vec::new() })
+        .collect::<Vec<_>>();
+    for (run, (mission, mut open)) in runs {
+        sort_waits(&mut open);
+        let (run_verdict, Some(cause)) = verdict(&open) else { continue };
+        if run_verdict == RunVerdict::Moving {
+            continue;
+        }
+        let blocked_steps = open.iter().filter(|wait| wait.kind.is_cause()).count();
+        // A stalled run is listed under its stuck step's cause; a waiting one under its first.
+        let step = match run_verdict {
+            RunVerdict::Stalled => open.iter().find(|wait| wait.kind.stalls()),
+            _ => open.iter().find(|wait| wait.kind == cause),
+        }
+        .expect("a blocked run has a step of its cause")
+        .clone();
+        let cause = step.kind;
+        let group = groups.iter_mut().find(|group| group.cause == cause).expect("every cause has a group");
+        group.runs.push(BlockedRun {
+            run: run.to_owned(),
+            mission: mission.map(str::to_owned),
+            cause,
+            verdict: run_verdict,
+            step,
+            blocked_steps,
+        });
+    }
+    for group in &mut groups {
+        group.runs.sort_by(|left, right| {
+            left.step.since_unix_ms.cmp(&right.step.since_unix_ms).then(left.run.cmp(&right.run))
+        });
+    }
+    groups.retain(|group| !group.runs.is_empty());
+    BlockedRuns { groups, runs_read, quiet_after_ms, work_cut: work.cut, as_of_unix_ms: now }
+}
+
 pub async fn get_run_waiting_on(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
@@ -389,6 +445,15 @@ pub async fn get_run_waiting_on(
     .await?
     .map(Json)
     .ok_or_else(|| ApiError::not_found(format!("mission run `{run}` does not exist")))
+}
+
+pub async fn get_blocked_runs(
+    State(state): State<AppState>,
+    Query(query): Query<WaitingOnQuery>,
+) -> Result<Json<BlockedRuns>, ApiError> {
+    let Sources { work, missions } = sources(&state.store)?;
+    let quiet_after_ms = query.quiet_after_ms.unwrap_or(DEFAULT_QUIET_AFTER_MS);
+    Ok(Json(blocked_runs(&work, &missions.rows, now_ms(), quiet_after_ms)))
 }
 
 #[cfg(test)]
