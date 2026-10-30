@@ -290,6 +290,8 @@ pub mod tombstones_tests;
 pub mod step_wait_tests;
 #[cfg(test)]
 pub mod work_renew_tests;
+#[cfg(test)]
+mod observation_write_amp_tests;
 pub use runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
@@ -701,6 +703,8 @@ pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, cla
 pub struct ParkedSeat {
     /// The crash-loop decision that parked it.
     pub decision: String,
+    /// The first raise since the seat last ran: one park, however many retries failed in it.
+    pub episode: String,
     pub reason: String,
     pub parked_at_unix_ms: u128,
 }
@@ -4135,15 +4139,45 @@ impl Store {
     /// subject and kind stays. Deletes run in short transactions of at most `chunk` rows, so
     /// a crash leaves a consistent table that the next pass finishes. Each chunk borrows the
     /// background writer so queued foreground requests can run between chunks.
+    /// Replicate the held usage rollups whose hour is over, for seats that stopped re-stamping
+    /// (one that died without `ended`). The hourly local trim runs it first, so no rollup waits
+    /// more than about an hour past its own, and none is trimmed while it waits.
+    pub fn flush_overdue_usage_rollups(&self, now: u128) -> Result<usize> {
+        let subjects = self
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT DISTINCT s.subject FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                 WHERE s.kind='harness.usage' AND json_extract(s.slot, '$[1]')='response_rollup'
+                   AND o.observed_at_unix_ms < ?1",
+            )?
+            .query_map([(now / USAGE_ROLLUP_HOUR_MS * USAGE_ROLLUP_HOUR_MS).min(i64::MAX as u128) as i64], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut published = 0;
+        for subject in subjects {
+            published += self
+                .connection
+                .batched(|transaction| {
+                    publish_pending_usage_tx(transaction, &self.origin, &subject, "", now, Some(0), false)
+                        .map(|claims| claims.len())
+                })
+                .map_err(|error| anyhow::anyhow!("{error}"))?
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+        }
+        Ok(published)
+    }
+
     pub fn trim_local_observations(
         &self,
         older_than_unix_ms: u128,
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<usize> {
+        self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
         let mut deleted = 0;
+        // A reading a usage slot still waits to replicate is never trimmed (below).
         // The newest observation of a subject and kind always stays. Rows past retention go
         // through the time index, and a row is "not the newest" when a later id exists for its
         // subject and kind, one seek in `local_observations_subject_kind_index`. This used to
@@ -4152,11 +4186,12 @@ impl Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha799bfe026cb owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                /* sqlite-large-value: allow-for-now lv-h315fe07938f4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
                       AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                      AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=old.id)
                       AND EXISTS (SELECT 1 FROM local_observations AS newer
                                   WHERE newer.subject=old.subject AND newer.kind=old.kind
                                     AND newer.id>old.id)
@@ -4204,11 +4239,12 @@ impl Store {
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-h7762c849fb0b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-ha3460e7a5f9d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
                           AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                          AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=local_observations.id)
                         ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
@@ -5532,9 +5568,25 @@ impl Store {
                 if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
                     continue;
                 }
+                // Each failed retry raises again; the episode is the first raise since the seat
+                // last ran, so one park is one fault however many retries fail.
+                let episode: String = connection.query_row(
+                    "SELECT id FROM claims INDEXED BY claims_subject_kind_index
+                      WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                        AND store_index<=?2
+                        AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                            WHERE subject=?1 AND kind='runtime.observed' AND store_index<=?2
+                              AND json_extract(body, '$.fields.status')='running'), 0)
+                        AND json_extract(body, '$.fields.decision')='raise'
+                        AND json_extract(body, '$.fields.key')=?3
+                      ORDER BY store_index LIMIT 1",
+                    params![subject, at_index, fields.get("key").and_then(Value::as_str)],
+                    |row| row.get(0),
+                )?;
                 parked.insert(
                     subject,
                     ParkedSeat {
+                        episode,
                         decision: id,
                         reason: fields
                             .get("reason")
@@ -8485,6 +8537,17 @@ fn usage_occupancy_percent(fields: &BTreeMap<String, Value>) -> Option<f64> {
     })
 }
 
+/// Replicate every usage reading `subject` holds back, whatever its hour: its step ended, and
+/// the run is judged on its origin, maybe another member, as soon as the receipt arrives.
+pub fn flush_held_usage_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    now: u128,
+) -> Result<Vec<ClaimRecord>, St3Error> {
+    publish_pending_usage_tx(transaction, origin, subject, "", now, Some(0), true)
+}
+
 /// Every unreplicated `response_rollup` reading this node holds, for each series that has one
 /// pending, as (subject, body): the readings after the series' replicated snapshot, newest
 /// first. A period boundary inside the hour then finds the reading it ended on, not only the
@@ -9091,7 +9154,7 @@ fn publish_changed_harness_state_tx(
             })
     });
     let resting = input.fields.get("state").and_then(Value::as_str) != Some("working");
-    let ended = input.fields.get("state").and_then(Value::as_str) == Some("ended");
+    let ended = matches!(input.fields.get("state").and_then(Value::as_str), Some("ended" | "indeterminate"));
     let incarnation = fields.get("incarnation_id").and_then(Value::as_str).unwrap_or("").to_owned();
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
@@ -9279,7 +9342,14 @@ fn publish_due_usage_tx(
         .map_err(internal)?;
     // When the harness is not working: since when, as its replicated state says. A harness
     // that never reported a state has no turn end to wait for, so each reading replicates.
-    let resting_since = match latest_claim_of_kind_tx(transaction, &input.subject, "harness.observed")? {
+    let state = latest_claim_of_kind_tx(transaction, &input.subject, "harness.observed")?;
+    // A rollup waits for its hour only while its own incarnation is the seat's live one: after
+    // `ended` or `indeterminate`, or once a restart replaced it, nothing would flush it.
+    let live_incarnation = state.as_ref().is_some_and(|claim| {
+        !matches!(claim.body.pointer("/fields/state").and_then(Value::as_str), Some("ended" | "indeterminate"))
+            && claim.body.pointer("/fields/incarnation_id") == input.fields.get("incarnation_id")
+    });
+    let resting_since = match state {
         None => Some(u128::MAX),
         Some(claim) if claim.body.pointer("/fields/state").and_then(Value::as_str) == Some("working") => None,
         Some(claim) => Some(
@@ -9302,6 +9372,7 @@ fn publish_due_usage_tx(
     // Occupancy is held on its points only when both readings say how full the window is.
     let held_occupancy = input.fields.get("semantics").and_then(Value::as_str) == Some("context_occupancy")
         && resting_since != Some(u128::MAX)
+        && live_incarnation
         && usage_occupancy_percent(&input.fields).is_some()
         && last.as_ref().is_some_and(|(_, text)| usage_occupancy_percent(&published_fields(text)).is_some());
     let (due, repeat) = match &last {
@@ -9318,6 +9389,10 @@ fn publish_due_usage_tx(
                 .any(|name| published.get(*name) != input.fields.get(*name));
             let repeat = published == input.fields;
             ((moved || changed) && !repeat, repeat)
+        }
+        Some((_, text)) if rollup && resting_since != Some(u128::MAX) && !live_incarnation => {
+            let repeat = published_fields(text) == input.fields;
+            (!repeat, repeat)
         }
         Some((_, text)) if rollup && resting_since != Some(u128::MAX) => {
             let published = published_fields(text);
