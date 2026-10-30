@@ -120,7 +120,7 @@ impl Store {
         let mut all = Vec::new();
         loop {
             let (items, next) =
-                self.messages_page_inner(recipient, include_closed, after, through, 200, delivery)?;
+                self.messages_page_from(recipient, include_closed, after, through, 200, delivery, false)?;
             all.extend(items);
             match next {
                 Some(cursor) => after = Some(cursor),
@@ -255,6 +255,10 @@ impl Store {
         Ok(view)
     }
 
+    /// A page of a mailbox. A recipient's page outside delivery continues into the messages
+    /// shard once the graph's messages are listed; delivery pages and the unpaged readers,
+    /// which order and hold graph mail, stay on the graph until they learn stream items.
+    /// A cursor past the graph is only good for its own `through`: a new listing starts over.
     pub fn messages_page_inner(
         &self,
         recipient: Option<&str>,
@@ -263,6 +267,20 @@ impl Store {
         through: u64,
         limit: usize,
         delivery: bool,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        self.messages_page_from(recipient, include_closed, after, through, limit, delivery, !delivery)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn messages_page_from(
+        &self,
+        recipient: Option<&str>,
+        include_closed: bool,
+        after: Option<u64>,
+        through: u64,
+        limit: usize,
+        delivery: bool,
+        stream: bool,
     ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let connection = self.readers.get();
         let recipient = recipient.map(|recipient|
@@ -369,7 +387,7 @@ impl Store {
                 }
             }
             // A member without a messages shard pages the graph alone, as before.
-            if has_more || super::messages_shard::shard(self).is_none() {
+            if has_more || !stream || super::messages_shard::shard(self).is_none() {
                 return Ok((output, next_after));
             }
             // The graph's messages are all listed; the page goes on into the stream. A page the
