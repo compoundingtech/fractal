@@ -29,6 +29,15 @@ pub(super) struct HostArgs {
     /// Recover an interrupted swap that has not passed its API probe.
     #[arg(long)]
     rollback: bool,
+    /// Match the daemon unit's --config override, if any.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Match the daemon unit's --state-dir override, if any.
+    #[arg(long)]
+    state_dir: Option<PathBuf>,
+    /// Match the daemon unit's --store-dir override, if any.
+    #[arg(long)]
+    store_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -71,6 +80,7 @@ struct Layout {
     directories: [(PathBuf, PathBuf); 2],
     // The whole product root moves, but daemon identity/locks may live in store/.
     daemon_state: PathBuf,
+    store_dir: Option<PathBuf>,
     journal: PathBuf,
     lock: PathBuf,
 }
@@ -92,6 +102,7 @@ impl Layout {
             home, profiles,
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
             daemon_state: state.join("st3"),
+            store_dir: None,
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
         })
@@ -114,6 +125,45 @@ impl Layout {
             |_| self.daemon_state.clone(),
             |suffix| new.join(suffix),
         )
+    }
+
+    fn configure_store(&mut self, config: &Config) {
+        let store = fractal_daemon::config::store_dir(config);
+        self.store_dir = (store != config.state_dir).then_some(store);
+    }
+
+    fn target_store_dir(&self) -> Option<PathBuf> {
+        self.store_dir.as_ref().map(|store| {
+            for (old, new) in &self.directories {
+                if let Ok(suffix) = store.strip_prefix(old) { return new.join(suffix); }
+            }
+            store.clone()
+        })
+    }
+
+    fn check_store(&self, target: bool) -> Result<()> {
+        let store = if target { self.target_store_dir() } else { self.store_dir.clone() };
+        let Some(store) = store else { return Ok(()); };
+        ensure!(store.is_absolute() && !store.components().any(|part| matches!(part, std::path::Component::ParentDir)),
+            "host migration requires an absolute store_dir without parent traversal; configured store_dir is {}", store.display());
+        let metadata = fs::symlink_metadata(&store)
+            .with_context(|| format!("configured store_dir {} is not reachable; mount or restore it before host migration", store.display()))?;
+        ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "configured store_dir {} must be an ordinary directory or an external mount, not a symlink", store.display());
+        if target { return Ok(()); }
+        let resolved = fs::canonicalize(&store)?;
+        for (root, destination) in &self.directories {
+            ensure!(!store.starts_with(destination) && !resolved.starts_with(mounts::resolved(destination)?),
+                "configured store_dir {} is inside the destination product root {}; keep it outside both product roots or in an ordinary directory below the legacy root before cutover", store.display(), destination.display());
+            if store.starts_with(root) {
+                ensure!(store != *root && resolved == mounts::resolved(root)?.join(store.strip_prefix(root)?),
+                    "configured store_dir {} must be an ordinary directory below the product root without symlinked ancestors", store.display());
+            } else {
+                ensure!(!resolved.starts_with(mounts::resolved(root)?),
+                    "configured store_dir {} resolves inside product root {}; configure its ordinary path before host migration", store.display(), root.display());
+            }
+        }
+        Ok(())
     }
 
     fn pairs(&self, services: &Services) -> Vec<(PathBuf, PathBuf)> {
@@ -180,8 +230,11 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
     ensure!(fractal_daemon::instance::current().is_none(), "host migration does not move named instances; run it for the default host");
     ensure!(matches!(endpoint, Endpoint::Unix(_)), "host migration requires the local Unix API, not a remote endpoint");
     let mut layout = Layout::discover()?;
-    let mut config = Config::load_unvalidated(None)?;
+    let mut config = Config::load_unvalidated(args.config.as_deref())?;
+    if let Some(state) = &args.state_dir { config.state_dir = state.clone(); }
+    if let Some(store) = &args.store_dir { config.store_dir = Some(store.clone()); }
     layout.configure_state(&config.state_dir)?;
+    layout.configure_store(&config);
     config.apply_fleet_file()?;
     fractal_daemon::node_identity::resolve(&mut config)?;
     let mut manager = native::Native::new(endpoint.clone(), config.node.clone());
@@ -346,11 +399,14 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         let mut journal: Journal = serde_json::from_slice(&fs::read(&layout.journal)?)?;
         validate_journal(layout, &journal, &services)?;
         if args.rollback {
+            mounts::rollback_preflight(&layout.directories)?;
             ensure!(!journal.committed, "the local API probe succeeded; rollback to legacy state is no longer permitted");
             rollback(layout, manager, &mut journal)?;
             return Ok(receipt(manager, host, "rolled-back", "legacy restored", journal.before, 0));
         }
         ensure!(journal.committed, "an interrupted host swap exists; run `fractal migrate host --rollback` before retrying");
+        mounts::committed_preflight(&layout.directories, layout.target_store_dir().as_deref())?;
+        layout.check_store(true)?;
         ensure!(services.target[0].running && !services.legacy.iter().any(|unit| unit.running),
             "committed migration requires the Fractal daemon running and all legacy services stopped; refusing ambiguous API ownership");
         manager.probe().await.context("completed migration's local API is not listening; state was not rolled back")?;
@@ -371,6 +427,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     }
     let pairs = layout.pairs(&services);
     mounts::preflight(&layout.directories)?;
+    layout.check_store(false)?;
     for (index, (old, new)) in pairs.iter().enumerate() {
         if index < 2 || old.exists() { destination_free(old, new)?; }
         if index < 2 {
@@ -468,6 +525,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
         save(layout, journal)?;
         publish_receipt(new)?;
     }
+    layout.check_store(true)?;
     // launchd opens StandardOutPath before exec, so its parent must already exist.
     fs::create_dir_all(layout.target_daemon_state().join("logs"))?;
     manager.reload()?;
@@ -485,6 +543,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
 }
 
 fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<()> {
+    mounts::rollback_preflight(&layout.directories)?;
     for unit in journal.services.target.iter().rev() {
         manager.stop(unit)?;
         manager.enable(unit, false)?;
