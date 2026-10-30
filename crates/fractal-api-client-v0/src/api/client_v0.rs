@@ -7858,15 +7858,38 @@ async fn dispatch_action(
                         .map_err(|_| validation("invalid delegation proof"))
                 })
                 .transpose()?;
+            let (seat, episode, answer) = (
+                parameter_string(p, "target_id")?,
+                parameter_string(p, "episode")?,
+                parameter_string(p, "answer")?,
+            );
+            // A card may have offered allow from a read before its call's result: whatever lets
+            // the call through is refused once the seat's conversation records one.
+            // Only the seat's person is told: anyone else is refused by the store as before.
+            let person = state.store.agent_person(&seat).map_err(ApiError::internal)?;
+            if delegation.is_none() && answer != "deny" && person.as_deref() == Some(authority_actor.as_str()) {
+                let call = state.store.native_prompt_call(&seat, &episode).map_err(ApiError::internal)?;
+                if let Some(call) = call {
+                    let (reader, target) = (state.clone(), seat.clone());
+                    let answered = crate::api::read_deadline::spawn_blocking(move || {
+                        crate::api::prompt_card::call_has_result(&reader, &target, &call)
+                    })
+                    .await
+                    .map_err(ApiError::internal)?;
+                    if answered == Ok(true) {
+                        return Err(ApiError::bad(St3Error::new(
+                            "stale-fence",
+                            format!(
+                                "{}is no longer waiting: the call it asks about already has a result",
+                                fractal_client::PROMPT_REFUSAL_PREFIX
+                            ),
+                        )));
+                    }
+                }
+            }
             let answered = state
                 .store
-                .respond_native_prompt(
-                    &parameter_string(p, "target_id")?,
-                    &parameter_string(p, "episode")?,
-                    &parameter_string(p, "answer")?,
-                    authority_actor,
-                    delegation.as_ref(),
-                )
+                .respond_native_prompt(&seat, &episode, &answer, authority_actor, delegation.as_ref())
                 .map_err(ApiError::bad)?;
             signal_changed(state);
             Ok(vec![answered.subject])
