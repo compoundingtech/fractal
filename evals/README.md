@@ -41,7 +41,6 @@ Future imports require an explicit eval review before they enter this corpus.
 | Local File Refresh | Not supported | `fractal/local-file-refresh` |
 | Constraint Inheritance | Not supported | `fractal/constraint-inheritance` |
 | Continuous Stewardship | Not supported | `fractal/continuous-stewardship` |
-| Agent Migration Rehearsal | Not supported | `fractal/agent-migration-rehearsal` |
 | Automatic GitHub Intake | Not supported | `fractal/automatic-github-intake` |
 | Codex compaction message delivery | Not supported | `fractal/codex-compaction-message-delivery` |
 | Native session import | Not supported | `fractal/native-session-import` |
@@ -98,7 +97,6 @@ The seat counts include every native agent seat. The LLM judge counts are separa
 | Fractal | Planning Mode | Codex × 1, created by the launch API | None |
 | Fractal | Run Generation Revision | Codex × 1, created by the launch API | None |
 | Fractal | Continuous Stewardship | Codex × 1 | None |
-| Fractal | Agent Migration Rehearsal | Codex × 1 | None |
 | Fractal | Automatic GitHub Intake | Codex × 1 | None |
 | Fractal | Codex compaction message delivery | Codex × 1 | None |
 | Fractal | Native session import | Claude × 1, Codex × 1, Pi × 1, OMP × 1, OpenCode × 1 (raw, then imported) | None |

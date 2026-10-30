@@ -109,6 +109,11 @@ are idempotent. A reused call identity with different descriptors is refused.
 Legacy PTY records without a boot id may establish daemon identity through their
 matching live start token; this does not relax the independent exact-wrapper
 custody or launch/binding checks above.
+The common native identity-proof boundary follows provider, physical runtime and
+daemon-selected source-path checks; question observations additionally prove the
+exact wrapper before that boundary. Neither forged observations nor closes may
+write claims or shared delivery diagnostics. Observation admission never promotes
+a mailbox lease or records mailbox bind-refusal diagnostics.
 
 Native successful completion records `answered_elsewhere`, a structured native timeout
 records `expired`, and error completion records `cancelled`. O1a records closure status

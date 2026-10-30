@@ -392,7 +392,7 @@ fn admit_report_with(
     let owner = state.store.mailbox_lease_authority(fence)?
         .ok_or_else(|| refused("the report has no canonical lease"))?;
     if owner.sequence == 0 {
-        return with_authority(state, fence, peer, |owner, validate| {
+        return with_authority(state, fence, peer, || {}, |owner, validate| {
             validate()?;
             check(Some(owner))
         });
@@ -427,7 +427,7 @@ fn admit_report_with(
     {
         // Preserve writer-side revalidation for exceptional bootstrap/re-exec,
         // even though it requires additional fence work beyond ordinary reports.
-        return with_authority(state, fence, peer, |owner, validate| {
+        return with_authority(state, fence, peer, || {}, |owner, validate| {
             validate()?;
             check(Some(owner))
         });
@@ -594,7 +594,7 @@ pub fn repair_proven(
             "the delivery report belongs to another native process",
         ));
     }
-    with_authority(state, fence, peer, |owner, validate| {
+    with_authority(state, fence, peer, || {}, |owner, validate| {
         validate()?;
         state.store.check_mailbox(fence)?;
         if !state.store.owns_mailbox_lease(fence, owner)? {
@@ -1059,9 +1059,10 @@ pub fn with_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
+    authenticated: impl FnOnce(),
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
-    with_authority_mode(state, fence, peer, true, action)
+    with_authority_mode(state, fence, peer, true, authenticated, action)
 }
 
 /// Native observations use physical custody without creating/promoting a mailbox lease.
@@ -1071,7 +1072,8 @@ pub(super) fn with_observation_authority<T>(
     peer: &NativeDeliveryPeer,
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
-    with_authority_mode(state, fence, peer, false, action)
+    // Question observation never records mailbox bind-refusal diagnostics or promotes custody.
+    with_authority_mode(state, fence, peer, false, || {}, action)
 }
 
 fn with_authority_mode<T>(
@@ -1079,6 +1081,7 @@ fn with_authority_mode<T>(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     promote: bool,
+    authenticated: impl FnOnce(),
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
     if fence.epoch != 0 {
@@ -1168,6 +1171,12 @@ fn with_authority_mode<T>(
             "the channel carries another runtime's observation paths",
         ));
     }
+    // Identity proof only, not mailbox custody: provider, physical runtime membership
+    // and daemon-selected source paths match. Pre-authority rejected callers cannot
+    // mutate shared delivery diagnostics. Session/fence refusals after this point can.
+    // Observation identity additionally requires the exact wrapper BootstrapWitness above;
+    // a same-seat descendant cannot reach this point merely by forging argv or environment.
+    authenticated();
     let source = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
         .map_err(|error| unavailable(error.to_string()))?;
     if let Some((_, raw)) = &source {
