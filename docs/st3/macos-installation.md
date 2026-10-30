@@ -147,6 +147,10 @@ After stopping legacy services, the mover also acquires the separate store's
 directory-FD lock and holds it through the exchanges, releasing it before starting
 the target daemon. A concurrent store owner refuses the swap and restores legacy
 services; the fence creates no store files and follows a nested store's inode.
+Symlinks for any database-trio file, including dangling links, refuse before
+services stop and are checked again under the store fence before exchanges.
+The product-root bridge is an ancestor symlink, not a database-file symlink,
+and remains compatible with the daemon's store checks.
 
 To put only the database on a dataset mounted at
 `~/.local/state/fractal/store`, first complete cutover without mounts below either
