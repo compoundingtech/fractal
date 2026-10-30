@@ -6462,7 +6462,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
-    startup_telemetry.task("startup.judge_claims", || fractal_daemon::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true)))?;
+    startup_telemetry.task("startup.judge_claims", || fractal_daemon::task_cpu::blocking("startup.judge_claims", || store.judge_claims_slice(true)))?;
     startup_phases.judge_claims_ms = phase_elapsed_ms();
     startup.phase("validate-replication-backlog");
     startup_telemetry.phase("validate-replication-backlog");
@@ -19412,6 +19412,20 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                         let retired_started = std::time::Instant::now();
                         if !worker.retire_legacy_signature_page()? { break; }
                         std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    // A resume or a trust-root change can leave a large verdict backlog. Ordinary
+                    // passes take only a slice of it; this job drains the rest at the same duty.
+                    if worker.verdicts_pending()? {
+                        stderr_message("st3", format_args!("signature verdict backlog draining"));
+                        let drain_started = std::time::Instant::now();
+                        let mut judged = 0;
+                        while worker.verdicts_pending()? {
+                            let loan_started = std::time::Instant::now();
+                            judged += worker.advance_signature_judgment()?;
+                            if let Some(fault) = worker.signature_migration()?.fault { return Ok(Some(fault)); }
+                            std::thread::sleep(loan_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                        }
+                        stderr_message("st3", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
                     }
                     return Ok(None);
                 }

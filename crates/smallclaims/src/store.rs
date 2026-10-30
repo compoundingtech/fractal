@@ -6572,7 +6572,7 @@ impl Store {
         }
         // Judge the claims just sealed only after the snapshot is taken: a verdict pass takes the
         // writer, and writes queued behind it must not land between sealing and the snapshot.
-        self.judge_claims(false)?;
+        self.judge_claims_slice(false)?;
         Ok(snapshot)
     }
 
@@ -7608,7 +7608,7 @@ impl Store {
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it.
         self.seal_local_batches_after_frontier()?;
-        self.judge_claims(false)?;
+        self.judge_claims_slice(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self
@@ -8325,7 +8325,7 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
-                        self.judge_claims(true).map_err(|error| {
+                        self.judge_claims_slice(true).map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
                             if error.is_sqlite_contention() {
