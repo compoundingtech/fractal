@@ -113,6 +113,10 @@ pub struct World {
     /// What was left of each objective or budget across the chart period, by its id.
     #[serde(skip)]
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
+    /// Why the last refresh of the objectives and budgets failed, while the rows shown are
+    /// from an earlier read.
+    #[serde(skip)]
+    pub slo_stale: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]

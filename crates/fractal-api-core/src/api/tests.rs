@@ -12967,6 +12967,111 @@ async fn native_recipient_preflight_refuses_unknown_without_writing_and_accepts_
 }
 
 #[test]
+fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let transcript = home.join(".codex/sessions/2026/09/24/prompted.jsonl");
+    fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    let owner = "agent/example/prompted";
+    let incarnation = "native-pty:one";
+    let provider_incarnation = "provider-one";
+    let native_id = "native-prompted-codex-test";
+    let lines = [
+        json!({"type":"session_meta","timestamp":"2026-09-24T12:00:00Z","payload":{"id":native_id,"cwd":root.path(),"source":"test"}}),
+        json!({"type":"response_item","timestamp":"2026-09-24T12:00:01Z","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"ls\"]}","call_id":"call-done"}}),
+        json!({"type":"response_item","timestamp":"2026-09-24T12:00:02Z","payload":{"type":"function_call_output","call_id":"call-done","output":"README.md"}}),
+        json!({"type":"response_item","timestamp":"2026-09-24T12:00:03Z","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"make\",\"release\"]}","call_id":"call-waiting"}}),
+    ];
+    fs::write(&transcript, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+    let mut state = state(root.path());
+    state.native_session_home = Some(home);
+    let directory = state
+        .state_dir
+        .join("drivers")
+        .join(&hex::encode(Sha256::digest(owner.as_bytes()))[..24])
+        .join("state");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        directory.join("runtime.json"),
+        serde_json::to_vec(&json!({"agent":"example/prompted","incarnation":provider_incarnation})).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        directory.join("binding.json"),
+        serde_json::to_vec(&json!({"agent":"example/prompted","runtimeIncarnation":provider_incarnation,"threadId":native_id})).unwrap(),
+    )
+    .unwrap();
+    for (kind, fields) in [
+        (
+            "runtime.observed",
+            BTreeMap::from([
+                ("status".into(), Value::String("running".into())),
+                ("runtime_id".into(), Value::String("prompted-pty".into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+                ("terminal".into(), Value::Bool(true)),
+            ]),
+        ),
+        (
+            "harness.observed",
+            BTreeMap::from([
+                ("state".into(), Value::String("blocked".into())),
+                ("driver".into(), Value::String("codex".into())),
+                ("incarnation_id".into(), Value::String(incarnation.into())),
+                ("evidence_incarnation".into(), Value::String(provider_incarnation.into())),
+            ]),
+        ),
+    ] {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: owner.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    // The refresher follows the transcript before it is read.
+    let followed = std::cell::RefCell::new(Vec::new());
+    let calls = prompt_card::seat_pending_calls(&state, owner, |path| {
+        followed.borrow_mut().push(path.to_owned());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        calls,
+        [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]},"complete":true})]
+    );
+    assert_eq!(*followed.borrow(), std::slice::from_ref(&transcript));
+    // A conversation st cannot follow is not read: the card says why.
+    let unfollowed = prompt_card::seat_pending_calls(&state, owner, |_| Err("st cannot follow this seat's conversation: no watcher".into()));
+    assert_eq!(unfollowed.unwrap_err(), "st cannot follow this seat's conversation: no watcher");
+    let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-waiting"}}});
+    let prompt = prompt_card::prompt_card(&row, || Ok(calls));
+    assert_eq!(prompt["calls"][0]["input"], r#"{"command":["make","release"]}"#);
+    assert_eq!(prompt["allow"], true);
+
+    // A call too large for the timeline to hold whole is never answered here, however st cut it.
+    let large = json!({"type":"response_item","timestamp":"2026-09-24T12:00:04Z","payload":{"type":"function_call","name":"apply_patch",
+        "arguments":json!({"patch":"x".repeat(300 * 1024)}).to_string(),"call_id":"call-large"}});
+    let mut file = fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    std::io::Write::write_all(&mut file, format!("{large}\n").as_bytes()).unwrap();
+    let calls = prompt_card::seat_pending_calls(&state, owner, |_| Ok(())).unwrap();
+    let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-large"}}});
+    let prompt = prompt_card::prompt_card(&row, || Ok(calls));
+    assert_eq!(prompt["calls"][0]["call_id"], "call-large");
+    assert_eq!(prompt["calls"][0]["input_complete"], false);
+    assert_eq!(prompt["allow"], false);
+
+    // A seat st has no session for says why, and the card offers no answer.
+    let reason = prompt_card::seat_pending_calls(&state, "agent/example/absent", |_| Ok(())).unwrap_err();
+    assert!(reason.starts_with("st cannot read this seat's conversation"), "{reason}");
+}
+
+#[test]
 fn agent_card_shows_current_incarnation_background_jobs() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
