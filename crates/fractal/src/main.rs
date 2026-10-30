@@ -13111,7 +13111,10 @@ fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
         other => other.to_owned(),
     };
     line.push_str(&format!(" at {}", end.ended_at));
-    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref()) {
+    // The FAULT line already prints a parked seat's reason.
+    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref())
+        .filter(|reason| agent.fault.as_deref() != Some(*reason))
+    {
         line.push_str(": ");
         push_todo_terminal_text(&mut line, reason);
     }
@@ -17106,23 +17109,7 @@ fn tolerate_driver_api_outage(
 
 /// Driver notes go to a private log, never to the terminal the driver shares with its provider.
 fn write_driver_log(subject: &str, line: &str) -> Result<()> {
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let state_home = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
-        .context("no state directory for driver warning")?;
-    let directory = state_home.join("st3");
-    fs::create_dir_all(&directory)?;
-    let mut options = fs::OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(directory.join("driver-api-warnings.log"))?;
-    let at = current_unix_ms()?;
-    writeln!(file, "{at} {subject} {}", line.replace('\n', " "))?;
-    Ok(())
+    fractal_daemon::client::write_driver_log(subject, line)
 }
 
 async fn renew_claimed_work(
@@ -19863,7 +19850,14 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
             ..context.clone()
         };
         match store.connection.write_workers().spawn_blocking(move || {
-            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || {
+                let actions = store.checkpoint_step(&context)?;
+                // A local trim that stopped alerts the `[trim] notify` agent.
+                store
+                    .record_local_trim_stops(&actions)
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                anyhow::Ok(actions)
+            })
         })
         .await
         {

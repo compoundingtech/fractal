@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 fractal-client = { path = "../fractal-client" }
+fractal-schema = { path = "../fractal-schema" }
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
 serde_json = "1"
+

@@ -1005,6 +1005,7 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        seed_empty_projection_health(&connection)?;
         if fresh && defer_fresh_durability {
             // Back to the member's setting before `from_connection` commits its first meta rows,
             // which a fresh store always writes: that commit fsyncs the WAL, and with it every
@@ -1047,6 +1048,7 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        seed_empty_projection_health(&connection)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -10196,6 +10198,23 @@ thread_local! {
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.
     static STOP_BETWEEN_REPAIR_PAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A store that holds no claims, and has held none a checkpoint dropped, has projected every
+/// claim it holds. Record that, so a backlog it receives before its first projection pass is
+/// projected a chunk per writer hold from here, as on a store whose first pass found nothing,
+/// instead of replayed from nothing in one hold. Without this row a pass cannot tell what the
+/// projection holds, and replays it all. It runs at every open, so an interrupted first open
+/// reopens to the store a whole one makes.
+fn seed_empty_projection_health(connection: &Connection) -> Result<()> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hfd7ba932c92e owner=smallclaims::store TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+         SELECT 'graph', 'healthy', 0, ?1
+         WHERE NOT EXISTS(SELECT 1 FROM claims) AND NOT EXISTS(SELECT 1 FROM checkpoint_claims)
+         ON CONFLICT(aggregate) DO NOTHING",
+        [now_ms().to_string()],
+    )?;
+    Ok(())
 }
 
 pub fn apply_replication_repair_tx(

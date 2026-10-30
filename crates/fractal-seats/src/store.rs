@@ -162,6 +162,8 @@ pub mod agents_window_deadline_tests;
 #[cfg(test)]
 pub mod arrangements_tests;
 #[cfg(test)]
+pub mod ordered_membership_tests;
+#[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod fleet_admission_tests;
