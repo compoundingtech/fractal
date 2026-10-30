@@ -555,6 +555,38 @@ def shared_target(tree_target=None):
     return target, lock
 
 
+def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """The cap this process runs under, as one string, or None. Only the two caps made for builds count: builds.slice, and a
+    seat's lane, app-lanes-<seat>.slice directly in app-lanes.slice (docs/st3/seat-lanes.md). The process must be inside one, and
+    that slice or a cgroup below it, on the way to the process, must hold a memory.max and a cpu.max quota: read from the kernel's
+    files, never from a name alone or a variable. Limits above the cap (any other cgroup's) do not count."""
+    try:
+        text = Path(cgroup_file).read_text()
+    except OSError:
+        return None
+    path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
+    parts = path.split('/') if path else []
+    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
+        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
+    if cap is None:
+        return None
+
+    def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
+        try:
+            return cgroup.joinpath(file).read_text().split()[0] != 'max'
+        except (OSError, IndexError):
+            return False
+
+    memory = cpu = None
+    for depth in range(cap + 1, len(parts) + 1):
+        cgroup = Path(root, *parts[:depth])
+        if memory is None and limited(cgroup, 'memory.max'):
+            memory = parts[depth - 1]
+        if cpu is None and limited(cgroup, 'cpu.max'):
+            cpu = parts[depth - 1]
+    return f'{parts[cap]}: memory by {memory}, CPU by {cpu}' if memory and cpu else None
+
+
 def governed(argv, name):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
@@ -564,8 +596,16 @@ def governed(argv, name):
     (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
+    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+
+    A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
+    (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
+    name or an environment variable a caller could set."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
+        return argv
+    cap = own_cap()
+    if cap:
+        print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
         return argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
