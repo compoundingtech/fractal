@@ -114,7 +114,7 @@ a deploy, a release or the merge queue waits for a person's approval. **Only `lo
 **Factory read.** The review is a cheap extra reader, not a gate: replayed on twelve heads where a reviewer had found a blocking
 defect, `scripts/review` found it three times, and it misses mixed-version, concurrency, CI-queue and cost defects. So a **medium**
 change in one of these areas does not self-queue: its author sends the signed head to Factory for one read first. This is a lane rule
-Nathan approved on top of the review (2026-10-30), not an intake step of the review itself: the review still reads, approves and queues
+the owner approved on top of the review (2026-10-30), not an intake step of the review itself: the review still reads, approves and queues
 nothing, and the author still queues their own change once Factory has read it. The areas are
 named in `.st/review-risk.json` under `factory_read`: replication and sync (smallclaims replication, the sync worker, claim ranges,
 inventory, the peer); store schema, trim and checkpoints; concurrency (watchers, locks, spawned background tasks, by path and by

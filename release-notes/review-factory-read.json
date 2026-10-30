@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "The review rules gain a factory_read list in .st/review-risk.json (five risky areas) and docs/review.md states the lane rule it encodes: a MEDIUM change in one of those areas does not self-queue and goes to Factory for one read. Nathan approved it through ask step-run/ask-781daf9db23755ab7edfc6a63eb13950/ask. The risk levels, risky-classes.json and the low/high routing are unchanged."
+    "detail": "The review rules gain a factory_read list in .st/review-risk.json (five risky areas) and docs/review.md states the lane rule it encodes: a MEDIUM change in one of those areas does not self-queue and goes to Factory for one read. The owner approved it through ask step-run/ask-781daf9db23755ab7edfc6a63eb13950/ask. The risk levels, risky-classes.json and the low/high routing are unchanged."
   },
   "compatibility": {
     "status": "none",
