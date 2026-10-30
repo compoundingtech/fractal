@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# linux-clippy's lane (docs/keyed-clippy.md): the clippy stage alone, with every file its compiles read checked against linux-clippy's
-# input key in the skip policy (scripts/dep-info-check, which scripts/ci-linux runs when CI_KEYED_CLIPPY_POLICY names the policy).
-# linux-gate runs the same stage without it, so linux-gate never depends on the policy file.
-set -euo pipefail
-export CI_KEYED_CLIPPY_POLICY=.st/evidence-skip-policy.json
-exec bash scripts/ci-local clippy "$@"
