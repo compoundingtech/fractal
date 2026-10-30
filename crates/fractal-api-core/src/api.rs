@@ -771,6 +771,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
+        .route("/v1/signatures/resume", post(replication::signature_resume))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -3217,12 +3218,12 @@ fn overlay_agent_resources_at(
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            let report_age_ms = harness
-                .as_ref()
-                .map(|harness| {
-                    u64::try_from(now.saturating_sub(harness.observed_at_unix_ms))
-                        .unwrap_or(u64::MAX)
-                });
+            // The seat's host also hears the re-stamps that stay local, in one seek per card.
+            let heard_at = match &harness {
+                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness)?),
+                None => None,
+            };
+            let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
                 Some(age) if age > 90_000 => "stale",
@@ -3257,6 +3258,14 @@ fn overlay_agent_resources_at(
         }
         Ok(())
     })
+}
+
+/// When this node last heard the seat's harness: its replicated report, or on the seat's host the
+/// newest local re-stamp of the same incarnation, whichever is later. Re-stamps that change nothing
+/// stay in the host's local log, so without it the host's own cards read a resting seat stale.
+pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
+    let local = store.local_harness_observed_at(subject, &harness.incarnation_id)?;
+    Ok(local.map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)))
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.
@@ -7051,6 +7060,7 @@ pub async fn guard_bound_request(
         "/v1/diagnostic",
         "/v1/rules/",
         "/v1/repair",
+        "/v1/signatures/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))

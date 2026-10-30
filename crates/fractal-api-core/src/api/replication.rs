@@ -151,6 +151,18 @@ pub async fn checkpoint_resume(
         .map(Json)
 }
 
+/// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
+/// or the fleet's fault agent.
+pub async fn signature_resume(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::store::principals::SignatureResumeRequest>,
+) -> Result<Json<smallclaims::store::principals::SignatureResume>, ApiError> {
+    let store = state.store.clone();
+    let resumed = blocking_action(move || store.resume_signature_migration_as(&request.actor, &request.reason)).await?;
+    signal_changed(&state);
+    Ok(Json(resumed))
+}
+
 pub async fn repair_replication_record(
     State(state): State<AppState>,
     Json(request): Json<ReplicationRepairRequest>,

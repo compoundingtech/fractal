@@ -1035,6 +1035,21 @@ way. When only our hosts' notes can cover the run (a `pull_request` run whose br
 mode), the gate asks the base's verifier with `--prefer-levels host`. The newest passing host record then decides, unless a failing
 record is dated after it; a newer failure still decides, and every other rule applies to the record chosen.
 
+**Which record decides: the newest pass that validates.** A check's input key, and each crate's key for `rust-tests`, is shared by
+every tree with the same inputs, so the records for it come from many trees and signers. The newest record used to decide and only then
+be validated, so a newer pass that could never cover this tree hid an older one that does. On 2026-10-29 that happened twice (#4241). CI
+signs per-crate notes at level `fleet`, which no kind of `rust-tests` accepts; and host notes signed on another tree carry that tree's
+lane definition. A signing run counted 18 crates covered by host notes, and by the time it pushed, newer passes of both sorts for the
+same keys made the push hook refuse them. The same race could refuse a signed pull request at its own gate.
+
+The verifier now walks the passes newest first and lets the first that validates decide; every rule (level, kind, command, lane
+definition, inputs, age) applies to it as before, so what can cover a tree is unchanged. It passes over a newer pass only when that pass
+was made for something else: its level is accepted by no kind of the check, or it carries another tree's lane definition. A newer pass
+refused for any other reason still decides, so a signer cannot hide a newer claim of another kind behind its own older grant. Failures
+stay conservative: a failing record of any level dated after the deciding pass (within the clock-skew margin) refuses, whatever tree's
+lane it was signed for. With no pass that validates, the newest record decides and is refused as before. The answer says which record
+decided (`decided_by`) and lists each newer pass it passed over and why (`skipped_newer`), so an acceptance or a refusal can be audited.
+
 The check jobs act on it:
 
 - A job wired with the skip (`typescript-client`, `genie-freshness`, `ci-script-tests`) runs only its checkout. Every other step is
@@ -1852,7 +1867,7 @@ The check that builds the Rust workspace (`linux-gate`) builds in one cargo targ
 trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
 trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
-Operations' terms: it is removed before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it), it is never
+Operations' terms: it is emptied before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it). st-test empties only a target it or cargo made, by its CACHEDIR.TAG, or a pool tree's own target inside the pool directory; st-test writes the tag when it creates a target, since cargo tags only a target directory it creates itself. It is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
 **The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
