@@ -771,6 +771,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
+        .route("/v1/signatures/resume", post(replication::signature_resume))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -7051,6 +7052,7 @@ pub async fn guard_bound_request(
         "/v1/diagnostic",
         "/v1/rules/",
         "/v1/repair",
+        "/v1/signatures/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))

@@ -5113,6 +5113,17 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         "--reason",
         "The fixture projection was checked.",
     ]);
+    let resumed = amber.st_json(&[
+        "replication",
+        "signatures",
+        "resume",
+        "--as",
+        PERSON,
+        "--reason",
+        "The fixture signature migration was checked.",
+    ]);
+    assert!(resumed["cleared"].is_null(), "{resumed}");
+    assert_eq!(resumed["migration"]["phase"], "done", "{resumed}");
     amber.restart().await;
     amber.wait_listening().await;
     cobalt.st_ok(&[
