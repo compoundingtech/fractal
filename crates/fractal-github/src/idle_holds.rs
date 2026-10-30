@@ -181,7 +181,7 @@ impl IdleHoldsStore for Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         // A thread a poller describes in compact state: its states are the same history.
-        let mut states = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-PLACEHOLDER-QUEUE-STATE owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_STATE_SQL)?;
+        let mut states = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbc1c39e02c9b owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_STATE_SQL)?;
         let compact = states
             .query_map(params![item, THREAD_SCAN], |row| {
                 Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, false, Some(row.get::<_, i64>(2)?)))
@@ -200,7 +200,7 @@ impl IdleHoldsStore for Store {
         let exited = fractal_schema::github_plugin::event_subject(&item, "merge-queue-left")
             .map(|subject| -> Result<Option<u128>> {
                 let upper = format!("{subject}0");
-                let mut events = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-PLACEHOLDER-QUEUE-EVENT owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_EVENT_SQL)?;
+                let mut events = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h13f5ed40c752 owner=fractal_github::idle_holds TODO=trace-statement-and-value-representation */ QUEUE_EXIT_EVENT_SQL)?;
                 let times = events
                     .query_map(params![subject, upper], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?;

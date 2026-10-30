@@ -123,7 +123,7 @@ impl GithubPluginStore {
             )?;
         }
         connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS plugin_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;",
+            /* sqlite-large-value: allow-for-now lv-ha1763c1a36dd owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS plugin_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;",
         )?;
         let mirror: i64 = connection
             .query_row("SELECT value FROM plugin_meta WHERE key='mirror_version'", [], |row| row.get::<_, String>(0))
@@ -135,8 +135,7 @@ impl GithubPluginStore {
         );
         if mirror < 1 {
             connection.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-MIRROR-TABLES owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */
-                "BEGIN;
+                /* sqlite-large-value: allow-for-now lv-h86c3bdebac93 owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */ "BEGIN;
                  CREATE TABLE IF NOT EXISTS mirror_repositories(
                      repository TEXT PRIMARY KEY,
                      observer TEXT NOT NULL,
@@ -286,8 +285,7 @@ impl GithubPluginStore {
             replaced += 1;
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-SEEDED owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-            "UPDATE mirror_repositories SET seeded_at_unix_ms=?2 WHERE repository=?1",
+            /* sqlite-large-value: allow-for-now lv-h641845a77ded owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET seeded_at_unix_ms=?2 WHERE repository=?1",
             params![repository, at as i64],
         )?;
         transaction.commit()?;
@@ -333,8 +331,7 @@ impl GithubPluginStore {
                 };
                 let event = github_events::Event { key, ..event };
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-EVENT-INSERT owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-                    "INSERT OR IGNORE INTO mirror_events(subject, repository, number, key, event, head_sha, detail, at, recorded_at_unix_ms, sequence)
+                    /* sqlite-large-value: allow-for-now lv-h7468a1888dd8 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mirror_events(subject, repository, number, key, event, head_sha, detail, at, recorded_at_unix_ms, sequence)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         subject, repository, number as i64, event.key, event.event, event.head_sha,
@@ -346,13 +343,11 @@ impl GithubPluginStore {
             write_item(&transaction, repository, number, item, at)?;
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-MIRRORED owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-            "UPDATE mirror_repositories SET mirrored_at_unix_ms=?2 WHERE repository=?1",
+            /* sqlite-large-value: allow-for-now lv-h8cd0425703e2 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET mirrored_at_unix_ms=?2 WHERE repository=?1",
             params![repository, at as i64],
         )?;
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-EVENT-PRUNE owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-            "DELETE FROM mirror_events WHERE repository=?1 AND recorded_at_unix_ms < ?2",
+            /* sqlite-large-value: allow-for-now lv-h9927b63f8690 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mirror_events WHERE repository=?1 AND recorded_at_unix_ms < ?2",
             params![repository, at.saturating_sub(EVENT_RETENTION_MS) as i64],
         )?;
         transaction.commit()?;
@@ -522,8 +517,7 @@ fn item_number(item: &MirrorItem) -> Option<u64> {
 
 fn upsert_repository(connection: &Connection, repository: &str, observer: &str, locator: &str) -> Result<()> {
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-REPOSITORY owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-        "INSERT INTO mirror_repositories(repository, observer, locator) VALUES (?1, ?2, ?3)
+        /* sqlite-large-value: allow-for-now lv-h42a085359417 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_repositories(repository, observer, locator) VALUES (?1, ?2, ?3)
          ON CONFLICT(repository) DO UPDATE SET observer=excluded.observer, locator=excluded.locator",
         params![repository, observer, locator],
     )?;
@@ -533,8 +527,7 @@ fn upsert_repository(connection: &Connection, repository: &str, observer: &str, 
 fn write_item(connection: &Connection, repository: &str, number: u64, item: &MirrorItem, at: u128) -> Result<()> {
     let state = if item.facts.get("state").and_then(Value::as_str) == Some("open") { "open" } else { "closed" };
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ITEM owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */
-        "INSERT INTO mirror_items(repository, number, item_kind, subject, state, facts, claim, observed_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hb68788c308e8 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_items(repository, number, item_kind, subject, state, facts, claim, observed_at_unix_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(repository, number) DO UPDATE SET item_kind=excluded.item_kind, subject=excluded.subject,
              state=excluded.state, facts=excluded.facts, claim=excluded.claim,
@@ -547,8 +540,7 @@ fn write_item(connection: &Connection, repository: &str, number: u64, item: &Mir
     if let Some(head) = item.facts.get("head_sha").and_then(Value::as_str) {
         let text = |name: &str| item.facts.get(name).filter(|value| !value.is_null()).map(Value::to_string);
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-HEAD owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */
-            "INSERT INTO mirror_heads(repository, number, head_sha, first_seen_unix_ms, last_seen_unix_ms, checks_state, checks, required_checks)
+            /* sqlite-large-value: allow-for-now lv-h97dc82980e2a owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_heads(repository, number, head_sha, first_seen_unix_ms, last_seen_unix_ms, checks_state, checks, required_checks)
              VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)
              ON CONFLICT(repository, number, head_sha) DO UPDATE SET last_seen_unix_ms=excluded.last_seen_unix_ms,
                  checks_state=excluded.checks_state, checks=excluded.checks, required_checks=excluded.required_checks",
@@ -564,8 +556,7 @@ fn write_item(connection: &Connection, repository: &str, number: u64, item: &Mir
 fn forget_repository(connection: &Connection, repository: &str) -> Result<()> {
     for table in ["mirror_items", "mirror_heads", "mirror_events", "mirror_repositories"] {
         connection.execute(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-FORGET owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-            &format!("DELETE FROM {table} WHERE repository=?1"),
+            &format!(/* sqlite-large-value: allow-for-now lv-h02b64a65ba01 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE repository=?1"),
             [repository],
         )?;
     }

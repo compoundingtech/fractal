@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS local_resource_projection_pending (subject TEXT PRIMA
 // A newer `vcs.item.state` lays its compact facts over an item's observed facts, so either kind
 // marks the subject pending. The existence probes use the pending subject primary key. Avoiding the duplicate INSERT
 // entirely also works when the statement firing a trigger has its own conflict policy.
-const PENDING_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h00e1d3cc0874 owner=fractal_store::store::resources TODO=chunk-or-reference-exact-wire-values */ r#"
+const PENDING_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h81c266ee908d owner=fractal_store::store::resources TODO=chunk-or-reference-exact-wire-values */ r#"
 CREATE TRIGGER IF NOT EXISTS resource_observations_insert AFTER INSERT ON claims
 WHEN NEW.kind IN ('resource.observed','vcs.item.state') BEGIN
     INSERT INTO local_resource_projection_pending(subject)
@@ -103,7 +103,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
         replace_pending_triggers(transaction)?;
         // Compact item states this store took while it ran a build whose triggers ignored them.
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ITEM-STATE-PENDING owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='vcs.item.state'",
+            /* sqlite-large-value: allow-for-now lv-h5083d144d1c8 owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='vcs.item.state'",
             [],
         )?;
         transaction.execute(
@@ -309,7 +309,7 @@ pub fn newest_item_state(
     connection: &Connection,
     subject: &str,
 ) -> Result<Option<(String, serde_json::Map<String, Value>, String)>> {
-    let row = connection.query_row(/* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ITEM-STATE-READ owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let row = connection.query_row(/* sqlite-large-value: allow-for-now lv-h618ad247dea0 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
          WHERE subject=?1 AND kind='vcs.item.state'
          AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
@@ -400,7 +400,6 @@ impl Store {
         let upper = prefix_successor(&prefix).unwrap_or_default();
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-GITHUB-EVENTS owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */
             "SELECT subject, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
              WHERE subject>=?1 AND subject<?2 AND kind='github.event'",
         )?;
@@ -444,7 +443,7 @@ impl Store {
         let connection = self.readers.get();
         Ok(connection
             .query_row(
-                /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ADVERTISED owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
+                /* sqlite-large-value: allow-for-now lv-h3ec16882ba90 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
                     "SELECT json_extract(body, '$.fields.features') FROM claims
                      WHERE subject=?1 AND kind='daemon.started' AND origin=?2
                      ORDER BY CANONICAL_DESC(claims) LIMIT 1",
