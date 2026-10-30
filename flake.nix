@@ -1175,7 +1175,7 @@
           assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
           assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
           assert pkgs.lib.hasInfix "--web-dist" args;
-          assert pkgs.lib.hasInfix "${package}/share/fractal-web" args;
+          assert builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
           assert (
             let
               disabled = (mkHmModuleEval { webListen = null; }).config;
