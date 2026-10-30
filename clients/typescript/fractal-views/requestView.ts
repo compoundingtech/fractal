@@ -1,4 +1,5 @@
 import type { MailImage } from './conversationView.ts';
+import { within } from './time.ts';
 
 // A request card as the Fractal terminal UI shows one (crates/fractal-tui/src/ui/screens.rs, `report` and the Request
 // card): a JSON report reads as its telling fields, a yes-or-no question gets Yes and No, and
@@ -103,4 +104,15 @@ function optionalText(value: unknown): string | undefined {
   if (typeof value === 'string') return value || undefined;
   const option = value as { _tag?: string; value?: unknown } | null | undefined;
   return option?._tag === 'Some' && typeof option.value === 'string' ? option.value || undefined : undefined;
+}
+
+/** When an ask resolves by itself and what then applies, as stui words it: `answer within 3h,
+ * or “Keep it open” applies`, or `answer within 3h, or it times out`. Null without a deadline. */
+export function askDeadline(
+  item: { deadline_at?: string | null; default_answer?: { label: string } | null },
+  now = Date.now(),
+): string | null {
+  if (!item.deadline_at) return null;
+  const then = item.default_answer ? `“${item.default_answer.label}” applies` : 'it times out';
+  return `answer within ${within(item.deadline_at, now)}, or ${then}`;
 }

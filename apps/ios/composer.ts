@@ -85,6 +85,8 @@ const REFUSALS: Record<string, string> = {
 };
 // A Fractal version from before long messages: sendReason says what to do about it.
 const LEGACY_LIMIT = /cannot exceed 4 ?KiB|post a document first/i;
+// The fault an internal refusal names first, before its detail (`signature-state-corrupt: …`).
+const FAULT = /^\s*([a-z]+(?:-[a-z]+)+):/;
 
 /**
  * Why Fractal did not take a message, in words for the person, by the refusal's code. A refusal
@@ -95,13 +97,15 @@ export function sendRefusal(error: unknown): string {
   if (!(error instanceof ClientError)) return plainError(error);
   const { code, message } = error.response;
   if (LEGACY_LIMIT.test(message)) return message;
+  // An internal refusal names its fault, so the person can tell someone why (#1951).
+  if (code === 'internal') return `${REFUSALS.internal} (${message.match(FAULT)?.[1] ?? code})`;
   const refused = signatureRefusal(code, 'phone') ?? REFUSALS[code];
   if (refused) return refused;
   if (code === 'validation-failed') return `Fractal did not accept the message as this app sent it; the app or Fractal may need an update (${message})`;
   // A missing grant or a recipient this phone may not write to: Fractal's reason says which.
   if (code === 'forbidden') return `this phone is not allowed to send this message (${message})`;
-  // remote-unavailable among them: the SDK names the unreachable host.
-  return plainError(error);
+  // A code the phone does not word itself keeps the SDK's words and names the code.
+  return `${plainError(error)} (${code})`;
 }
 
 /** Why a send was refused, in words for the person; Fractal's own sentence where it already says it. */

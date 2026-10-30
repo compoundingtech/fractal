@@ -5731,10 +5731,37 @@ impl Store {
             .collect()
     }
 
+    /// Clear a persisted signature fault and wake the stopped migration. A person may, and so
+    /// may the fleet's fault agent, which owns signature faults; no other agent.
+    pub fn resume_signature_migration_as(
+        &self,
+        actor: &str,
+        reason: &str,
+    ) -> Result<smallclaims::store::principals::SignatureResume, St3Error> {
+        let actor = smallclaims::store::normalize_actor(actor, "person");
+        let fault_agent = self.fleet_fault_agent().map_err(internal)?;
+        let allowed = actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str());
+        if !allowed || reason.trim().is_empty() {
+            return Err(St3Error::new(
+                "invalid-signature-resume",
+                "a person, or the fleet's fault agent, resumes the signature migration, with a reason",
+            ));
+        }
+        let cleared = self.resume_signature_migration().map_err(internal)?;
+        Ok(smallclaims::store::principals::SignatureResume {
+            actor,
+            reason: reason.to_owned(),
+            cleared,
+            migration: self.signature_migration().map_err(internal)?,
+        })
+    }
+
     pub fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         for fault in self.signature_state_faults()? {
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: format!("{}:{}", fault.code, fault.subject),
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -13048,6 +13075,8 @@ fn attention_action(label: &str, argv: &[&str]) -> AttentionActionView {
 
 fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: request.request.clone(),
         priority: if request.severity == "warning" {
             "normal"

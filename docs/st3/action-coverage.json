@@ -1786,6 +1786,16 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st replication signatures resume",
+      "description": "Clear this member's persisted signature-state-corrupt fault and let the migration go on. If the defect it named is still there, the next page persists the same fault again",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_fleet_controls_and_checkpoint_administration_survive_restarts",
+        "crates/fractal-api-core/src/api/tests.rs::a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_other_agent",
+        "crates/fractal-e2e/tests/device_signing.rs::a_signed_send_waits_on_a_persisted_signature_fault_until_a_person_resumes"
+      ],
+      "verification": "existing CLI integration"
+    },
+    {
       "command": "st replication status",
       "description": "Show fleet receipt, validation, projection, and peer health",
       "tests": [
