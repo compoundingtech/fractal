@@ -25,7 +25,7 @@ pub fn working(agent: &Value) -> bool {
     agent["state"] == "running"
         && agent["harness_state"] == "working"
         && agent["fault"].is_null()
-        && agent["delivery"]["state"] != "stale"
+        && !matches!(agent["delivery"]["state"].as_str(), Some("stale" | "refused"))
 }
 /// A mission that is really running or about to: stuck, paused and finished runs, and ones that
 /// only wait on a person, are counted elsewhere.
