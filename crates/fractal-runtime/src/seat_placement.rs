@@ -3,7 +3,7 @@ use std::process::Command;
 
 /// Daemon-owned placement for seats without a declared lane. Memory values are bytes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "PlacementFields", into = "PlacementFields")]
+#[serde(try_from = "PlacementFields")]
 pub struct UnlanedSeatPlacement(PlacementFields);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -43,9 +43,6 @@ impl TryFrom<PlacementFields> for UnlanedSeatPlacement {
     }
 }
 
-impl From<UnlanedSeatPlacement> for PlacementFields {
-    fn from(policy: UnlanedSeatPlacement) -> Self { policy.0 }
-}
 
 impl UnlanedSeatPlacement {
     pub(crate) fn apply(&self, command: &mut Command) {
@@ -86,7 +83,7 @@ pub(crate) mod tests {
         ] {
             let mut invalid = valid.clone();
             invalid[key] = value;
-            assert!(serde_json::from_value::<UnlanedSeatPlacement>(invalid).is_err(), "{invalid}");
+            assert!(serde_json::from_value::<UnlanedSeatPlacement>(invalid).is_err(), "accepted invalid {key}");
         }
         for key in ["slice", "memoryMax", "memorySwapMax", "oomPolicy"] {
             let mut invalid = valid.clone();
