@@ -3491,6 +3491,13 @@ pub fn timeline_first_page_with_extent(
         .store
         .conversation_timeline_owner_claims_at(owner, before)
         .map_err(ApiError::internal)?;
+    // Observability diagnostics stay in the local log of the node that runs the seat.
+    owner_claims.extend(
+        state
+            .store
+            .conversation_timeline_owner_local_diagnostics_at(owner, before)
+            .map_err(ApiError::internal)?,
+    );
     owner_claims.reverse();
     let mut message_claims = session_messages(state, owner, &session_id, incarnation, before)?;
     message_claims.reverse();

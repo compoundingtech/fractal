@@ -22,6 +22,8 @@
 #   window  for a transition, how long it stays in the replicated log
 #   pending why a kind whose class allows dropping has no checkpoint rule yet; it is kept whole
 #           until one exists
+#   local_codes  for a kind whose claims carry a `code` field: the codes that go only to the
+#           local observation log of the node that made them, whatever `log` says
 
 [kinds]
 "deploy.go" = { class = "durable" }
@@ -82,7 +84,6 @@
 "harness-question.resolved" = { class = "durable" }
 "harness.context-clear.requested" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "harness.context-clear.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
-"harness.diagnostic" = { class = "transition", window = "7d", pending = "only the seat status history rule retains its sources" }
 "harness.inventory.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
 "harness.limits" = { class = "current" }
 # Other nodes read the current harness state: step readiness is judged on the mission's node and
@@ -215,6 +216,36 @@
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }
 "work.submitted" = { class = "durable" }
 "workspace.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
+
+# Driver and daemon diagnostics. Control codes stay replicated claims: login and update fences,
+# the channel attach fence, admission, capacity retries, prompts and their answers, suspension,
+# wake failures and stop deferrals are read by other members and by control logic. The codes in
+# `local_codes` are observability only: nothing but a person reads them, so they go to the local
+# observation log and on to OpenTelemetry through [observations.otlp]. A code not named here
+# stays a claim. Claims that older members write keep replicating and are kept as before.
+[kinds."harness.diagnostic"]
+class = "transition"
+window = "7d"
+pending = "only the seat status history rule retains its sources"
+local_codes = [
+    "provider-update-available",
+    "claude-channel-initialized",
+    "codex-driver-failed",
+    "codex-launch-failed",
+    "claude-session-unbound",
+    "pi-handoff-failed",
+    "native-delivery-degraded",
+    "native-delivery-recovered",
+    "message-unforwarded",
+    "claude-handoff-status-unavailable",
+    "claude-receipt-unavailable",
+    "claude-handoff-unconfirmed",
+    "claude-receipt-unsettled",
+    "checkout-fetch-failed",
+    "checkout-kept",
+    "start-revocation-unverified",
+    "render-warning",
+]
 
 # The checkpoint rules, in order. Each names the kind it applies to, the conditions under which it
 # applies (`when`), the fields besides subject and kind that make up a slot (`slot`; `claim.origin`
