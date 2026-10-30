@@ -1042,21 +1042,17 @@ pub(crate) mod tests {
         assert_eq!(reads() - start, 3);
 
         // No card reads elm, so it is no longer followed, and a change to it then is not seen:
-        // when a card reads it again, it is read again and shows the change. (Some hosts report
-        // a write beside a watched transcript as an event that has oak read again too, which is
-        // safe, so this counts elm's read only.)
+        // when a card reads it again, it is read again.
         assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-b"]]);
         codex_lines(&elm.transcript, &[("call-e", true)]);
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let before = reads();
         assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [vec!["call-b"], vec![]]);
-        assert!(reads() > before, "an unfollowed transcript was not read again");
+        assert_eq!(reads() - start, 4);
 
         // The watcher lost events: nothing it followed is trusted, so each is read again.
         watch.shared.deliver(Err(notify::Error::generic("inotify queue overflowed")));
-        let before = reads();
         assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [vec!["call-b"], vec![]]);
-        assert_eq!(reads() - before, 2);
+        assert_eq!(reads() - start, 6);
     }
 
     /// An event can be lost without the watcher saying so. A card whose transcript changed no
