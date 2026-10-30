@@ -325,7 +325,7 @@ async fn history_pages_and_detail_do_not_cache_the_whole_claim_log() {
     for number in 0..8 {
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/node".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -968,7 +968,7 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     client_agent_resources(&state.store, false, "first", index).unwrap();
     let index = state
         .store
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/node".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -12754,6 +12754,66 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
 }
 
 #[tokio::test]
+async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    owner.store.bind_fleet("fleet/renamed-subject-test").unwrap();
+    let original = "agent/example-subject-original/worker";
+    let renamed = "agent/example-subject-renamed/worker";
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-subject-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "subject-declare").unwrap();
+    roster_fixture_append(&owner.store, original, "runtime.observed", json!({
+        "status":"running", "runtime_id":original, "host":owner.node,
+        "incarnation_id":"subject-incarnation"
+    }));
+    let app = router(owner.clone());
+    let (_, before) = get_request(app.clone(), &format!("/v1/status?subject={original}")).await;
+    assert!(!before["subjects"][0]["actual"].is_null(), "{before}");
+    let (status, receipt) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":original, "to":renamed, "actor":"person/robin",
+        "reason":"Clarify responsibility", "idempotency_key":"subject-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (status, after) = get_request(app.clone(), &format!("/v1/status?subject={original}")).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    for field in ["host", "incarnation_id", "runtime_id", "status"] {
+        assert_eq!(after["subjects"][0]["actual"][field], before["subjects"][0]["actual"][field]);
+    }
+    let replica_root = tempfile::tempdir().unwrap();
+    let mut replica = state(replica_root.path());
+    replica.store = Arc::new(Store::open_memory("subject-replica").unwrap());
+    replica.store.bind_fleet("fleet/renamed-subject-test").unwrap();
+    let exchange = owner.store.export_replication_exchange_answering(
+        "fleet/renamed-subject-test", &replica.store.replication_inventory().unwrap(),
+        &replica.store.replication_signature_requests().unwrap(),
+    ).unwrap();
+    replica.store.receive_replication_exchange(owner.store.origin(), "fleet/renamed-subject-test", &exchange).unwrap();
+    replica.store.validate_replication_backlog().unwrap();
+    replica.store.project_replication_backlog().unwrap();
+    for app in [app, router(replica)] {
+        let mut previous_claims = None;
+        for requested in [renamed, original] {
+            let (status, shown) = get_request(app.clone(), &format!("/v1/status?subject={requested}")).await;
+            assert_eq!(status, StatusCode::OK, "{shown}");
+            assert_eq!(shown["subjects"][0]["actual"], after["subjects"][0]["actual"]);
+            let (status, claims) = get_request(app.clone(), &format!("/v1/claims?subject={requested}&order=desc&limit=20")).await;
+            assert_eq!(status, StatusCode::OK, "{claims}");
+            assert!(!claims["claims"].as_array().unwrap().is_empty(), "{claims}");
+            assert!(claims["claims"].as_array().unwrap().iter().any(|claim| claim["kind"] == "runtime.observed"));
+            if let Some(previous) = previous_claims.replace(claims["claims"].clone()) {
+                assert_eq!(previous, claims["claims"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -13039,10 +13099,10 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
     // The refresher follows the transcript before it is read.
     let followed = std::cell::RefCell::new(Vec::new());
     let calls = prompt_card::seat_pending_calls(&state, owner, |conversation| {
-        let prompt_card::Follow::Transcript(path) = conversation else {
+        let prompt_card::Follow::Transcript(source) = conversation else {
             panic!("the seat runs here");
         };
-        followed.borrow_mut().push(path.to_owned());
+        followed.borrow_mut().push(source.transcript.clone());
         Ok(None)
     })
     .unwrap();
