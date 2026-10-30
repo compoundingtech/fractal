@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run Linux gate stages on this machine the way their CI jobs run them, for a note signed here (scripts/fractal-test, a lane in
-# .st/required-lanes.json). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
+# required-lanes.json, .fractal first, .st only if absent). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
 #
 #   scripts/ci-local mail-redelivery-canaries
 #   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
