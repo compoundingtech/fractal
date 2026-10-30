@@ -542,7 +542,7 @@ roster refresher already folds.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
-| Phone | `apps/ios/agentsView.ts` `agentState` (file 294 lines) | Ignores `blocked_on`, so every blocked seat reads as needs you; calls needs you "alert"; shows no next. |
+| Phone | Moved: `apps/ios/agentsView.ts` `agentState` reads `presentation.state`; a row without one reads `unknown` and shows its reported `state` as from an older Fractal (`agentReported`) | Calls needs you "alert"; shows no `because` and no next. |
 | Fractal | `apps/fractal-web/src/data/projections.ts` `activityOf`, `statusOf`; `web/sidebarRow.ts` | Its own status line and activity words; no shared states. |
 
 ### Attention row
