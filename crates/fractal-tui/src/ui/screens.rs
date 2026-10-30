@@ -1730,9 +1730,9 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
 /// state once the harness is signed in again, on the same run: no restart (Nathan, 2026-10-04).
 pub fn login_guidance(agent: &Agent) -> String {
     let how = match agent.harness {
-        Harness::Claude => "open its terminal (ctrl+]) and run /login".to_owned(),
+        Harness::Claude => "open its terminal (Attach) and run /login".to_owned(),
         Harness::Codex => format!("run `codex login` on {} (or in its terminal)", agent.host),
-        _ => "open its terminal (ctrl+]) and log it in".to_owned(),
+        _ => "open its terminal (Attach) and log it in".to_owned(),
     };
     let provider = match agent.harness {
         Harness::Claude => "Claude",
@@ -2752,7 +2752,7 @@ pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
     if agent.terminal {
-        rows.push(row('t', "Terminal", "attach its terminal (ctrl+] too)"));
+        rows.push(row('t', "Terminal", "attach its terminal (or use Attach)"));
     }
     rows.push(row('d', "Details", "what it is doing and what is queued (ctrl+d too)"));
     rows.push(row('f', "Find", "find in its conversation (ctrl+f too)"));

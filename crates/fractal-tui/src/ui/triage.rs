@@ -417,4 +417,21 @@ mod tests {
             assert!(matches!(ui.focused_pane(), Some(Pane::Home(_))));
         }
     }
+
+    #[test]
+    fn replaced_content_keeps_its_tab_identity_for_back_and_forward() {
+        let mut ui = ui(vec![item("first", question(), "2026-10-01T00:00:00Z")]);
+        let prior = Pane::Document("doc/triage-before".into());
+        ui.open_in_glass(prior.clone(), Open::Tab);
+        let tab_id = ui.current_place().unwrap().tab_id;
+        ui.triage_next(true);
+        assert_eq!(ui.current_place().unwrap().tab_id, tab_id);
+        ui.navigate_history(false);
+        assert_eq!(ui.focused_pane(), Some(prior));
+        ui.navigate_history(true);
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Home(Some("attention/first".into())))
+        );
+    }
 }

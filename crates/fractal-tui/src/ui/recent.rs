@@ -67,7 +67,6 @@ impl Ui {
         self.recent.popup.is_some()
     }
 
-
     /// Refresh the open snapshot only when the shared tab-status observations change.
     /// This is not typing: keep both the selected destination and release-to-commit mode.
     pub(in crate::ui) fn refresh_recent_labels(&mut self) {
@@ -309,7 +308,9 @@ impl Ui {
 mod tests {
     use super::*;
     use crate::ui::{
-        demo, glass::Open, pane::Pane,
+        demo,
+        glass::Open,
+        pane::Pane,
         view::{AgentState, AttentionKind, Link, Load},
     };
 
@@ -392,7 +393,10 @@ mod tests {
 
         let popup = ui.recent.popup.as_ref().unwrap();
         assert_eq!(selected_place(&ui), &selected);
-        assert_eq!(popup.selected, 1, "refresh must not reset to the first match");
+        assert_eq!(
+            popup.selected, 1,
+            "refresh must not reset to the first match"
+        );
         assert!(popup.commit_on_release);
         let entry = &popup.entries[popup.matches[popup.selected]];
         assert_eq!(entry.label, ui.place_label(&selected));
@@ -467,9 +471,15 @@ mod tests {
             agents.retain(|agent| agent.id != "agent/recent-b");
         }
         ui.set_world(world);
-        assert!(ui.recent.popup.as_ref().unwrap().entries.iter().all(|entry| {
-            entry.place.pane != "agent:agent/recent-b"
-        }));
+        assert!(
+            ui.recent
+                .popup
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| { entry.place.pane != "agent:agent/recent-b" })
+        );
         ui.recent_key(key(KeyCode::Esc));
         ui.set_world(ui.world.clone());
         assert!(!ui.recent_open(), "refreshing a closed popup is a no-op");
