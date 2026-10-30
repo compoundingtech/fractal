@@ -4,7 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -23,6 +23,25 @@ pub struct StateLock {
 }
 
 impl StateLock {
+    /// Refuse a pathname that no longer names the directory fenced by this guard.
+    /// Call immediately before and after opening the configured store.
+    pub fn verify_store_directory(&self, config: &Config) -> Result<()> {
+        let directory = store_dir(config);
+        let current = fs::metadata(&directory)
+            .with_context(|| format!("inspect locked store directory {}", directory.display()))?;
+        let held = self
+            ._store_lock
+            .as_ref()
+            .unwrap_or(&self._state_directory_lock)
+            .metadata()?;
+        anyhow::ensure!(
+            current.is_dir() && current.dev() == held.dev() && current.ino() == held.ino(),
+            "configured store directory {} no longer names the locked directory; refusing replacement or symlink retarget",
+            directory.display()
+        );
+        reject_store_database_symlinks(&directory)
+    }
+
     /// Called only after the join handshake (or its checkpoint resume) has succeeded.
     /// An explicit admission establishes a new writer, unlike a computer-name change.
     pub fn record_fleet_join(&self, joined: &crate::fleet::join::Joined) -> Result<()> {
@@ -127,6 +146,7 @@ pub fn lock_store_directory(guard: &mut StateLock, config: &Config) -> Result<()
         );
         guard._store_lock = Some(lock_directory(&store_dir(config))?);
     }
+    guard.verify_store_directory(config)?;
     Ok(())
 }
 
@@ -152,7 +172,9 @@ pub fn acquire(config: &mut Config) -> Result<StateLock> {
     validate_store_location(config)?;
     let mut lock = lock(&config.state_dir)?;
     lock_store_directory(&mut lock, config)?;
+    lock.verify_store_directory(config)?;
     resolve(config)?;
+    lock.verify_store_directory(config)?;
     config.validate()?;
     let path = config.state_dir.join(FILE);
     if !path.exists() {
@@ -235,10 +257,11 @@ pub fn resolve(config: &mut Config) -> Result<()> {
 /// An explicit path is an operator-selected existing directory, never a mkdir request.
 /// Inspect both locations before opening SQLite or persisting a node pin.
 fn validate_store_location(config: &Config) -> Result<bool> {
+    let directory = store_dir(config);
     if config.store_dir.is_none() {
+        reject_store_database_symlinks(&directory)?;
         return Ok(false);
     }
-    let directory = store_dir(config);
     let metadata = fs::metadata(&directory).with_context(|| {
         format!(
             "configured store directory (store_dir) {} must already exist and be a directory",
@@ -250,6 +273,7 @@ fn validate_store_location(config: &Config) -> Result<bool> {
         "configured store directory (store_dir) {} is not a directory",
         directory.display()
     );
+    reject_store_database_symlinks(&directory)?;
     let configured = fs::canonicalize(&directory)?;
     let state = match fs::canonicalize(&config.state_dir) {
         Ok(state) => Some(state),
@@ -277,6 +301,22 @@ fn validate_store_location(config: &Config) -> Result<bool> {
         directory.display()
     );
     Ok(true)
+}
+
+fn reject_store_database_symlinks(directory: &Path) -> Result<()> {
+    for name in STORE_DATABASE_FILES {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "configured store database file {} must not be a symlink",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect configured store database files"),
+        }
+    }
+    Ok(())
 }
 
 fn has_columns(connection: &Connection, table: &str, required: &[&str]) -> Result<bool> {
@@ -309,6 +349,26 @@ fn restored_writer(database: &Path) -> Result<Option<String>> {
     }
     let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     restored_writer_from(&connection)
+}
+
+/// Read-only admission preflight, before a fleet handshake can mutate membership.
+pub fn check_store_writer_transition(config: &Config, requested_node_id: &str) -> Result<()> {
+    if config.store_dir.is_none() {
+        return Ok(());
+    }
+    validate_store_location(config)?;
+    let database = config.store_path();
+    if !database.try_exists()? {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if let Some(writer) = configured_writer_from(&connection, requested_node_id)? {
+        anyhow::ensure!(
+            writer == requested_node_id,
+            "database local writer `{writer}` does not match admitted node `{requested_node_id}`; fleet admission cannot change an existing store writer"
+        );
+    }
+    Ok(())
 }
 
 /// Record the daemon's local writer only after read-only startup identity admission
@@ -431,6 +491,132 @@ fn previous_local_receipts(connection: &Connection) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_database_trio_symlinks_cannot_bypass_default_owner() {
+        for name in STORE_DATABASE_FILES {
+            for dangling in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut explicit = configured_store(root.path());
+                let mut owner = Config {
+                    node: "orchid".into(),
+                    state_dir: root.path().join("owner"),
+                    ..Config::default()
+                };
+                let _owner_guard = acquire(&mut owner).unwrap();
+                local_writer_database(&owner.store_path(), "orchid");
+                let target = if dangling {
+                    owner.state_dir.join("missing")
+                } else {
+                    owner.store_path()
+                };
+                let link = store_dir(&explicit).join(name);
+                std::os::unix::fs::symlink(&target, &link).unwrap();
+                let before = fs::read(owner.store_path()).unwrap();
+                assert!(
+                    acquire(&mut explicit)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("must not be a symlink")
+                );
+                assert!(!explicit.state_dir.join("node-identity.lock").exists());
+                assert!(!explicit.state_dir.join(FILE).exists());
+                assert_eq!(fs::read(owner.store_path()).unwrap(), before);
+                assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+            }
+        }
+    }
+
+    #[test]
+    fn default_database_trio_symlinks_are_rejected_before_mutation() {
+        for name in STORE_DATABASE_FILES {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = Config {
+                node: "orchid".into(),
+                state_dir: root.path().join("state"),
+                ..Config::default()
+            };
+            fs::create_dir(&config.state_dir).unwrap();
+            std::os::unix::fs::symlink(
+                root.path().join("missing"),
+                config.state_dir.join(name),
+            )
+            .unwrap();
+            assert!(
+                acquire(&mut config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("must not be a symlink")
+            );
+            assert!(!config.state_dir.join("node-identity.lock").exists());
+        }
+    }
+
+    #[test]
+    fn locked_store_refuses_replacement_or_removal_without_recreation() {
+        for replacement in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = configured_store(root.path());
+            let guard = acquire(&mut config).unwrap();
+            let directory = store_dir(&config);
+            fs::remove_dir(&directory).unwrap();
+            if replacement {
+                fs::create_dir(&directory).unwrap();
+            }
+            assert!(guard.verify_store_directory(&config).is_err());
+            assert_eq!(directory.exists(), replacement);
+            assert!(!config.store_path().exists());
+        }
+    }
+
+    #[test]
+    fn locked_store_refuses_symlink_retarget_including_state_alias() {
+        for state_alias in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = configured_store(root.path());
+            let original = if state_alias {
+                config.state_dir.clone()
+            } else {
+                store_dir(&config)
+            };
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(&original, &alias).unwrap();
+            config.store_dir = Some(alias.clone());
+            let guard = acquire(&mut config).unwrap();
+            guard.verify_store_directory(&config).unwrap();
+            fs::remove_file(&alias).unwrap();
+            let replacement = root.path().join("replacement");
+            fs::create_dir(&replacement).unwrap();
+            std::os::unix::fs::symlink(&replacement, &alias).unwrap();
+            assert!(guard.verify_store_directory(&config).is_err());
+            assert!(!config.store_path().exists());
+        }
+    }
+
+    #[test]
+    fn writer_transition_preflight_is_read_only_and_rejects_existing_writer_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let config = configured_store(root.path());
+        check_store_writer_transition(&config, "fern").unwrap();
+        assert!(!config.store_path().exists());
+        let connection = Connection::open(config.store_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);
+                 INSERT INTO meta VALUES('local_node_writer','orchid');",
+            )
+            .unwrap();
+        let before = fs::read(config.store_path()).unwrap();
+        check_store_writer_transition(&config, "orchid").unwrap();
+        assert!(
+            check_store_writer_transition(&config, "fern")
+                .unwrap_err()
+                .to_string()
+                .contains("does not match admitted node")
+        );
+        assert_eq!(fs::read(config.store_path()).unwrap(), before);
+        assert!(!config.state_dir.join(FILE).exists());
+    }
 
     #[test]
     fn explicit_fresh_admission_records_writer_before_any_seat_launch() {
@@ -683,6 +869,63 @@ mod tests {
         fs::write(config.state_dir.join("claims.sqlite3-wal"), b"sidecar").unwrap();
         let _lock = acquire(&mut config).unwrap();
         assert_eq!(config.node, "orchid");
+    }
+
+    #[test]
+    fn ancestor_symlink_store_alias_shares_canonical_state_fence() {
+        let root = tempfile::tempdir().unwrap();
+        let product = root.path().join("real-product");
+        let legacy = root.path().join("legacy-product");
+        let directory = product.join("store");
+        fs::create_dir_all(&directory).unwrap();
+        std::os::unix::fs::symlink(&product, &legacy).unwrap();
+        let mut explicit = Config {
+            node: "orchid".into(),
+            state_dir: directory.clone(),
+            store_dir: Some(legacy.join("store")),
+            ..Config::default()
+        };
+        local_writer_database(&explicit.store_path(), "orchid");
+        let connection = Connection::open(explicit.store_path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 INSERT INTO meta VALUES('local_node_writer','orchid');",
+            )
+            .unwrap();
+        for name in STORE_DATABASE_FILES {
+            assert!(directory.join(name).exists());
+        }
+        let guard = acquire(&mut explicit).unwrap();
+        guard.verify_store_directory(&explicit).unwrap();
+        assert!(guard._store_lock.is_none());
+        let mut default = Config {
+            node: "orchid".into(),
+            state_dir: directory,
+            ..Config::default()
+        };
+        assert!(
+            acquire(&mut default)
+                .unwrap_err()
+                .to_string()
+                .contains("another daemon owns the state directory")
+        );
+        let mut separate = explicit.clone();
+        separate.state_dir = root.path().join("separate-state");
+        assert!(
+            acquire(&mut separate)
+                .unwrap_err()
+                .to_string()
+                .contains("another daemon owns the store directory")
+        );
+        drop(guard);
+        let _default_guard = acquire(&mut default).unwrap();
+        assert!(
+            acquire(&mut explicit)
+                .unwrap_err()
+                .to_string()
+                .contains("another daemon owns the state directory")
+        );
     }
 
     #[test]

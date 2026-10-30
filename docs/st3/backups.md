@@ -57,7 +57,7 @@ that its envelope inventory, claim sources and all graph table digests match.
 
 ## Relocate only the SQLite store
 
-`store_dir = "/absolute/path"` in the daemon's TOML config, or `st up --store-dir
+`store_dir = "/absolute/path"` in the daemon's TOML config, or `fractal up --store-dir
 /absolute/path`, selects the directory for exactly `claims.sqlite3`, `claims.sqlite3-wal`,
 and `claims.sqlite3-shm`. Unset configuration keeps the database in `state_dir`; there is no
 automatic file move. Keep the product state directory and its identity, keys, sockets,
@@ -74,6 +74,12 @@ receipt, or backup-restore writer marker. An old database with none is not safe 
 merely because its filename or config node matches.
 Preserve the original files and resolve the missing identity evidence; do not erase or edit
 identity metadata to bypass the refusal.
+
+The three database files must not be symlinks. The daemon fences the selected directory's
+inode and refuses startup if that pathname is removed, replaced, or retargeted while it
+opens the database; it never recreates a missing explicit store directory. A fleet join
+that would change an existing configured store's local writer is refused before redeeming
+the invite or saving membership. Keep that writer name when joining.
 
 1. Stop **only the daemon**, using its service manager (for example,
    `systemctl --user stop st3.service` for the legacy Linux unit; use the actual installed unit).

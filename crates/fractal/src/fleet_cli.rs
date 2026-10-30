@@ -754,6 +754,14 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let use_services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
+            if config.store_dir.is_some() {
+                let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim())?;
+                // Resolve saved admission before fresh-name precedence, just as join does.
+                let name = fractal_daemon::fleet::join::admission_name(
+                    &config.state_dir, &decoded, args.name.as_deref(), &config.node,
+                )?;
+                fractal_daemon::node_identity::check_store_writer_transition(&config, &name)?;
+            }
             let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
                 state_dir: config.state_dir.clone(),
                 store_path: config.store_path(),
@@ -1432,6 +1440,8 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
                 None => (read_code_without_echo()?, None),
             }
         };
+        // Migration passes an explicit name, so the code's target cannot override it.
+        fractal_daemon::node_identity::check_store_writer_transition(config, &config.node)?;
         let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
             state_dir: config.state_dir.clone(),
             store_path: config.store_path(),

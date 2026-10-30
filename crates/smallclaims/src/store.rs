@@ -939,7 +939,16 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, true, |_| {})
+        Self::open_with(path, origin.into(), runtime, true, true, |_| {})
+    }
+
+    /// Open a database only inside an already existing directory, without recreating it.
+    pub fn open_existing_directory(
+        path: &Path,
+        origin: impl Into<String>,
+        runtime: Arc<dyn Runtime>,
+    ) -> Result<Self> {
+        Self::open_with(path, origin.into(), runtime, false, true, |_| {})
     }
 
     /// [`Self::open`] with the initialization of a fresh database committed the way it was
@@ -954,17 +963,18 @@ impl Store {
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, defer_fresh_durability, prepare)
+        Self::open_with(path, origin.into(), runtime, true, defer_fresh_durability, prepare)
     }
 
     fn open_with(
         path: &Path,
         origin: String,
         runtime: Arc<dyn Runtime>,
+        create_parent: bool,
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        if let Some(parent) = path.parent() {
+        if create_parent && let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(path)

@@ -595,9 +595,25 @@ pub async fn join(options: &JoinOptions) -> Result<Joined> {
     join_inner(options, None).await
 }
 
-async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
-    let code = JoinCode::decode(&options.code)?;
-    let state_dir = &options.state_dir;
+/// Resolve the writer a join will admit, including an already-saved checkpoint.
+/// This performs no key creation, store mutation, or invitation redemption.
+pub fn admission_name(
+    state_dir: &Path,
+    code: &JoinCode,
+    requested: Option<&str>,
+    configured: &str,
+) -> Result<String> {
+    Ok(match resumed_join(state_dir, code)? {
+        Some(joined) => joined.name,
+        None => fresh_join_name(code, requested, configured).to_owned(),
+    })
+}
+
+fn fresh_join_name<'a>(code: &'a JoinCode, requested: Option<&'a str>, configured: &'a str) -> &'a str {
+    requested.or(code.name.as_deref()).unwrap_or(configured)
+}
+
+fn resumed_join(state_dir: &Path, code: &JoinCode) -> Result<Option<Joined>> {
     if let Some(existing) = FleetFile::load(state_dir)? {
         anyhow::ensure!(
             existing.fleet_id == code.fleet_id.to_string(),
@@ -610,29 +626,34 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         if let Some(checkpoint) = checkpoint
             && !code.migrate
         {
-            if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
-                fs::remove_file(pairing_recovery_path(state_dir))?;
-                fs::File::open(fleet_dir(state_dir))?.sync_all()?;
-            }
-            return Ok(Joined {
+            return Ok(Some(Joined {
                 fleet_id: checkpoint.fleet_id,
                 name: checkpoint.name,
                 sponsor: checkpoint.sponsor,
                 writer_floor: existing.writer_floor,
                 migrate: false,
                 resumed: true,
-            });
+            }));
         }
         anyhow::ensure!(
             code.migrate || (code.pairing.is_some() && pairing_recovery_path(state_dir).exists()),
             "this machine is already a member of this fleet"
         );
     }
-    let name = options
-        .name
-        .clone()
-        .or_else(|| code.name.clone())
-        .unwrap_or_else(|| options.configured_node.clone());
+    Ok(None)
+}
+
+async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
+    let code = JoinCode::decode(&options.code)?;
+    let state_dir = &options.state_dir;
+    if let Some(joined) = resumed_join(state_dir, &code)? {
+        if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
+            fs::remove_file(pairing_recovery_path(state_dir))?;
+            fs::File::open(fleet_dir(state_dir))?.sync_all()?;
+        }
+        return Ok(joined);
+    }
+    let name = fresh_join_name(&code, options.name.as_deref(), &options.configured_node).to_owned();
     anyhow::ensure!(
         valid_fleet_node_name(&name),
         "`{name}` cannot name a fleet member; use --name"

@@ -6336,6 +6336,37 @@ fn daemon_start_version(machine_version: &str) -> Result<&str> {
     )
 }
 
+fn begin_admitted_startup(
+    config: &Config,
+    identity: &fractal_daemon::node_identity::StateLock,
+) -> Result<Arc<fractal_daemon::startup::Startup>> {
+    identity.verify_store_directory(config)?;
+    let startup = Arc::new(fractal_daemon::startup::Startup::begin(&config.socket)?);
+    identity.verify_store_directory(config)?;
+    Ok(startup)
+}
+
+#[cfg(test)]
+#[test]
+fn admitted_explicit_state_alias_is_not_recreated_at_startup_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let alias = root.path().join("legacy");
+    std::os::unix::fs::symlink(&state, &alias).unwrap();
+    let mut config = Config {
+        state_dir: state.clone(),
+        store_dir: Some(alias),
+        socket: state.join("run/daemon.sock"),
+        ..Config::default()
+    };
+    let identity = fractal_daemon::node_identity::acquire(&mut config).unwrap();
+    fs::rename(&state, root.path().join("moved")).unwrap();
+    assert!(begin_admitted_startup(&config, &identity).is_err());
+    assert!(!state.exists());
+    assert!(!config.socket.exists());
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
@@ -6411,7 +6442,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         identity_duration,
         state_identity.is_err(),
     );
-    let _state_identity = match state_identity {
+    let state_identity = match state_identity {
         Ok(identity) => identity,
         Err(error) => {
             drop(startup_telemetry);
@@ -6423,23 +6454,26 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::resource::configure_github(&config)?;
     validate_unix_socket_path(&config.socket, "--socket")?;
     validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
-    fs::create_dir_all(&config.state_dir)?;
-    let startup = Arc::new(fractal_daemon::startup::Startup::begin(&config.socket)?);
+    let startup = begin_admitted_startup(&config, &state_identity)?;
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
     let state_socket = config.state_dir.join("run/st3.sock");
+    state_identity.verify_store_directory(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
         fractal_daemon::api::reserve_unix_socket(&config.client_gateway_socket, None),
     )?;
+    state_identity.verify_store_directory(&config)?;
     // Only addresses are bound. Until initialization finishes, connections are
     // refused and clients use the existing live startup-phase observation.
     let reserved_bind_ms = phase_elapsed_ms();
     startup.phase("install-hooks");
     startup_telemetry.phase("install-hooks");
+    state_identity.verify_store_directory(&config)?;
     fractal_daemon::hooks::ensure_installed(&fractal_daemon::hooks::root(&config.state_dir)).context(
         "publishing this st binary's required lifecycle hook set before starting the daemon",
     )?;
+    state_identity.verify_store_directory(&config)?;
     fractal_daemon::profile::init_from_env();
     raise_open_file_limit();
     startup_phases.install_hooks_ms = phase_elapsed_ms();
@@ -6448,9 +6482,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let store = Arc::new(startup_telemetry.task("startup.open_store", || {
         fractal_daemon::task_cpu::blocking("startup.open_store", || {
             let database = config.store_path();
-            let store = Store::open(&database, &config.node)?;
+            state_identity.verify_store_directory(&config)?;
+            let store = if config.store_dir.is_some() {
+                Store::open_existing_directory(&database, &config.node)?
+            } else {
+                Store::open(&database, &config.node)?
+            };
+            state_identity.verify_store_directory(&config)?;
             if config.store_dir.is_some() {
                 fractal_daemon::node_identity::record_store_writer(&database, &config.node)?;
+                state_identity.verify_store_directory(&config)?;
             }
             Ok::<_, anyhow::Error>(store)
         })
