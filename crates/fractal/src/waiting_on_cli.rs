@@ -1,10 +1,15 @@
-//! `st missions waiting-on RUN`: what a run waits on, rendered from the daemon's answer.
+//! `st missions waiting-on RUN` and `st missions blocked`: what a run waits on, and every blocked
+//! run in the fleet by cause, rendered from the daemon's published answer.
 
-use fractal_daemon::waiting_on::{RunWaitingOn, StepSettled, StepWait, WaitKind, describe_age};
+use fractal_daemon::waiting_on::{BlockedRuns, RunWaitingOn, StepSettled, StepWait, WaitKind, describe_age};
 use std::fmt::Write as _;
 
 /// How many finished steps a run's page names before it counts the rest.
 const FINISHED_SHOWN: usize = 10;
+
+fn short(id: &str) -> &str {
+    id.trim_start_matches("mission-run/").trim_start_matches("mission/")
+}
 
 fn age(now: u128, at: Option<u128>) -> Option<String> {
     at.map(|at| describe_age(now.saturating_sub(at)))
@@ -94,10 +99,37 @@ pub fn render_run_waiting_on(view: &RunWaitingOn) -> String {
     out
 }
 
+pub fn render_blocked_runs(view: &BlockedRuns) -> String {
+    let now = view.as_of_unix_ms;
+    let blocked = view.groups.iter().map(|group| group.runs.len()).sum::<usize>();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "BLOCKED RUNS  {blocked} of {} runs with open work · stuck after {} quiet · published work at index {}",
+        view.runs_read,
+        describe_age(u128::from(view.quiet_after_ms)),
+        view.work_cut
+    );
+    for group in &view.groups {
+        let _ = writeln!(out, "\n{} ({})", group.cause.heading(), group.runs.len());
+        for run in &group.runs {
+            let more = match run.blocked_steps {
+                0 | 1 => String::new(),
+                steps => format!(" · {steps} steps blocked"),
+            };
+            let _ = writeln!(out, "  {}  {}{more}", short(&run.run), step_line(&run.step, now));
+        }
+    }
+    if blocked == 0 {
+        let _ = writeln!(out, "\nNothing is blocked.");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fractal_daemon::waiting_on::RunVerdict;
+    use fractal_daemon::waiting_on::{BlockedGroup, BlockedRun, RunVerdict};
 
     const NOW: u128 = 10_000_000_000;
     const MINUTE: u128 = 60_000;
@@ -164,4 +196,38 @@ mod tests {
         assert!(page.find("WAITING ON") < page.find("FINISHED"));
     }
 
+    #[test]
+    fn the_fleet_list_groups_one_line_per_run_under_its_cause() {
+        let mut ask = wait(WaitKind::Ask, "review", "person/ada", 2 * 60 * MINUTE);
+        ask.seat_state = None;
+        ask.detail = Some("Which beds stay?".into());
+        let view = BlockedRuns {
+            groups: vec![BlockedGroup {
+                cause: WaitKind::Ask,
+                runs: vec![BlockedRun {
+                    run: "mission-run/garden/review/7".into(),
+                    mission: Some("mission/garden/review".into()),
+                    cause: WaitKind::Ask,
+                    verdict: RunVerdict::Waiting,
+                    step: ask,
+                    blocked_steps: 2,
+                }],
+            }],
+            runs_read: 9,
+            quiet_after_ms: 30 * 60_000,
+            work_cut: 42,
+            as_of_unix_ms: NOW,
+        };
+        let page = render_blocked_runs(&view);
+        assert!(page.starts_with("BLOCKED RUNS  1 of 9 runs with open work · stuck after 30m quiet"), "{page}");
+        assert!(page.contains("\nwaiting on a person (1)\n"), "{page}");
+        assert!(
+            page.contains(
+                "  garden/review/7  ask          review · person/ada · 2h · Which beds stay? · 2 steps blocked\n"
+            ),
+            "{page}"
+        );
+        let empty = BlockedRuns { groups: vec![], ..view };
+        assert!(render_blocked_runs(&empty).ends_with("\nNothing is blocked.\n"));
+    }
 }
