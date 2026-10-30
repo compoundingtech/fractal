@@ -226,11 +226,7 @@ fn wait_for(label: &str, condition: impl FnMut() -> bool) {
 }
 
 /// [`wait_for`], adding `explain` to the timeout message.
-fn wait_for_explained(
-    label: &str,
-    mut condition: impl FnMut() -> bool,
-    explain: impl FnOnce() -> String,
-) {
+fn wait_for_explained(label: &str, mut condition: impl FnMut() -> bool, explain: impl FnOnce() -> String) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while !condition() {
         if Instant::now() >= deadline {
@@ -358,11 +354,7 @@ fn harness_bare_codex_dry_run_uses_defaults() {
     )
     .unwrap();
     let preview = daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--dry-run",
+        "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run",
     ]);
     assert_eq!(preview["blockers"], serde_json::json!([]));
 }
@@ -381,11 +373,7 @@ fn harness_explicit_executable_dry_run_is_accepted() {
     )
     .unwrap();
     let preview = daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--dry-run",
+        "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run",
     ]);
     assert_eq!(preview["blockers"], serde_json::json!([]));
 }
@@ -507,11 +495,7 @@ fn apply_bundles_seats_missions_and_schedules_and_refuses_partial_publication() 
             .contains("example/helper")
     );
     let applied = daemon.command(&["apply", seat, mission, schedule, "--as", PUBLISHER]);
-    daemon.require_roster_cut(
-        applied["store_index"]
-            .as_u64()
-            .expect("apply acceptance cut"),
-    );
+    daemon.require_roster_cut(applied["store_index"].as_u64().expect("apply acceptance cut"));
     assert!(
         applied.to_string().contains("schedule/example/daily"),
         "{applied}"
@@ -693,13 +677,10 @@ mission "orchid/replay" state="ready" {
 "#,
     )
     .unwrap();
-    daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -759,13 +740,10 @@ mission "orchid/replay" state="ready" {
 "#,
     )
     .unwrap();
-    daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -814,12 +792,8 @@ mission "orchid/replay" state="ready" {
                     let fields = &claim["body"]["fields"];
                     format!(
                         "  #{} {} at {}: status {} exit_code {} incarnation {}",
-                        claim["store_index"],
-                        claim["kind"],
-                        claim["accepted_at_unix_ms"],
-                        fields["status"],
-                        fields["exit_code"],
-                        fields["incarnation_id"],
+                        claim["store_index"], claim["kind"], claim["accepted_at_unix_ms"],
+                        fields["status"], fields["exit_code"], fields["incarnation_id"],
                     )
                 })
                 .collect::<Vec<_>>()
@@ -995,13 +969,10 @@ fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
     // Publish the broken gates as their runs had them; publish would otherwise refuse them.
     let file = root.path().join("replay.kdl");
     std::fs::write(&file, mission(root.path(), false)).unwrap();
-    daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        PUBLISHER,
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    PUBLISHER,
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -1092,32 +1063,21 @@ fn broken_gates_wait_for_a_revision_that_then_passes_their_steps() {
     while daemon.run()["status"] != "completed" {
         if Instant::now() >= deadline {
             let run = daemon.run();
-            let steps = run["steps"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .iter()
+            let steps = run["steps"].as_array().cloned().unwrap_or_default().iter()
                 .map(|step| format!("{} {}", step["step"], step["status"]))
                 .collect::<Vec<_>>();
-            let gates = daemon
-                .gate_results()
-                .iter()
-                .map(|claim| {
-                    format!(
-                        "{} {} check {} at {}",
-                        claim["body"]["fields"]["gate"],
-                        claim["body"]["fields"]["value"]["answer"],
-                        claim["body"]["fields"]["value"]["check"],
-                        claim["accepted_at_unix_ms"].as_u64().unwrap_or_default(),
-                    )
-                })
+            let gates = daemon.gate_results().iter()
+                .map(|claim| format!(
+                    "{} {} check {} at {}",
+                    claim["body"]["fields"]["gate"],
+                    claim["body"]["fields"]["value"]["answer"],
+                    claim["body"]["fields"]["value"]["check"],
+                    claim["accepted_at_unix_ms"].as_u64().unwrap_or_default(),
+                ))
                 .collect::<Vec<_>>();
             panic!(
                 "timed out waiting for the revised gates to pass (revised at {} ms)\nrun {}\nsteps {steps:#?}\ngate results {gates:#?}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
                     - revised.elapsed().as_millis(),
                 run["status"],
             );
@@ -1186,7 +1146,11 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
     }
 
     // Publish runs the same check and refuses the broken gates, naming each one.
-    let refused = daemon.run_cli(&["apply", file, "--as", PUBLISHER, "--workspace", workspace]);
+    let refused = daemon.run_cli(&["apply", file,
+    "--as",
+    PUBLISHER,
+    "--workspace",
+    workspace,]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
@@ -1220,7 +1184,11 @@ fn a_check_answers_for_each_gate_and_publish_refuses_a_broken_one() {
         };
         assert_eq!(gate["answer"], expected, "{gate:#}");
     }
-    daemon.command(&["apply", fixed, "--as", PUBLISHER, "--workspace", workspace]);
+    daemon.command(&["apply", fixed,
+    "--as",
+    PUBLISHER,
+    "--workspace",
+    workspace,]);
     // The listing reads the latest published snapshot, which can trail the apply.
     wait_for("the corrected mission to be listed", || {
         daemon
@@ -1332,6 +1300,7 @@ mission "orchid/inputs" state="ready" {
     let (_, view) = check(&["--input", "release=1.5.0"]);
     assert_eq!(view["gates"][0]["answer"], "not-yet", "{view:#}");
 }
+
 
 #[test]
 fn until_scripts_wait_for_round_outputs_in_preflight_and_still_run_each_round() {

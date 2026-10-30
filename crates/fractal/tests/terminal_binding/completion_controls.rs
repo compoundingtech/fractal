@@ -75,8 +75,7 @@ fn reject_binding(
     assert!(fractal_daemon::test_support::check_fixture_mailbox(store, &owner).is_ok());
     if rejection == "token" {
         let request = fractal_daemon::mailbox::Fence::new(SEAT, incarnation, "title");
-        let successor =
-            fractal_daemon::test_support::bind_fixture_mailbox(store, &request).unwrap();
+        let successor = fractal_daemon::test_support::bind_fixture_mailbox(store, &request).unwrap();
         assert_eq!(
             fractal_daemon::test_support::check_fixture_mailbox(store, &owner)
                 .unwrap_err()
@@ -86,12 +85,7 @@ fn reject_binding(
         // Forced raw owner displacement is foreign to the durable native lease.
         // Linux custody fences this unqualified token. Other platforms retain legacy admission.
         if cfg!(target_os = "linux") {
-            assert_eq!(
-                fractal_daemon::test_support::check_fixture_mailbox(store, &successor)
-                    .unwrap_err()
-                    .code,
-                "stale-mailbox-session"
-            );
+            assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(store, &successor).unwrap_err().code, "stale-mailbox-session");
         } else {
             fractal_daemon::test_support::check_fixture_mailbox(store, &successor).unwrap();
         }
@@ -132,34 +126,25 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         let store = state.store.clone();
-        fractal_daemon::api::serve_unix_bound(
-            &server_socket,
-            &server_socket,
-            fractal_daemon::api::router(state),
-            store,
-        )
-        .await
-        .unwrap();
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_socket, fractal_daemon::api::router(state), store)
+            .await
+            .unwrap();
     });
     for _ in 0..200 {
         if socket.exists() {
@@ -167,8 +152,7 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let client =
-        fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket));
     // The real native wrapper launches a model-free provider, which consumes one real
     // Claude channel notification and exits. All files live under this fixture's HOME.
     let provider = root.path().join("fake-claude.py");
@@ -258,7 +242,8 @@ read -r _
     let agent_incarnation = format!("{physical}:bound:{INVOCATION}");
     let pty_root = root.path().join("pty");
     let runtime_id = TERMINAL.replace('/', ".");
-    let _pty_listener = register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
+    let _pty_listener =
+        register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
     runtime.ptys.lock().unwrap()[0].incarnation_id = Some(physical.clone());
     apply(
         &store,
@@ -313,11 +298,9 @@ read -r _
     // before the channel fence permits the native idle view. This does not grant readiness from channel presence.
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if store
-                .current_harness(SEAT)
-                .unwrap()
-                .is_some_and(|h| h.state == "idle" && h.incarnation_id == agent_incarnation)
-            {
+            if store.current_harness(SEAT).unwrap().is_some_and(|h| {
+                h.state == "idle" && h.incarnation_id == agent_incarnation
+            }) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -438,15 +421,10 @@ read -r _
         );
         if rejection == Some("token") {
             if cfg!(target_os = "linux") {
-                assert_eq!(
-                    fractal_daemon::test_support::check_fixture_mailbox(&store, owner)
-                        .unwrap_err()
-                        .code,
-                    "stale-mailbox-session"
-                );
-            } else {
-                fractal_daemon::test_support::check_fixture_mailbox(&store, owner).unwrap();
-            }
+            assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(&store, owner).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            fractal_daemon::test_support::check_fixture_mailbox(&store, owner).unwrap();
+        }
         }
         assert!(!barrier.join("provider-return.json").exists());
         std::fs::write(barrier.join("exit-provider"), b"go").unwrap();
@@ -491,15 +469,10 @@ read -r _
         assert!(shell.try_wait().unwrap().is_none());
         if rejection == Some("token") {
             if cfg!(target_os = "linux") {
-                assert_eq!(
-                    fractal_daemon::test_support::check_fixture_mailbox(&store, &owner)
-                        .unwrap_err()
-                        .code,
-                    "stale-mailbox-session"
-                );
-            } else {
-                fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap();
-            }
+            assert_eq!(fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap_err().code, "stale-mailbox-session");
+        } else {
+            fractal_daemon::test_support::check_fixture_mailbox(&store, &owner).unwrap();
+        }
         } else {
             assert_eq!(
                 fractal_daemon::test_support::check_fixture_mailbox(&store, &owner)

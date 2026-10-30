@@ -48,13 +48,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::{Map, Value, json};
 use fractal_daemon::model::{ClaimInput, ClaimRecord};
 use fractal_daemon::store::{
     CheckpointAction, CheckpointContext, CheckpointExcuseRequest, Store, TrimFault, certificates,
     checkpoint_name, stable_checkpoints, verify_checkpoint_manifest,
 };
 use fractal_schema::{FieldSpec, Retention, ValueType};
-use serde_json::{Map, Value, json};
 
 const FLEET: &str = "7d3f9a2e-5b6c-4e1d-8a0f-2c9b8e7d6f5a";
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -77,10 +77,8 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!(
-                "../../../fixtures/convergence/claims-v10.json"
-            ))
-            .expect("versioned convergence input schema")
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v10.json"))
+                .expect("versioned convergence input schema")
         });
     &CORPUS
 }
@@ -98,12 +96,7 @@ fn the_corpus_includes_every_registry_kind() {
 #[test]
 fn the_corpus_generates_each_client_diagnostic_input() {
     let mut world = World::new(1, Sabotage::None);
-    for kind in [
-        "client.launch",
-        "client.js-error",
-        "client.native-crash",
-        "client.hang",
-    ] {
+    for kind in ["client.launch", "client.js-error", "client.native-crash", "client.hang"] {
         let input = world
             .claim_of(&corpus()[kind], 0)
             .unwrap_or_else(|| panic!("generate a native input for {kind}"));
@@ -122,9 +115,7 @@ fn the_corpus_generates_valid_deployment_inputs() {
     let mut world = World::new(1, Sabotage::None);
     for kind in fractal_schema::deploy::KINDS {
         let input = world.claim_of(&corpus()[kind], 0).unwrap();
-        fractal_schema::registry()
-            .validate_claim(&input.subject, kind, &input.fields)
-            .unwrap();
+        fractal_schema::registry().validate_claim(&input.subject, kind, &input.fields).unwrap();
         world.nodes[0].store.append_claim(&input).unwrap();
     }
 }
@@ -142,18 +133,10 @@ fn deployment_fields(kind: &str) -> Option<Map<String, Value>> {
             "compatSignoffId": "example-signoff-claim"
         }),
         "deploy.go-revoked" => json!({"version":1,"goId":"example-go-claim"}),
-        "deploy.go-consumed" => {
-            json!({"version":1,"goId":"example-go-claim","operation":"install","result":"succeeded"})
-        }
-        "deploy.stop" => {
-            json!({"version":1,"stopId":"example-stop","scope":"installer-entry","hosts":["host-a","host-b"],"liftCondition":"example release"})
-        }
-        "deploy.stop-lifted" => {
-            json!({"version":1,"stopId":"example-stop","releaseGoId":"example-release-go-claim"})
-        }
-        "deploy.compat-signoff" => {
-            json!({"version":1,"trainId":"train/example","oldCommit":"a".repeat(40),"newCommit":"b".repeat(40)})
-        }
+        "deploy.go-consumed" => json!({"version":1,"goId":"example-go-claim","operation":"install","result":"succeeded"}),
+        "deploy.stop" => json!({"version":1,"stopId":"example-stop","scope":"installer-entry","hosts":["host-a","host-b"],"liftCondition":"example release"}),
+        "deploy.stop-lifted" => json!({"version":1,"stopId":"example-stop","releaseGoId":"example-release-go-claim"}),
+        "deploy.compat-signoff" => json!({"version":1,"trainId":"train/example","oldCommit":"a".repeat(40),"newCommit":"b".repeat(40)}),
         _ => return None,
     };
     match value {
@@ -660,9 +643,7 @@ impl World {
                 _ => TrimFault::BeforeFinish,
             };
             self.nodes[index].store.set_trim_chunk_envelopes(2);
-            self.nodes[index]
-                .store
-                .set_trim_pause(std::time::Duration::ZERO);
+            self.nodes[index].store.set_trim_pause(std::time::Duration::ZERO);
             self.nodes[index].store.set_trim_fault(Some(fault));
             self.note(format!(
                 "{} will crash at {fault:?}",
@@ -779,13 +760,14 @@ impl World {
         if let Ok(claim) = appended {
             *self.written.entry(claim.kind.clone()).or_default() += 1;
             // Observations a node keeps to itself never replicate, whoever wrote them.
-            let replicated = fractal_schema::registry()
-                .claim(&claim.kind)
-                .is_some_and(|spec| match spec.retention {
-                    Retention::Durable => true,
-                    Retention::SystemLocal => claim.actor.is_some(),
-                    Retention::Local | Retention::Latest => false,
-                });
+            let replicated =
+                fractal_schema::registry()
+                    .claim(&claim.kind)
+                    .is_some_and(|spec| match spec.retention {
+                        Retention::Durable => true,
+                        Retention::SystemLocal => claim.actor.is_some(),
+                        Retention::Local | Retention::Latest => false,
+                    });
             if replicated
                 && claim
                     .actor
@@ -970,16 +952,9 @@ impl World {
         let deployment = deployment_fields(&spec.kind);
         let (fields, actor) = if let Some(mut fields) = deployment {
             if spec.kind == "deploy.go" && self.rng.chance(40) {
-                fields.insert(
-                    "combined".into(),
-                    json!({"stopId":"example-stop","planId":"example-plan"}),
-                );
+                fields.insert("combined".into(), json!({"stopId":"example-stop","planId":"example-plan"}));
             }
-            let actor = if spec.kind == "deploy.go-consumed" {
-                "agent/example-executor"
-            } else {
-                "agent/example-manager"
-            };
+            let actor = if spec.kind == "deploy.go-consumed" { "agent/example-executor" } else { "agent/example-manager" };
             (fields, Some(actor.to_owned()))
         } else {
             let mut fields = Map::new();
@@ -1628,20 +1603,10 @@ fn append_generated_claim(
             },
         )
         .expect("preview generated mission declaration");
-    let applied = store.apply_as(
-        &intent,
-        &preview.subject_tokens,
-        key,
-        input.actor.as_deref(),
-    )?;
-    Ok(applied
-        .claim_ids
+    let applied = store.apply_as(&intent, &preview.subject_tokens, key, input.actor.as_deref())?;
+    Ok(applied.claim_ids
         .into_iter()
-        .filter_map(|id| {
-            store
-                .claim_by_id(&id)
-                .expect("read generated publication claim")
-        })
+        .filter_map(|id| store.claim_by_id(&id).expect("read generated publication claim"))
         .find(|claim| {
             claim.kind == input.kind
                 && claim.subject == input.subject
@@ -1774,10 +1739,7 @@ const NEVER_TRIMS: &[u64] = &[];
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!(
-        "convergence corpus v10 seed {seed}: trimmed={}",
-        outcome.trimmed
-    );
+    eprintln!("convergence corpus v10 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }

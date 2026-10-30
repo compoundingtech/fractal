@@ -15,11 +15,7 @@ fn step_line(wait: &StepWait, now: u128) -> String {
     let mut line = format!("{:<12} {}", wait.kind.name(), wait.path);
     if let Some(who) = &wait.who {
         let _ = write!(line, " · {who}");
-        if let Some(state) = wait
-            .seat_state
-            .as_deref()
-            .filter(|state| *state != "running")
-        {
+        if let Some(state) = wait.seat_state.as_deref().filter(|state| *state != "running") {
             let _ = write!(line, " ({state})");
         }
     }
@@ -56,21 +52,13 @@ fn step_line(wait: &StepWait, now: u128) -> String {
 }
 
 fn settled_line(step: &StepSettled, now: u128) -> String {
-    format!(
-        "{:<12} {} · {} ago",
-        step.state,
-        step.path,
-        describe_age(now.saturating_sub(step.at_unix_ms))
-    )
+    format!("{:<12} {} · {} ago", step.state, step.path, describe_age(now.saturating_sub(step.at_unix_ms)))
 }
 
 pub fn render_run_waiting_on(view: &RunWaitingOn) -> String {
     let now = view.as_of_unix_ms;
     let verdict = serde_json::to_value(view.verdict).ok();
-    let verdict = verdict
-        .as_ref()
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
+    let verdict = verdict.as_ref().and_then(|value| value.as_str()).unwrap_or("unknown");
     let mut out = String::new();
     let _ = writeln!(out, "RUN      {}", view.run);
     let _ = writeln!(out, "MISSION  {}", view.mission);
@@ -133,20 +121,10 @@ mod tests {
 
     #[test]
     fn a_run_page_says_why_then_each_open_step_then_what_finished() {
-        let mut quiet = wait(
-            WaitKind::NoProgress,
-            "plant",
-            "agent/garden/ash",
-            95 * MINUTE,
-        );
+        let mut quiet = wait(WaitKind::NoProgress, "plant", "agent/garden/ash", 95 * MINUTE);
         quiet.lease_expires_at_unix_ms = Some(NOW + 8 * MINUTE);
         quiet.detail = Some("watering the north bed".into());
-        let mut stopped = wait(
-            WaitKind::SeatDown,
-            "water",
-            "agent/garden/birch",
-            40 * MINUTE,
-        );
+        let mut stopped = wait(WaitKind::SeatDown, "water", "agent/garden/birch", 40 * MINUTE);
         stopped.seat_state = Some("stopped".into());
         let view = RunWaitingOn {
             run: "mission-run/garden/alpha/1".into(),
@@ -173,14 +151,8 @@ mod tests {
         };
         let page = render_run_waiting_on(&view);
         assert!(page.contains("STATE    running · stalled\n"), "{page}");
-        assert!(
-            page.contains("WHY      water: agent/garden/birch is stopped"),
-            "{page}"
-        );
-        assert!(
-            page.contains("  seat-down    water · agent/garden/birch (stopped) · 40m\n"),
-            "{page}"
-        );
+        assert!(page.contains("WHY      water: agent/garden/birch is stopped"), "{page}");
+        assert!(page.contains("  seat-down    water · agent/garden/birch (stopped) · 40m\n"), "{page}");
         assert!(
             page.contains(
                 "  no-progress  plant · agent/garden/ash · last progress 1h 35m ago · lease 8m · watering the north bed\n"
@@ -191,4 +163,5 @@ mod tests {
         assert!(page.contains("  … 2 more\n"), "{page}");
         assert!(page.find("WAITING ON") < page.find("FINISHED"));
     }
+
 }

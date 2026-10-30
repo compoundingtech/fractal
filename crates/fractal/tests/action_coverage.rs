@@ -2,22 +2,22 @@
 #![cfg(unix)]
 
 use fractal_daemon::DeliveryStore;
-use fractal_daemon::EvidenceStore;
-use fractal_daemon::GitChangesStore;
 use fractal_daemon::MissionsStore;
-use fractal_daemon::OwnedSetsStore;
 use fractal_daemon::SeatsStore;
+use fractal_daemon::EvidenceStore;
+use fractal_daemon::OwnedSetsStore;
+use fractal_daemon::GitChangesStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fractal_client::{ActionResult, Client, ClientError, Envelope, ErrorCode, Fence};
+use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
+use fractal_client::{ActionResult, Client, ClientError, Envelope, ErrorCode, Fence};
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "action-coverage";
@@ -35,40 +35,23 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     let path = root.path().join("claims.sqlite3");
     let startup = Store::open(&path, NODE).unwrap();
     let definitions = |connection: &rusqlite::Connection| {
-        fractal_daemon::owner_indexes::INDEX_NAMES
-            .iter()
-            .map(|name| {
-                connection
-                    .query_row(
-                        "SELECT sql FROM sqlite_master WHERE name=?1",
-                        [name],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .unwrap()
-            })
-            .collect::<Vec<_>>()
+        fractal_daemon::owner_indexes::INDEX_NAMES.iter().map(|name| {
+            connection.query_row(
+                "SELECT sql FROM sqlite_master WHERE name=?1", [name],
+                |row| row.get::<_, String>(0),
+            ).unwrap()
+        }).collect::<Vec<_>>()
     };
     let expected = definitions(&startup.connection.write());
     drop(startup);
     let connection = rusqlite::Connection::open(&path).unwrap();
     for name in fractal_daemon::owner_indexes::INDEX_NAMES {
-        connection
-            .execute_batch(&format!("DROP INDEX {name}"))
-            .unwrap();
+        connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
     }
     let run = || async {
         let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
-        command
-            .args([
-                "store",
-                "prepare-indexes",
-                "--endpoint",
-                "unix:/nonexistent/offline.sock",
-                "--daemon-wait",
-                "0",
-                "--store",
-            ])
-            .arg(&path);
+        command.args(["store", "prepare-indexes", "--endpoint", "unix:/nonexistent/offline.sock",
+            "--daemon-wait", "0", "--store"]).arg(&path);
         command.output().await
     };
     // The CLI is a separate process: both lifetime and SQLite writer locks must fence it.
@@ -81,11 +64,7 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     assert!(String::from_utf8_lossy(&refused.stderr).contains("store writer lock is held"));
     connection.execute_batch("ROLLBACK").unwrap();
     let prepared = run().await.unwrap();
-    assert!(
-        prepared.status.success(),
-        "{}",
-        String::from_utf8_lossy(&prepared.stderr)
-    );
+    assert!(prepared.status.success(), "{}", String::from_utf8_lossy(&prepared.stderr));
     let output = String::from_utf8(prepared.stdout).unwrap();
     for name in fractal_daemon::owner_indexes::INDEX_NAMES {
         assert!(output.contains(&format!("before: {name}: missing")));
@@ -99,32 +78,18 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
     assert!(run().await.unwrap().status.success());
     assert_eq!(before, std::fs::read(&path).unwrap());
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection
-        .execute_batch(
-            "DROP INDEX claims_actual_accepted_index;
-         CREATE INDEX claims_actual_accepted_index ON claims(subject)",
-        )
-        .unwrap();
+    connection.execute_batch(
+        "DROP INDEX claims_actual_accepted_index;
+         CREATE INDEX claims_actual_accepted_index ON claims(subject)"
+    ).unwrap();
     assert_ne!(expected, definitions(&connection));
     let rejected = run().await.unwrap();
-    assert!(
-        !rejected.status.success(),
-        "stdout={} stderr={} schema={:?}",
+    assert!(!rejected.status.success(), "stdout={} stderr={} schema={:?}",
         String::from_utf8_lossy(&rejected.stdout),
-        String::from_utf8_lossy(&rejected.stderr),
-        definitions(&connection)
-    );
+        String::from_utf8_lossy(&rejected.stderr), definitions(&connection));
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("schema gate failed"));
     let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
-    assert!(
-        !command
-            .args(["store", "prepare-indexes"])
-            .output()
-            .await
-            .unwrap()
-            .status
-            .success()
-    );
+    assert!(!command.args(["store", "prepare-indexes"]).output().await.unwrap().status.success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -583,23 +548,19 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: None,
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.into(),
-            pty_root: root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: Some(root.join("native")),
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-            private_notes: Default::default(),
-        }
+        AppState { owning_person: None,
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.join("native")),
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     fn socket(&self) -> PathBuf {
@@ -803,12 +764,7 @@ impl Daemon {
         self.cli_command_format(actor, args, true)
     }
 
-    fn cli_command_format(
-        &self,
-        actor: &str,
-        args: &[&str],
-        json_output: bool,
-    ) -> tokio::process::Command {
+    fn cli_command_format(&self, actor: &str, args: &[&str], json_output: bool) -> tokio::process::Command {
         let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command
             .args([
@@ -816,11 +772,7 @@ impl Daemon {
                 self.socket().to_str().unwrap(),
                 "--daemon-wait",
                 "0",
-            ])
-            .env_remove("ST_AGENT")
-            .env_remove("FRACTAL_AGENT")
-            .env_remove("ST3_INCARNATION")
-            .env_remove("FRACTAL_INCARNATION")
+            ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
             .env_remove("ST_MISSION_RUN")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("GH_TOKEN")
@@ -1295,10 +1247,7 @@ impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(
-        &self,
-        _: &str,
-    ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
     fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
@@ -2014,11 +1963,7 @@ async fn suspend_refuses_authored_selection_without_writes() {
             let ClientError::Api(code, message, envelope) = refused else {
                 panic!("{refused}")
             };
-            assert_eq!(
-                code,
-                ErrorCode::SuspendAuthoredSessionSelection,
-                "{message}"
-            );
+            assert_eq!(code, ErrorCode::SuspendAuthoredSessionSelection, "{message}");
             assert!(message.contains("--resume"), "{message}");
             assert_eq!(envelope.details["selector"], "--resume");
             assert!(!envelope.retryable);
@@ -2247,8 +2192,7 @@ impl Drop for PtyFixture {
 }
 impl Daemon {
     async fn pty(&self, owner: &str) -> PtyFixture {
-        let runtime =
-            fractal_runtime::PtyRuntime::new(self.state.pty_root.clone()).with_binary("pty");
+        let runtime = fractal_runtime::PtyRuntime::new(self.state.pty_root.clone()).with_binary("pty");
         let id = self
             .store()
             .desired_subjects()
@@ -2450,20 +2394,13 @@ async fn runtime_controls_survive_stale_incarnations_and_restarts() {
                 // Observe that outcome rather than assuming signal delivery is a join.
                 tokio::time::timeout(Duration::from_secs(10), async {
                     loop {
-                        if pty
-                            .runtime
-                            .snapshot()
-                            .unwrap()
-                            .into_iter()
-                            .all(|live| live.name != pty.id || live.status != "running")
-                        {
+                        if pty.runtime.snapshot().unwrap().into_iter()
+                            .all(|live| live.name != pty.id || live.status != "running") {
                             break;
                         }
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
-                })
-                .await
-                .expect("the restarted fixture runtime must exit after TERM");
+                }).await.expect("the restarted fixture runtime must exit after TERM");
             }
             "runtime.stop" => assert_eq!(
                 daemon
@@ -2607,53 +2544,21 @@ schedule "b" { host "action-coverage"; at "2100-01-02T00:00:00Z"; work { mission
 "#, "schedule-list-declarations");
     let mut original = None;
     for pass in 0..2 {
-        let first = cli_value(
-            daemon
-                .cli(
-                    PERSON,
-                    &[
-                        "schedules",
-                        "ls",
-                        "--as",
-                        PERSON,
-                        "--limit",
-                        "1",
-                        "--unheard-after",
-                        "1m",
-                    ],
-                )
-                .await,
-        );
+        let first = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+        ]).await);
         assert_eq!(first["value"]["collection"], "schedules");
         assert_eq!(first["value"]["basis"], "local-replicated-declarations");
         assert_eq!(first["value"]["coverage"]["unheard_after_ms"], 60_000);
         assert_eq!(first["value"]["items"].as_array().unwrap().len(), 1);
         assert_eq!(first["value"]["items"][0]["id"], "schedule/a");
-        assert_eq!(
-            first["value"]["items"][0]["primary_host_id"],
-            "host/action-coverage"
-        );
+        assert_eq!(first["value"]["items"][0]["primary_host_id"], "host/action-coverage");
         assert_eq!(first["value"]["page"]["has_more"], true);
         let cursor = first["value"]["page"]["next_cursor"].as_str().unwrap();
-        let second = cli_value(
-            daemon
-                .cli(
-                    PERSON,
-                    &[
-                        "schedules",
-                        "ls",
-                        "--as",
-                        PERSON,
-                        "--limit",
-                        "1",
-                        "--unheard-after",
-                        "1m",
-                        "--cursor",
-                        cursor,
-                    ],
-                )
-                .await,
-        );
+        let second = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+            "--cursor", cursor,
+        ]).await);
         assert_eq!(second["value"]["items"].as_array().unwrap().len(), 1);
         assert_eq!(second["value"]["items"][0]["id"], "schedule/b");
         assert_eq!(second["value"]["page"]["has_more"], false);
@@ -2690,54 +2595,28 @@ async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
         "deploy-reader-baseline",
     );
     let commands: &[&[&str]] = &[
-        &["agents", "ls"],
-        &["missions", "ls"],
-        &["work", "ls"],
-        &["alerts", "ls", "--as", PERSON],
-        &["terminals", "ls"],
-        &["launch", "ls"],
-        &["lanes", "ls"],
-        &["sets", "ls"],
+        &["agents", "ls"], &["missions", "ls"], &["work", "ls"],
+        &["alerts", "ls", "--as", PERSON], &["terminals", "ls"],
+        &["launch", "ls"], &["lanes", "ls"], &["sets", "ls"],
         &["documents", "ls"],
     ];
     // Generic list envelopes carry a fresh request ID and snapshot creation time
     // even when the graph is unchanged. Compare every other rendered line,
     // including snapshot identity/store cut and all collection/page contents.
     let stable_output = |bytes: &[u8]| {
-        std::str::from_utf8(bytes)
-            .unwrap()
-            .lines()
+        std::str::from_utf8(bytes).unwrap().lines()
             .filter(|line| !line.starts_with("REQUEST ID ") && !line.starts_with("  CREATED AT "))
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
+            .map(str::to_owned).collect::<Vec<_>>()
     };
     let mut baseline = Vec::new();
     for arguments in commands {
-        let output = daemon
-            .cli_command_format(PERSON, arguments, false)
-            .output()
-            .await
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
         assert!(!output.stdout.is_empty(), "{arguments:?}");
         baseline.push((stable_output(&output.stdout), output.stderr));
     }
-    assert!(
-        baseline[0]
-            .0
-            .iter()
-            .any(|line| line.contains("example-reader"))
-    );
-    assert!(
-        baseline[1]
-            .0
-            .iter()
-            .any(|line| line.contains("example/inspect"))
-    );
+    assert!(baseline[0].0.iter().any(|line| line.contains("example-reader")));
+    assert!(baseline[1].0.iter().any(|line| line.contains("example/inspect")));
     let source = Store::open_memory("host-a").unwrap();
     source.bind_fleet(FLEET).unwrap();
     let examples = [
@@ -2757,63 +2636,33 @@ async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
         json!({"version": 1, "trainId": "train/example", "oldCommit": "a".repeat(40), "newCommit": "b".repeat(40)}),
     ];
     for (kind, fields) in fractal_schema::deploy::KINDS.into_iter().zip(examples) {
-        source
-            .append_claim(&ClaimInput {
-                subject: "resource/deploy/example".into(),
-                kind: kind.into(),
-                actor: Some("agent/example-executor".into()),
-                fields: serde_json::from_value(fields).unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        source.append_claim(&ClaimInput {
+            subject: "resource/deploy/example".into(), kind: kind.into(),
+            actor: Some("agent/example-executor".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
     }
-    let exchange = source
-        .export_replication_exchange(FLEET, &daemon.store().replication_inventory().unwrap())
-        .unwrap();
+    let exchange = source.export_replication_exchange(
+        FLEET, &daemon.store().replication_inventory().unwrap(),
+    ).unwrap();
     assert_eq!(exchange.envelopes.len(), 6);
-    daemon
-        .store()
-        .receive_replication_exchange("host-a", FLEET, &exchange)
-        .unwrap();
+    daemon.store().receive_replication_exchange("host-a", FLEET, &exchange).unwrap();
     let admission = daemon.store().validate_replication_backlog().unwrap();
-    assert_eq!(
-        (admission.valid, admission.unknown, admission.invalid),
-        (0, 6, 0)
-    );
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 6, 0));
     daemon.store().project_replication_backlog().unwrap();
     let records = daemon.store().replica_records(true).unwrap();
     assert_eq!(records.len(), 6);
     for kind in fractal_schema::deploy::KINDS {
-        assert!(
-            records
-                .iter()
-                .any(|record| record.kind.as_deref() == Some(kind)
-                    && record.state == "unknown"
-                    && record.error_code.as_deref() == Some("unknown-claim-kind"))
-        );
+        assert!(records.iter().any(|record| record.kind.as_deref() == Some(kind)
+            && record.state == "unknown"
+            && record.error_code.as_deref() == Some("unknown-claim-kind")));
     }
     for (arguments, (stdout, stderr)) in commands.iter().zip(baseline) {
-        let output = daemon
-            .cli_command_format(PERSON, arguments, false)
-            .output()
-            .await
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            stable_output(&output.stdout),
-            stdout,
-            "{arguments:?}: list rendering changed"
-        );
-        assert_eq!(
-            output.stderr, stderr,
-            "{arguments:?}: list diagnostics changed"
-        );
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(stable_output(&output.stdout), stdout, "{arguments:?}: list rendering changed");
+        assert_eq!(output.stderr, stderr, "{arguments:?}: list diagnostics changed");
     }
 }
 
@@ -2925,10 +2774,7 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
     daemon.worker();
     daemon.apply("version 2\nmission \"example/inspect\" state=\"ready\" { goal \"Inspect the graph.\"; step \"work\" { assigned-to \"agent/example/worker\" } }\n", "inspect-mission");
     let run = daemon.start("example/inspect", "inspect-run");
-    daemon
-        .store()
-        .set_step_state(&run.steps[0].subject, "ready", None)
-        .unwrap();
+    daemon.store().set_step_state(&run.steps[0].subject, "ready", None).unwrap();
     for _ in 0..2 {
         fractal_daemon::api::start_published_lists(&daemon.state);
         let cut = daemon.store().index().unwrap();
@@ -2939,19 +2785,10 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
         .await
         .unwrap()
         .unwrap();
-        let output = daemon
-            .cli(PERSON, &["missions", "waiting-on", &run.subject])
-            .await;
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let output = daemon.cli(PERSON, &["missions", "waiting-on", &run.subject]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let waiting: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(
-            (waiting["run"].as_str(), waiting["verdict"].as_str()),
-            (Some(run.subject.as_str()), Some("moving"))
-        );
+        assert_eq!((waiting["run"].as_str(), waiting["verdict"].as_str()), (Some(run.subject.as_str()), Some("moving")));
         assert_eq!(waiting["open"][0]["path"], "work");
         assert_eq!(waiting["open"][0]["kind"], "ready");
         assert_eq!(waiting["open"][0]["who"], WORKER);
@@ -2969,11 +2806,7 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
     let session = uuid::Uuid::now_v7().to_string();
     let seed = daemon.root.path().join(format!("time_{session}.jsonl"));
     let inventory = daemon.root.path().join("seed-inventory");
-    std::fs::write(
-        &seed,
-        format!("{{\"type\":\"session\",\"id\":\"{session}\"}}\n"),
-    )
-    .unwrap();
+    std::fs::write(&seed, format!("{{\"type\":\"session\",\"id\":\"{session}\"}}\n")).unwrap();
     daemon.apply(
         &format!(
             "version 2\nagent \"example/worker\" {{ host {NODE:?}; workspace {:?}; harness \"omp\" {{ seed {:?}; }} }}",
@@ -2981,150 +2814,58 @@ async fn cli_seed_acknowledgement_survives_restart_without_rearming_seed() {
         ),
         "coverage-seeded-worker",
     );
-    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(
-        daemon.socket(),
-    ));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(daemon.socket()));
     assert_eq!(
-        fractal_daemon::native_seed::first_launch(
-            &client,
-            WORKER,
-            "seed-attempt",
-            "omp",
-            Some(&seed),
-            &inventory,
-            false
-        )
-        .await
-        .unwrap(),
+        fractal_daemon::native_seed::first_launch(&client, WORKER, "seed-attempt", "omp", Some(&seed), &inventory, false)
+            .await.unwrap(),
         Some(session.clone()),
     );
     let marker = format!(
         "custom/agent/first-native-launch-{}",
         hex::encode(sha2::Sha256::digest(WORKER.as_bytes())),
     );
-    let receipt = daemon
-        .store()
-        .claims_for(&marker, Some("custom.agent.first-native-launch"))
-        .unwrap()
-        .pop()
-        .unwrap();
+    let receipt = daemon.store().claims_for(&marker, Some("custom.agent.first-native-launch"))
+        .unwrap().pop().unwrap();
     daemon.restart().await;
     std::fs::remove_file(&seed).unwrap();
     assert_eq!(
-        fractal_daemon::native_seed::first_launch(
-            &client,
-            WORKER,
-            "before-acknowledgement",
-            "omp",
-            Some(&seed),
-            &inventory,
-            false
-        )
-        .await
-        .unwrap(),
+        fractal_daemon::native_seed::first_launch(&client, WORKER, "before-acknowledgement", "omp", Some(&seed), &inventory, false)
+            .await.unwrap(),
         None,
         "an incomplete attempt starts fresh even before acknowledgement, without reading the missing seed",
     );
-    let notice = daemon
-        .store()
-        .latest_claim(WORKER, Some("harness.diagnostic"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        notice.body["fields"]["code"],
-        "first-native-launch-incomplete"
-    );
+    let notice = daemon.store().latest_claim(WORKER, Some("harness.diagnostic")).unwrap().unwrap();
+    assert_eq!(notice.body["fields"]["code"], "first-native-launch-incomplete");
     let args = [
-        "agents",
-        "acknowledge-seed",
-        "example/worker",
-        "--reason",
-        "Accept the interrupted import",
+        "agents", "acknowledge-seed", "example/worker", "--reason", "Accept the interrupted import",
     ];
     let acknowledgement = cli_value(daemon.cli(PERSON, &args).await);
-    assert_eq!(
-        acknowledgement["kind"],
-        "custom.agent.first-native-launch-acknowledged"
-    );
-    assert_eq!(
-        acknowledgement["actor"], PERSON,
-        "the configured person is the default actor"
-    );
+    assert_eq!(acknowledgement["kind"], "custom.agent.first-native-launch-acknowledged");
+    assert_eq!(acknowledgement["actor"], PERSON, "the configured person is the default actor");
     assert_eq!(acknowledgement["body"]["fields"]["receipt"], receipt.id);
-    assert_eq!(
-        acknowledgement["body"]["fields"]["reason"],
-        "Accept the interrupted import"
-    );
+    assert_eq!(acknowledgement["body"]["fields"]["reason"], "Accept the interrupted import");
     assert_eq!(acknowledgement["body"]["evidence"], json!([receipt.id]));
     daemon.restart().await;
-    let replay = cli_value(
-        daemon
-            .cli(
-                PERSON,
-                &[
-                    "agents",
-                    "acknowledge-seed",
-                    WORKER,
-                    "--reason",
-                    "Accept the interrupted import",
-                    "--as",
-                    PERSON,
-                ],
-            )
-            .await,
-    );
-    assert_eq!(
-        replay["id"], acknowledgement["id"],
-        "restart replay must not duplicate the acknowledgement"
-    );
-    let saved = daemon
-        .store()
-        .claims_for(
-            &marker,
-            Some("custom.agent.first-native-launch-acknowledged"),
-        )
-        .unwrap();
+    let replay = cli_value(daemon.cli(PERSON, &[
+        "agents", "acknowledge-seed", WORKER, "--reason", "Accept the interrupted import", "--as", PERSON,
+    ]).await);
+    assert_eq!(replay["id"], acknowledgement["id"], "restart replay must not duplicate the acknowledgement");
+    let saved = daemon.store().claims_for(&marker, Some("custom.agent.first-native-launch-acknowledged")).unwrap();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].body, acknowledgement["body"]);
     assert_eq!(
-        fractal_daemon::native_seed::first_launch(
-            &client,
-            WORKER,
-            "after-acknowledgement",
-            "omp",
-            Some(&seed),
-            &inventory,
-            false
-        )
-        .await
-        .unwrap(),
+        fractal_daemon::native_seed::first_launch(&client, WORKER, "after-acknowledgement", "omp", Some(&seed), &inventory, false)
+            .await.unwrap(),
         None,
         "acknowledgement never rearms or restages the missing seed",
     );
-    assert_eq!(
-        daemon
-            .store()
-            .latest_claim(WORKER, Some("harness.diagnostic"))
-            .unwrap()
-            .unwrap()
-            .id,
-        notice.id
-    );
-    let receipts = daemon
-        .store()
-        .claims_for(&marker, Some("custom.agent.first-native-launch"))
-        .unwrap();
+    assert_eq!(daemon.store().latest_claim(WORKER, Some("harness.diagnostic")).unwrap().unwrap().id, notice.id);
+    let receipts = daemon.store().claims_for(&marker, Some("custom.agent.first-native-launch")).unwrap();
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].id, receipt.id);
     assert_eq!(receipts[0].body["fields"]["outcome"], "seeded");
     assert_eq!(receipts[0].body["fields"]["session_id"], session);
-    assert!(
-        daemon
-            .store()
-            .claims_for(WORKER, Some("harness.session-file"))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(daemon.store().claims_for(WORKER, Some("harness.session-file")).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3142,42 +2883,20 @@ async fn cli_identity_renames_preserve_storage_subjects_across_restart() {
         "coverage-rename-declarations",
     );
     for (family, from, to, kind) in [
-        (
-            "agents",
-            "agent/example-rename/worker",
-            "agent/example-renamed/worker",
-            "agent.renamed",
-        ),
-        (
-            "missions",
-            "mission/example-rename-work",
-            "mission/example-renamed-work",
-            "mission.renamed",
-        ),
+        ("agents", "agent/example-rename/worker", "agent/example-renamed/worker", "agent.renamed"),
+        ("missions", "mission/example-rename-work", "mission/example-renamed-work", "mission.renamed"),
     ] {
         let key = format!("coverage-{family}-rename");
         let arguments = [
-            family,
-            "rename-id",
-            from,
-            to,
-            "--as",
-            "person/robin",
-            "--reason",
-            "Clarify responsibility",
-            "--idempotency-key",
-            &key,
+            family, "rename-id", from, to, "--as", "person/robin",
+            "--reason", "Clarify responsibility", "--idempotency-key", &key,
         ];
         let receipt = cli_value(daemon.cli("person/robin", &arguments).await);
         assert_eq!(receipt["identity"], from);
         assert_eq!(receipt["canonical_id"], to);
         assert_eq!(receipt["applied"], "renamed");
         let claims = daemon.store().claims_for(from, None).unwrap();
-        assert!(
-            claims
-                .iter()
-                .any(|claim| claim.kind == kind && claim.id == receipt["claim_id"])
-        );
+        assert!(claims.iter().any(|claim| claim.kind == kind && claim.id == receipt["claim_id"]));
         let index = daemon.store().index().unwrap();
         daemon.restart().await;
         let replay = cli_value(daemon.cli("person/robin", &arguments).await);
@@ -3325,7 +3044,12 @@ async fn cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_rest
     std::fs::write(&file, "version 2\nmission \"example/cli-work\" state=\"ready\" { concurrent-runs; goal \"Record the CLI work.\"; step \"work\" timeout=\"1h\" { assigned-to \"agent/example/worker\" } }\n").unwrap();
     cli_value(
         daemon
-            .cli(PERSON, &["apply", file.to_str().unwrap(), "--as", PERSON])
+            .cli(
+                PERSON,
+                &["apply", file.to_str().unwrap(),
+                "--as",
+                PERSON,],
+            )
             .await,
     );
     daemon.restart().await;
@@ -3655,41 +3379,21 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
         cli_value(daemon.cli(WORKER, &arguments).await);
     }
     // People have no inbox: the worker cannot answer the person with st, and nothing is written.
-    let sent_before = daemon
-        .store()
-        .claims_for_kind_at("message.sent", None, true, 1_000)
-        .unwrap()
-        .claims
-        .len();
+    let sent_before = daemon.store().claims_for_kind_at("message.sent", None, true, 1_000).unwrap().claims.len();
     let refused = daemon
         .cli(
             WORKER,
             &[
-                "conversations",
-                "reply",
-                message,
-                "--from",
-                WORKER,
-                "--body",
-                "Copper answer",
-                "--idempotency-key",
-                "coverage-cli-reply-refused",
+                "conversations", "reply", message, "--from", WORKER, "--body", "Copper answer",
+                "--idempotency-key", "coverage-cli-reply-refused",
             ],
         )
         .await;
     assert!(!refused.status.success());
     let refusal = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        refusal.contains("people do not have inboxes: print your answer in the chat"),
-        "{refusal}"
-    );
+    assert!(refusal.contains("people do not have inboxes: print your answer in the chat"), "{refusal}");
     assert_eq!(
-        daemon
-            .store()
-            .claims_for_kind_at("message.sent", None, true, 1_000)
-            .unwrap()
-            .claims
-            .len(),
+        daemon.store().claims_for_kind_at("message.sent", None, true, 1_000).unwrap().claims.len(),
         sent_before
     );
     // A reply between agents is unchanged: it keeps its thread and is sent once across a restart.
@@ -3699,15 +3403,8 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
             .cli(
                 WORKER,
                 &[
-                    "conversations",
-                    "send",
-                    PEER,
-                    "--from",
-                    WORKER,
-                    "--body",
-                    "Copper handoff?",
-                    "--idempotency-key",
-                    "coverage-cli-ask-peer",
+                    "conversations", "send", PEER, "--from", WORKER, "--body", "Copper handoff?",
+                    "--idempotency-key", "coverage-cli-ask-peer",
                 ],
             )
             .await,
@@ -5533,8 +5230,7 @@ async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements(
         // native runtime canaries; this tests the public CLI request/wait and durable state.
         let owner = tokio::spawn(async move {
             for _ in 0..200 {
-                if let Some(operation) =
-                    fractal_daemon::suspension::current(&store, WORKER).unwrap()
+                if let Some(operation) = fractal_daemon::suspension::current(&store, WORKER).unwrap()
                     && operation.action == command
                     && matches!(operation.phase.as_str(), "quiescing" | "restoring")
                 {
@@ -5588,26 +5284,20 @@ async fn cli_persons_rename_migrates_current_work_and_reviews_across_restart() {
     const NEW_PERSON: &str = "person/robin";
     let mut daemon = Daemon::new().await;
     daemon.worker();
-    daemon
-        .store()
-        .append_claim(&ClaimInput {
-            subject: "message/cli-known-rename-person".into(),
-            kind: "message.sent".into(),
-            actor: Some(NEW_PERSON.into()),
-            fields: BTreeMap::from([
-                ("from".into(), json!(NEW_PERSON)),
-                ("to".into(), json!(WORKER)),
-                (
-                    "content".into(),
-                    json!("The new person already participates in the graph."),
-                ),
-                ("status".into(), json!("sent")),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some("cli-known-rename-person".into()),
-        })
-        .unwrap();
+    daemon.store().append_claim(&ClaimInput {
+        subject: "message/cli-known-rename-person".into(),
+        kind: "message.sent".into(),
+        actor: Some(NEW_PERSON.into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!(NEW_PERSON)),
+            ("to".into(), json!(WORKER)),
+            ("content".into(), json!("The new person already participates in the graph.")),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("cli-known-rename-person".into()),
+    }).unwrap();
     daemon.apply(
         r#"version 2
 mission "example/person-rename" state="ready" {
@@ -5676,12 +5366,7 @@ mission "example/person-rename" state="ready" {
     assert_eq!(report["new_person"], NEW_PERSON);
     assert_eq!(report["reassigned_steps"], json!([ask_step]));
     assert_eq!(report["reassigned_reviews"], json!([review_step]));
-    assert!(
-        report["run_requesters"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(run.subject))
-    );
+    assert!(report["run_requesters"].as_array().unwrap().contains(&json!(run.subject)));
     let ask_mission = daemon
         .store()
         .mission_run(&original_work.run)
@@ -5690,10 +5375,7 @@ mission "example/person-rename" state="ready" {
         .mission;
     let mut missions_to_republish = vec!["mission/example/person-rename".to_owned(), ask_mission];
     missions_to_republish.sort();
-    assert_eq!(
-        report["missions_to_republish"],
-        json!(missions_to_republish)
-    );
+    assert_eq!(report["missions_to_republish"], json!(missions_to_republish));
     assert!(
         report["namespace_notice"]
             .as_str()
@@ -5705,26 +5387,14 @@ mission "example/person-rename" state="ready" {
     assert_eq!(daemon.store().index().unwrap(), index);
     daemon.restart().await;
     assert_eq!(cli_value(daemon.cli(PERSON, &args).await), report);
-    assert_eq!(
-        daemon.store().index().unwrap(),
-        index,
-        "rename replay wrote twice"
-    );
+    assert_eq!(daemon.store().index().unwrap(), index, "rename replay wrote twice");
 
     let moved = daemon.store().step_run(ask_step).unwrap().unwrap();
     assert_eq!(moved.assigned_to.as_deref(), Some(NEW_PERSON));
     assert_eq!(moved.status, original_work.status);
     assert_eq!(moved.attempt, original_work.attempt);
     assert_eq!(moved.definition_hash, original_work.definition_hash);
-    assert_eq!(
-        daemon
-            .store()
-            .mission_run(&run.subject)
-            .unwrap()
-            .unwrap()
-            .requester,
-        PERSON
-    );
+    assert_eq!(daemon.store().mission_run(&run.subject).unwrap().unwrap().requester, PERSON);
     let asks = daemon
         .store()
         .claims_for(ask_step, Some("work.person-asked"))
@@ -5747,13 +5417,7 @@ mission "example/person-rename" state="ready" {
     assert_eq!(reviews[0]["owner"].as_str(), Some(review_step.as_str()));
     assert_eq!(reviews[0]["reviewer"], NEW_PERSON);
     assert_eq!(reviews[0]["request"], review_request.id);
-    assert!(
-        daemon
-            .store()
-            .attention_items(Some(PERSON))
-            .unwrap()
-            .is_empty()
-    );
+    assert!(daemon.store().attention_items(Some(PERSON)).unwrap().is_empty());
     let attention = daemon.store().attention_items(Some(NEW_PERSON)).unwrap();
     assert!(attention.iter().any(|item| item.subject == ask_step));
     assert!(attention.iter().any(|item| item.subject == *review_step));
@@ -6020,65 +5684,34 @@ async fn cli_github_gates_pass_wait_and_refuse_over_private_http_across_restart(
             }
         },
     ));
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
     for (state, expected, prefix) in [(0, 0, "pass:"), (1, 1, "not yet:"), (2, 3, "broken:")] {
         phase.store(state, std::sync::atomic::Ordering::SeqCst);
         daemon.restart().await;
         for args in [
             vec!["gate", "merged", "fixture/app#12"],
-            vec![
-                "gate",
-                "ci-passed",
-                "proof",
-                "--repo",
-                "fixture/app",
-                "--ref",
-                "fixture-commit",
-            ],
+            vec!["gate", "ci-passed", "proof", "--repo", "fixture/app", "--ref", "fixture-commit"],
         ] {
-            let output = daemon
-                .cli_command(PERSON, &args)
+            let output = daemon.cli_command(PERSON, &args)
                 .env("GH_TOKEN", "fixture-token")
                 .env("ST3_GITHUB_API_URL", &api)
-                .output()
-                .await
-                .unwrap();
-            assert_eq!(
-                output.status.code(),
-                Some(expected),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+                .output().await.unwrap();
+            assert_eq!(output.status.code(), Some(expected), "{}", String::from_utf8_lossy(&output.stderr));
             assert!(String::from_utf8_lossy(&output.stdout).starts_with(prefix));
             assert_eq!(daemon.store().index().unwrap(), index);
         }
         if state == 0 {
-            let output = daemon
-                .cli_command(
-                    PERSON,
-                    &[
-                        "gate",
-                        "ci-passed",
-                        "proof",
-                        "--repo",
-                        "fixture/app",
-                        "--ref",
-                        "obsolete-fixture",
-                    ],
-                )
+            let output = daemon.cli_command(PERSON, &["gate", "ci-passed", "proof", "--repo", "fixture/app", "--ref", "obsolete-fixture"])
                 .env("GH_TOKEN", "fixture-token")
                 .env("ST3_GITHUB_API_URL", &api)
-                .output()
-                .await
-                .unwrap();
+                .output().await.unwrap();
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8_lossy(&output.stdout).contains("queued"));
             assert_eq!(daemon.store().index().unwrap(), index);
         }
     }
     server.abort();
+
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6162,15 +5795,9 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
         .map_or_else(
             |_| "no answer within 5 s".to_owned(),
             |shown| match serde_json::from_slice::<Value>(&shown.stdout) {
-                Ok(shown) => [
-                    "state",
-                    "harness_state",
-                    "reachability",
-                    "observation",
-                    "fault",
-                ]
-                .map(|field| format!("{field}={}", shown["value"][field]))
-                .join(" "),
+                Ok(shown) => ["state", "harness_state", "reachability", "observation", "fault"]
+                    .map(|field| format!("{field}={}", shown["value"][field]))
+                    .join(" "),
                 Err(_) => String::from_utf8_lossy(&shown.stderr).into_owned(),
             },
         );
@@ -6214,13 +5841,7 @@ async fn cli_agent_and_shell_declarations_survive_restart() {
         daemon
             .cli(
                 PERSON,
-                &[
-                    "apply",
-                    "--no-gate-check",
-                    file.to_str().unwrap(),
-                    "--as",
-                    PERSON,
-                ],
+                &["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON],
             )
             .await,
     );
@@ -6298,18 +5919,11 @@ async fn custom_reply_survives_fences_cli_and_daemon_restarts() {
             .await,
     );
     assert_eq!(registered["state"], "ready");
-    let registrations = cli_value(daemon.cli(PERSON, &["schema", "registrations"]).await);
-    assert_eq!(registrations["items"].as_array().unwrap().len(), 1);
-    let exact = format!(
-        "garden.review@{}",
-        registered["registration"].as_str().unwrap()
-    );
-    let registration = cli_value(
-        daemon
-            .cli(PERSON, &["schema", "registration", &exact])
-            .await,
-    );
-    assert_eq!(registration["registration"], registered["registration"]);
+    let registrations=cli_value(daemon.cli(PERSON,&["schema","registrations"]).await);
+    assert_eq!(registrations["items"].as_array().unwrap().len(),1);
+    let exact=format!("garden.review@{}",registered["registration"].as_str().unwrap());
+    let registration=cli_value(daemon.cli(PERSON,&["schema","registration",&exact]).await);
+    assert_eq!(registration["registration"],registered["registration"]);
     let subject = "custom/garden/review/v1/transport-example";
     cli_value(
         daemon
@@ -6337,27 +5951,8 @@ async fn custom_reply_survives_fences_cli_and_daemon_restarts() {
         .await
         .unwrap();
     assert_eq!(source.value.header().id, subject);
-    let basis = cli_value(
-        daemon
-            .cli(
-                PERSON,
-                &[
-                    "subject",
-                    "basis",
-                    subject,
-                    "--kind",
-                    "custom.garden.review.v1.requested",
-                ],
-            )
-            .await,
-    );
-    assert_eq!(
-        basis["revision"],
-        daemon
-            .store()
-            .custom_basis_revision(subject, &["custom.garden.review.v1.requested".into()])
-            .unwrap()
-    );
+    let basis=cli_value(daemon.cli(PERSON,&["subject","basis",subject,"--kind","custom.garden.review.v1.requested"]).await);
+    assert_eq!(basis["revision"],daemon.store().custom_basis_revision(subject,&["custom.garden.review.v1.requested".into()]).unwrap());
     let page = daemon
         .client("person/lichen")
         .custom_subjects_list(Some("garden.review"), Some(1), None, Some(10))
@@ -6528,30 +6123,14 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
         daemon
             .cli(
                 PERSON,
-                &[
-                    "schema",
-                    "register",
-                    manifest.to_str().unwrap(),
-                    "--as",
-                    SEAT,
-                ],
+                &["schema", "register", manifest.to_str().unwrap(), "--as", SEAT],
             )
             .await,
     );
     assert_eq!(registered["state"], "ready");
-    let raw_kinds = [
-        "opened",
-        "requested",
-        "answered",
-        "assumed",
-        "promoted",
-        "damaged",
-    ]
-    .map(|k| format!("custom.decision.tree.v1.{k}"));
-    let opened = claim(
-        "opened",
-        vec![format!("seat={SEAT}"), format!("recipient={DECIDER}")],
-    );
+    let raw_kinds = ["opened", "requested", "answered", "assumed", "promoted", "damaged"]
+        .map(|k| format!("custom.decision.tree.v1.{k}"));
+    let opened = claim("opened", vec![format!("seat={SEAT}"), format!("recipient={DECIDER}")]);
     run(&daemon, PERSON, &opened).await;
     let body = document(
         &daemon,
@@ -6580,13 +6159,8 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     ] {
         let kind = format!("custom.decision.tree.v1.{kind}");
         let request = format!("request={request}");
-        let args = [
-            "claim", TREE, &kind, "--actor", actor, "--field", &request, "--field", choice,
-        ];
-        assert!(
-            !daemon.cli(PERSON, &args).await.status.success(),
-            "{kind} as {actor}"
-        );
+        let args = ["claim", TREE, &kind, "--actor", actor, "--field", &request, "--field", choice];
+        assert!(!daemon.cli(PERSON, &args).await.status.success(), "{kind} as {actor}");
     }
     let pending = vec![
         "state=pending".to_owned(),
@@ -6683,10 +6257,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
         )
         .await;
     let stderr = String::from_utf8_lossy(&stale.stderr);
-    assert!(
-        !stale.status.success() && stderr.contains("stale-fence"),
-        "{stderr}"
-    );
+    assert!(!stale.status.success() && stderr.contains("stale-fence"), "{stderr}");
     let show = ["subject".to_owned(), "show".into(), TREE.into()];
     let shown = run(&daemon, DECIDER, &show).await;
     assert_eq!(shown["state"], "stale");
@@ -6727,23 +6298,13 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     const VICTIM: &str = "agent/example/victim";
     const SQUATTER: &str = "agent/example/squatter";
     let open = vec![format!("seat={VICTIM}"), format!("recipient={DECIDER}")];
-    run(
-        &daemon,
-        PERSON,
-        &claim_on(SQUATTED, SQUATTER, "opened", open.clone()),
-    )
-    .await;
+    run(&daemon, PERSON, &claim_on(SQUATTED, SQUATTER, "opened", open.clone())).await;
     let forged = vec![
         "question=Approve the forged plan?".to_owned(),
         "kind=blocker".into(),
         format!("body={body}"),
     ];
-    run(
-        &daemon,
-        PERSON,
-        &claim_on(SQUATTED, SQUATTER, "requested", forged.clone()),
-    )
-    .await;
+    run(&daemon, PERSON, &claim_on(SQUATTED, SQUATTER, "requested", forged.clone())).await;
     let forged_request = daemon
         .store()
         .claims_for(SQUATTED, Some("custom.decision.tree.v1.requested"))
@@ -6757,12 +6318,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
         format!("request={forged_request}"),
         format!("_basis={}", basis(&daemon, SQUATTED, &raw_kinds).await),
     ];
-    run(
-        &daemon,
-        PERSON,
-        &claim_on(SQUATTED, SQUATTER, "status", forged_status),
-    )
-    .await;
+    run(&daemon, PERSON, &claim_on(SQUATTED, SQUATTER, "status", forged_status)).await;
     let squat = ["subject".to_owned(), "show".into(), SQUATTED.into()];
     let squat = run(&daemon, DECIDER, &squat).await;
     assert_eq!(squat["fields"]["owner"], SQUATTER);
@@ -7063,24 +6619,20 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
             .cli(PERSON, &["agents", "stop", STOPPED, "--as", PERSON])
             .await,
     );
-    daemon
-        .store()
-        .append_claim(&ClaimInput {
-            subject: STOPPED.into(),
-            kind: "runtime.observed".into(),
-            actor: Some(STOPPED.into()),
-            fields: serde_json::from_value(json!({
-                "runtime_id": "example-stopped-runtime",
-                "incarnation_id": "example-stopped-runtime:i1",
-                "status": "stopped",
-                "terminal": true,
-            }))
-            .unwrap(),
-            evidence: vec![],
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
+    daemon.store().append_claim(&ClaimInput {
+        subject: STOPPED.into(),
+        kind: "runtime.observed".into(),
+        actor: Some(STOPPED.into()),
+        fields: serde_json::from_value(json!({
+            "runtime_id": "example-stopped-runtime",
+            "incarnation_id": "example-stopped-runtime:i1",
+            "status": "stopped",
+            "terminal": true,
+        })).unwrap(),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
     let transport = fractal_daemon::client::Client::unix_as(daemon.socket(), PERSON).unwrap();
     let parameters = json!({"to":WORKER,"content":"An invented note.","kind":"wake"});
     let accepted = dispatch(
@@ -7106,9 +6658,7 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
     ];
     let before_retirement = cli_value(daemon.cli(PERSON, &["agents", "ls", "--all"]).await);
     let active = before_retirement["value"]["items"]
-        .as_array()
-        .unwrap()
-        .iter()
+        .as_array().unwrap().iter()
         .find(|item| item["id"] == WORKER)
         .unwrap_or_else(|| panic!("{WORKER}: {before_retirement}"));
     assert_ne!(active["state"], "retired", "{active}");
@@ -7125,16 +6675,12 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
             .unwrap();
         for (subject, state) in [(WORKER, "retired"), (STOPPED, "stopped")] {
             let shown = cli_value(
-                daemon
-                    .cli(PERSON, &["agents", "show", subject, "--all"])
-                    .await,
+                daemon.cli(PERSON, &["agents", "show", subject, "--all"]).await,
             );
             assert_eq!(shown["value"]["id"], subject, "{shown}");
             assert_eq!(shown["value"]["state"], state, "{shown}");
             let cli_card = listed["value"]["items"]
-                .as_array()
-                .unwrap()
-                .iter()
+                .as_array().unwrap().iter()
                 .find(|item| item["id"] == subject)
                 .unwrap_or_else(|| panic!("{subject}: {listed}"));
             assert_eq!(cli_card["state"], state, "{cli_card}");
@@ -7145,22 +6691,15 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
             assert_eq!(exact["id"], subject, "{exact}");
             assert_eq!(exact["state"], state, "{exact}");
             let http_card = http_list["items"]
-                .as_array()
-                .unwrap()
-                .iter()
+                .as_array().unwrap().iter()
                 .find(|item| item["id"] == subject)
                 .unwrap_or_else(|| panic!("{subject}: {http_list}"));
             assert_eq!(http_card["state"], state, "{http_card}");
         }
     }
-    assert!(
-        daemon
-            .store()
-            .claims_for_subject_kind_at(STOPPED, "agent.retired", None, false, 10)
-            .unwrap()
-            .claims
-            .is_empty()
-    );
+    assert!(daemon.store()
+        .claims_for_subject_kind_at(STOPPED, "agent.retired", None, false, 10)
+        .unwrap().claims.is_empty());
     dispatch(
         &daemon.client(PERSON),
         "message.send",
@@ -7236,10 +6775,8 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
         "{stderr}"
     );
     let raw = transport.post::<_,Value>("/v1/messages",&json!({"to":WORKER,"from":PERSON,"content":"An adapter note","idempotency_key":"retirement-adapter-message"})).await.unwrap_err();
-    let (status, code, _, details) = fractal_daemon::client::api_error_parts(&raw).unwrap();
-    assert_eq!(status, 409);
-    assert_eq!(code, "recipient-retired");
-    assert_eq!(details["applied"], "none");
+    let (status,code,_,details)=fractal_daemon::client::api_error_parts(&raw).unwrap();
+    assert_eq!(status,409);assert_eq!(code,"recipient-retired");assert_eq!(details["applied"],"none");
     let restarted = daemon
         .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
         .await;
@@ -7304,11 +6841,7 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
         st(&["status"]),
         json!({"service": null, "enabled": false, "granted": []})
     );
-    assert_eq!(
-        recorded(),
-        "",
-        "status without an exposure asks Fabric nothing"
-    );
+    assert_eq!(recorded(), "", "status without an exposure asks Fabric nothing");
 
     assert_eq!(
         st(&["enable"]),
@@ -7316,8 +6849,7 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
     );
     let expose = recorded();
     assert!(
-        expose.starts_with("expose st3-client-v0 --socket ")
-            && expose.ends_with("st3-client.sock\n"),
+        expose.starts_with("expose st3-client-v0 --socket ") && expose.ends_with("st3-client.sock\n"),
         "{expose}"
     );
     assert!(root.path().join("state/st3/fabric-gateway.toml").exists());

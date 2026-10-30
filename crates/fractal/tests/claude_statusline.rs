@@ -46,8 +46,7 @@ impl Seat {
             fractal_drivers::harness_state::WRAPPERLESS_PREFIX,
             payload["session_id"].as_str().unwrap()
         );
-        fractal_drivers::harness_state::claim(&paths.agent_dir, IDENTITY, "claude", &token)
-            .unwrap();
+        fractal_drivers::harness_state::claim(&paths.agent_dir, IDENTITY, "claude", &token).unwrap();
         Self {
             _tmp: tmp,
             home,
@@ -125,15 +124,11 @@ impl Seat {
     }
 
     fn record(&self) -> Option<serde_json::Value> {
-        assert!(fractal_drivers::harness_events::enabled(
-            &self.paths.agent_dir
-        ));
+        assert!(fractal_drivers::harness_events::enabled(&self.paths.agent_dir));
         assert!(!self.paths.agent_dir.join("harness-context").exists());
-        let raw = fractal_drivers::harness_events::read_snapshot(
-            &self.paths.agent_dir,
-            "harness-context",
-        )
-        .expect("native observation outbox must remain readable")?;
+        let raw =
+            fractal_drivers::harness_events::read_snapshot(&self.paths.agent_dir, "harness-context")
+                .expect("native observation outbox must remain readable")?;
         Some(serde_json::from_slice(&raw).unwrap())
     }
 }

@@ -4,9 +4,9 @@ use fractal_daemon::SeatsStoreCore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use serde_json::Value;
 use fractal_daemon::model::{ClaimInput, MissionRunRequest};
 use fractal_daemon::store::Store;
-use serde_json::Value;
 
 fn fixture_root() -> PathBuf {
     Path::new(test_env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/operational-state")
@@ -83,8 +83,8 @@ fn regression_fixture_set_is_small_complete_and_deterministic() {
 
 #[test]
 fn every_screen_model_has_one_cli_renderer_and_required_rendering_state() {
-    let path = Path::new(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/st3/operational-state/screens.json");
+    let path =
+        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../docs/st3/operational-state/screens.json");
     let contract: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     let required = BTreeSet::from([
         "now",

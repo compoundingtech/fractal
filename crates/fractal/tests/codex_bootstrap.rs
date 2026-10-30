@@ -12,11 +12,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
+use serde_json::{Value, json};
+use fractal_runtime::PtyRuntime;
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
-use fractal_runtime::PtyRuntime;
-use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 const SUBJECT: &str = "agent/eval.codex-bootstrap";
@@ -85,17 +85,7 @@ async fn bound_cold_codex_promotes_custody_delivers_once_and_returns_to_its_shel
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    delivery_recovery_control(
-        true,
-        true,
-        Some(CompletionControl {
-            order: "before",
-            failure: false,
-            rejection: None,
-            preflight: false,
-        }),
-    )
-    .await;
+    delivery_recovery_control(true, true, Some(CompletionControl { order: "before", failure: false, rejection: None, preflight: false })).await;
 }
 
 #[derive(Clone, Copy)]
@@ -110,77 +100,28 @@ macro_rules! codex_completion_control {
     ($name:ident, $order:literal, $failure:literal, $rejection:expr) => {
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn $name() {
-            if fractal_daemon::test_support::supervise_test() {
-                return;
-            }
-            delivery_recovery_control(
-                true,
-                true,
-                Some(CompletionControl {
-                    order: $order,
-                    failure: $failure,
-                    rejection: $rejection,
-                    preflight: false,
-                }),
-            )
-            .await;
+            if fractal_daemon::test_support::supervise_test() { return; }
+            delivery_recovery_control(true, true, Some(CompletionControl {
+                order: $order, failure: $failure, rejection: $rejection,
+                preflight: false,
+            })).await;
         }
     };
 }
 
-codex_completion_control!(
-    bound_codex_success_after_join_keeps_its_shell,
-    "after",
-    false,
-    None
-);
-codex_completion_control!(
-    bound_codex_failure_before_join_keeps_failure,
-    "before",
-    true,
-    None
-);
-codex_completion_control!(
-    bound_codex_failure_after_join_keeps_failure,
-    "after",
-    true,
-    None
-);
-codex_completion_control!(
-    bound_codex_foreign_token_after_terminal_stays_fenced,
-    "before",
-    false,
-    Some("token")
-);
-codex_completion_control!(
-    bound_codex_foreign_runtime_after_terminal_stays_fenced,
-    "before",
-    false,
-    Some("runtime")
-);
-codex_completion_control!(
-    bound_codex_foreign_invocation_after_terminal_stays_fenced,
-    "before",
-    false,
-    Some("invocation")
-);
+codex_completion_control!(bound_codex_success_after_join_keeps_its_shell, "after", false, None);
+codex_completion_control!(bound_codex_failure_before_join_keeps_failure, "before", true, None);
+codex_completion_control!(bound_codex_failure_after_join_keeps_failure, "after", true, None);
+codex_completion_control!(bound_codex_foreign_token_after_terminal_stays_fenced, "before", false, Some("token"));
+codex_completion_control!(bound_codex_foreign_runtime_after_terminal_stays_fenced, "before", false, Some("runtime"));
+codex_completion_control!(bound_codex_foreign_invocation_after_terminal_stays_fenced, "before", false, Some("invocation"));
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_preflight_failure_without_harness_event_is_reported() {
-    if fractal_daemon::test_support::supervise_test() {
-        return;
-    }
-    delivery_recovery_control(
-        false,
-        true,
-        Some(CompletionControl {
-            order: "before",
-            failure: true,
-            rejection: None,
-            preflight: true,
-        }),
-    )
-    .await;
+    if fractal_daemon::test_support::supervise_test() { return; }
+    delivery_recovery_control(false, true, Some(CompletionControl {
+        order: "before", failure: true, rejection: None, preflight: true,
+    })).await;
 }
 
 fn lease_evidence(root: &Path) -> Value {
@@ -281,23 +222,19 @@ async fn delivery_recovery_control(
     runtime_claim(&store, &runtime_id, "starting", None);
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "bootstrap".into(),
-        state_dir: root.into(),
-        pty_root: pty_root.clone(),
-        pty_binary: pty.clone(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "bootstrap".into(),
+    state_dir: root.into(),
+    pty_root: pty_root.clone(),
+    pty_binary: pty.clone(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let delay = delayed.clone();
     let read_count = reads.clone();
     let bootstrap_custody = Arc::new(std::sync::Mutex::new(None));
@@ -390,10 +327,7 @@ async fn delivery_recovery_control(
     if let Some(control) = completion.filter(|control| !control.preflight) {
         std::fs::create_dir(&barrier).unwrap();
         std::fs::write(barrier.join("order"), control.order).unwrap();
-        environment.insert(
-            "ST3_FIXTURE_TERMINAL_COMPLETION",
-            barrier.to_string_lossy().into_owned(),
-        );
+        environment.insert("ST3_FIXTURE_TERMINAL_COMPLETION", barrier.to_string_lossy().into_owned());
     }
     let launch_root = root.to_owned();
     let launch_runtime_id = runtime_id.clone();
@@ -503,30 +437,14 @@ async fn delivery_recovery_control(
         std::fs::write(root.join("launch-bound-codex"), b"launch").unwrap();
     }
     if preflight {
-        until(
-            || root.join("driver-returned").exists(),
-            "Codex preflight failure was hidden waiting for a harness event",
-        )
-        .await;
-        assert_eq!(
-            std::fs::read_to_string(root.join("driver-returned")).unwrap(),
-            "2"
-        );
-        let diagnostic = store
-            .latest_claim(SUBJECT, Some("harness.diagnostic"))
-            .unwrap()
-            .unwrap();
+        until(|| root.join("driver-returned").exists(),
+            "Codex preflight failure was hidden waiting for a harness event").await;
+        assert_eq!(std::fs::read_to_string(root.join("driver-returned")).unwrap(), "2");
+        let diagnostic = store.latest_claim(SUBJECT, Some("harness.diagnostic")).unwrap().unwrap();
         assert_eq!(diagnostic.body["fields"]["code"], "codex-launch-failed");
-        assert!(
-            diagnostic.body["fields"]["reason"]
-                .as_str()
-                .unwrap()
-                .contains("synthetic app-server schema failure")
-        );
-        let ended = store
-            .latest_claim(SUBJECT, Some("runtime.observed"))
-            .unwrap()
-            .unwrap();
+        assert!(diagnostic.body["fields"]["reason"].as_str().unwrap()
+            .contains("synthetic app-server schema failure"));
+        let ended = store.latest_claim(SUBJECT, Some("runtime.observed")).unwrap().unwrap();
         assert_eq!(ended.body["fields"]["status"], "exited");
         assert_eq!(ended.body["fields"]["exit_code"], 1);
         server.abort();
@@ -553,17 +471,9 @@ async fn delivery_recovery_control(
         }
         if tokio::time::Instant::now() >= deadline {
             // CI keeps only this message, not the evidence root: say where the driver stopped.
-            let reports = store
-                .claims_for(SUBJECT, Some("harness.observed"))
-                .unwrap()
-                .iter()
-                .map(|claim| {
-                    format!(
-                        "{} {}",
-                        claim.accepted_at_unix_ms,
-                        claim.body.get("fields").unwrap_or(&claim.body)["state"]
-                    )
-                })
+            let reports = store.claims_for(SUBJECT, Some("harness.observed")).unwrap().iter()
+                .map(|claim| format!("{} {}", claim.accepted_at_unix_ms,
+                    claim.body.get("fields").unwrap_or(&claim.body)["state"]))
                 .collect::<Vec<_>>();
             let screen = std::process::Command::new(on_path("pty").unwrap())
                 .env("PTY_ROOT", root.join("pty"))
@@ -575,9 +485,7 @@ async fn delivery_recovery_control(
                 connection.query_row("SELECT sequence FROM local_mailbox_leases WHERE subject=?1 AND component='delivery'",
                     [SUBJECT], |row| row.get::<_, u64>(0))
             }).ok();
-            panic!(
-                "native control did not become ready: {agent}\nlease sequence: {lease:?}\nharness reports: {reports:?}\ndriver screen:\n{screen}"
-            );
+            panic!("native control did not become ready: {agent}\nlease sequence: {lease:?}\nharness reports: {reports:?}\ndriver screen:\n{screen}");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
@@ -855,105 +763,42 @@ async fn delivery_recovery_control(
                 .unwrap()
                 .contains(root.to_str().unwrap())
         );
-        let signal = if completion.is_some_and(|control| control.failure) {
-            libc::SIGKILL
-        } else {
-            libc::SIGTERM
-        };
+        let signal = if completion.is_some_and(|control| control.failure) { libc::SIGKILL } else { libc::SIGTERM };
         assert_eq!(unsafe { libc::kill(pid as i32, signal) }, 0);
         let mut terminal_result = Value::Null;
         if let Some(control) = completion {
-            until(
-                || barrier.join("provider-return.json").exists(),
-                "Codex provider result was not retained",
-            )
-            .await;
-            terminal_result = serde_json::from_slice(
-                &std::fs::read(barrier.join("provider-return.json")).unwrap(),
-            )
-            .unwrap();
+            until(|| barrier.join("provider-return.json").exists(), "Codex provider result was not retained").await;
+            terminal_result = serde_json::from_slice(&std::fs::read(barrier.join("provider-return.json")).unwrap()).unwrap();
             assert_eq!(terminal_result["ok"], !control.failure, "{terminal_result}");
-            until(
-                || barrier.join("observation-drained").exists(),
-                "live Codex drain did not defer its owned terminal event",
-            )
-            .await;
-            assert_eq!(
-                std::fs::read_to_string(barrier.join("observation-drained")).unwrap(),
-                "deferred"
-            );
-            if control.order == "after" {
-                std::fs::write(barrier.join("release-provider"), b"go").unwrap();
-            }
-            until(
-                || barrier.join("join-phase").exists(),
-                "Codex JoinHandle phase was not observed",
-            )
-            .await;
-            assert_eq!(
-                std::fs::read_to_string(barrier.join("join-phase")).unwrap(),
-                if control.order == "after" {
-                    "finished"
-                } else {
-                    "pending"
-                }
-            );
-            let latest = store
-                .latest_claim(SUBJECT, Some("harness.observed"))
-                .unwrap()
-                .unwrap();
-            assert_ne!(
-                latest.body["fields"]["state"], "ended",
-                "terminal graph publication must wait for the task disposition"
-            );
+            until(|| barrier.join("observation-drained").exists(), "live Codex drain did not defer its owned terminal event").await;
+            assert_eq!(std::fs::read_to_string(barrier.join("observation-drained")).unwrap(), "deferred");
+            if control.order == "after" { std::fs::write(barrier.join("release-provider"), b"go").unwrap(); }
+            until(|| barrier.join("join-phase").exists(), "Codex JoinHandle phase was not observed").await;
+            assert_eq!(std::fs::read_to_string(barrier.join("join-phase")).unwrap(),
+                if control.order == "after" { "finished" } else { "pending" });
+            let latest = store.latest_claim(SUBJECT, Some("harness.observed")).unwrap().unwrap();
+            assert_ne!(latest.body["fields"]["state"], "ended", "terminal graph publication must wait for the task disposition");
             let retained = lease_evidence(root);
             assert_eq!(retained, lease, "completion does not reissue custody");
             match control.rejection {
                 Some("token") => {
-                    let request =
-                        fractal_daemon::mailbox::Fence::new(SUBJECT, &incarnation, "delivery");
+                    let request = fractal_daemon::mailbox::Fence::new(SUBJECT, &incarnation, "delivery");
                     fractal_daemon::test_support::bind_fixture_mailbox(&store, &request).unwrap();
                 }
                 Some("runtime") => {
-                    store
-                        .append_claim(&ClaimInput {
-                            subject: SUBJECT.into(),
-                            kind: "runtime.observed".into(),
-                            actor: Some("daemon/runtime".into()),
-                            fields: BTreeMap::from([
-                                ("status".into(), json!("running")),
-                                ("incarnation_id".into(), json!("replacement-runtime")),
-                            ]),
-                            evidence: vec![],
-                            expected_subject: None,
-                            idempotency_key: None,
-                        })
-                        .unwrap();
+                    store.append_claim(&ClaimInput {
+                        subject: SUBJECT.into(), kind: "runtime.observed".into(), actor: Some("daemon/runtime".into()),
+                        fields: BTreeMap::from([("status".into(), json!("running")), ("incarnation_id".into(), json!("replacement-runtime"))]),
+                        evidence: vec![], expected_subject: None, idempotency_key: None,
+                    }).unwrap();
                 }
                 Some("invocation") => {
-                    let source = format!(
-                        "version 2\nagent \"eval.codex-bootstrap\" {{ harness \"codex\" {{}}; bind-terminal {TERMINAL:?} incarnation={physical_incarnation:?} id=\"019a0000-0000-7000-8000-000000000005\"; }}"
-                    );
+                    let source = format!("version 2\nagent \"eval.codex-bootstrap\" {{ harness \"codex\" {{}}; bind-terminal {TERMINAL:?} incarnation={physical_incarnation:?} id=\"019a0000-0000-7000-8000-000000000005\"; }}");
                     let intent = fractal_daemon::graph::parse_intent(&source, "bootstrap").unwrap();
-                    let plan = store
-                        .mission(
-                            &intent,
-                            fractal_daemon::model::IntentInput {
-                                kdl: source,
-                                source_name: None,
-                            },
-                        )
-                        .unwrap();
-                    store
-                        .apply_as(
-                            &intent,
-                            &plan.subject_tokens,
-                            "replace-codex-invocation",
-                            Some("person/eval"),
-                        )
-                        .unwrap();
+                    let plan = store.mission(&intent, fractal_daemon::model::IntentInput { kdl: source, source_name: None }).unwrap();
+                    store.apply_as(&intent, &plan.subject_tokens, "replace-codex-invocation", Some("person/eval")).unwrap();
                 }
-                None => {}
+                None => {},
                 Some(other) => panic!("unknown completion rejection {other}"),
             }
             std::fs::write(barrier.join("poll-driver"), b"go").unwrap();
@@ -963,15 +808,8 @@ async fn delivery_recovery_control(
             if control.rejection.is_some() {
                 // Prove the foreign fence is fatal while the provider JoinHandle is
                 // pending, then release the blocking fixture worker for shutdown.
-                until(
-                    || barrier.join("fence-received").exists(),
-                    "foreign Codex fence was not accepted",
-                )
-                .await;
-                assert_eq!(
-                    std::fs::read_to_string(barrier.join("fence-received")).unwrap(),
-                    "pending"
-                );
+                until(|| barrier.join("fence-received").exists(), "foreign Codex fence was not accepted").await;
+                assert_eq!(std::fs::read_to_string(barrier.join("fence-received")).unwrap(), "pending");
                 std::fs::write(barrier.join("release-provider"), b"go").unwrap();
             }
         }
@@ -982,27 +820,14 @@ async fn delivery_recovery_control(
         .await;
         assert_eq!(
             std::fs::read_to_string(root.join("driver-returned")).unwrap(),
-            if completion.is_some_and(|control| control.failure || control.rejection.is_some()) {
-                "2"
-            } else {
-                "0"
-            }
+            if completion.is_some_and(|control| control.failure || control.rejection.is_some()) { "2" } else { "0" }
         );
         if let Some(control) = completion {
             if control.failure {
-                assert!(
-                    store
-                        .claims_for(SUBJECT, Some("harness.diagnostic"))
-                        .unwrap()
-                        .iter()
-                        .any(|claim| claim.body["fields"]["code"] == "codex-driver-failed")
-                );
+                assert!(store.claims_for(SUBJECT, Some("harness.diagnostic")).unwrap().iter()
+                    .any(|claim| claim.body["fields"]["code"] == "codex-driver-failed"));
             }
-            assert_eq!(
-                offers(),
-                1,
-                "terminal disposition must not replay native mail"
-            );
+            assert_eq!(offers(), 1, "terminal disposition must not replay native mail");
             std::fs::write(root.join("codex-completion-evidence.json"), serde_json::to_vec_pretty(&json!({
                 "order":control.order,"failed_provider":control.failure,"foreign_fence":control.rejection,
                 "provider_result":terminal_result,"wrapper_exit":std::fs::read_to_string(root.join("driver-returned")).unwrap(),
@@ -1085,23 +910,19 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     runtime_claim(&store, &runtime_id, status, previous);
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "bootstrap".into(),
-        state_dir: root.path().into(),
-        pty_root: pty_root.clone(),
-        pty_binary: pty.clone(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "bootstrap".into(),
+    state_dir: root.path().into(),
+    pty_root: pty_root.clone(),
+    pty_binary: pty.clone(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let pending_count = pending.clone();
     let bound_count = bound.clone();
     let bound_store = state.store.clone();
@@ -1138,14 +959,9 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let server_socket = socket.clone();
     let server_state_socket = state_socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix_bound(
-            &server_socket,
-            &server_state_socket,
-            app,
-            bound_store,
-        )
-        .await
-        .unwrap();
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_state_socket, app, bound_store)
+            .await
+            .unwrap();
     });
     until(|| socket.exists(), "the isolated API did not start").await;
     let provider = root.path().join("provider");

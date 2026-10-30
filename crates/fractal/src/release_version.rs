@@ -19,11 +19,7 @@ fn display(receipt: &Path, machine: &str, fallback: &str) -> String {
             return None;
         }
         let mut bytes = Vec::new();
-        std::fs::File::open(receipt)
-            .ok()?
-            .take(8193)
-            .read_to_end(&mut bytes)
-            .ok()?;
+        std::fs::File::open(receipt).ok()?.take(8193).read_to_end(&mut bytes).ok()?;
         if bytes.len() > 8192 {
             return None;
         }
@@ -36,9 +32,7 @@ fn display(receipt: &Path, machine: &str, fallback: &str) -> String {
             || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             || commit != revision
             || tag.is_empty()
-            || !tag
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            || !tag.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         {
             return None;
         }
@@ -53,10 +47,7 @@ pub(crate) fn print() {
     let version = std::env::current_exe()
         .ok()
         .and_then(|binary| receipt_path(&binary))
-        .map_or_else(
-            || fallback.to_owned(),
-            |path| display(&path, &machine, fallback),
-        );
+        .map_or_else(|| fallback.to_owned(), |path| display(&path, &machine, fallback));
     println!("fractal {version}");
 }
 
@@ -69,10 +60,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("RELEASE.json");
         std::fs::write(&path, r#"{"tag":"v0.3.18","commit":"abcdef123"}"#).unwrap();
-        assert_eq!(
-            display(&path, "0.3.17+abcdef123", "fallback"),
-            "v0.3.18 (abcdef123)"
-        );
+        assert_eq!(display(&path, "0.3.17+abcdef123", "fallback"), "v0.3.18 (abcdef123)");
     }
 
     #[test]
@@ -81,10 +69,7 @@ mod tests {
         let path = root.path().join("RELEASE.json");
         std::fs::write(&path, r#"{"tag":"v0.3.18","commit":"abcdef123"}"#).unwrap();
         assert_eq!(display(&path, "0.3.17+abcdef124", "fallback"), "fallback");
-        assert_eq!(
-            display(&path, "0.3.17+abcdef123-dirty", "fallback"),
-            "fallback"
-        );
+        assert_eq!(display(&path, "0.3.17+abcdef123-dirty", "fallback"), "fallback");
     }
 
     #[test]
@@ -93,11 +78,7 @@ mod tests {
         let path = root.path().join("RELEASE.json");
         let fallback = "0.3.17+abcdef123";
         assert_eq!(display(&path, fallback, fallback), fallback);
-        for bytes in [
-            "not json",
-            "{}",
-            r#"{"tag":"v0.3.18\nforged","commit":"abcdef123"}"#,
-        ] {
+        for bytes in ["not json", "{}", r#"{"tag":"v0.3.18\nforged","commit":"abcdef123"}"#] {
             std::fs::write(&path, bytes).unwrap();
             assert_eq!(display(&path, fallback, fallback), fallback);
         }
@@ -105,13 +86,9 @@ mod tests {
 
     #[test]
     fn macos_receipt_stays_outside_signed_bundle() {
-        assert_eq!(
-            receipt_path(Path::new("/Applications/SmallTalk.app/Contents/MacOS/st3")),
-            Some(PathBuf::from("/Applications/SmallTalk.app.RELEASE.json"))
-        );
-        assert_eq!(
-            receipt_path(Path::new("/opt/fractal/bin/st3")),
-            Some(PathBuf::from("/opt/fractal/bin/RELEASE.json"))
-        );
+        assert_eq!(receipt_path(Path::new("/Applications/SmallTalk.app/Contents/MacOS/st3")),
+            Some(PathBuf::from("/Applications/SmallTalk.app.RELEASE.json")));
+        assert_eq!(receipt_path(Path::new("/opt/fractal/bin/st3")),
+            Some(PathBuf::from("/opt/fractal/bin/RELEASE.json")));
     }
 }

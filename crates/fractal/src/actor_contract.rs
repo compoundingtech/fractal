@@ -185,14 +185,8 @@ mod tests {
     #[test]
     fn actor_contract_records_real_command_aliases() {
         let value = generate(super::super::Cli::command());
-        assert_eq!(
-            value["contract"]["aliases"]["st alerts"],
-            json!(["attention"])
-        );
-        assert_eq!(
-            value["contract"]["aliases"]["st changes list"],
-            json!(["ls"])
-        );
+        assert_eq!(value["contract"]["aliases"]["st alerts"], json!(["attention"]));
+        assert_eq!(value["contract"]["aliases"]["st changes list"], json!(["ls"]));
         for (alias, canonical) in [
             ("attention ls", "alerts ls"),
             ("changes ls", "changes list"),
@@ -298,7 +292,8 @@ mod tests {
         .unwrap();
         assert!(published.get("contract_sha256").is_none());
         assert_eq!(
-            value["contract"], published["contract"],
+            value["contract"],
+            published["contract"],
             "the CLI actor surface changed; review every changed command and regenerate with: st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json; resolve rebase conflicts by regenerating, never by hand-merging"
         );
     }
@@ -320,16 +315,12 @@ mod tests {
     fn actor_contract_matches_actual_as_acceptance() {
         fn check(command: &clap::Command, path: &str, contract: &Value) {
             let callable = path != "st"
-                && (!command
-                    .get_subcommands()
-                    .any(|child| child.get_name() != "help")
+                && (!command.get_subcommands().any(|child| child.get_name() != "help")
                     || !command.is_subcommand_required_set());
             if callable {
                 let entry = contract["contract"]["commands"]
                     .get(path)
-                    .unwrap_or_else(|| {
-                        panic!("callable command missing from actor contract: {path}")
-                    });
+                    .unwrap_or_else(|| panic!("callable command missing from actor contract: {path}"));
                 let mut argv = path.split_whitespace().collect::<Vec<_>>();
                 argv.extend(["--as", "person/probe"]);
                 let actual = super::super::Cli::command().try_get_matches_from(argv);

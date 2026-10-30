@@ -1,9 +1,9 @@
 #![cfg(unix)]
+use serde_json::Value;
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::MemberSpec;
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, watch};
@@ -427,27 +427,22 @@ impl Node {
         let notify = Arc::new(Notify::new());
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
-        let state = AppState {
-            owning_person: None,
-            store: store.clone(),
-            notify,
-            event_notify: watch::channel(0).0,
-            node: name.into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: Some(FLEET.into()),
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-            private_notes: Default::default(),
-        };
+        let state = AppState { owning_person: None,
+        store: store.clone(),
+        notify,
+        event_notify: watch::channel(0).0,
+        node: name.into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let socket = root.path().join("st3.sock");
         let router = fractal_daemon::api::router(state);
-        let server =
-            tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
+        let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
         for _ in 0..100 {
             if root.path().join("st3.sock").exists() {
                 break;
@@ -539,9 +534,7 @@ agent "example/mover" {{
         let home = self.root.path().to_owned();
         let args = args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
         tokio::task::spawn_blocking(move || {
-            std::process::Command::new(test_bin!("st3"))
-                .env_remove("ST_AGENT")
-                .env_remove("FRACTAL_AGENT")
+            std::process::Command::new(test_bin!("st3")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .env("HOME", &home)
                 .env("XDG_CONFIG_HOME", home.join("config"))
@@ -907,8 +900,7 @@ async fn a_confirmed_explicit_stop_allows_a_move_while_the_source_is_offline() {
     amber.declare("amber", true, "initial");
     amber.pass();
     amber.pass();
-    let intent =
-        fractal_daemon::parse_intent(&format!("version 2\nstop \"{SEAT}\"\n"), "amber").unwrap();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\nstop \"{SEAT}\"\n"), "amber").unwrap();
     let preview = amber
         .store
         .mission(
@@ -1014,13 +1006,9 @@ agent "example/mover" {{
     )
     .unwrap();
     let result = cobalt
-        .cli(&[
-            "apply",
-            "--no-gate-check",
-            path.to_str().unwrap(),
-            "--as",
-            "person/avery",
-        ])
+        .cli(&["apply", "--no-gate-check", path.to_str().unwrap(),
+        "--as",
+        "person/avery",])
         .await;
     assert!(
         result.status.success(),

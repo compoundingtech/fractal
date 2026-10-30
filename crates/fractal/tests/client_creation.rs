@@ -2,30 +2,26 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use fractal_daemon::{api::AppState, store::Store};
 use serde_json::{Value, json};
+use fractal_daemon::{api::AppState, store::Store};
 use std::{path::Path, sync::Arc};
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
 fn state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("creation-test").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "creation-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("creation-test").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "creation-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 async fn request(
     app: axum::Router,
@@ -218,8 +214,7 @@ async fn agent_creation_has_typed_parameters_and_native_first_message() {
         "agent/creation-test.worker"
     );
     let members = state.store.desired_subjects().unwrap();
-    let fractal_daemon::model::LaunchSpec::Argv(argv) = &members[0].member.as_ref().unwrap().launch
-    else {
+    let fractal_daemon::model::LaunchSpec::Argv(argv) = &members[0].member.as_ref().unwrap().launch else {
         panic!()
     };
     assert!(
@@ -322,9 +317,10 @@ async fn first_message_receipt_survives_reopen_and_replication() {
     let mut original = state(root.path());
     original.store = Arc::new(Store::open(&database, "creation-test").unwrap());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Http(
-        format!("http://{}", listener.local_addr().unwrap()),
-    ));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Http(format!(
+        "http://{}",
+        listener.local_addr().unwrap()
+    )));
     let server_state = original.clone();
     let server = tokio::spawn(async move {
         axum::serve(listener, fractal_daemon::api::router(server_state))
@@ -332,44 +328,24 @@ async fn first_message_receipt_survives_reopen_and_replication() {
             .unwrap();
     });
     assert!(
-        fractal_daemon::creation::claim_initial_message(
-            &client,
-            "agent/test/worker",
-            "launch-1",
-            "i1"
-        )
-        .await
-        .unwrap()
+        fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i1")
+            .await
+            .unwrap()
     );
     assert!(
-        !fractal_daemon::creation::claim_initial_message(
-            &client,
-            "agent/test/worker",
-            "launch-1",
-            "i1"
-        )
-        .await
-        .unwrap()
+        !fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i1")
+            .await
+            .unwrap()
     );
     assert!(
-        !fractal_daemon::creation::claim_initial_message(
-            &client,
-            "agent/test/worker",
-            "launch-1",
-            "i2"
-        )
-        .await
-        .unwrap()
+        !fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i2")
+            .await
+            .unwrap()
     );
     assert!(
-        fractal_daemon::creation::claim_initial_message(
-            &client,
-            "agent/test/worker",
-            "launch-2",
-            "i2"
-        )
-        .await
-        .unwrap()
+        fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-2", "i2")
+            .await
+            .unwrap()
     );
     server.abort();
     let _ = server.await;
@@ -380,23 +356,19 @@ async fn first_message_receipt_survives_reopen_and_replication() {
     second.store = Arc::new(Store::open_memory("replica-test").unwrap());
     replicate(&reopened, &second.store);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Http(
-        format!("http://{}", listener.local_addr().unwrap()),
-    ));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Http(format!(
+        "http://{}",
+        listener.local_addr().unwrap()
+    )));
     let server = tokio::spawn(async move {
         axum::serve(listener, fractal_daemon::api::router(second))
             .await
             .unwrap();
     });
     assert!(
-        !fractal_daemon::creation::claim_initial_message(
-            &client,
-            "agent/test/worker",
-            "launch-1",
-            "i3"
-        )
-        .await
-        .unwrap()
+        !fractal_daemon::creation::claim_initial_message(&client, "agent/test/worker", "launch-1", "i3")
+            .await
+            .unwrap()
     );
     server.abort();
     let _ = server.await;

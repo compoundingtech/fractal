@@ -26,8 +26,7 @@ fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
 #[test]
 fn malformed_native_fabric_endpoint_is_not_a_local_socket() {
     for value in [
-        "fabric://devbox",
-        "fabric://devbox/replication",
+        "fabric://devbox", "fabric://devbox/replication",
         "fabric://devbox/st3-client-v0/../admin",
     ] {
         assert!(Endpoint::parse(value).is_err(), "{value}");
@@ -45,50 +44,26 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
     };
     assert!(validate_repair_plan_filters(&plan, &[], &[]).is_ok());
     assert!(validate_repair_plan_filters(&plan, &["agent/example-first".into()], &[]).is_err());
-    assert!(
-        validate_repair_plan_filters(&plan, &[], &["revoked-legacy-runtime-start".into()]).is_err()
-    );
+    assert!(validate_repair_plan_filters(&plan, &[], &["revoked-legacy-runtime-start".into()]).is_err());
 }
 
 #[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
-        "st",
-        "repair",
-        "dry-run",
-        "--as",
-        "agent/own",
-        "--subject",
-        "agent/example-first",
-        "--subject",
-        "agent/example-second",
-        "--class",
-        "revoked-legacy-runtime-start",
-    ])
-    .unwrap();
-    let Command::Repair {
-        command:
-            RepairCommand::DryRun {
-                subjects,
-                classes,
-                ignored_actor,
-            },
-    } = cli.command
-    else {
+        "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
+        "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
+    ]).unwrap();
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes, ignored_actor } } = cli.command else {
         panic!("expected filtered repair dry-run");
     };
     assert_eq!(ignored_actor.as_deref(), Some("agent/own"));
     assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
     assert_eq!(classes, ["revoked-legacy-runtime-start"]);
     let path = repair_plan_path(&subjects, &classes).unwrap();
-    assert!(path.contains(&format!(
-        "subjects={}",
-        urlencoding::encode(r#"["agent/example-first","agent/example-second"]"#)
-    )));
-    assert!(path.contains(&format!(
-        "classes={}",
-        urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#)
-    )));
+    assert!(path.contains(&format!("subjects={}",
+        urlencoding::encode(r#"["agent/example-first","agent/example-second"]"#))));
+    assert!(path.contains(&format!("classes={}",
+        urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
     assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
 }
 
@@ -96,26 +71,9 @@ fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
 fn repair_actor_path_binds_the_literal_seat_before_requests() {
     for arguments in [
         vec!["st", "repair", "apply", "--as", "agent/own", "orpv0:token"],
-        vec![
-            "st",
-            "repair",
-            "dry-run",
-            "--as",
-            "agent/own",
-            "--subject",
-            "agent/target",
-            "--class",
-            "revoked-legacy-runtime-start",
-        ],
-        vec![
-            "st",
-            "conversations",
-            "status",
-            "--as",
-            "agent/own",
-            "--idempotency-key",
-            "key",
-        ],
+        vec!["st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/target",
+            "--class", "revoked-legacy-runtime-start"],
+        vec!["st", "conversations", "status", "--as", "agent/own", "--idempotency-key", "key"],
     ] {
         let own = Cli::try_parse_from(&arguments).unwrap();
         assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
@@ -140,16 +98,16 @@ fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
     let store = Store::open_memory("repair-actor-test").unwrap();
     let subjects = vec!["agent/target".to_owned()];
     let classes = vec!["revoked-legacy-runtime-start".to_owned()];
-    let mut plan = store
-        .operational_repair_plan_with_legacy_starts_and_filter(&[], &subjects, &classes)
-        .unwrap();
+    let mut plan = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], &subjects, &classes,
+    ).unwrap();
     assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_ok());
-    let mut item: fractal_daemon::model::OperationalRepairItem =
-        serde_json::from_value(serde_json::json!({
+    let mut item: fractal_daemon::model::OperationalRepairItem = serde_json::from_value(
+        serde_json::json!({
             "id": "repair/test", "class": classes[0], "subject": "agent/unrelated",
             "affected_subjects": [], "reason": "test"
-        }))
-        .unwrap();
+        })
+    ).unwrap();
     plan.items.push(item.clone());
     assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
     item.subject = subjects[0].clone();
@@ -161,44 +119,31 @@ fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
 #[test]
 fn repair_apply_guidance_preserves_actorless_humans_and_effective_agent_aliases() {
     let human = fractal_drivers::contracts::env_with("ST_AGENT", &|_| None);
-    assert_eq!(
-        repair_apply_guidance("orpv0:token", human.as_deref()),
-        "fractal repair apply orpv0:token"
-    );
+    assert_eq!(repair_apply_guidance("orpv0:token", human.as_deref()),
+        "fractal repair apply orpv0:token");
     for variable in ["ST_AGENT", "FRACTAL_AGENT"] {
         let own = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
             (name == variable).then(|| "agent/own".to_owned())
         });
         let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
         guard_mutating_cli_actor(&read.command, own.as_deref(), None).unwrap();
-        assert_eq!(
-            repair_apply_guidance("orpv0:token", own.as_deref()),
-            "fractal repair apply --as agent/own orpv0:token",
-            "{variable}"
-        );
+        assert_eq!(repair_apply_guidance("orpv0:token", own.as_deref()),
+            "fractal repair apply --as agent/own orpv0:token", "{variable}");
     }
 }
 
 #[test]
 fn repair_apply_actor_requests_use_only_the_new_attributed_route() {
     assert_eq!(repair_apply_path(None), "/v1/repair/apply");
-    assert_eq!(
-        repair_apply_path(Some("agent/own")),
-        "/v1/repair/apply-attributed"
-    );
+    assert_eq!(repair_apply_path(Some("agent/own")), "/v1/repair/apply-attributed");
 }
 
 #[test]
 fn owner_index_preparation_is_explicit_and_only_in_maintenance_help() {
     assert!(Cli::try_parse_from(["st", "store", "prepare-indexes"]).is_err());
     let cli = Cli::try_parse_from([
-        "st",
-        "store",
-        "prepare-indexes",
-        "--store",
-        "/private/claims.sqlite3",
-    ])
-    .unwrap();
+        "st", "store", "prepare-indexes", "--store", "/private/claims.sqlite3",
+    ]).unwrap();
     assert!(matches!(cli.command, Command::Store {
         command: StoreCommand::PrepareIndexes { store },
     } if store == std::path::Path::new("/private/claims.sqlite3")));
@@ -221,40 +166,22 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
         };
         assert_eq!(agent_environment_present(), case != "instance");
         let root_command = cli_command();
-        let command = root_command
-            .find_subcommand("work")
-            .unwrap()
-            .find_subcommand("start")
-            .unwrap()
-            .clone();
-        let parsed = command
-            .clone()
-            .try_get_matches_from(["start", "task"])
+        let command = root_command.find_subcommand("work").unwrap()
+            .find_subcommand("start").unwrap().clone();
+        let parsed = command.clone().try_get_matches_from(["start", "task"])
             .and_then(|matches| WorkStartArgs::from_arg_matches(&matches));
         assert_eq!(parsed.ok().map(|args| args.actor).as_deref(), expected);
-        let matches = command
-            .try_get_matches_from(["start", "task", "--as", "person/explicit"])
-            .unwrap();
+        let matches = command.try_get_matches_from([
+            "start", "task", "--as", "person/explicit",
+        ]).unwrap();
         let explicit = WorkStartArgs::from_arg_matches(&matches).unwrap();
         assert_eq!(explicit.actor, "person/explicit");
         if case == "instance" {
             let arguments = vec![std::ffi::OsString::from("st")];
-            assert_eq!(
-                fractal_daemon::instance::requested(&arguments).as_deref(),
-                Some("alias-test")
-            );
-            let matches = cli_command()
-                .try_get_matches_from([
-                    "st",
-                    "--instance",
-                    "flag-test",
-                    "work",
-                    "start",
-                    "task",
-                    "--as",
-                    "person/explicit",
-                ])
-                .unwrap();
+            assert_eq!(fractal_daemon::instance::requested(&arguments).as_deref(), Some("alias-test"));
+            let matches = cli_command().try_get_matches_from([
+                "st", "--instance", "flag-test", "work", "start", "task", "--as", "person/explicit",
+            ]).unwrap();
             let parsed = Cli::from_arg_matches(&matches).unwrap();
             assert_eq!(parsed.instance.as_deref(), Some("flag-test"));
         }
@@ -269,12 +196,7 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
         ("instance", None, None),
     ] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "tests::cli_environment_aliases_are_normalized_before_parsing",
-                "--nocapture",
-            ])
+        command.args(["--exact", "tests::cli_environment_aliases_are_normalized_before_parsing", "--nocapture"])
             .env(CHILD, case);
         for (name, new) in CLI_ENVIRONMENT_NAMES {
             command.env_remove(name).env_remove(new);
@@ -282,31 +204,14 @@ fn cli_environment_aliases_are_normalized_before_parsing() {
                 command.env_remove(legacy);
             }
         }
-        if let Some(value) = old {
-            command.env("ST_AGENT", value);
-        }
-        if let Some(value) = new {
-            command.env("FRACTAL_AGENT", value);
-        }
-        if case == "instance" {
-            command.env("FRACTAL_INSTANCE", "alias-test");
-        }
+        if let Some(value) = old { command.env("ST_AGENT", value); }
+        if let Some(value) = new { command.env("FRACTAL_AGENT", value); }
+        if case == "instance" { command.env("FRACTAL_INSTANCE", "alias-test"); }
         let output = command.output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            output.status.success(),
-            "{case}: {stderr}\n{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        assert_eq!(
-            stderr.contains("conflicting environment variables"),
-            case == "conflict",
-            "{case}: {stderr}"
-        );
-        assert!(
-            !stderr.contains("agent/old") && !stderr.contains("agent/new"),
-            "{case}: {stderr}"
-        );
+        assert!(output.status.success(), "{case}: {stderr}\n{}", String::from_utf8_lossy(&output.stdout));
+        assert_eq!(stderr.contains("conflicting environment variables"), case == "conflict", "{case}: {stderr}");
+        assert!(!stderr.contains("agent/old") && !stderr.contains("agent/new"), "{case}: {stderr}");
     }
 }
 
@@ -324,28 +229,13 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
     ];
     let list = render_slo_list(&rows);
     let lines = list.lines().collect::<Vec<_>>();
-    assert_eq!(
-        lines[0],
-        "OBJECTIVES  a target with windows and an error budget · 2"
-    );
-    assert!(
-        lines[1].starts_with("STATUS   ID           TARGET"),
-        "{}",
-        lines[1]
-    );
-    assert!(
-        lines[2].starts_with("met      person-read  p99 ≤ 100 ms"),
-        "{}",
-        lines[2]
-    );
+    assert_eq!(lines[0], "OBJECTIVES  a target with windows and an error budget · 2");
+    assert!(lines[1].starts_with("STATUS   ID           TARGET"), "{}", lines[1]);
+    assert!(lines[2].starts_with("met      person-read  p99 ≤ 100 ms"), "{}", lines[2]);
     assert!(lines[2].ends_with("1h      50%"), "{}", lines[2]);
     assert!(lines[3].ends_with("1h      -"), "{}", lines[3]);
     assert_eq!(lines[5], "BUDGETS  an allowance that resets · 1");
-    assert!(
-        lines[7].contains("ada/claude/weekly") && lines[7].ends_with("60%"),
-        "{}",
-        lines[7]
-    );
+    assert!(lines[7].contains("ada/claude/weekly") && lines[7].ends_with("60%"), "{}", lines[7]);
     assert_eq!(render_slo_list(&[]), "No objectives or budgets.\n");
 
     let explained = render_slo_explanation(&rows[1]);
@@ -369,16 +259,9 @@ fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
     assert_eq!(lines[5], " 50% │██  ");
     assert_eq!(lines[8], "  0% │██·▁");
     assert_eq!(lines[9], "     └────");
-    assert!(
-        lines[10].starts_with("      01-01 00:00 UTC "),
-        "{}",
-        lines[10]
-    );
+    assert!(lines[10].starts_with("      01-01 00:00 UTC "), "{}", lines[10]);
     assert!(lines[10].ends_with("01-02 00:00"), "{}", lines[10]);
-    assert_eq!(
-        lines[11],
-        "LOW 0% · LATEST 0% · 3 readings · a column is its lowest reading"
-    );
+    assert_eq!(lines[11], "LOW 0% · LATEST 0% · 3 readings · a column is its lowest reading");
     let empty = render_slo_chart(&row, &json!({"samples": 0, "steps": [null]}), "1h");
     assert!(empty.contains("No readings in this period"));
 }
@@ -429,9 +312,7 @@ fn checkpoint_status_labels_startup_revisions_and_missing_advertisements() {
 
 #[test]
 fn seats_renew_once_a_minute_each_at_its_own_second_not_all_on_the_minute_boundary() {
-    let seats: Vec<String> = (0..120)
-        .map(|n| format!("agent/example/seat-{n}"))
-        .collect();
+    let seats: Vec<String> = (0..120).map(|n| format!("agent/example/seat-{n}")).collect();
     let mut renewals_per_second = [0usize; 60];
     for seat in &seats {
         let offset = renewal_offset_secs(seat);
@@ -466,15 +347,8 @@ fn omp_pending_ask_retry_is_bound_to_the_expected_call_and_sent_once_across_reex
     let frame = json!({"type":"retry_pending_ask","toolCallId":"X"});
     assert!(state.take_pending_ask_retry(&frame, None).is_none());
     assert!(state.take_pending_ask_retry(&frame, Some("Y")).is_none());
-    assert!(
-        state
-            .take_pending_ask_retry(&json!({"type":"state","toolCallId":"X"}), Some("X"))
-            .is_none()
-    );
-    assert_eq!(
-        state.take_pending_ask_retry(&frame, Some("X")).as_deref(),
-        Some("X")
-    );
+    assert!(state.take_pending_ask_retry(&json!({"type":"state","toolCallId":"X"}), Some("X")).is_none());
+    assert_eq!(state.take_pending_ask_retry(&frame, Some("X")).as_deref(), Some("X"));
     assert!(state.take_pending_ask_retry(&frame, Some("X")).is_none());
     let mut restored: PiChannelResume =
         serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
@@ -484,24 +358,13 @@ fn omp_pending_ask_retry_is_bound_to_the_expected_call_and_sent_once_across_reex
 #[test]
 fn omp_delivery_readiness_does_not_clear_the_reopened_human_block() {
     let mut state = PiChannelResume::default();
-    assert!(
-        state.accept_frame(
-            r#"{"type":"state","state":"active","blockedOn":"human","ask":"question"}"#
-        )
-    );
+    assert!(state.accept_frame(r#"{"type":"state","state":"active","blockedOn":"human","ask":"question"}"#));
     assert!(!state.first_idle_seen);
     assert!(!state.accept_frame(r#"{"type":"delivery_ready"}"#));
     assert!(state.first_idle_seen);
     assert_eq!(state.pending.blocked_on.as_deref(), Some("human"));
     assert_eq!(state.pending.ask.as_deref(), Some("question"));
-    assert_eq!(
-        state
-            .pending
-            .state
-            .as_ref()
-            .map(|(status, _)| status.as_str()),
-        Some("working")
-    );
+    assert_eq!(state.pending.state.as_ref().map(|(status, _)| status.as_str()), Some("working"));
     assert!(state.accept_frame(r#"{"type":"state","state":"idle"}"#));
     assert!(state.pending.blocked_on.is_none());
 }
@@ -528,20 +391,11 @@ fn clients_and_devices_say_who_is_connected_and_when_others_were_seen() {
     let shown = render_clients(&found, now);
     assert!(shown.contains("CLIENTS  2 on host/example"), "{shown}");
     assert!(shown.contains("smalltalk-ios 1.0 (42)  person/avery (Pocket)  via gateway  connected now, since 2m ago"), "{shown}");
-    assert!(
-        shown.contains("  follows: agents, conversation:agent/example/harbor"),
-        "{shown}"
-    );
-    assert!(
-        shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"),
-        "{shown}"
-    );
+    assert!(shown.contains("  follows: agents, conversation:agent/example/harbor"), "{shown}");
+    assert!(shown.contains("(unnamed client)  person/avery  via local  last seen 3m ago"), "{shown}");
     let devices = "DEVICES\ndevice/001122  active  person/avery/session/0011  scopes 4\n  action: fractal devices --as person/avery revoke device/001122\n";
     let marked = with_device_presence(devices, Some(&found), now);
-    assert!(
-        marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"),
-        "{marked}"
-    );
+    assert!(marked.contains("scopes 4  · connected now · smalltalk-ios 1.0 (42)"), "{marked}");
     assert_eq!(with_device_presence(devices, None, now), devices);
 }
 
@@ -559,8 +413,7 @@ fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
         "observed_at":"2026-10-03T15:00:00Z","phases":[],
         "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0},
         "truncated":false
-    })
-    .to_string();
+    }).to_string();
     assert!(!state.accept_frame(&frame));
     assert!(state.accept_frame(r#"{"type":"ready","sessionId":"native-a"}"#));
     assert!(state.accept_frame(&frame));
@@ -571,12 +424,7 @@ fn harness_todo_graph_channel_rehydrates_and_spools_only_current_binding() {
         serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert!(resumed.accept_frame(r#"{"type":"session","sessionId":"native-b"}"#));
     assert!(!resumed.accept_frame(&frame));
-    assert_eq!(
-        fractal_drivers::harness_events::pending(root.path(), 100)
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().len(), 1);
 }
 
 #[test]
@@ -600,18 +448,9 @@ fn harness_todo_spool_reconnect_preserves_sequence_and_next_incarnation_cleans_o
     prepare_channel_todo_outbox(root.path(), "agent/one", "runtime-c").unwrap();
     assert!(!current.exists());
     assert!(unrelated.exists());
-    assert!(!todo_runtime_has_ended(
-        &json!({"incarnation_id":"a","status":"running"}),
-        "a"
-    ));
-    assert!(todo_runtime_has_ended(
-        &json!({"incarnation_id":"a","status":"exited"}),
-        "a"
-    ));
-    assert!(todo_runtime_has_ended(
-        &json!({"incarnation_id":"b","status":"running"}),
-        "a"
-    ));
+    assert!(!todo_runtime_has_ended(&json!({"incarnation_id":"a","status":"running"}), "a"));
+    assert!(todo_runtime_has_ended(&json!({"incarnation_id":"a","status":"exited"}), "a"));
+    assert!(todo_runtime_has_ended(&json!({"incarnation_id":"b","status":"running"}), "a"));
     assert!(!todo_runtime_has_ended(&json!({}), "a"));
 }
 
@@ -623,217 +462,94 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
     fs::write(dir.join("pending"), b"unpublished todo").unwrap();
     let store = std::sync::Arc::new(Store::open_memory("todo-liveness").unwrap());
     let observe = |status: &str| {
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/seat".into(),
-                kind: "runtime.observed".into(),
-                actor: None,
-                fields: serde_json::from_value(json!({
-                    "incarnation_id":"current", "status":status,
-                }))
-                .unwrap(),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        store.append_claim(&ClaimInput {
+            subject: "agent/seat".into(), kind: "runtime.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({
+                "incarnation_id":"current", "status":status,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
     };
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0).0,
-        node: "todo-liveness".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "todo-liveness".into(), state_dir: root.path().into(),
+    pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+    fleet_id: None, configured_peers: vec![], client_relay: None,
+    native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let path = root.path().join("api.sock");
     let socket = path.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state))
-            .await
-            .unwrap();
+        fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state)).await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !path.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+        while !path.exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
     let client = Client::unix(&path);
     tokio::time::pause();
     // Keep socket I/O from automatically advancing the paused clock to unrelated timers.
     let clock_guard = tokio::spawn(async {
-        loop {
-            tokio::task::yield_now().await;
-        }
+        loop { tokio::task::yield_now().await; }
     });
     let mut end_seen = None;
     observe("vanished");
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     assert_eq!(fs::read(dir.join("pending")).unwrap(), b"unpublished todo");
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     tokio::time::advance(Duration::from_secs(58)).await;
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     assert!(dir.join("pending").exists());
     observe("running");
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     observe("stopped");
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/missing",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/missing", "current", &dir, &mut end_seen,
+    ).await.unwrap());
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     let unavailable = Client::unix(&root.path().join("unavailable.sock"));
-    assert!(
-        remove_confirmed_ended_channel_todo_outbox(
-            &unavailable,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(remove_confirmed_ended_channel_todo_outbox(
+        &unavailable, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.is_err());
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     assert!(dir.join("pending").exists());
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     tokio::time::advance(Duration::from_secs(59)).await;
-    assert!(
-        remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     assert!(!dir.exists());
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join("pending"), b"unpublished EOF todo").unwrap();
     end_seen = None;
-    assert!(
-        !remove_confirmed_ended_channel_todo_outbox(
-            &client,
-            "agent/seat",
-            "current",
-            &dir,
-            &mut end_seen,
-        )
-        .await
-        .unwrap()
-    );
+    assert!(!remove_confirmed_ended_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     let first_seen = end_seen.unwrap();
     tokio::time::advance(Duration::from_secs(1)).await;
     clock_guard.abort();
     let _ = clock_guard.await;
-    assert!(
-        finish_channel_todo_outbox(&client, "agent/seat", "current", &dir, &mut end_seen,)
-            .await
-            .unwrap()
-    );
+    assert!(finish_channel_todo_outbox(
+        &client, "agent/seat", "current", &dir, &mut end_seen,
+    ).await.unwrap());
     assert!(first_seen.elapsed() >= CHANNEL_TODO_END_CONFIRMATION_GAP);
     assert!(!dir.exists());
     server.abort();
@@ -876,10 +592,7 @@ fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
     for legacy in ["st", "st3"] {
         assert_eq!(ClientMessage::Human.diagnostic_prefix(legacy), "fractal");
         assert_eq!(ClientMessage::Stable.diagnostic_prefix(legacy), legacy);
-        assert_eq!(
-            ClientMessage::for_output(true).diagnostic_prefix(legacy),
-            legacy
-        );
+        assert_eq!(ClientMessage::for_output(true).diagnostic_prefix(legacy), legacy);
     }
 }
 
@@ -894,12 +607,9 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
             "code": "internal",
             "message": "the store failed",
             "retryable": false
-        }))
-        .unwrap();
+        })).unwrap();
         let error = anyhow::Error::from(fractal_client::ClientError::Api(
-            api.code.clone(),
-            api.message.clone(),
-            Box::new(api),
+            api.code.clone(), api.message.clone(), Box::new(api),
         ));
         stderr_message("st", format_args!("{}", cli_error_message(&error, false)));
         let mut stalled = None;
@@ -915,12 +625,7 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
     }
     for gate in [false, true] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([
-                "--exact",
-                "tests::gate_subprocess_stderr_keeps_stable_client_errors",
-                "--nocapture",
-            ])
+        command.args(["--exact", "tests::gate_subprocess_stderr_keeps_stable_client_errors", "--nocapture"])
             .env(CHILD, "1")
             .env_remove(fractal_daemon::gate_report::ENV);
         if gate {
@@ -929,14 +634,11 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         let output = command.output().unwrap();
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert_eq!(
-            stderr.trim(),
-            if gate {
-                "st: st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
-            } else {
-                "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
-            }
-        );
+        assert_eq!(stderr.trim(), if gate {
+            "st: st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+        } else {
+            "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
+        });
     }
 }
 
@@ -947,35 +649,25 @@ async fn an_unprepared_agents_roster_prints_its_own_code_and_says_to_retry() {
     let socket = directory.path().join("roster.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let app = Router::new().fallback(|| async {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "api_version": "st3.client.v0",
-                "error_version": "st3.client.error.v0",
-                "request_id": "request/roster-test",
-                "code": "agent-roster-not-ready",
-                "message": "the agents roster is still being prepared; retry shortly",
-                "retryable": true,
-                "details": {}
-            })),
-        )
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/roster-test",
+            "code": "agent-roster-not-ready",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        })))
     });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let error = generated_client(&Endpoint::Unix(socket), None)
-        .unwrap()
-        .agents_list(None, Some(50), false)
-        .await
-        .unwrap_err();
+    let error = generated_client(&Endpoint::Unix(socket), None).unwrap()
+        .agents_list(None, Some(50), false).await.unwrap_err();
     assert!(error.is_transient(), "{error:?}");
     let error = anyhow::Error::new(error);
-    assert_eq!(
-        cli_error_message(&error, false),
-        "Fractal is still preparing the agents roster; try again shortly (agent-roster-not-ready)"
-    );
-    assert_eq!(
-        plain_error(&error),
-        "st is still preparing the agents roster; try again shortly (agent-roster-not-ready)"
-    );
+    assert_eq!(cli_error_message(&error, false),
+        "Fractal is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    assert_eq!(plain_error(&error),
+        "st is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
     server.abort();
     let _ = server.await;
 }
@@ -987,53 +679,33 @@ async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
     let socket = directory.path().join("blob.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let app = Router::new().fallback(|| async {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "api_version": "st3.client.v0",
-                "error_version": "st3.client.error.v0",
-                "request_id": "request/blob-test",
-                "code": "internal",
-                "message": "the blob store failed",
-                "retryable": false
-            })),
-        )
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/blob-test",
+            "code": "internal",
+            "message": "the blob store failed",
+            "retryable": false
+        })))
     });
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let endpoint = Endpoint::Unix(socket);
     let file = directory.path().join("image.png");
     fs::write(&file, b"image").unwrap();
     let upload = upload_attachment(&endpoint, "person/test", &file, Some("image/png"))
-        .await
-        .unwrap_err();
-    let read = run_blobs(
-        &endpoint,
-        None,
-        BlobCommand::Get {
-            reference: format!("blob/{}", "a".repeat(64)),
-            message: None,
-            output: None,
-            actor: Some("person/test".into()),
-        },
-        false,
-    )
-    .await
-    .unwrap_err();
+        .await.unwrap_err();
+    let read = run_blobs(&endpoint, None, BlobCommand::Get {
+        reference: format!("blob/{}", "a".repeat(64)),
+        message: None,
+        output: None,
+        actor: Some("person/test".into()),
+    }, false).await.unwrap_err();
     for error in [upload, read] {
-        assert!(
-            error
-                .downcast_ref::<fractal_client::ClientError>()
-                .is_some(),
-            "{error:#}"
-        );
-        assert_eq!(
-            render_client_error(&error, ClientMessage::Human),
-            "Fractal hit a problem: the blob store failed (internal)"
-        );
-        assert_eq!(
-            plain_error(&error),
-            "st hit a problem: the blob store failed (internal)"
-        );
+        assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{error:#}");
+        assert_eq!(render_client_error(&error, ClientMessage::Human),
+            "Fractal hit a problem: the blob store failed (internal)");
+        assert_eq!(plain_error(&error),
+            "st hit a problem: the blob store failed (internal)");
     }
     server.abort();
     let _ = server.await;
@@ -1099,13 +771,11 @@ fn a_wait_counts_only_exchanges_since_it_began() {
     let with = |name: &str, status: &str, measured: Option<(u128, u64)>| {
         let mut peer = peer_status(name, None);
         peer.status = status.into();
-        peer.sync = measured.map(
-            |(at, peer_only)| fractal_daemon::model::ReplicationPeerSync {
-                peer_only_envelopes: peer_only,
-                measured_at_unix_ms: at,
-                ..Default::default()
-            },
-        );
+        peer.sync = measured.map(|(at, peer_only)| fractal_daemon::model::ReplicationPeerSync {
+            peer_only_envelopes: peer_only,
+            measured_at_unix_ms: at,
+            ..Default::default()
+        });
         peer
     };
     let status = |peers| ReplicationStatus {
@@ -1113,8 +783,8 @@ fn a_wait_counts_only_exchanges_since_it_began() {
         ..Default::default()
     };
     // An in-sync measurement from before the wait, as after a restart, proves nothing.
-    let error =
-        caught_up_since(&status(vec![with("alder", "up", Some((9_000, 0)))]), since).unwrap_err();
+    let error = caught_up_since(&status(vec![with("alder", "up", Some((9_000, 0)))]), since)
+        .unwrap_err();
     assert_eq!(error, "no exchange with alder yet");
     let error = caught_up_since(
         &status(vec![with("alder", "up", Some((11_000, 300)))]),
@@ -1134,7 +804,8 @@ fn a_wait_counts_only_exchanges_since_it_began() {
     assert_eq!(caught_up.peers, vec![("alder".to_owned(), 11_000)]);
     assert_eq!(caught_up.not_checked, vec!["birch (last-seen)".to_owned()]);
     assert!(
-        render_caught_up(&caught_up, 12_000).contains("not checked, since they are not up: birch")
+        render_caught_up(&caught_up, 12_000)
+            .contains("not checked, since they are not up: birch")
     );
     let error =
         caught_up_since(&status(vec![with("birch", "last-seen", None)]), since).unwrap_err();
@@ -1149,19 +820,13 @@ fn fleet_wait_refuses_only_on_admissions_the_fleet_fenced() {
         envelopes: 2,
     };
     assert_eq!(render_fenced_admissions(&[]), None);
-    assert_eq!(
-        render_fenced_admissions(&[residue("admitted-unsigned")]),
-        None
-    );
+    assert_eq!(render_fenced_admissions(&[residue("admitted-unsigned")]), None);
     let refused = render_fenced_admissions(&[
         residue("admitted-unsigned"),
         residue("admitted-beyond-high-water"),
     ])
     .unwrap();
-    assert!(
-        refused.contains("admitted 2 envelopes from willow beyond the writer's high water"),
-        "{refused}"
-    );
+    assert!(refused.contains("admitted 2 envelopes from willow beyond the writer's high water"), "{refused}");
 }
 
 #[test]
@@ -1184,10 +849,7 @@ fn mixed_build_status_reports_log_verification_and_waiting_projections() {
     let rendered = render_replication_peers(&[peer], "local-graph", 0);
     assert!(rendered.contains("same envelopes"));
     assert!(rendered.contains("waiting because sample reason"));
-    assert!(
-        rendered
-            .contains("projection comparison waits for a settled exchange or a compatible build")
-    );
+    assert!(rendered.contains("projection comparison waits for a settled exchange or a compatible build"));
     assert!(!rendered.contains("graphs differ"));
     assert!(!rendered.contains("diverged"));
 }
@@ -1259,8 +921,7 @@ fn missions_tree_fixture_renders_all_sections() {
             .expect("valid missions tree fixture");
     assert_eq!(
         render_missions_tree(&fixture),
-        /* sqlite-large-value: allow-for-now lv-h936ef40a4b1a owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-        include_str!("../tests/fixtures/missions-tree.txt")
+        /* sqlite-large-value: allow-for-now lv-h936ef40a4b1a owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.txt")
     );
     let cli = Cli::try_parse_from(["st", "missions", "tree", "--json"])
         .expect("missions tree --json parses");
@@ -1286,34 +947,21 @@ fn a_conversation_reads_as_tui_shows_it_and_raw_keeps_every_entry() {
         false,
         fractal_conversation_ui::Density::Full,
     );
-    assert!(
-        pretty.starts_with("CONVERSATION  session/example"),
-        "{pretty}"
-    );
+    assert!(pretty.starts_with("CONVERSATION  session/example"), "{pretty}");
     assert!(pretty.contains("Please check why the n"), "{pretty}");
     // The harness's own wrappers are cleaned away, as in Fractal TUI; no escapes without colour.
     for noise in ["<task-notification>", "<channel", "<command-name>", "\x1b["] {
         assert!(!pretty.contains(noise), "{noise}: {pretty}");
     }
     let raw = timeline_entries_text("session/example", &items);
-    assert!(
-        raw.contains("<task-notification>"),
-        "raw keeps what was stored"
-    );
+    assert!(raw.contains("<task-notification>"), "raw keeps what was stored");
 }
 
 #[test]
 fn documents_get_renders_markdown_on_a_terminal_and_leaves_data_alone() {
-    let rendered =
-        render_document(b"# Title\n\nSome **bold** words.\n\n- one\n- two\n", 60).unwrap();
-    assert!(
-        rendered.contains("Title") && rendered.contains("\x1b["),
-        "{rendered:?}"
-    );
-    assert!(
-        rendered.contains("bold") && !rendered.contains("**bold**"),
-        "{rendered:?}"
-    );
+    let rendered = render_document(b"# Title\n\nSome **bold** words.\n\n- one\n- two\n", 60).unwrap();
+    assert!(rendered.contains("Title") && rendered.contains("\x1b["), "{rendered:?}");
+    assert!(rendered.contains("bold") && !rendered.contains("**bold**"), "{rendered:?}");
     // Data and binaries print as stored.
     assert!(render_document(br#"{"a": 1}"#, 60).is_none());
     assert!(render_document(b"version 2\nmission \"x\" {}", 60).is_none());
@@ -1350,10 +998,7 @@ fn cli_timeline_folds_claude_skill_and_raw_preserves_the_expansion() {
         false,
         fractal_conversation_ui::Density::Full,
     );
-    assert!(
-        orphan.lines().any(|line| line.trim() == "## Messages"),
-        "{orphan}"
-    );
+    assert!(orphan.lines().any(|line| line.trim() == "## Messages"), "{orphan}");
     assert!(
         orphan.contains("<smalltalk-message>, followed by a bounded preview."),
         "{orphan}"
@@ -1404,14 +1049,10 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
     ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
     let output_exempt = render_usage_report(&exempt, 24, None);
-    assert!(
-        output_exempt.contains("codex/aaaa  exempt\n"),
-        "{output_exempt}"
-    );
+    assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
     assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
     assert!(
-        output_exempt
-            .contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+        output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
         "{output_exempt}"
     );
     assert!(
@@ -1439,7 +1080,8 @@ fn usage_report_labels_the_daily_proxy_and_unknown_share() {
     assert!(rendered.contains("daily estimate"));
     assert!(rendered.contains("includes useful work"));
     assert!(
-        rendered.contains("1970-01-01 (partial)  2  $0.44–$0.66  unknown (no priced usage)  1/2"),
+        rendered
+            .contains("1970-01-01 (partial)  2  $0.44–$0.66  unknown (no priced usage)  1/2"),
         "{rendered}"
     );
 }
@@ -1507,40 +1149,23 @@ fn an_unbound_observation_keeps_the_provider_account() {
 #[test]
 fn usage_shows_agent_messages_per_merged_pull_request() {
     let line = |coordination: Value| {
-        let output =
-            render_usage_report(&json!({"rows": [], "coordination": coordination}), 24, None);
-        output
-            .lines()
-            .find(|line| line.starts_with("MESSAGES  "))
-            .map(str::to_owned)
+        let output = render_usage_report(&json!({"rows": [], "coordination": coordination}), 24, None);
+        output.lines().find(|line| line.starts_with("MESSAGES  ")).map(str::to_owned)
     };
     assert_eq!(
-        line(
-            json!({"agent_to_agent": 26, "silent": 10, "merged_pull_requests": 4,
-            "agent_to_agent_per_merged_pull_request": 6.5, "complete": true})
-        )
-        .as_deref(),
+        line(json!({"agent_to_agent": 26, "silent": 10, "merged_pull_requests": 4,
+            "agent_to_agent_per_merged_pull_request": 6.5, "complete": true})).as_deref(),
         Some("MESSAGES  26 agent to agent (10 silent) · 4 merged PRs · 6.5 per merged PR")
     );
     assert_eq!(
-        line(
-            json!({"agent_to_agent": 25, "silent": 0, "merged_pull_requests": 4,
-            "agent_to_agent_per_merged_pull_request": null, "complete": false})
-        )
-        .as_deref(),
-        Some(
-            "MESSAGES  25 agent to agent (0 silent) · 4 merged PRs · per merged PR unknown until message history is counted"
-        )
+        line(json!({"agent_to_agent": 25, "silent": 0, "merged_pull_requests": 4,
+            "agent_to_agent_per_merged_pull_request": null, "complete": false})).as_deref(),
+        Some("MESSAGES  25 agent to agent (0 silent) · 4 merged PRs · per merged PR unknown until message history is counted")
     );
     assert_eq!(
-        line(
-            json!({"agent_to_agent": 3, "silent": 0, "merged_pull_requests": 0,
-            "agent_to_agent_per_merged_pull_request": null, "complete": true})
-        )
-        .as_deref(),
-        Some(
-            "MESSAGES  3 agent to agent (0 silent) · 0 merged PRs · per merged PR unknown with none merged"
-        )
+        line(json!({"agent_to_agent": 3, "silent": 0, "merged_pull_requests": 0,
+            "agent_to_agent_per_merged_pull_request": null, "complete": true})).as_deref(),
+        Some("MESSAGES  3 agent to agent (0 silent) · 0 merged PRs · per merged PR unknown with none merged")
     );
     // An older daemon counts messages but not merged pull requests.
     assert_eq!(
@@ -1560,10 +1185,7 @@ fn usage_marks_a_reading_older_than_the_limits_cadence_as_stale() {
          "measured_at_unix_ms": 1_799_000_000_000_u64},
     ]});
     let output = render_usage_report(&report, 24, None);
-    assert!(
-        output.contains("  ada/claude-1 (claude/aaaa)  stale\n"),
-        "{output}"
-    );
+    assert!(output.contains("  ada/claude-1 (claude/aaaa)  stale\n"), "{output}");
     assert!(output.contains("  claude/bbbb\n"), "{output}");
 }
 
@@ -1585,22 +1207,10 @@ fn usage_lists_every_declared_account_with_its_limit_or_credits() {
         ],
     });
     let output = render_usage_report(&report, 24, None);
-    assert!(
-        output.contains("ACCOUNTS  3 · every declared account\n"),
-        "{output}"
-    );
-    assert!(
-        output.contains("ada/claude-1  weekly 24% resets 2027-01-09 "),
-        "{output}"
-    );
-    assert!(
-        output.contains("ada/claude-2  no limits reported\n"),
-        "{output}"
-    );
-    assert!(
-        output.contains("ada/key  credits $154+ of $200 this month\n"),
-        "{output}"
-    );
+    assert!(output.contains("ACCOUNTS  3 · every declared account\n"), "{output}");
+    assert!(output.contains("ada/claude-1  weekly 24% resets 2027-01-09 "), "{output}");
+    assert!(output.contains("ada/claude-2  no limits reported\n"), "{output}");
+    assert!(output.contains("ada/key  credits $154+ of $200 this month\n"), "{output}");
 }
 
 #[test]
@@ -1640,12 +1250,11 @@ fn conversations_ls_accepts_the_read_spelling_of_its_mailbox() {
         panic!("conversations ls")
     };
     assert_eq!(args.actor.as_deref(), Some("agent/run-1/worker"));
-    let cli = Cli::try_parse_from(["st3", "conversations", "ls", "agent/a", "--as", "agent/b"])
-        .expect("named successor may list the retired mailbox as itself");
-    let Command::Conversations {
-        command: MessageCommand::Ls(args),
-    } = cli.command
-    else {
+    let cli = Cli::try_parse_from([
+        "st3", "conversations", "ls", "agent/a", "--as", "agent/b",
+    ])
+    .expect("named successor may list the retired mailbox as itself");
+    let Command::Conversations { command: MessageCommand::Ls(args) } = cli.command else {
         panic!("conversations ls")
     };
     assert_eq!(args.identity.as_deref(), Some("agent/a"));
@@ -1708,19 +1317,11 @@ fn conversations_ls_accepts_sender_and_literal_subject_filters() {
     );
     for flag in ["--subject", "--subject-prefix"] {
         let error = Cli::try_parse_from([
-            "st3",
-            "conversations",
-            "ls",
-            "agent/reviewer",
-            flag,
-            "Review",
+            "st3", "conversations", "ls", "agent/reviewer", flag, "Review",
         ])
         .err()
         .expect("subject filters need a sender filter");
-        assert_eq!(
-            error.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
         assert!(error.to_string().contains("--from"));
     }
 }
@@ -1881,16 +1482,9 @@ fn native_push_preserves_delivery_notices_and_person_signatures() {
     assert_eq!(queued.body, "body");
     view.from = "person/operator".into();
     let queued = native_queued_message(&view, "body".into(), &[]);
+    assert!(!queued.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG));
     assert!(
-        !queued
-            .tags
-            .iter()
-            .any(|tag| tag == fractal_daemon::silent::SILENT_TAG)
-    );
-    assert!(
-        view.tags
-            .iter()
-            .any(|tag| tag == fractal_daemon::silent::SILENT_TAG),
+        view.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG),
         "signed durable tags are unchanged"
     );
 }
@@ -1921,7 +1515,9 @@ fn a_harness_cannot_act_as_another_agent() {
     assert!(foreign_agent_actor("requester", own, run).is_none());
     assert!(foreign_agent_actor("exec/run-1/controller", own, run).is_none());
     assert!(foreign_agent_actor("agent/run-1/wake.codex", None, run).is_none());
-    assert!(foreign_agent_actor("agent/run-1/wake.codex", Some("person/operator"), run).is_none());
+    assert!(
+        foreign_agent_actor("agent/run-1/wake.codex", Some("person/operator"), run).is_none()
+    );
 }
 
 #[test]
@@ -1932,36 +1528,16 @@ fn mission_start_requires_an_explicit_actor() {
 #[test]
 fn a_harness_cannot_mutate_as_a_peer_or_person() {
     let cases: &[&[&str]] = &[
+        &["st3", "work", "done", "step-run/example/ask", "--as", "person/avery", "--summary", "Friday"],
+        &["st3", "conversations", "archive", "message/notice", "--as", "person/avery"],
+        &["st3", "work", "delegation", "--for", "person/avery", "--as", "person/avery", "--evidence", "claim/decision"],
         &[
             "st3",
-            "work",
-            "done",
-            "step-run/example/ask",
+            "apply",
+            "mission.kdl",
             "--as",
-            "person/avery",
-            "--summary",
-            "Friday",
+            "agent/peer",
         ],
-        &[
-            "st3",
-            "conversations",
-            "archive",
-            "message/notice",
-            "--as",
-            "person/avery",
-        ],
-        &[
-            "st3",
-            "work",
-            "delegation",
-            "--for",
-            "person/avery",
-            "--as",
-            "person/avery",
-            "--evidence",
-            "claim/decision",
-        ],
-        &["st3", "apply", "mission.kdl", "--as", "agent/peer"],
         &[
             "st3",
             "missions",
@@ -2026,8 +1602,8 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
             "accepted {arguments:?}"
         );
     }
-    let own =
-        Cli::try_parse_from(["st3", "work", "wake", "step-run/x/y", "--as", "agent/own"]).unwrap();
+    let own = Cli::try_parse_from(["st3", "work", "wake", "step-run/x/y", "--as", "agent/own"])
+        .unwrap();
     assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
     assert!(guard_mutating_cli_actor(&own.command, None, None).is_ok());
 }
@@ -2035,21 +1611,12 @@ fn a_harness_cannot_mutate_as_a_peer_or_person() {
 #[test]
 fn harness_actor_rejection_keeps_st_work_ask_at_the_error_rendering_boundary() {
     let cli = Cli::try_parse_from([
-        "fractal",
-        "work",
-        "wake",
-        "step-run/example/work",
-        "--as",
-        "person/operator",
-    ])
-    .unwrap();
+        "fractal", "work", "wake", "step-run/example/work", "--as", "person/operator",
+    ]).unwrap();
     let error = guard_mutating_cli_actor(&cli.command, Some("agent/worker"), None).unwrap_err();
     for native_driver in [false, true] {
         let output = cli_error_message(&error, native_driver);
-        assert!(
-            output.contains("`st work ask --as \"$ST_AGENT\"`"),
-            "{output}"
-        );
+        assert!(output.contains("`st work ask --as \"$ST_AGENT\"`"), "{output}");
         assert!(!output.contains("fractal work ask"), "{output}");
     }
 }
@@ -2147,13 +1714,8 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
             );
         });
         let output = String::from_utf8(
-            capture
-                .0
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
-        )
-        .unwrap();
+            capture.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(),
+        ).unwrap();
         assert!(
             output.contains("unhandled pi-family channel frame"),
             "{output}"
@@ -2174,133 +1736,82 @@ async fn pi_family_publication_verifies_the_exact_external_frame_path() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("daemon.sock");
     let client = Client::new(Endpoint::Unix(socket.clone()));
-    let store = std::sync::Arc::new(Store::open(&root.path().join("graph.db"), "test").unwrap());
-    store
-        .append_claim(&ClaimInput {
-            subject: "agent/external".into(),
-            kind: "runtime.observed".into(),
-            actor: Some("agent/external".into()),
-            fields: BTreeMap::from([
-                ("status".into(), json!("running")),
-                ("incarnation_id".into(), json!("external-incarnation")),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
-    let graph = store.clone();
-    let app = Router::new().route(
-        "/v1/agents/native-session",
-        post(move |Json(report): Json<Value>| {
-            let store = graph.clone();
-            async move {
-                assert_eq!(report["subject"], "agent/external");
-                assert_eq!(report["actor"], "agent/external");
-                assert_eq!(report["incarnation_id"], "external-incarnation");
-                assert_eq!(report["session_id"], "external-native");
-                let record = store
-                    .append_claim(&ClaimInput {
-                        subject: "agent/external".into(),
-                        kind: "harness.session-file".into(),
-                        actor: Some("agent/external".into()),
-                        fields: BTreeMap::from([
-                            ("harness".into(), json!("omp")),
-                            ("agent".into(), report["subject"].clone()),
-                            ("incarnation_id".into(), report["incarnation_id"].clone()),
-                            ("session_id".into(), report["session_id"].clone()),
-                            ("path".into(), report["path"].clone()),
-                        ]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: None,
-                    })
-                    .unwrap();
-                Json(json!({"api_version":"st3.v1", "value":record}))
-            }
-        }),
+    let store = std::sync::Arc::new(
+        Store::open(&root.path().join("graph.db"), "test").unwrap(),
     );
+    store.append_claim(&ClaimInput {
+        subject: "agent/external".into(),
+        kind: "runtime.observed".into(),
+        actor: Some("agent/external".into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("external-incarnation")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let graph = store.clone();
+    let app = Router::new().route("/v1/agents/native-session", post(move |Json(report): Json<Value>| {
+        let store = graph.clone();
+        async move {
+            assert_eq!(report["subject"], "agent/external");
+            assert_eq!(report["actor"], "agent/external");
+            assert_eq!(report["incarnation_id"], "external-incarnation");
+            assert_eq!(report["session_id"], "external-native");
+            let record = store.append_claim(&ClaimInput {
+                subject: "agent/external".into(),
+                kind: "harness.session-file".into(),
+                actor: Some("agent/external".into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("agent".into(), report["subject"].clone()),
+                    ("incarnation_id".into(), report["incarnation_id"].clone()),
+                    ("session_id".into(), report["session_id"].clone()),
+                    ("path".into(), report["path"].clone()),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            Json(json!({"api_version":"st3.v1", "value":record}))
+        }
+    }));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app)
-            .await
-            .unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
-        if socket.exists() {
-            break;
-        }
+        if socket.exists() { break; }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let selected = root.path().join("arbitrary-external-name.jsonl");
     // A sibling with the same native ID must never rescue the reported file.
-    fs::write(
-        root.path().join("fallback_external-native.jsonl"),
-        "{\"type\":\"session\",\"id\":\"external-native\"}\n",
-    )
-    .unwrap();
+    fs::write(root.path().join("fallback_external-native.jsonl"),
+        "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
     let mut pending = PiFamilyReports {
-        native_session: Some((
-            "external-native".into(),
-            Some(selected.to_string_lossy().into_owned()),
-        )),
+        native_session: Some(("external-native".into(), Some(selected.to_string_lossy().into_owned()))),
         ..Default::default()
     };
-    for content in [
-        None,
-        Some("{}\n"),
-        Some("{\"type\":\"session\",\"id\":\"foreign\"}\n"),
-    ] {
-        if let Some(content) = content {
-            fs::write(&selected, content).unwrap();
-        }
-        pending
-            .publish(
-                &client,
-                "agent/external",
-                "omp",
-                "external-incarnation",
-                "channel",
-            )
-            .await
-            .unwrap();
+    for content in [None, Some("{}\n"), Some("{\"type\":\"session\",\"id\":\"foreign\"}\n")] {
+        if let Some(content) = content { fs::write(&selected, content).unwrap(); }
+        pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+            .await.unwrap();
         assert!(pending.native_session.is_some());
-        assert!(
-            store
-                .claims_for("agent/external", Some("harness.session-file"))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store.claims_for("agent/external", Some("harness.session-file")).unwrap().is_empty());
     }
-    fs::write(
-        &selected,
-        "{\"type\":\"session\",\"id\":\"external-native\"}\n",
-    )
-    .unwrap();
-    pending
-        .publish(
-            &client,
-            "agent/external",
-            "omp",
-            "external-incarnation",
-            "channel",
-        )
-        .await
-        .unwrap();
+    fs::write(&selected, "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+        .await.unwrap();
     assert!(pending.native_session.is_none());
-    let claim = store
-        .latest_claim("agent/external", Some("harness.session-file"))
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        claim.body["fields"]["path"],
-        json!(fs::canonicalize(selected).unwrap())
-    );
+    let claim = store.latest_claim("agent/external", Some("harness.session-file")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["path"], json!(fs::canonicalize(selected).unwrap()));
     server.abort();
 }
 
 #[tokio::test]
-async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed_mail() {
+async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed_mail()
+{
     // The two providers share this pump but load their own native receipt ledgers.
     for driver in ["codex", "opencode"] {
         let root = tempfile::tempdir().unwrap();
@@ -2364,10 +1875,7 @@ async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed
                 &agent_dir.join("resources/inbox"),
             )
             .unwrap();
-            let mut ids = queued
-                .iter()
-                .map(|message| message.filename.as_str())
-                .collect::<Vec<_>>();
+            let mut ids = queued.iter().map(|message| message.filename.as_str()).collect::<Vec<_>>();
             ids.sort_unstable();
             assert_eq!(ids, ["message/legacy", "message/pending"], "{driver}");
         }
@@ -2382,8 +1890,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("daemon.sock");
         let client = Client::new(fractal_daemon::client::Endpoint::Unix(path.clone()));
-        let mut fence =
-            fractal_daemon::mailbox::Fence::new("agent/eval.worker", "session-1", "delivery");
+        let mut fence = fractal_daemon::mailbox::Fence::new("agent/eval.worker", "session-1", "delivery");
         fence.epoch = 7; // The daemon's already-allocated binding, carried through exec.
         let mut state = PiChannelResume {
             incarnation: "session-1".into(),
@@ -2412,8 +1919,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
         assert!(state.pending.acknowledgements.contains("message/native"));
         let resume_path =
             fractal_drivers::reexec::write_state(root.path(), "channel-resume", &state).unwrap();
-        let mut resumed: PiChannelResume =
-            fractal_drivers::reexec::read_state(&resume_path).unwrap();
+        let mut resumed: PiChannelResume = fractal_drivers::reexec::read_state(&resume_path).unwrap();
         assert_eq!(
             serde_json::to_value(&resumed.pending.fence).unwrap(),
             serde_json::to_value(fenced.then_some(&fence)).unwrap()
@@ -2448,8 +1954,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
             async move {
                 let lifecycle = receipt["lifecycle"].as_str().unwrap().to_owned();
                 let (message, actor) = if fenced {
-                    let receipt: fractal_daemon::mailbox::Receipt =
-                        serde_json::from_value(receipt).unwrap();
+                    let receipt: fractal_daemon::mailbox::Receipt = serde_json::from_value(receipt).unwrap();
                     assert_eq!(serde_json::to_value(&receipt.fence).unwrap(), expected);
                     (receipt.message, receipt.fence.subject)
                 } else {
@@ -2476,9 +1981,7 @@ async fn pi_family_pending_read_survives_daemon_outage_and_reexec_across_both_tr
             .route("/v1/messages/{message_id}/claims", handler);
         let server_path = path.clone();
         let server = tokio::spawn(async move {
-            fractal_daemon::api::serve_unix(&server_path, app)
-                .await
-                .unwrap();
+            fractal_daemon::api::serve_unix(&server_path, app).await.unwrap();
         });
         for _ in 0..100 {
             if path.exists() {
@@ -2519,10 +2022,7 @@ fn a_human_ask_survives_channel_replacement_until_an_answered_state_frame() {
     assert_eq!(resumed.pending.state, Some(("working".into(), 1)));
     assert_eq!(resumed.pending.blocked_on.as_deref(), Some("human"));
     assert_eq!(resumed.pending.ask.as_deref(), Some("question"));
-    assert_eq!(
-        resumed.pending.reason.as_deref(),
-        Some("Which deployment target?")
-    );
+    assert_eq!(resumed.pending.reason.as_deref(), Some("Which deployment target?"));
     // The extension only emits an unblocked state for the matching ask's result.
     // An unrelated tool result is timeline data, not a new harness observation.
     assert!(!resumed.accept_frame(
@@ -2590,7 +2090,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
             settle: ResumeSettle::resumed(),
         },
     };
-    let back: DriverResume = serde_json::from_slice(&serde_json::to_vec(&resume).unwrap()).unwrap();
+    let back: DriverResume =
+        serde_json::from_slice(&serde_json::to_vec(&resume).unwrap()).unwrap();
     assert_eq!(back.session, resume.session);
     assert_eq!(back.incarnation, resume.incarnation);
     assert!(back.loop_state.ready);
@@ -2622,12 +2123,14 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
 fn a_delivery_report_names_the_process_and_its_channel() {
     let root = tempfile::tempdir().unwrap();
     let report: Value =
-        serde_json::from_str(&native_delivery_report("claude-channel", Some(root.path()))).unwrap();
+        serde_json::from_str(&native_delivery_report("claude-channel", Some(root.path())))
+            .unwrap();
     assert_eq!(report["transport"], "claude-channel");
     assert_eq!(report["pid"], std::process::id());
     assert!(report["image"].is_string());
     assert!(report["channel"].is_null(), "no channel has reported yet");
-    let codex: Value = serde_json::from_str(&native_delivery_report("app-server", None)).unwrap();
+    let codex: Value =
+        serde_json::from_str(&native_delivery_report("app-server", None)).unwrap();
     assert!(codex.get("channel").is_none());
 }
 
@@ -2651,42 +2154,28 @@ fn agent_card_todo_preserves_snapshot_and_reports_active_blocked_empty_truncated
                 "truncated":true
             }
         }
-    }))
-    .unwrap();
+    })).unwrap();
     let card = render_client_agent(&agent, &[], 0);
     assert!(card.contains("Todo         ▶ Compile · 3/10 done · 1 blocked · truncated\n"));
     assert!(!card.contains("▶ Later"));
     let value = serde_json::to_value(&agent).unwrap();
-    assert_eq!(
-        value["todo"]["snapshot"]["phases"][0]["tasks"][1]["blocker"],
-        "Approval"
-    );
+    assert_eq!(value["todo"]["snapshot"]["phases"][0]["tasks"][1]["blocker"], "Approval");
     assert_eq!(value["todo"]["claim_id"], "claim/todo");
     agent.todo.as_mut().unwrap().snapshot.phases[0].tasks[0].content =
         "\u{1b}[31mCompile\u{1b}[0m\nnext\tstep\u{1b}]0;spoofed title\u{7}\u{8}".into();
-    assert!(
-        render_client_agent(&agent, &[], 0)
-            .contains("Todo         ▶ Compile next step · 3/10 done · 1 blocked · truncated\n")
-    );
+    assert!(render_client_agent(&agent, &[], 0)
+        .contains("Todo         ▶ Compile next step · 3/10 done · 1 blocked · truncated\n"));
     agent.todo.as_mut().unwrap().snapshot.totals.abandoned = 2;
-    assert!(
-        render_client_agent(&agent, &[], 0)
-            .contains("3/10 done · 1 blocked · 2 abandoned · truncated")
-    );
+    assert!(render_client_agent(&agent, &[], 0)
+        .contains("3/10 done · 1 blocked · 2 abandoned · truncated"));
     let todo = agent.todo.as_mut().unwrap();
     todo.stale = true;
     todo.snapshot.phases.clear();
     todo.snapshot.truncated = false;
     todo.snapshot.totals = fractal_client::HarnessTodoTotals {
-        pending: 0,
-        in_progress: 0,
-        completed: 0,
-        blocked: 0,
-        abandoned: 0,
+        pending: 0, in_progress: 0, completed: 0, blocked: 0, abandoned: 0,
     };
-    assert!(
-        render_client_agent(&agent, &[], 0).contains("Todo         0/0 done · 0 blocked · stale\n")
-    );
+    assert!(render_client_agent(&agent, &[], 0).contains("Todo         0/0 done · 0 blocked · stale\n"));
     agent.todo = None;
     assert!(!render_client_agent(&agent, &[], 0).contains("Todo"));
     assert!(serde_json::to_value(agent).unwrap()["todo"].is_null());
@@ -2716,8 +2205,7 @@ fn agent_card_names_a_pending_codex_approval() {
         "state": "running", "reachability": "local", "runtime_ids": [],
         "driver": "codex", "harness_state": "blocked", "blocked_on": "human",
         "ask": "permission", "reason": "waitingOnApproval"
-    }))
-    .unwrap();
+    })).unwrap();
     let card = render_client_agent(&agent, &[], 0);
     assert!(card.contains("HARNESS      codex · blocked\n"));
     assert!(card.contains("AWAITING     approval\n"));
@@ -2903,10 +2391,7 @@ fn a_down_agent_card_says_since_when_and_marks_the_step_its_holder_cannot_work()
     }))
     .unwrap();
     let card = render_client_agent(&agent, &[step], 360_000);
-    assert!(
-        card.contains("STATE        down · no session since 2026-09-23T21:00:00.000Z\n"),
-        "{card}"
-    );
+    assert!(card.contains("STATE        down · no session since 2026-09-23T21:00:00.000Z\n"), "{card}");
     assert!(
         card.contains("CURRENT STEP Build the parser · working · held by a seat with no session since 2026-09-23T21:00:00.000Z\n"),
         "{card}"
@@ -2970,18 +2455,19 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
     let socket = root.path().join("st3.sock");
     let store = Arc::new(Store::open_memory("pi-delivery-test").unwrap());
     let seat = "agent/run-1/wake.omp";
-    let claim = |subject: &str, kind: &str, actor: &str, fields: Vec<(&str, &str)>| ClaimInput {
-        subject: subject.into(),
-        kind: kind.into(),
-        actor: Some(actor.into()),
-        fields: fields
-            .into_iter()
-            .map(|(key, value)| (key.to_owned(), Value::String(value.into())))
-            .collect(),
-        evidence: Vec::new(),
-        expected_subject: None,
-        idempotency_key: None,
-    };
+    let claim =
+        |subject: &str, kind: &str, actor: &str, fields: Vec<(&str, &str)>| ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some(actor.into()),
+            fields: fields
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), Value::String(value.into())))
+                .collect(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
     for subject in ["message/held", "message/pending"] {
         store
             .append_claim(&claim(
@@ -3008,23 +2494,19 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             ))
             .unwrap();
     }
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "pi-delivery-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "pi-delivery-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -3103,23 +2585,19 @@ async fn trace_after_index_reads_the_first_bounded_page() {
                 .store_index
         })
         .collect::<Vec<_>>();
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "trace-cursor-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "trace-cursor-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -3181,23 +2659,19 @@ async fn trace_wait_starts_after_existing_events() {
             .unwrap()
             .store_index;
     }
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "wait-cursor-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "wait-cursor-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -3334,10 +2808,7 @@ fn every_cli_command_has_a_valid_help_surface() {
             if !line.trim_start().starts_with("Usage:") {
                 assert!(
                     !line.split_whitespace().any(|word| {
-                        matches!(
-                            word.trim_matches(['`', '.', ',', ';', ':']),
-                            "seat" | "seats" | "seat's" | "Seat" | "Seats"
-                        )
+                        matches!(word.trim_matches(['`', '.', ',', ';', ':']), "seat" | "seats" | "seat's" | "Seat" | "Seats")
                     }),
                     "{} contains legacy agent terminology: {line}",
                     path.join(" ")
@@ -3372,21 +2843,14 @@ fn every_cli_command_has_a_valid_help_surface() {
 #[test]
 fn web_help_hides_only_its_unsupported_inherited_global_options() {
     let command = cli_command();
-    let globals = command
-        .get_arguments()
+    let globals = command.get_arguments()
         .filter(|argument| argument.is_global_set())
         .collect::<Vec<_>>();
     assert_eq!(globals.len(), 7);
     let web = command.find_subcommand("web").unwrap();
     for argument in globals {
         let id = argument.get_id().as_str();
-        assert!(
-            web.get_arguments()
-                .find(|arg| arg.get_id().as_str() == id)
-                .unwrap()
-                .is_hide_set(),
-            "{id}"
-        );
+        assert!(web.get_arguments().find(|arg| arg.get_id().as_str() == id).unwrap().is_hide_set(), "{id}");
     }
     let mut setup = command.find_subcommand("setup").unwrap().clone();
     assert!(setup.render_long_help().to_string().contains("--endpoint"));
@@ -3401,17 +2865,11 @@ fn web_help_hides_only_its_unsupported_inherited_global_options() {
 #[test]
 fn cli_branding_is_fractal_even_through_legacy_aliases() {
     for program in ["fractal", "st", "st3"] {
-        let help = Cli::try_parse_from([program, "setup", "--help"])
-            .err()
-            .unwrap()
-            .to_string();
+        let help = Cli::try_parse_from([program, "setup", "--help"]).err().unwrap().to_string();
         assert!(help.contains("Usage: fractal setup"), "{help}");
         assert!(help.contains("start fractal"), "{help}");
         assert!(!help.contains("start st"), "{help}");
-        let version = Cli::try_parse_from([program, "--version"])
-            .err()
-            .unwrap()
-            .to_string();
+        let version = Cli::try_parse_from([program, "--version"]).err().unwrap().to_string();
         assert!(version.starts_with("fractal "), "{version}");
     }
 }
@@ -3419,16 +2877,11 @@ fn cli_branding_is_fractal_even_through_legacy_aliases() {
 #[test]
 fn web_is_visible_in_root_help_and_parses_as_a_public_command() {
     let help = cli_help::root_help(false);
-    assert!(
-        help.lines().any(|line| line.starts_with("  web ")),
-        "{help}"
-    );
+    assert!(help.lines().any(|line| line.starts_with("  web ")), "{help}");
     let command = Cli::command();
     assert!(!command.find_subcommand("web").unwrap().is_hide_set());
     assert!(matches!(
-        Cli::try_parse_from(["fractal", "web", "--state-dir", "/tmp/example"])
-            .unwrap()
-            .command,
+        Cli::try_parse_from(["fractal", "web", "--state-dir", "/tmp/example"]).unwrap().command,
         Command::Web { state_dir: Some(_) }
     ));
 }
@@ -3445,9 +2898,7 @@ fn web_without_arguments_uses_the_configured_state_directory() {
 
 #[test]
 fn web_long_help_exits_successfully() {
-    let error = Cli::try_parse_from(["fractal", "web", "--help"])
-        .err()
-        .unwrap();
+    let error = Cli::try_parse_from(["fractal", "web", "--help"]).err().unwrap();
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
     assert_eq!(error.exit_code(), 0);
 }
@@ -3463,36 +2914,20 @@ fn web_short_help_exits_successfully() {
 fn web_state_directory_preserves_every_legacy_value_form() {
     // The previous positional parser accepted any OS string after --state-dir,
     // including strings that otherwise name flags or delimit options.
-    for directory in [
-        "/example/state",
-        "relative",
-        "",
-        "-state",
-        "--help",
-        "-h",
-        "--",
-        "--state-dir",
-    ] {
+    for directory in ["/example/state", "relative", "", "-state", "--help", "-h", "--", "--state-dir"] {
         let cli = Cli::try_parse_from(["fractal", "web", "--state-dir", directory]).unwrap();
-        assert!(
-            matches!(
-                cli.command,
-                Command::Web { state_dir: Some(path) } if path == std::path::Path::new(directory)
-            ),
-            "{directory:?}"
-        );
+        assert!(matches!(
+            cli.command,
+            Command::Web { state_dir: Some(path) } if path == std::path::Path::new(directory)
+        ), "{directory:?}");
     }
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt as _;
         let directory = std::ffi::OsString::from_vec(vec![b'-', 0xff]);
         let cli = Cli::try_parse_from([
-            std::ffi::OsString::from("fractal"),
-            "web".into(),
-            "--state-dir".into(),
-            directory.clone(),
-        ])
-        .unwrap();
+            std::ffi::OsString::from("fractal"), "web".into(), "--state-dir".into(), directory.clone(),
+        ]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Web { state_dir: Some(path) } if path == std::path::Path::new(&directory)
@@ -3511,9 +2946,7 @@ fn web_rejects_missing_values_repeats_positionals_and_unknown_flags_with_usage_s
         vec!["fractal", "web", "--state-dir", "one", "extra"],
         vec!["fractal", "web", "--", "unexpected"],
     ] {
-        let error = Cli::try_parse_from(arguments.clone())
-            .err()
-            .expect("invalid web arguments");
+        let error = Cli::try_parse_from(arguments.clone()).err().expect("invalid web arguments");
         assert_eq!(error.exit_code(), 2, "{arguments:?}: {error}");
     }
 }
@@ -3530,9 +2963,7 @@ fn web_uses_clap_option_delimiters_and_equals_values() {
         ));
     }
     assert!(matches!(
-        Cli::try_parse_from(["fractal", "web", "--"])
-            .unwrap()
-            .command,
+        Cli::try_parse_from(["fractal", "web", "--"]).unwrap().command,
         Command::Web { state_dir: None }
     ));
 }
@@ -3540,24 +2971,14 @@ fn web_uses_clap_option_delimiters_and_equals_values() {
 #[test]
 fn web_global_rejection_covers_the_complete_inherited_inventory() {
     let command = Cli::command();
-    let globals = command
-        .get_arguments()
+    let globals = command.get_arguments()
         .filter(|argument| argument.is_global_set())
         .map(|argument| argument.get_id().as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        globals,
-        std::collections::BTreeSet::from([
-            "read_contract_inventory_json",
-            "checkpoint_space_gate_capabilities",
-            "endpoint",
-            "instance",
-            "catalog",
-            "json",
-            "daemon_wait",
-        ]),
-        "review each new global and add its real-binary web rejection case"
-    );
+    assert_eq!(globals, std::collections::BTreeSet::from([
+        "read_contract_inventory_json", "checkpoint_space_gate_capabilities",
+        "endpoint", "instance", "catalog", "json", "daemon_wait",
+    ]), "review each new global and add its real-binary web rejection case");
 }
 
 #[test]
@@ -3633,75 +3054,23 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
-        (
-            "agents",
-            /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("agents_cli.rs"),
-        ),
-        (
-            "attention",
-            /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("attention_cli.rs"),
-        ),
-        (
-            "change",
-            /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("change_cli.rs"),
-        ),
-        (
-            "conversations",
-            /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("conversations_cli.rs"),
-        ),
+        ("agents", /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
+        ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
+        ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
-        (
-            "doctor",
-            /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("doctor_cli.rs"),
-        ),
-        (
-            "driver",
-            /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("driver_cli.rs"),
-        ),
-        (
-            "fleet",
-            /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("fleet_cli.rs"),
-        ),
-        (
-            "launch",
-            /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("launch_cli.rs"),
-        ),
-        (
-            "migrate",
-            /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("migrate_cli.rs"),
-        ),
-        (
-            "replication",
-            /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("replication_cli.rs"),
-        ),
+        ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
+        ("driver", /* sqlite-large-value: allow-for-now lv-he57a4ce28014 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("driver_cli.rs")),
+        ("fleet", /* sqlite-large-value: allow-for-now lv-hc13a087df895 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("fleet_cli.rs")),
+        ("launch", /* sqlite-large-value: allow-for-now lv-hebaee54249d0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("launch_cli.rs")),
+        ("migrate", /* sqlite-large-value: allow-for-now lv-hb7a9cac23074 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("migrate_cli.rs")),
+        ("replication", /* sqlite-large-value: allow-for-now lv-h6d2867cf81a5 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("replication_cli.rs")),
         ("schedules", SCHEDULES_SOURCE),
-        (
-            "terminals",
-            /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("terminals_cli.rs"),
-        ),
-        (
-            "uninstall",
-            /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("uninstall_cli.rs"),
-        ),
+        ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
+        ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
         ("validate", VALIDATE_SOURCE),
         ("waiting_on", WAITING_ON_SOURCE),
-        (
-            "work",
-            /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */
-            include_str!("work_cli.rs"),
-        ),
+        ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
     let main_source = /* sqlite-large-value: allow-for-now lv-h47a0a723f1b0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
     let declared: BTreeSet<&str> = main_source
@@ -3710,10 +3079,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         .collect();
     assert_eq!(
         declared,
-        command_files
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<BTreeSet<_>>(),
+        command_files.iter().map(|(name, _)| *name).collect::<BTreeSet<_>>(),
         "every command file main.rs declares is scanned"
     );
     let cli_source = std::iter::once(main_source)
@@ -3916,28 +3282,16 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
         stale: true,
         ..behind(None, None, None)
     });
-    assert!(
-        output.contains(&summary("estimating time to catch up")),
-        "{output}"
-    );
-    assert!(
-        output.contains("  stale: no exchange since the measurement below"),
-        "{output}"
-    );
+    assert!(output.contains(&summary("estimating time to catch up")), "{output}");
+    assert!(output.contains("  stale: no exchange since the measurement below"), "{output}");
     assert!(
         output.contains("  estimating time to catch up (arrival only; measured 2s ago)"),
         "{output}"
     );
-    assert!(
-        !output.contains("receiving") && !output.contains("closing at"),
-        "{output}"
-    );
+    assert!(!output.contains("receiving") && !output.contains("closing at"), "{output}");
     // Positive: the forecast names the closing rate it divides by.
     let output = render(behind(Some(142.5), Some(140.0), Some(889)));
-    assert!(
-        output.contains(&summary("caught up in about 15m")),
-        "{output}"
-    );
+    assert!(output.contains(&summary("caught up in about 15m")), "{output}");
     assert!(
         output.contains(
             "  receiving 142.5 envelopes/s, closing at 140.0/s, caught up in about 15m \
@@ -3955,14 +3309,8 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
     };
     let output = render(nothing_missing.clone());
     assert!(!output.contains("catching up"), "{output}");
-    assert!(
-        !output.contains("caught up in") && !output.contains("closing at"),
-        "{output}"
-    );
-    assert!(
-        !output.contains("nothing was missing at the last measurement"),
-        "{output}"
-    );
+    assert!(!output.contains("caught up in") && !output.contains("closing at"), "{output}");
+    assert!(!output.contains("nothing was missing at the last measurement"), "{output}");
     // The same measurement gone stale: view() withdrew its rates and its zero forecast, and
     // the status says only what the last measurement found, whether or not this node held
     // envelopes the peer lacked. The graph comparison lines are unchanged.
@@ -3997,34 +3345,33 @@ fn replication_status_says_not_catching_up_when_nothing_closes_the_gap() {
 fn replication_status_says_which_side_holds_what_and_how_long_catching_up_takes() {
     let now = 1_000_000;
     let local = "1111111111111111aaaa";
-    let peer = |name: &str,
-                graph: Option<&str>,
-                sync: Option<fractal_daemon::model::ReplicationPeerSync>| {
-        ReplicationPeerStatus {
-            last_successful_exchange: None,
-            last_failed_exchange: None,
-            worker: None,
-            projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
-            incompatible_projection_tables: Vec::new(),
-            differing_tables: Vec::new(),
-            projection_comparison_waiting: false,
-            projection_comparison_waiting_reason: None,
-            projection_graphs_equal: None,
-            projection_compared_at_unix_ms: None,
-            peer: name.into(),
-            status: "up".into(),
-            last_success_at_unix_ms: Some(now - 2_000),
-            last_error: None,
-            last_failure_at_unix_ms: None,
-            refusal_reason: None,
-            schema_digest: None,
-            projection_registry_digest: None,
-            projection_versions: Default::default(),
-            authority_digest: None,
-            graph_digest: graph.map(str::to_owned),
-            sync,
-        }
-    };
+    let peer =
+        |name: &str, graph: Option<&str>, sync: Option<fractal_daemon::model::ReplicationPeerSync>| {
+            ReplicationPeerStatus {
+                last_successful_exchange: None,
+                last_failed_exchange: None,
+                worker: None,
+                projection_digests: BTreeMap::from([("claim_sources".into(), "sample".into())]),
+                incompatible_projection_tables: Vec::new(),
+                differing_tables: Vec::new(),
+                projection_comparison_waiting: false,
+                projection_comparison_waiting_reason: None,
+                projection_graphs_equal: None,
+                projection_compared_at_unix_ms: None,
+                peer: name.into(),
+                status: "up".into(),
+                last_success_at_unix_ms: Some(now - 2_000),
+                last_error: None,
+                last_failure_at_unix_ms: None,
+                refusal_reason: None,
+                schema_digest: None,
+                projection_registry_digest: None,
+                projection_versions: Default::default(),
+                authority_digest: None,
+                graph_digest: graph.map(str::to_owned),
+                sync,
+            }
+        };
     let same_envelopes = |compared: Option<u128>, differs: Option<u128>, diverged| {
         Some(fractal_daemon::model::ReplicationPeerSync {
             measured_at_unix_ms: now,
@@ -4401,10 +3748,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     update.alert = Some(false);
     let now = render_now_page(&updates, "fractal now");
     assert!(now.starts_with("UPDATES  1\n"), "{now}");
-    assert!(
-        !now.contains("1 alert\n") && !now.contains("0 alerts"),
-        "{now}"
-    );
+    assert!(!now.contains("1 alert\n") && !now.contains("0 alerts"), "{now}");
     // Nothing waits: no line about alerts at all, not even a zero.
     assert_eq!(
         render_now_page(&fixture_product_page(&[], false), "fractal now"),
@@ -4414,10 +3758,7 @@ fn now_counts_alerts_alone_and_says_nothing_when_none_wait() {
     let mut mixed = page.clone();
     mixed.items.extend(updates.items.clone());
     let listed = render_alert_sections(&mixed, Some("ALERTS FOR person/alex"), "fractal alerts ls");
-    assert!(
-        listed.starts_with("ALERTS FOR person/alex  1\n"),
-        "{listed}"
-    );
+    assert!(listed.starts_with("ALERTS FOR person/alex  1\n"), "{listed}");
     assert!(listed.contains("\nUPDATES  1\n"), "{listed}");
     // A daemon that predates alerts says nothing: an update is still not an alert.
     let ClientResource::Attention(update) = &mut mixed.items[1] else {
@@ -4626,10 +3967,8 @@ async fn renewal_retry_empty_selection_retires_an_expired_lease_bound() {
     // This is the production selector, called only after the work read succeeds.
     update_renewal_retry_lease(&mut retry, &[], "agent/worker", 1_000);
     retry.succeeded();
-    assert!(
-        (Duration::from_secs(15)..=Duration::from_secs(30))
-            .contains(&repeated_timeout_pause(&mut retry))
-    );
+    assert!((Duration::from_secs(15)..=Duration::from_secs(30))
+        .contains(&repeated_timeout_pause(&mut retry)));
 }
 
 #[tokio::test]
@@ -4664,10 +4003,8 @@ async fn renewal_retry_selects_live_leases_and_replaces_the_old_bound() {
     let replacement = [retry_lease_step("claimed", "agent/worker", Some(101_000))];
     update_renewal_retry_lease(&mut retry, &replacement, "agent/worker", 1_000);
     retry.succeeded();
-    assert!(
-        (Duration::from_secs(15)..=Duration::from_secs(30))
-            .contains(&repeated_timeout_pause(&mut retry))
-    );
+    assert!((Duration::from_secs(15)..=Duration::from_secs(30))
+        .contains(&repeated_timeout_pause(&mut retry)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -4757,19 +4094,12 @@ fn machine_and_device_renderers_have_exact_operational_output() {
         )
     );
     let mut assistant = fixture_product_page(&["device"], false);
-    let ClientResource::Device(device) = &mut assistant.items[0] else {
-        panic!("device fixture");
-    };
+    let ClientResource::Device(device) = &mut assistant.items[0] else { panic!("device fixture"); };
     device.person_id = None;
     device.grant_id = Some("assistant-grant/0123456789abcdef01234567".into());
-    device.session_actor =
-        "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
+    device.session_actor = "assistant/chatgpt/session/assistant-grant/0123456789abcdef01234567".into();
     let shown = render_product_page("DEVICES", &assistant, "fractal devices");
-    assert!(
-        shown.contains(
-            "action: fractal devices grant revoke assistant-grant/0123456789abcdef01234567"
-        )
-    );
+    assert!(shown.contains("action: fractal devices grant revoke assistant-grant/0123456789abcdef01234567"));
     assert!(!shown.contains("--as person/"));
 }
 
@@ -5003,10 +4333,7 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!(
-            "st admission override {} --binary",
-            driver.as_str()
-        )));
+        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
@@ -5043,8 +4370,9 @@ fn harness_diagnostic_requires_and_derives_the_agent_identity() {
 #[test]
 fn every_extension_harness_has_a_hidden_native_channel_driver() {
     for driver in ["pi-channel", "omp-channel"] {
-        let cli = Cli::try_parse_from(["st3", "driver", driver, "--subject", "agent/run/worker"])
-            .unwrap_or_else(|error| panic!("{driver} did not parse: {error}"));
+        let cli =
+            Cli::try_parse_from(["st3", "driver", driver, "--subject", "agent/run/worker"])
+                .unwrap_or_else(|error| panic!("{driver} did not parse: {error}"));
         let Command::Driver(args) = cli.command else {
             panic!("{driver} did not select the hidden driver command");
         };
@@ -5128,9 +4456,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
-        let error = send_message(&client, args(to), Vec::new())
-            .await
-            .unwrap_err();
+        let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();
         let text = format!("{error:#}");
         assert!(
             text.starts_with("people do not have inboxes: print your answer in the chat"),
@@ -5236,12 +4562,7 @@ fn machine_read_inventory_comes_from_the_live_clap_graph() {
 
 #[test]
 fn machine_read_inventory_probe_is_exclusive_before_actions() {
-    let args = |words: &[&str]| {
-        words
-            .iter()
-            .map(std::ffi::OsString::from)
-            .collect::<Vec<_>>()
-    };
+    let args = |words: &[&str]| words.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
     assert_eq!(
         read_contract_inventory_request(&args(&["st", "--read-contract-inventory-json"])),
         Some(true)
@@ -5262,28 +4583,15 @@ fn machine_read_inventory_probe_is_exclusive_before_actions() {
             None
         );
         assert_eq!(
-            read_contract_inventory_request(&args(&[
-                "st", "driver", "run", "--", "codex", literal
-            ])),
+            read_contract_inventory_request(&args(&["st", "driver", "run", "--", "codex", literal])),
             None
         );
-        assert!(
-            Cli::try_parse_from([
-                "st",
-                "documents",
-                "put",
-                "--as",
-                "doc/example",
-                "--",
-                literal,
-            ])
-            .is_ok()
-        );
+        assert!(Cli::try_parse_from([
+            "st", "documents", "put", "--as", "doc/example", "--", literal,
+        ])
+        .is_ok());
     }
-    assert_eq!(
-        read_contract_inventory_request(&args(&["st", "documents", "put"])),
-        None
-    );
+    assert_eq!(read_contract_inventory_request(&args(&["st", "documents", "put"])), None);
 }
 
 #[test]
@@ -5297,10 +4605,7 @@ fn mission_start_help_shows_the_run_subject_an_id_names() {
         .render_help()
         .to_string();
     assert!(help.contains("`mission-run/release/demo/1`"), "{help}");
-    assert!(
-        help.contains("A bare ID is placed under the mission"),
-        "{help}"
-    );
+    assert!(help.contains("A bare ID is placed under the mission"), "{help}");
     assert!(!help.contains("`mission-run/1`"), "{help}");
 }
 
@@ -5486,9 +4791,7 @@ fn mission_start_report_to_names_an_agent_and_completion_needs_one() {
         false,
     );
     assert_eq!(
-        fractal_daemon::graph::parse_intent(&person, "node")
-            .unwrap_err()
-            .code,
+        fractal_daemon::graph::parse_intent(&person, "node").unwrap_err().code,
         "invalid-report-to"
     );
 }
@@ -5768,36 +5071,21 @@ fn mission_show_accepts_follow() {
     assert_eq!(args.limit, 50);
     assert!(args.cursor.is_none());
     let continued = Cli::try_parse_from([
-        "st3",
-        "missions",
-        "show",
-        "mission-run/release/demo",
-        "--cursor",
-        "child-run",
-        "--limit",
-        "20",
+        "st3", "missions", "show", "mission-run/release/demo", "--cursor", "child-run",
+        "--limit", "20",
     ])
     .unwrap();
     let Command::Missions {
         command: MissionViewCommand::Show(continued),
-    } = continued.command
-    else {
+    } = continued.command else {
         panic!("mission show pagination did not parse");
     };
     assert_eq!(continued.cursor.as_deref(), Some("child-run"));
     assert_eq!(continued.limit, 20);
-    assert!(
-        Cli::try_parse_from([
-            "st3",
-            "missions",
-            "show",
-            "mission-run/release/demo",
-            "--follow",
-            "--cursor",
-            "child-run",
-        ])
-        .is_err()
-    );
+    assert!(Cli::try_parse_from([
+        "st3", "missions", "show", "mission-run/release/demo", "--follow", "--cursor", "child-run",
+    ])
+    .is_err());
 }
 
 #[test]
@@ -5823,23 +5111,13 @@ fn wait_timeout_accepts_bounded_units_and_zero() {
 
 #[test]
 fn progress_eta_flag_is_not_an_execution_action_flag() {
-    assert!(
-        Cli::try_parse_from([
-            "fractal",
-            "work",
-            "progress",
-            "step-run/example",
-            "--eta",
-            "2h"
-        ])
-        .is_ok()
-    );
+    assert!(Cli::try_parse_from([
+        "fractal", "work", "progress", "step-run/example", "--eta", "2h"
+    ]).is_ok());
     for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
-        assert!(
-            Cli::try_parse_from(["fractal", "work", action, "step-run/example", "--eta", "2h"])
-                .is_err(),
-            "{action}"
-        );
+        assert!(Cli::try_parse_from([
+            "fractal", "work", action, "step-run/example", "--eta", "2h"
+        ]).is_err(), "{action}");
     }
 }
 
@@ -5996,9 +5274,14 @@ fn an_ended_harness_uses_the_registered_state() {
 
 #[test]
 fn typed_claude_accepts_tui_options_and_rejects_headless_protocol_options() {
-    reject_noninteractive_claude_argv(&["claude".into(), "--model".into(), "opus".into()]).unwrap();
-    reject_noninteractive_claude_argv(&["claude".into(), "--remote-control".into(), "cos".into()])
+    reject_noninteractive_claude_argv(&["claude".into(), "--model".into(), "opus".into()])
         .unwrap();
+    reject_noninteractive_claude_argv(&[
+        "claude".into(),
+        "--remote-control".into(),
+        "cos".into(),
+    ])
+    .unwrap();
 
     for argv in [
         vec!["claude".into(), "-p".into()],
@@ -6162,7 +5445,8 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     );
 
     let explicit =
-        Cli::try_parse_from(["st3", "conversations", "ls", "agent/explicit", "--archive"]).unwrap();
+        Cli::try_parse_from(["st3", "conversations", "ls", "agent/explicit", "--archive"])
+            .unwrap();
     let Command::Conversations {
         command: MessageCommand::Ls(explicit),
     } = explicit.command
@@ -6176,16 +5460,7 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
 #[test]
 fn fyi_is_the_silent_kind_on_send_and_reply() {
     let parse = |extra: &[&str]| {
-        let mut args = vec![
-            "st3",
-            "conversations",
-            "send",
-            "agent/example/worker",
-            "--from",
-            "agent/example/peer",
-            "--body",
-            "Merged.",
-        ];
+        let mut args = vec!["st3", "conversations", "send", "agent/example/worker", "--from", "agent/example/peer", "--body", "Merged."];
         args.extend_from_slice(extra);
         Cli::try_parse_from(args).map(|cli| match cli.command {
             Command::Conversations {
@@ -6196,15 +5471,9 @@ fn fyi_is_the_silent_kind_on_send_and_reply() {
     };
     let fyi = parse(&["--fyi"]).unwrap();
     assert!(fyi.silent());
+    assert_eq!(fyi.tags().collect::<Vec<_>>(), [fractal_daemon::silent::SILENT_TAG]);
     assert_eq!(
-        fyi.tags().collect::<Vec<_>>(),
-        [fractal_daemon::silent::SILENT_TAG]
-    );
-    assert_eq!(
-        parse(&["--kind", "silent"])
-            .unwrap()
-            .tags()
-            .collect::<Vec<_>>(),
+        parse(&["--kind", "silent"]).unwrap().tags().collect::<Vec<_>>(),
         fyi.tags().collect::<Vec<_>>()
     );
     assert!(!parse(&[]).unwrap().silent());
@@ -6212,15 +5481,7 @@ fn fyi_is_the_silent_kind_on_send_and_reply() {
     assert!(parse(&["--fyi", "--kind", "wake"]).is_err());
     assert!(parse(&["--fyi", "--kind", "silent"]).is_err());
     let reply = Cli::try_parse_from([
-        "st3",
-        "conversations",
-        "reply",
-        "message/example",
-        "--from",
-        "agent/example/peer",
-        "--body",
-        "Noted.",
-        "--fyi",
+        "st3", "conversations", "reply", "message/example", "--from", "agent/example/peer", "--body", "Noted.", "--fyi",
     ])
     .unwrap();
     let Command::Conversations {
@@ -6541,23 +5802,19 @@ fn a_provenance_reads_as_one_line() {
 async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("message-read-state").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "message-read-state".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("message-read-state").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "message-read-state".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -6624,98 +5881,43 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     use fractal_daemon::{RetirementsStore as _, SeatsStoreCore as _};
     let source = "version 2\nagent \"example/old\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\nagent \"example/new\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n";
     let intent = fractal_daemon::parse_intent(source, store.origin()).unwrap();
-    store
-        .apply_internal(&intent, "custody-sender-fixture")
-        .unwrap();
-    let message = store
-        .append_claim(&ClaimInput {
-            subject: "message/custody-sender".into(),
-            kind: "message.sent".into(),
-            actor: Some("agent/example/new".into()),
-            fields: BTreeMap::from([
-                ("from".into(), json!("agent/example/new")),
-                ("to".into(), json!("agent/example/old")),
-                ("content".into(), json!("A note before retirement")),
-                ("status".into(), json!("sent")),
-            ]),
-            evidence: vec![],
-            expected_subject: None,
-            idempotency_key: Some("custody-sender-send".into()),
-        })
-        .unwrap();
-    let token = store
-        .selected_desired_token("agent/example/old")
-        .unwrap()
-        .unwrap();
-    store
-        .retire_agent_with_successor(
-            "agent/example/old",
-            "person/avery",
-            "Rollover",
-            &token,
-            None,
-            "custody-sender-retire",
-            &[],
-            Some("agent/example/new"),
-        )
-        .unwrap();
-    let state = AppState {
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "custody-sender".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        owning_person: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    store.apply_internal(&intent, "custody-sender-fixture").unwrap();
+    let message = store.append_claim(&ClaimInput {
+        subject: "message/custody-sender".into(), kind: "message.sent".into(),
+        actor: Some("agent/example/new".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("agent/example/new")),
+            ("to".into(), json!("agent/example/old")),
+            ("content".into(), json!("A note before retirement")),
+            ("status".into(), json!("sent")),
+        ]), evidence: vec![], expected_subject: None,
+        idempotency_key: Some("custody-sender-send".into()),
+    }).unwrap();
+    let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+    let state = AppState { store: store.clone(), notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+    state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+    client_relay: None, native_session_home: None, owning_person: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move {
-        serve_unix(&server_socket, router(state)).await.unwrap();
-    });
+    let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
     for _ in 0..100 {
-        if socket.exists() {
-            break;
-        }
+        if socket.exists() { break; }
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     assert!(socket.exists());
     let client = Client::unix(&socket);
-    assert_eq!(
-        read_message(&client, &message.subject)
-            .await
-            .unwrap()
-            .status,
-        "sent"
-    );
-    let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false)
-        .await
-        .unwrap();
-    let signed = store
-        .latest_claim(&message.subject, Some("message.read"))
-        .unwrap()
-        .unwrap();
+    assert_eq!(read_message(&client, &message.subject).await.unwrap().status, "sent");
+    let read = read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    let signed = store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap();
     assert_eq!(signed.actor.as_deref(), Some("agent/example/new"));
     assert_eq!(signed.body["fields"]["acting_for"], "agent/example/old");
     assert_eq!(read.status, "read");
-    read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false)
-        .await
-        .unwrap();
-    assert_eq!(
-        store
-            .latest_claim(&message.subject, Some("message.read"))
-            .unwrap()
-            .unwrap()
-            .id,
-        signed.id
-    );
+    read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
+    assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
     server.abort();
 }
 
@@ -6744,8 +5946,11 @@ agent "example/worker" {
         }),
     ] {
         let rendered = render_desired_node(&tree).unwrap();
-        let parsed =
-            fractal_daemon::parse_intent(&format!("version 2\n{rendered}\n"), "studio").unwrap();
+        let parsed = fractal_daemon::parse_intent(
+            &format!("version 2\n{rendered}\n"),
+            "studio",
+        )
+        .unwrap();
         assert_eq!(
             declared_resources(&parsed.subjects["agent/example/worker"].desired),
             expected,
@@ -6757,8 +5962,8 @@ agent "example/worker" {
 fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() {
     assert!(Cli::try_parse_from(["st3", "agents"]).is_err());
 
-    let cli =
-        Cli::try_parse_from(["st3", "agents", "ls", "--status", "running", "--enrich"]).unwrap();
+    let cli = Cli::try_parse_from(["st3", "agents", "ls", "--status", "running", "--enrich"])
+        .unwrap();
     let Command::Agents {
         command: AgentsCommand::Ls(args),
     } = cli.command
@@ -6809,11 +6014,7 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     };
     let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
-    assert!(
-        intent
-            .subjects
-            .contains_key("agent/example/cos/standing/cos")
-    );
+    assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
         intent.subjects["agent/example/cos/standing/cos"]
             .owner_run
@@ -6912,7 +6113,10 @@ fn agent_new_cli_declares_checkout_and_preserves_plain_workspace() {
     let document: KdlDocument = source.parse().unwrap();
     let body = document.get("agent").unwrap().children().unwrap();
     let checkout = body.get("checkout").unwrap();
-    assert_eq!(checkout.get(0).unwrap().as_string(), Some("/work/repo"));
+    assert_eq!(
+        checkout.get(0).unwrap().as_string(),
+        Some("/work/repo")
+    );
     assert_eq!(
         checkout.get("branch").unwrap().as_string(),
         Some("example/parser")
@@ -6936,9 +6140,12 @@ fn agent_new_cli_declares_checkout_and_preserves_plain_workspace() {
     for flag in ["--base", "--branch"] {
         assert!(Cli::try_parse_from(["st", "agents", "new", "parser", flag, "main"]).is_err());
     }
-    assert!(Cli::try_parse_from(["st", "agents", "new", "parser", "--remove-at-run-end"]).is_err());
     assert!(
-        Cli::try_parse_from(["st", "agents", "repos", "--host", "host/example", "--json"]).is_ok()
+        Cli::try_parse_from(["st", "agents", "new", "parser", "--remove-at-run-end"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from(["st", "agents", "repos", "--host", "host/example", "--json"])
+            .is_ok()
     );
 }
 
@@ -7039,6 +6246,7 @@ fn a_new_claude_agent_is_the_fleet_claude_seat() {
         "--channels plugin:st-channel@st",
         "--model claude-opus-5-5",
         "--effort high",
+
     ] {
         assert!(
             joined.contains(expected),
@@ -7090,7 +6298,10 @@ fn a_new_codex_agent_is_the_fleet_codex_seat() {
         panic!("a harness seat launches an argv");
     };
     let joined = argv.join(" ");
-    for expected in ["--model gpt-example", "-c model_reasoning_effort=medium"] {
+    for expected in [
+        "--model gpt-example",
+        "-c model_reasoning_effort=medium",
+    ] {
         assert!(
             joined.contains(expected),
             "{expected} is missing from {joined}"
@@ -7115,7 +6326,8 @@ fn a_new_agent_needs_its_own_identity_inside_a_harness() {
         .command;
     guard_mutating_cli_actor(&command, Some("agent/seat"), None).unwrap();
     assert!(
-        Cli::try_parse_from(["st3", "agents", "new", "site", "--attach", "--print-kdl"]).is_err()
+        Cli::try_parse_from(["st3", "agents", "new", "site", "--attach", "--print-kdl"])
+            .is_err()
     );
 }
 
@@ -7190,7 +6402,8 @@ fn human_mutations_reject_missing_or_shorthand_identity() {
 #[test]
 fn full_control_device_pairing_is_an_explicit_cli_choice() {
     let limited =
-        Cli::try_parse_from(["st3", "devices", "--as", "person/alex", "pair", "iPhone"]).unwrap();
+        Cli::try_parse_from(["st3", "devices", "--as", "person/alex", "pair", "iPhone"])
+            .unwrap();
     let Command::Devices(DevicesArgs {
         command: Some(DevicesCommand::Pair { full_control, .. }),
         ..
@@ -7261,47 +6474,17 @@ fn full_control_device_pairing_is_an_explicit_cli_choice() {
 #[test]
 fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
     let cli = Cli::try_parse_from([
-        "st3",
-        "devices",
-        "--as",
-        "person/operator",
-        "grant",
-        "read-trust",
-        "assistant-grant/fixture",
-        "--issuer",
-        "scg/approval-host",
-        "--key-id",
-        "approval-key/fixture",
-        "--attestor-public-key",
-        "attestor-fixture",
-        "--shim-public-key",
-        "shim-fixture",
-        "--default-response-bytes",
-        "1024",
-        "--max-response-bytes",
-        "2048",
-    ])
-    .unwrap();
+        "st3", "devices", "--as", "person/operator", "grant", "read-trust",
+        "assistant-grant/fixture", "--issuer", "scg/approval-host", "--key-id",
+        "approval-key/fixture", "--attestor-public-key", "attestor-fixture",
+        "--shim-public-key", "shim-fixture", "--default-response-bytes", "1024",
+        "--max-response-bytes", "2048",
+    ]).unwrap();
     assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
-    let Command::Devices(DevicesArgs {
-        command:
-            Some(DevicesCommand::Grant {
-                command:
-                    AssistantGrantCommand::ReadTrust {
-                        grant,
-                        issuer,
-                        key_id,
-                        attestor_public_key,
-                        shim_public_key,
-                        default_response_bytes,
-                        max_response_bytes,
-                    },
-            }),
-        ..
-    }) = cli.command
-    else {
-        panic!("expected assistant read trust");
-    };
+    let Command::Devices(DevicesArgs { command: Some(DevicesCommand::Grant {
+        command: AssistantGrantCommand::ReadTrust { grant, issuer, key_id,
+            attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes },
+    }), .. }) = cli.command else { panic!("expected assistant read trust"); };
     assert_eq!(grant, "assistant-grant/fixture");
     assert_eq!(issuer, "scg/approval-host");
     assert_eq!(key_id, "approval-key/fixture");
@@ -7312,24 +6495,8 @@ fn assistant_read_trust_cli_pins_explicit_keys_and_downward_budgets() {
 #[test]
 fn assistant_grant_cli_rejects_harness_person_impersonation() {
     for argv in [
-        vec![
-            "st3",
-            "devices",
-            "--as",
-            "person/operator",
-            "pair",
-            "--assistant",
-            "assistant/chatgpt",
-        ],
-        vec![
-            "st3",
-            "devices",
-            "--as",
-            "person/operator",
-            "grant",
-            "inspect",
-            "assistant-grant/demo",
-        ],
+        vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/chatgpt"],
+        vec!["st3", "devices", "--as", "person/operator", "grant", "inspect", "assistant-grant/demo"],
     ] {
         let cli = Cli::try_parse_from(argv).unwrap();
         assert!(guard_mutating_cli_actor(&cli.command, Some("agent/test"), None).is_err());
@@ -7341,12 +6508,7 @@ fn assistant_grant_cli_rejects_harness_person_impersonation() {
 fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
     let argv = |extra: &[&'static str]| {
         let mut argv = vec![
-            "st3",
-            "devices",
-            "--as",
-            "person/operator",
-            "pair",
-            "--assistant",
+            "st3", "devices", "--as", "person/operator", "pair", "--assistant",
             "assistant/chatgpt",
         ];
         argv.extend_from_slice(extra);
@@ -7379,14 +6541,9 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
     };
     assert!(device_name.is_none());
     assert_eq!(grant.expires_in, Some(3_600));
-    let sealed =
-        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), grant)
-            .unwrap();
+    let sealed = SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), grant).unwrap();
     assert_eq!(sealed.scopes.len(), 2);
-    assert_eq!(
-        sealed.consent_evidence,
-        "axe decision ask recorded by the owning person"
-    );
+    assert_eq!(sealed.consent_evidence, "axe decision ask recorded by the owning person");
 
     for rejected in [
         argv(&["--expires-in", "0"]),
@@ -7395,20 +6552,9 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
         argv(&["--scope", "read.everything"]),
         argv(&["--full-control"]),
         argv(&["--read-only"]),
-        vec![
-            "st3",
-            "devices",
-            "--as",
-            "person/operator",
-            "pair",
-            "--assistant",
-            "assistant/other",
-        ],
+        vec!["st3", "devices", "--as", "person/operator", "pair", "--assistant", "assistant/other"],
     ] {
-        assert!(
-            Cli::try_parse_from(&rejected).is_err(),
-            "accepted {rejected:?}"
-        );
+        assert!(Cli::try_parse_from(&rejected).is_err(), "accepted {rejected:?}");
     }
 
     let terms = |scopes: Vec<AssistantScope>, consent: bool| AssistantGrantTerms {
@@ -7418,36 +6564,18 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
         consent_evidence: Some("axe decision ask recorded by the owning person".into()),
     };
     let summary = parse_assistant_scope("read.assistant.summary").unwrap();
+    assert!(SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![], true)).is_err());
     assert!(
-        SealedAssistantGrantTerms::from_cli(
-            "person/operator",
-            Some("person/operator"),
-            terms(vec![], true)
-        )
-        .is_err()
+        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![summary.clone()], false))
+            .is_err()
     );
     assert!(
-        SealedAssistantGrantTerms::from_cli(
-            "person/operator",
-            Some("person/operator"),
-            terms(vec![summary.clone()], false)
-        )
-        .is_err()
+        SealedAssistantGrantTerms::from_cli("person/other", Some("person/operator"), terms(vec![summary.clone()], true))
+            .is_err()
     );
-    assert!(
-        SealedAssistantGrantTerms::from_cli(
-            "person/other",
-            Some("person/operator"),
-            terms(vec![summary.clone()], true)
-        )
-        .is_err()
-    );
-    let defaulted = SealedAssistantGrantTerms::from_cli(
-        "person/operator",
-        Some("person/operator"),
-        terms(vec![summary], true),
-    )
-    .unwrap();
+    let defaulted =
+        SealedAssistantGrantTerms::from_cli("person/operator", Some("person/operator"), terms(vec![summary], true))
+            .unwrap();
     assert_eq!(defaulted.expires_in_seconds, 3_600);
     assert!(require_assistant_grant_owner("person/operator", None).is_err());
     assert!(require_assistant_grant_owner("person/operator", Some("operator")).is_err());
@@ -7455,12 +6583,7 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
 
     let complete = |extra: &[&'static str]| {
         let mut argv = vec![
-            "st3",
-            "devices",
-            "complete",
-            "https://member.example",
-            "pairing/demo",
-            "--assistant",
+            "st3", "devices", "complete", "https://member.example", "pairing/demo", "--assistant",
         ];
         argv.extend_from_slice(extra);
         Cli::try_parse_from(argv)
@@ -7473,17 +6596,15 @@ fn assistant_pairing_seals_explicit_scopes_expiry_and_consent() {
         panic!("expected an assistant completion command")
     };
     assert!(assistant);
-    assert!(
-        complete(&["--unpinned"]).is_err(),
-        "assistant sessions carry no person root"
-    );
+    assert!(complete(&["--unpinned"]).is_err(), "assistant sessions carry no person root");
     assert!(complete(&["--fingerprint", "sha256:demo"]).is_err());
 }
 
 #[test]
 fn legacy_publish_is_not_a_public_alias() {
     assert!(
-        Cli::try_parse_from(["st3", "publish", "mission.kdl", "--as", "agent/operator"]).is_err()
+        Cli::try_parse_from(["st3", "publish", "mission.kdl", "--as", "agent/operator"])
+            .is_err()
     );
 }
 
@@ -7639,7 +6760,8 @@ fn work_wake_is_explicit_and_terminal_ding_is_not_a_driver() {
 
 #[test]
 fn review_commands_parse_a_filter_and_an_owner_target() {
-    let list = Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
+    let list =
+        Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
     let Command::Attention {
         command: AttentionCommand::Ls { actor, .. },
     } = list.command
@@ -7668,7 +6790,8 @@ fn review_commands_parse_a_filter_and_an_owner_target() {
 
 #[test]
 fn attention_commands_parse_list_request_and_resolution() {
-    let list = Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
+    let list =
+        Cli::try_parse_from(["st3", "attention", "ls", "--as", "person/alex"]).unwrap();
     let Command::Attention {
         command: AttentionCommand::Ls { actor, .. },
     } = list.command
@@ -7933,16 +7056,10 @@ fn graph_delivery_idle_and_deliberate_hold_keep_mailbox_ready() {
         assert!(report["reason"].is_null());
     }
     gate.update(true, DELIVERY_CONTROL_LEASE);
-    assert!(
-        gate.held(),
-        "a deliberate hold must still block native input"
-    );
+    assert!(gate.held(), "a deliberate hold must still block native input");
     for transport in ["app-server", "opencode-server"] {
         let report = native_delivery_control_report(transport, &gate);
-        assert_eq!(
-            report["ready"], true,
-            "a deliberate hold is healthy control"
-        );
+        assert_eq!(report["ready"], true, "a deliberate hold is healthy control");
         assert!(report["reason"].is_null());
     }
 }
@@ -7950,8 +7067,8 @@ fn graph_delivery_idle_and_deliberate_hold_keep_mailbox_ready() {
 #[tokio::test]
 async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
     use axum::{Json, Router, routing::get};
-    use fractal_drivers::session_control::{DeliveryBlockReason, DeliveryGate};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use fractal_drivers::session_control::{DeliveryBlockReason, DeliveryGate};
 
     for delayed_reads in [1, usize::MAX] {
         let root = tempfile::tempdir().unwrap();
@@ -7963,50 +7080,41 @@ async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
         let handler_gate = gate.clone();
         let retry_held = Arc::new(AtomicBool::new(false));
         let handler_retry_held = retry_held.clone();
-        let app = Router::new().route(
-            "/v1/delivery/hold",
-            get(move || {
-                let count = count.clone();
-                let gate = handler_gate.clone();
-                let retry_held = handler_retry_held.clone();
-                async move {
-                    let attempt = count.fetch_add(1, Ordering::SeqCst);
-                    if attempt == 1 {
-                        retry_held.store(gate.held(), Ordering::SeqCst);
-                    }
-                    if attempt < delayed_reads {
-                        tokio::time::sleep(Duration::from_millis(350)).await;
-                    }
-                    Json(json!({"api_version":"st3.v1", "value": {
-                        "subject":"agent/eval/gated", "active":false,
-                        "until_unix_ms":null, "reason":null, "actor":null, "claim":null,
-                    }}))
+        let app = Router::new().route("/v1/delivery/hold", get(move || {
+            let count = count.clone();
+            let gate = handler_gate.clone();
+            let retry_held = handler_retry_held.clone();
+            async move {
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 1 {
+                    retry_held.store(gate.held(), Ordering::SeqCst);
                 }
-            }),
-        );
+                if attempt < delayed_reads {
+                    tokio::time::sleep(Duration::from_millis(350)).await;
+                }
+                Json(json!({"api_version":"st3.v1", "value": {
+                    "subject":"agent/eval/gated", "active":false,
+                    "until_unix_ms":null, "reason":null, "actor":null, "claim":null,
+                }}))
+            }
+        }));
         let server_socket = socket.clone();
         let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
         for _ in 0..100 {
-            if socket.exists() {
-                break;
-            }
+            if socket.exists() { break; }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         assert!(socket.exists());
         let client = Client::unix(&socket);
         let mut reported = Vec::new();
         let started = Instant::now();
-        let result =
-            refresh_graph_delivery_gate_with_report(&client, "agent/eval/gated", &gate, |gate| {
-                reported.push(gate.blocked_reason())
-            })
-            .await;
+        let result = refresh_graph_delivery_gate_with_report(
+            &client, "agent/eval/gated", &gate,
+            |gate| reported.push(gate.blocked_reason()),
+        ).await;
         assert!(started.elapsed() < DELIVERY_CONTROL_LEASE);
         assert_eq!(reads.load(Ordering::SeqCst), 2, "exactly one retry");
-        assert!(
-            retry_held.load(Ordering::SeqCst),
-            "native input must be closed during the retry"
-        );
+        assert!(retry_held.load(Ordering::SeqCst), "native input must be closed during the retry");
         if delayed_reads == 1 {
             result.unwrap();
             assert_eq!(reported, [None], "a recovered retry must not flap health");
@@ -8016,10 +7124,7 @@ async fn graph_delivery_control_retries_once_and_keeps_late_reads_closed() {
             assert_eq!(reported, [Some(DeliveryBlockReason::ControlUnavailable)]);
             assert!(gate.held());
             tokio::time::sleep(Duration::from_millis(400)).await;
-            assert!(
-                gate.held(),
-                "cancelled reads must never grant a permit later"
-            );
+            assert!(gate.held(), "cancelled reads must never grant a permit later");
         }
         server.abort();
     }
@@ -8162,10 +7267,7 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     assert!(!inbox.join(&old).exists());
     assert!(archive.join(old).is_file());
     assert!(inbox.join(next).is_file());
-    assert_eq!(
-        fractal_drivers::message::list_dir(&archive).unwrap().len(),
-        1
-    );
+    assert_eq!(fractal_drivers::message::list_dir(&archive).unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -8297,26 +7399,14 @@ async fn legacy_native_mailbox_replays_delivered_unread_once_and_keeps_read_clos
         assert_eq!(subjects, ["message/delivered"]);
         let filename = &messages[0].filename;
         if let Some(first) = &first_filename {
-            assert_eq!(
-                filename, first,
-                "replay must retain the native handoff identity"
-            );
+            assert_eq!(filename, first, "replay must retain the native handoff identity");
         } else {
             first_filename = Some(filename.clone());
         }
     }
-    assert_eq!(
-        store.message("message/delivered").unwrap().unwrap().status,
-        "delivered"
-    );
-    assert_eq!(
-        store.message("message/read").unwrap().unwrap().status,
-        "read"
-    );
-    assert_eq!(
-        store.message("message/closed").unwrap().unwrap().status,
-        "closed"
-    );
+    assert_eq!(store.message("message/delivered").unwrap().unwrap().status, "delivered");
+    assert_eq!(store.message("message/read").unwrap().unwrap().status, "read");
+    assert_eq!(store.message("message/closed").unwrap().unwrap().status, "closed");
     server.abort();
 }
 
@@ -8738,23 +7828,19 @@ async fn serve_test_store(
     node: &str,
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: node.into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -9036,9 +8122,7 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!(
-        "http://{address}"
-    )));
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
     let mut observations = NativeObservations::start(root.path(), "runtime-a").unwrap();
     let mut ready = false;
     assert!(
@@ -9130,9 +8214,7 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
     for delivery_tick in 0..3 {
         // This is the production control-arm wake and eligibility result: local delivery
         // keeps ticking, but the report body cannot run or record success/failure yet.
-        let settled = settle
-            .control_tick(&mut control, &mut control_interval)
-            .await;
+        let settled = settle.control_tick(&mut control, &mut control_interval).await;
         let expected = Duration::from_secs(delivery_tick * 10);
         let elapsed = tokio::time::Instant::now() - started;
         assert!(elapsed >= expected && elapsed <= expected + Duration::from_millis(5));
@@ -9144,19 +8226,12 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
     }
     assert_eq!(attempts, 0);
     // Even the work interval's initial immediate tick stays unconsumed before eligibility.
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(9),
-            settle.retry_tick(&mut work, &mut work_interval)
-        )
-        .await
-        .is_err()
-    );
+    assert!(tokio::time::timeout(
+        Duration::from_secs(9), settle.retry_tick(&mut work, &mut work_interval)
+    ).await.is_err());
     assert!(!settle.passed());
     tokio::time::advance(Duration::from_secs(1)).await;
-    let settled = settle
-        .control_tick(&mut control, &mut control_interval)
-        .await;
+    let settled = settle.control_tick(&mut control, &mut control_interval).await;
     assert!(settled && control.ready());
     attempts += 1;
     assert_eq!(attempts, 1);
@@ -9167,19 +8242,10 @@ async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() 
     let pause = control.failed(&anyhow::anyhow!("control deadline"));
     assert!((Duration::from_millis(500)..=Duration::from_millis(1500)).contains(&pause));
     let failed_at = tokio::time::Instant::now();
-    assert!(
-        tokio::time::timeout(
-            pause / 2,
-            settle.control_tick(&mut control, &mut control_interval)
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        settle
-            .control_tick(&mut control, &mut control_interval)
-            .await
-    );
+    assert!(tokio::time::timeout(
+        pause / 2, settle.control_tick(&mut control, &mut control_interval)
+    ).await.is_err());
+    assert!(settle.control_tick(&mut control, &mut control_interval).await);
     let elapsed = tokio::time::Instant::now() - failed_at;
     assert!(elapsed >= pause && elapsed <= pause + Duration::from_millis(5));
 }
@@ -9195,14 +8261,9 @@ async fn resumed_driver_settle_does_not_fire_or_reset_an_existing_retry() {
     // polling it during settle would make this timeout return early.
     retry.failed(&anyhow::anyhow!("control deadline"));
     retry.failed(&anyhow::anyhow!("control deadline"));
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(4),
-            settle.control_tick(&mut retry, &mut interval)
-        )
-        .await
-        .is_err()
-    );
+    assert!(tokio::time::timeout(
+        Duration::from_secs(4), settle.control_tick(&mut retry, &mut interval)
+    ).await.is_err());
     assert!(!settle.passed());
     tokio::time::advance(Duration::from_secs(26)).await;
     assert!(settle.control_tick(&mut retry, &mut interval).await);
@@ -9314,13 +8375,9 @@ async fn a_resumed_driver_sends_its_outbox_only_after_its_settle() {
 async fn initial_snapshot_requires_the_providers_runtime_binding() {
     let root = tempfile::tempdir().unwrap();
     fractal_drivers::harness_events::enable(root.path(), "runtime-old").unwrap();
-    let seq = fractal_drivers::harness_state::claim(
-        root.path(),
-        "example/seat",
-        "claude",
-        "provider-old",
-    )
-    .unwrap();
+    let seq =
+        fractal_drivers::harness_state::claim(root.path(), "example/seat", "claude", "provider-old")
+            .unwrap();
     let observations = NativeObservations::start(root.path(), "runtime-old").unwrap();
     assert_eq!(
         observations.provider_incarnation.as_deref(),
@@ -9395,9 +8452,7 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!(
-        "http://{address}"
-    )));
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
     let mut observations = NativeObservations::start(root.path(), "current-runtime").unwrap();
     let mut ready = false;
     // A predecessor's claim must neither publish the diagnostic nor require the daemon.
@@ -9405,13 +8460,8 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
         .drain(&client, "agent/example/seat", "opencode", &mut ready)
         .await
         .unwrap();
-    fractal_drivers::harness_state::claim(
-        root.path(),
-        "example/seat",
-        "opencode",
-        "current-provider",
-    )
-    .unwrap();
+    fractal_drivers::harness_state::claim(root.path(), "example/seat", "opencode", "current-provider")
+        .unwrap();
     assert!(
         observations
             .drain(&client, "agent/example/seat", "opencode", &mut ready)
@@ -9479,59 +8529,32 @@ async fn reading_the_outbox_does_not_wake_an_idle_driver() {
             .await
             .is_err()
     );
-    fractal_drivers::harness_events::write_channel_todo(
-        root.path(),
-        "runtime",
-        &json!({
-            "harness":"omp", "session_id":"native", "incarnation_id":"runtime",
-            "observed_at":"2026-10-03T15:00:00Z", "source_op":"hydrate", "phases":[],
-            "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
-        }),
-    )
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), observations.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    fractal_drivers::harness_events::write_channel_todo(root.path(), "runtime", &json!({
+        "harness":"omp", "session_id":"native", "incarnation_id":"runtime",
+        "observed_at":"2026-10-03T15:00:00Z", "source_op":"hydrate", "phases":[],
+        "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}, "truncated":false,
+    })).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), observations.recv()).await.unwrap().unwrap();
 }
 
 #[test]
 fn native_identity_rename_commands_preserve_full_ids_and_fences() {
     for kind in ["agents", "missions"] {
         let cli = Cli::try_parse_from([
-            "st",
-            kind,
-            "rename-id",
-            "agent/example-old",
-            "agent/example-new",
-            "--as",
-            "person/robin",
-            "--reason",
-            "Clarify responsibility",
-            "--if-naming-revision",
-            "claim/example",
-            "--idempotency-key",
-            "example-rename",
-            "--json",
-        ])
-        .unwrap();
+            "st", kind, "rename-id", "agent/example-old", "agent/example-new",
+            "--as", "person/robin", "--reason", "Clarify responsibility",
+            "--if-naming-revision", "claim/example", "--idempotency-key", "example-rename", "--json",
+        ]).unwrap();
         assert!(cli.json);
         let args = match cli.command {
-            Command::Agents {
-                command: AgentsCommand::RenameId(args),
-            }
-            | Command::Missions {
-                command: MissionViewCommand::RenameId(args),
-            } => args,
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
             _ => panic!("expected identity rename"),
         };
         assert_eq!(args.from, "agent/example-old");
         assert_eq!(args.to, "agent/example-new");
         assert_eq!(args.actor, "person/robin");
-        assert_eq!(
-            args.expected_naming_revision.as_deref(),
-            Some("claim/example")
-        );
+        assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
         assert_eq!(args.expected_declaration, None);
         assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
     }
@@ -9540,18 +8563,9 @@ fn native_identity_rename_commands_preserve_full_ids_and_fences() {
 #[test]
 fn native_identity_rename_requires_actor_and_reason() {
     for missing in ["--as", "--reason"] {
-        let mut arguments = vec![
-            "st",
-            "agents",
-            "rename-id",
-            "agent/example-old",
-            "agent/example-new",
-        ];
-        for (flag, value) in [
-            ("--as", "person/robin"),
-            ("--reason", "Clarify responsibility"),
-            ("--idempotency-key", "example-rename"),
-        ] {
+        let mut arguments = vec!["st", "agents", "rename-id", "agent/example-old", "agent/example-new"];
+        for (flag, value) in [("--as", "person/robin"), ("--reason", "Clarify responsibility"),
+            ("--idempotency-key", "example-rename")] {
             if flag != missing {
                 arguments.extend([flag, value]);
             }
@@ -9563,21 +8577,10 @@ fn native_identity_rename_requires_actor_and_reason() {
 #[test]
 fn native_identity_rename_allows_generated_idempotency_key() {
     let cli = Cli::try_parse_from([
-        "st",
-        "agents",
-        "rename-id",
-        "agent/example-old",
-        "agent/example-new",
-        "--as",
-        "person/robin",
-        "--reason",
-        "Clarify responsibility",
-    ])
-    .unwrap();
-    let Command::Agents {
-        command: AgentsCommand::RenameId(args),
-    } = cli.command
-    else {
+        "st", "agents", "rename-id", "agent/example-old", "agent/example-new",
+        "--as", "person/robin", "--reason", "Clarify responsibility",
+    ]).unwrap();
+    let Command::Agents { command: AgentsCommand::RenameId(args) } = cli.command else {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
@@ -9588,27 +8591,28 @@ fn github_watch_continuation_keeps_the_agent_executable() {
     assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
 }
 
-#[test]
-fn work_detail_explains_managed_and_unmanaged_leases() {
-    let page = fixture_product_page(&["work"], false);
-    let ClientResource::Work(work) = &page.items[0] else {
-        panic!("expected work fixture");
-    };
-    let mut work = work.clone();
-    work.claimant = Some("agent/example".into());
-    work.claim_incarnation = Some("incarnation/current".into());
-    work.claim_expires_at_unix_ms = Some(62_001);
-    let managed = render_client_work_detail(&work, Some(true));
-    assert!(managed.contains("\nLease: The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.\n"));
-    assert!(!managed.contains("fractal work renew"));
-    let unmanaged = render_client_work_detail(&work, Some(false));
-    assert!(unmanaged.contains(&format!("\nLease: The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew {} --as agent/example --incarnation incarnation/current\n", work.header.id)));
-    assert!(!unmanaged.contains("Fractal driver renews"));
-    work.claim_incarnation = None;
-    let unmanaged = render_client_work_detail(&work, Some(false));
-    assert!(unmanaged.contains(" --as agent/example\n"));
-    assert!(!unmanaged.contains("--incarnation"));
-}
+    #[test]
+    fn work_detail_explains_managed_and_unmanaged_leases() {
+        let page = fixture_product_page(&["work"], false);
+        let ClientResource::Work(work) = &page.items[0] else {
+            panic!("expected work fixture");
+        };
+        let mut work = work.clone();
+        work.claimant = Some("agent/example".into());
+        work.claim_incarnation = Some("incarnation/current".into());
+        work.claim_expires_at_unix_ms = Some(62_001);
+        let managed = render_client_work_detail(&work, Some(true));
+        assert!(managed.contains("\nLease: The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.\n"));
+        assert!(!managed.contains("fractal work renew"));
+        let unmanaged = render_client_work_detail(&work, Some(false));
+        assert!(unmanaged.contains(&format!("\nLease: The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew {} --as agent/example --incarnation incarnation/current\n", work.header.id)));
+        assert!(!unmanaged.contains("Fractal driver renews"));
+        work.claim_incarnation = None;
+        let unmanaged = render_client_work_detail(&work, Some(false));
+        assert!(unmanaged.contains(" --as agent/example\n"));
+        assert!(!unmanaged.contains("--incarnation"));
+    }
+
 
 #[tokio::test]
 async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
@@ -9621,12 +8625,7 @@ async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
     work.claimant = Some("agent/example".into());
     work.claim_incarnation = Some("incarnation/current".into());
     work.claim_expires_at_unix_ms = Some(62_001);
-    let ownership = claim_has_driver(
-        &client,
-        work.claimant.as_deref(),
-        work.claim_incarnation.as_deref(),
-    )
-    .await;
+    let ownership = claim_has_driver(&client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
     assert_eq!(ownership, None);
     let rendered = render_client_work_detail(&work, ownership);
     assert!(rendered.contains(&format!("WORK  {}", work.header.id)));

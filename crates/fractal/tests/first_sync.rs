@@ -25,11 +25,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
+use serde_json::{Value, json};
 use fractal_daemon::model::{
     ClaimInput, IntentInput, MissionRunRequest, ReplicationStatus, ReplicationTimings, WorkRequest,
 };
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
 
 const FLEET: &str = "5d0c6f8e-2b1a-4c3d-9e8f-7a6b5c4d3e2f";
 // Below the Linux and macOS ephemeral port ranges, so no outgoing connection can hold them.
@@ -697,12 +697,7 @@ fn report_signing(envelopes: u64) {
     let (key, _) = fractal_daemon::fleet::MemberKey::generate().unwrap();
     let messages = (0..envelopes)
         .map(|sequence| {
-            fractal_daemon::fleet::envelope_signature_message(
-                FLEET,
-                "source",
-                sequence,
-                &"a".repeat(64),
-            )
+            fractal_daemon::fleet::envelope_signature_message(FLEET, "source", sequence, &"a".repeat(64))
         })
         .collect::<Vec<_>>();
     let started = Instant::now();

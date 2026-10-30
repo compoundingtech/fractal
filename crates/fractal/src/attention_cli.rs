@@ -73,7 +73,9 @@ async fn actionable_attention_item(
                 |card| item.subject == card.source_id && item.episode == card.episode,
             )
         })
-        .with_context(|| format!("attention item `{normalized}` is not currently actionable"))?;
+        .with_context(|| {
+            format!("attention item `{normalized}` is not currently actionable")
+        })?;
     let card_id = alias.map(|card| card.header.id);
     Ok((item, card_id))
 }
@@ -217,15 +219,9 @@ pub(super) async fn run_attention(
                 return Ok(());
             };
             if let Err(error) = sync_message_projection(client).await {
-                crate::stderr_message(
-                    "st",
-                    format_args!(
-                        "{} was sent (idempotency key {}), but the message projection was not refreshed: {}",
-                        receipt.message.subject,
-                        receipt.idempotency_key,
-                        plain_error(&error)
-                    ),
-                );
+                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
+                receipt.idempotency_key,
+                plain_error(&error)));
             }
             print_message_receipt(&receipt, json_output)
         }

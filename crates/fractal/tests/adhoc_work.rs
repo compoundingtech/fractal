@@ -1,8 +1,8 @@
 //! Start, checkpoint, transfer, acknowledge and close through an isolated durable daemon.
 #![cfg(unix)]
 use fractal_daemon::SeatsStoreCore;
-use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
 use serde_json::{Value, json};
+use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Notify, watch};
@@ -13,10 +13,7 @@ impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(
-        &self,
-        _: &str,
-    ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
+    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
     fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
@@ -81,23 +78,19 @@ impl Daemon {
         self.root.join("api.sock")
     }
     async fn start(&mut self) {
-        let state = AppState {
-            owning_person: None,
-            store: self.store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: "example".into(),
-            state_dir: self.root.clone(),
-            pty_root: self.root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-            assistant_receipts: Default::default(),
-            private_notes: Default::default(),
-        };
+        let state = AppState { owning_person: None,
+        store: self.store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "example".into(),
+        state_dir: self.root.clone(),
+        pty_root: self.root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let socket = self.socket();
         self.server = Some(tokio::spawn(async move {
             fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state))
@@ -128,7 +121,8 @@ impl Daemon {
         self.cli_output(args, true).await
     }
     async fn cli_output(&self, args: &[&str], json: bool) -> std::process::Output {
-        let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
+        let mut command =
+            fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))
@@ -207,117 +201,45 @@ async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
     daemon.declare();
     daemon.start().await;
     let opened = daemon
-        .ok(&[
-            "work",
-            "start",
-            "ETA fixture",
-            "--as",
-            ALDER,
-            "--idempotency-key",
-            "eta-start",
-        ])
+        .ok(&["work", "start", "ETA fixture", "--as", ALDER, "--idempotency-key", "eta-start"])
         .await;
     let step = opened["subject"].as_str().unwrap();
     daemon
-        .ok(&[
-            "work",
-            "claim",
-            step,
-            "--as",
-            ALDER,
-            "--incarnation",
-            "alder-one",
-        ])
+        .ok(&["work", "claim", step, "--as", ALDER, "--incarnation", "alder-one"])
         .await;
     daemon
         .fails(
-            &[
-                "work",
-                "progress",
-                step,
-                "--as",
-                ALDER,
-                "--incarnation",
-                "stale",
-                "--eta",
-                "2h",
-            ],
+            &["work", "progress", step, "--as", ALDER, "--incarnation", "stale", "--eta", "2h"],
             "not the current live incarnation",
         )
         .await;
     daemon
         .fails(
-            &[
-                "work",
-                "progress",
-                step,
-                "--as",
-                ALDER,
-                "--incarnation",
-                "alder-one",
-                "--eta",
-                "2000-01-01T00:00:00Z",
-            ],
+            &["work", "progress", step, "--as", ALDER, "--incarnation", "alder-one", "--eta", "2000-01-01T00:00:00Z"],
             "ETA must be in the future",
         )
         .await;
     let updated = daemon
         .ok(&[
-            "work",
-            "progress",
-            step,
-            "--as",
-            ALDER,
-            "--incarnation",
-            "alder-one",
-            "--summary",
-            "Review in progress",
-            "--eta",
-            "2h",
+            "work", "progress", step, "--as", ALDER, "--incarnation", "alder-one",
+            "--summary", "Review in progress", "--eta", "2h",
         ])
         .await;
     let summary = updated["progress_summary"].as_str().unwrap().to_owned();
-    assert!(summary.starts_with(&format!(
-        "Review in progress\nETA (self-reported by {ALDER}): "
-    )));
+    assert!(summary.starts_with(&format!("Review in progress\nETA (self-reported by {ALDER}): ")));
     assert!(summary.ends_with("Not a deadline."));
-    let eta = summary
-        .split(format!("ETA (self-reported by {ALDER}): ").as_str())
-        .nth(1)
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap();
-    let reported = summary
-        .split("reported at ")
-        .nth(1)
-        .unwrap()
-        .strip_suffix(". Not a deadline.")
-        .unwrap();
+    let eta = summary.split(format!("ETA (self-reported by {ALDER}): ").as_str()).nth(1).unwrap()
+        .split(';').next().unwrap();
+    let reported = summary.split("reported at ").nth(1).unwrap()
+        .strip_suffix(". Not a deadline.").unwrap();
     let eta = chrono::DateTime::parse_from_rfc3339(eta).unwrap();
     let reported = chrono::DateTime::parse_from_rfc3339(reported).unwrap();
     assert_eq!((eta - reported).num_seconds(), 7200);
     daemon.restart().await;
-    assert!(
-        daemon
-            .ok(&["work", "show", step])
-            .await
-            .to_string()
-            .contains("ETA (self-reported by ")
-    );
-    assert!(
-        daemon
-            .ok(&["work", "ls", "--as", ALDER])
-            .await
-            .to_string()
-            .contains("ETA (self-reported by ")
-    );
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
+    assert!(daemon.ok(&["work", "ls", "--as", ALDER]).await.to_string().contains("ETA (self-reported by "));
     let human = daemon.cli_output(&["work", "show", step], false).await;
-    assert!(
-        human.status.success(),
-        "{}",
-        String::from_utf8_lossy(&human.stderr)
-    );
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
     let human = String::from_utf8_lossy(&human.stdout);
     assert!(human.contains("Progress ("));
     assert!(human.contains("just now") || human.contains(" ago"));
@@ -326,43 +248,16 @@ async fn progress_eta_survives_replay_and_is_replaced_by_the_next_note() {
     assert!(human.contains("reported at "));
     assert!(human.contains("Not a deadline."));
     daemon
-        .ok(&[
-            "work",
-            "progress",
-            step,
-            "--as",
-            ALDER,
-            "--incarnation",
-            "alder-one",
-        ])
+        .ok(&["work", "progress", step, "--as", ALDER, "--incarnation", "alder-one"])
         .await;
-    assert!(
-        daemon
-            .ok(&["work", "show", step])
-            .await
-            .to_string()
-            .contains("ETA (self-reported by ")
-    );
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
     daemon
         .ok(&[
-            "work",
-            "progress",
-            step,
-            "--as",
-            ALDER,
-            "--incarnation",
-            "alder-one",
-            "--summary",
-            "Estimate withdrawn",
+            "work", "progress", step, "--as", ALDER, "--incarnation", "alder-one",
+            "--summary", "Estimate withdrawn",
         ])
         .await;
-    assert!(
-        !daemon
-            .ok(&["work", "show", step])
-            .await
-            .to_string()
-            .contains("ETA (self-reported by ")
-    );
+    assert!(!daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
 }
 
 #[tokio::test]
@@ -469,24 +364,12 @@ async fn spontaneous_work_survives_restart_handoff_acknowledgment_and_close() {
             "not the current live incarnation",
         )
         .await;
-    assert!(
-        daemon
-            .ok(&["work", "show", step])
-            .await
-            .to_string()
-            .contains("ETA (self-reported by ")
-    );
+    assert!(daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
     let transferred = daemon.ok(&handoff).await;
     assert_eq!(transferred["assigned_to"], BIRCH);
     assert!(transferred["claimant"].is_null());
     assert_eq!(transferred["progress_summary"], "Current: fixture found");
-    assert!(
-        !daemon
-            .ok(&["work", "show", step])
-            .await
-            .to_string()
-            .contains("ETA (self-reported by ")
-    );
+    assert!(!daemon.ok(&["work", "show", step]).await.to_string().contains("ETA (self-reported by "));
     assert_eq!(daemon.ok(&handoff).await["subject"], step);
     let note = daemon.note(BIRCH);
     daemon

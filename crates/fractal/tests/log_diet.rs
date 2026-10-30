@@ -36,21 +36,21 @@
 //! Inside an st3 harness, unset `ST_AGENT` first: the local API binds a caller to the agent in
 //! its process ancestry, and these drivers write as their own agents.
 
-use fractal_daemon::EvidenceStore;
 use fractal_daemon::MissionsStore;
+use fractal_daemon::EvidenceStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::model::{ClaimInput, ClaimRecord, IntentInput, MissionRunRequest};
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::{Store, local_observation_position};
-use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "diet-node";
@@ -167,29 +167,23 @@ impl Daemon {
         std::fs::create_dir_all(&state_dir).unwrap();
         let store = Arc::new(Store::open(&state_dir.join("claims.sqlite3"), NODE).unwrap());
         let notify = Arc::new(Notify::new());
-        let state = AppState {
-            owning_person: None,
-            store: store.clone(),
-            notify: notify.clone(),
-            event_notify: watch::channel(0_u64).0,
-            node: NODE.into(),
-            state_dir,
-            pty_root: root.join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-            assistant_receipts: Default::default(),
-            private_notes: Default::default(),
-        };
+        let state = AppState { owning_person: None,
+        store: store.clone(),
+        notify: notify.clone(),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir,
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let socket = root.join("st3.sock");
         let server_socket = socket.clone();
         runtime.spawn(async move {
-            let _ =
-                fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
-                    .await;
+            let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await;
         });
         // The workload runs every reconcile pass itself; see `reconcile`.
         let reconciler = Arc::new(Reconciler::new(

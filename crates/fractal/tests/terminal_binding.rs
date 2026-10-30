@@ -1,9 +1,9 @@
 #![cfg(unix)]
 //! Borrowed PTYs are tested through the runtime backend: every physical action is recorded.
+use serde_json::{Value, json};
 use fractal_daemon::model::{ClaimInput, IntentInput, MemberSpec, MessageSendRequest, MessageView};
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, watch};
@@ -77,12 +77,7 @@ impl RuntimeControl for Runtime {
         self.actions.lock().unwrap().push("leftovers".into());
     }
 }
-fn apply(
-    store: &Store,
-    source: &str,
-    actor: Option<&str>,
-    key: &str,
-) -> Result<(), fractal_daemon::St3Error> {
+fn apply(store: &Store, source: &str, actor: Option<&str>, key: &str) -> Result<(), fractal_daemon::St3Error> {
     let intent = fractal_daemon::parse_intent(source, "orchid")?;
     let preview = store.mission(
         &intent,
@@ -239,18 +234,12 @@ fn binding_forbids_managed_side_effects_and_requires_an_invocation_fence() {
         "exec \"helper\" { command \"true\"; }",
     ] {
         let source = source(INVOCATION).replacen("name \"Terminal/claude\";", additional, 1);
-        assert!(
-            fractal_daemon::parse_intent(&source, "orchid").is_err(),
-            "{source}"
-        );
+        assert!(fractal_daemon::parse_intent(&source, "orchid").is_err(), "{source}");
     }
     assert!(fractal_daemon::parse_intent(&source("not-a-uuid"), "orchid").is_err());
     let intent = fractal_daemon::parse_intent(&source(INVOCATION), "orchid").unwrap();
     let member = intent.subjects[SEAT].member.as_ref().unwrap();
-    assert_eq!(
-        member.lifecycle,
-        fractal_daemon::model::MemberLifecycle::TerminalBound
-    );
+    assert_eq!(member.lifecycle, fractal_daemon::model::MemberLifecycle::TerminalBound);
     assert_eq!(member.restart, fractal_daemon::model::RestartType::Never);
 }
 
@@ -338,34 +327,25 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         let store = state.store.clone();
-        fractal_daemon::api::serve_unix_bound(
-            &server_socket,
-            &server_socket,
-            fractal_daemon::api::router(state),
-            store,
-        )
-        .await
-        .unwrap();
+        fractal_daemon::api::serve_unix_bound(&server_socket, &server_socket, fractal_daemon::api::router(state), store)
+            .await
+            .unwrap();
     });
     for _ in 0..200 {
         if socket.exists() {
@@ -373,8 +353,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let client =
-        fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket));
+    let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket));
     // The real native wrapper launches a model-free provider, which consumes one real
     // Claude channel notification and exits. All files live under this fixture's HOME.
     let provider = root.path().join("fake-claude.py");
@@ -442,7 +421,8 @@ read -r _
     let agent_incarnation = format!("{physical}:bound:{INVOCATION}");
     let pty_root = root.path().join("pty");
     let runtime_id = TERMINAL.replace('/', ".");
-    let _pty_listener = register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
+    let _pty_listener =
+        register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
     runtime.ptys.lock().unwrap()[0].incarnation_id = Some(physical.clone());
     apply(
         &store,

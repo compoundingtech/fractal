@@ -7,11 +7,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::{Value, json};
+use fractal_drivers::subagents::{self as ledger, Tokens};
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::store::Store;
-use fractal_drivers::subagents::{self as ledger, Tokens};
-use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 const CODEX_SEAT: &str = "agent/example/codex";
@@ -26,28 +26,23 @@ async fn serve(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let store = Arc::new(Store::open(&root.join("graph.db"), "publisher-test").unwrap());
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "publisher-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "publisher-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let socket = root.join("st3.sock");
     let path = socket.clone();
-    let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await
-    });
+    let server =
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await });
     for _ in 0..200 {
         if socket.exists() {
             break;
@@ -186,9 +181,9 @@ async fn a_codex_subagent_run_ends_with_its_own_tokens_in_the_parents_usage() {
     assert_eq!(ended[1]["total_tokens"], 215);
     assert_eq!(ended[1]["output_tokens"], 15);
 
-    let record = fractal_drivers::harness_timeline::read(
-        &fractal_drivers::harness_timeline::timeline_path(&agent_dir),
-    )
+    let record = fractal_drivers::harness_timeline::read(&fractal_drivers::harness_timeline::timeline_path(
+        &agent_dir,
+    ))
     .unwrap();
     let usage = record
         .operations
@@ -332,9 +327,9 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0]["outcome"], "harness-exited");
     assert_eq!(ended[0]["total_tokens"], 42);
-    let record = fractal_drivers::harness_timeline::read(
-        &fractal_drivers::harness_timeline::timeline_path(&agent_dir),
-    )
+    let record = fractal_drivers::harness_timeline::read(&fractal_drivers::harness_timeline::timeline_path(
+        &agent_dir,
+    ))
     .unwrap();
     assert!(
         record
@@ -360,13 +355,7 @@ fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::
     let seq =
         fractal_drivers::harness_state::claim(agent_dir, OMP_SEAT, "omp", "provider-1").unwrap();
     let mut channel = fractal_drivers::pi_channel::EventObserver::new(
-        agent_dir,
-        &agent_dir.join("sessions/omp"),
-        OMP_SEAT,
-        "omp",
-        "provider-1",
-        seq,
-        "runtime-1",
+        agent_dir, &agent_dir.join("sessions/omp"), OMP_SEAT, "omp", "provider-1", seq, "runtime-1",
     )
     .unwrap();
     channel
@@ -387,10 +376,7 @@ async fn listed_subagents(client: &Client) -> Value {
         .iter()
         .find(|agent| agent["id"] == OMP_SEAT)
         .unwrap_or_else(|| panic!("the omp seat is listed: {agents}"));
-    assert_eq!(
-        agent["driver"], "omp",
-        "the fixture declares an OMP harness"
-    );
+    assert_eq!(agent["driver"], "omp", "the fixture declares an OMP harness");
     agent["subagents"].clone()
 }
 
@@ -439,10 +425,8 @@ async fn an_omp_subagent_is_listed_on_its_seat_until_it_ends() {
     assert_eq!(fields(&store, OMP_SEAT, "subagent.appeared").len(), 1);
 
     channel
-        .observe(
-            &json!({"type": "subagent", "event": "end", "id": "0-Review",
-            "name": "task", "outcome": "completed"}),
-        )
+        .observe(&json!({"type": "subagent", "event": "end", "id": "0-Review",
+            "name": "task", "outcome": "completed"}))
         .unwrap();
     publisher.tick(&client).await.unwrap();
     assert_eq!(listed_subagents(&client).await, json!([]));

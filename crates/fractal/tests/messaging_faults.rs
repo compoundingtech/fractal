@@ -115,9 +115,7 @@ fn run_case_at(case: &str, real_grace: bool) {
             FAST_OBSERVE_SECONDS,
         ]);
     }
-    let output = eval
-        .output()
-        .expect("run the isolated messaging fault eval");
+    let output = eval.output().expect("run the isolated messaging fault eval");
     let result = std::fs::read_to_string(evidence.join("result.json"));
     let passed = result
         .as_ref()

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use fractal_daemon::cli_println as println;
 use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::cli_println as println;
 use fractal_schema::deploy::{PackageIdentity, VerifyGoRequest};
 
 #[derive(Args)]
@@ -72,9 +72,7 @@ impl From<VerifyGoArgs> for VerifyGoRequest {
 
 pub async fn run(endpoint: &Endpoint, args: DeployArgs, json: bool) -> Result<()> {
     let DeployCommand::VerifyGo(args) = args.command;
-    let receipt = Client::new(endpoint.clone())
-        .verify_deploy_go(&args.into())
-        .await?;
+    let receipt = Client::new(endpoint.clone()).verify_deploy_go(&args.into()).await?;
     // Both formats are complete machine-readable receipts, not an authorization hint.
     if json {
         println!("{}", serde_json::to_string(&receipt)?);

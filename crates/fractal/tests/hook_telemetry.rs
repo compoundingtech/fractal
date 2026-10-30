@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::post};
+use serde_json::{Value, json};
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
 
 #[derive(Clone)]
 struct Daemon {
@@ -36,8 +36,7 @@ async fn start_daemon(socket: &Path, delay: Duration) -> (Daemon, tokio::task::J
         .route("/v1/claims", post(admit))
         .with_state(daemon.clone());
     let path = socket.to_owned();
-    let server =
-        tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, app).await.unwrap() });
+    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, app).await.unwrap() });
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -65,8 +64,7 @@ fn seat(root: &Path) -> std::path::PathBuf {
 }
 
 fn hook(root: &Path, event: &str, collector: &str) -> tokio::process::Command {
-    let mut command =
-        fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -157,8 +155,7 @@ async fn an_undeclared_application_and_the_status_line_create_no_hook_count_or_e
             .status
             .success()
     );
-    let mut status_line =
-        fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+    let mut status_line = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     status_line
         .env_clear()
         .env("HOME", root.path())

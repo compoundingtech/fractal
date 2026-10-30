@@ -43,10 +43,10 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
-use fractal_daemon::AdhocWorkStore;
 use fractal_daemon::ConversationReadsStore;
-use fractal_daemon::CoordinationStore;
 use fractal_daemon::CustomStore;
+use fractal_daemon::AdhocWorkStore;
+use fractal_daemon::CoordinationStore;
 use fractal_daemon::MissionsStore;
 use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
@@ -57,21 +57,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post as axum_post;
+use axum::Router;
+use serde_json::{Value, json};
+use smallclaims::sqlite::work::{self, SqliteWork};
+use smallclaims::sync::PeerResponse;
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::Client;
 use fractal_daemon::config::{Config, PeerConfig};
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::peer::{ClientReadOperation, ClientReadRequest, ClientRelay, FleetAuth};
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
-use smallclaims::sqlite::work::{self, SqliteWork};
-use smallclaims::sync::PeerResponse;
 use tokio::sync::{Notify, watch};
 
 use crate::daemon_bench::{
@@ -129,14 +129,8 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/internal/fleet/admission-residue",
         "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
     ),
-    (
-        "POST /v1/client/observations",
-        "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs",
-    ),
-    (
-        "POST /v1/client/diagnostics",
-        "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here",
-    ),
+    ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
+    ("POST /v1/client/diagnostics", "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here"),
     // A Claude permission hook's or Codex driver's approval poll: one indexed newest-claim read
     // and one operation lookup.
     (
@@ -235,98 +229,29 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     // Pairing and fleet membership change who may talk to the daemon; their tests cover them.
     ("POST /v1/client/pairings", "pairs a device"),
     ("POST /v1/client/pairings/{id}/complete", "pairs a device"),
-    (
-        "GET /v1/client/assistant/grants/{id}",
-        "requires trusted-local owner provenance and an issued grant; assistant tests cover indexed grant inspection",
-    ),
-    (
-        "POST /v1/client/assistant/grants/{id}/policy",
-        "changes owner-issued assistant permissions; assistant tests cover policy history and consent",
-    ),
-    (
-        "POST /v1/client/assistant/grants/{id}/revoke",
-        "revokes owner-issued assistant permissions; assistant tests cover exact revocation",
-    ),
-    (
-        "POST /v1/client/assistant/grants/{id}/read-trust",
-        "changes owner-issued per-read approval policy; assistant authorization tests cover consent and revocation",
-    ),
-    (
-        "GET /v1/client/assistant/grants/assistant-grant/{id}",
-        "prefixed-ID alias of trusted-local owner grant inspection; requires an issued grant",
-    ),
-    (
-        "POST /v1/client/assistant/grants/assistant-grant/{id}/policy",
-        "prefixed-ID alias of low-frequency trusted-local owner policy administration",
-    ),
-    (
-        "POST /v1/client/assistant/grants/assistant-grant/{id}/revoke",
-        "prefixed-ID alias of low-frequency trusted-local owner grant revocation",
-    ),
-    (
-        "POST /v1/client/assistant/grants/assistant-grant/{id}/read-trust",
-        "prefixed-ID alias of low-frequency trusted-local owner read-trust administration",
-    ),
-    (
-        "POST /v1/client/assistant/propose",
-        "requires a paired assistant, a current grant and an owner-approved native action; assistant_native tests cover transactional authorization",
-    ),
-    (
-        "GET /v1/client/assistant/attention-content",
-        "requires a paired assistant and an exact owner alert; assistant_native tests cover bounded disclosure",
-    ),
-    (
-        "GET /v1/client/assistant/attention-rich",
-        "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections",
-    ),
-    (
-        "GET /v1/client/assistant/missions-rich",
-        "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections",
-    ),
-    (
-        "GET /v1/client/assistant/agents-rich",
-        "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections",
-    ),
-    (
-        "GET /v1/client/assistant/summary",
-        "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets",
-    ),
-    (
-        "GET /v1/client/assistant/attention",
-        "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets",
-    ),
-    (
-        "GET /v1/client/assistant/agents",
-        "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets",
-    ),
-    (
-        "GET /v1/client/assistant/missions",
-        "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets",
-    ),
-    (
-        "GET /v1/client/assistant/conversation-content",
-        "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets",
-    ),
-    (
-        "GET /v1/client/assistant/conversations",
-        "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost",
-    ),
-    (
-        "GET /v1/client/assistant/conversation-detail",
-        "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost",
-    ),
-    (
-        "GET /v1/client/assistant/conversation-timeline",
-        "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost",
-    ),
-    (
-        "GET /v1/client/assistant/conversation-search",
-        "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost",
-    ),
-    (
-        "GET /v1/client/assistant/terminal-content",
-        "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets",
-    ),
+    ("GET /v1/client/assistant/grants/{id}", "requires trusted-local owner provenance and an issued grant; assistant tests cover indexed grant inspection"),
+    ("POST /v1/client/assistant/grants/{id}/policy", "changes owner-issued assistant permissions; assistant tests cover policy history and consent"),
+    ("POST /v1/client/assistant/grants/{id}/revoke", "revokes owner-issued assistant permissions; assistant tests cover exact revocation"),
+    ("POST /v1/client/assistant/grants/{id}/read-trust", "changes owner-issued per-read approval policy; assistant authorization tests cover consent and revocation"),
+    ("GET /v1/client/assistant/grants/assistant-grant/{id}", "prefixed-ID alias of trusted-local owner grant inspection; requires an issued grant"),
+    ("POST /v1/client/assistant/grants/assistant-grant/{id}/policy", "prefixed-ID alias of low-frequency trusted-local owner policy administration"),
+    ("POST /v1/client/assistant/grants/assistant-grant/{id}/revoke", "prefixed-ID alias of low-frequency trusted-local owner grant revocation"),
+    ("POST /v1/client/assistant/grants/assistant-grant/{id}/read-trust", "prefixed-ID alias of low-frequency trusted-local owner read-trust administration"),
+    ("POST /v1/client/assistant/propose", "requires a paired assistant, a current grant and an owner-approved native action; assistant_native tests cover transactional authorization"),
+    ("GET /v1/client/assistant/attention-content", "requires a paired assistant and an exact owner alert; assistant_native tests cover bounded disclosure"),
+    ("GET /v1/client/assistant/attention-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
+    ("GET /v1/client/assistant/missions-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
+    ("GET /v1/client/assistant/agents-rich", "requires a paired assistant and grant-bound read authorization; assistant_native tests cover bounded rich projections"),
+    ("GET /v1/client/assistant/summary", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/attention", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/agents", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/missions", "requires a paired assistant and a single-use per-read approval; assistant projection tests cover bounded response and read-slot budgets"),
+    ("GET /v1/client/assistant/conversation-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
+    ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
+    ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
+    ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
+    ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
     ("POST /v1/internal/fleet/invites/revoke", "fleet membership"),
     ("POST /v1/internal/fleet/redeem", "fleet membership"),
@@ -572,7 +497,11 @@ const fn post(
     }
 }
 
-const fn put(route: &'static str, path: &'static str, body: fn(&Fixture, usize) -> Value) -> Probe {
+const fn put(
+    route: &'static str,
+    path: &'static str,
+    body: fn(&Fixture, usize) -> Value,
+) -> Probe {
     Probe {
         route,
         path,
@@ -591,11 +520,7 @@ const fn direct(route: &'static str, call: Direct) -> Probe {
 }
 
 const PROBES: &[Probe] = &[
-    post(
-        "POST /v1/client/push-registration",
-        "/v1/client/push-registration",
-        |_, _| push_body(),
-    ),
+    post("POST /v1/client/push-registration", "/v1/client/push-registration", |_, _| push_body()),
     Probe {
         route: "DELETE /v1/client/push-registration",
         path: "/v1/client/push-registration",
@@ -604,25 +529,13 @@ const PROBES: &[Probe] = &[
     },
     // Offline reads exercise populated local receipts without network timing. The sync
     // probe exercises the named non-owner refusal; real fetch/import is tested in changes::service.
-    get(
-        "GET /v1/client/changes",
-        "/v1/client/changes?repository=cost/garden&offline=true&limit=10",
-    ),
-    get(
-        "GET /v1/client/change",
-        "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001",
-    ),
-    post(
-        "POST /v1/client/changes/sync",
-        "/v1/client/changes/sync",
-        |_, _| json!({"repository":"cost/garden"}),
-    ),
-    put("PUT /v1/notes", "/v1/notes", |_, attempt| {
-        json!({
-            "person":"person/bench-operator", "actor":"person/bench-operator",
-            "text":format!("Invented current person context {attempt}"),
-        })
-    }),
+    get("GET /v1/client/changes", "/v1/client/changes?repository=cost/garden&offline=true&limit=10"),
+    get("GET /v1/client/change", "/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001"),
+    post("POST /v1/client/changes/sync", "/v1/client/changes/sync", |_, _| json!({"repository":"cost/garden"})),
+    put("PUT /v1/notes", "/v1/notes", |_, attempt| json!({
+        "person":"person/bench-operator", "actor":"person/bench-operator",
+        "text":format!("Invented current person context {attempt}"),
+    })),
     get("GET /v1/client/notes", "/v1/client/notes"),
     get(
         "GET /v1/client/adapter/deliveries",
@@ -631,24 +544,20 @@ const PROBES: &[Probe] = &[
     post(
         "POST /v1/client/adapter/import",
         "/v1/client/adapter/import",
-        |fixture, attempt| {
-            json!({
-                "from":"external/discord/user/404", "to":fixture.subjects.seats[0],
-                "content":"Invented provider import", "attachments":[],
-                "idempotency_key":format!("cost-adapter-import-{attempt}"),
-            })
-        },
+        |fixture, attempt| json!({
+            "from":"external/discord/user/404", "to":fixture.subjects.seats[0],
+            "content":"Invented provider import", "attachments":[],
+            "idempotency_key":format!("cost-adapter-import-{attempt}"),
+        }),
     ),
     post(
         "POST /v1/internal/client-read/forward",
         fractal_daemon::peer::CLIENT_READ_FORWARD_PATH,
-        |_, _| {
-            json!({
-                "authority_actor": "person/bench-operator",
-                "request": {"operation": "messages", "actor": "agent/bench/cost/reader", "history": false, "limit": 20, "cursor": null},
-                "relay": {"target": "host/cost-owner", "path": ["cost-source"], "hops_left": 3}
-            })
-        },
+        |_, _| json!({
+            "authority_actor": "person/bench-operator",
+            "request": {"operation": "messages", "actor": "agent/bench/cost/reader", "history": false, "limit": 20, "cursor": null},
+            "relay": {"target": "host/cost-owner", "path": ["cost-source"], "hops_left": 3}
+        }),
     ),
     post(
         "POST /v1/schema/registrations",
@@ -708,11 +617,8 @@ const PROBES: &[Probe] = &[
     // Posting and registration also require GitHub; count their local writes with invented
     // object IDs. The comment probe includes the default watch declaration.
     direct("POST /v1/github/comment", |store, fixture, attempt| {
-        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!(
-            "acme/garden#{}",
-            attempt + 10
-        ))
-        .map_err(|error| error.message)?;
+        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 10))
+            .map_err(|error| error.message)?;
         let agent = &fixture.subjects.seats[0];
         let id = attempt as u64 + 100;
         let mut record = store
@@ -734,8 +640,8 @@ const PROBES: &[Probe] = &[
         Ok(record)
     }),
     direct("POST /v1/github/own", |store, fixture, attempt| {
-        let thread = fractal_daemon::github_watch::ThreadRef::parse("acme/garden#12")
-            .map_err(|error| error.message)?;
+        let thread =
+            fractal_daemon::github_watch::ThreadRef::parse("acme/garden#12").map_err(|error| error.message)?;
         let id = attempt as u64 + 200;
         store
             .record_github_post(
@@ -752,9 +658,8 @@ const PROBES: &[Probe] = &[
     // cost check needs neither network access nor a live seat process. Each attempt declares a
     // new watch, and the ending probe ends a different one rather than measuring a replay.
     direct("POST /v1/github/watch", |store, fixture, attempt| {
-        let thread =
-            fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
-                .map_err(|error| error.message)?;
+        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
+            .map_err(|error| error.message)?;
         store
             .declare_watch(&thread, &fixture.subjects.seats[0], None)
             .map_err(|error| error.message)
@@ -766,9 +671,8 @@ const PROBES: &[Probe] = &[
             .map_err(|error| error.message)
     }),
     direct("POST /v1/github/unwatch", |store, fixture, attempt| {
-        let thread =
-            fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
-                .map_err(|error| error.message)?;
+        let thread = fractal_daemon::github_watch::ThreadRef::parse(&format!("acme/garden#{}", attempt + 1))
+            .map_err(|error| error.message)?;
         store
             .end_watch(&thread.watch(&fixture.subjects.seats[0]), "unwatched", None)
             .map(|ended| json!({"ended": ended}))
@@ -798,10 +702,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/client/document-references",
         "/v1/client/document-references?subject=message/{sent}",
     ),
-    get(
-        "GET /v1/client/usage",
-        "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}",
-    ),
+    get("GET /v1/client/usage", "/v1/client/usage?since_ms={usage_since}&until_ms={usage_until}"),
     get("GET /v1/client/clients", "/v1/client/clients"),
     get(
         "GET /v1/client/subject-definition",
@@ -813,10 +714,7 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/now", "/v1/client/now"),
     get("GET /v1/client/machines", "/v1/client/machines"),
-    get(
-        "GET /v1/client/hosts/{*id}",
-        "/v1/client/hosts/local/repositories",
-    ),
+    get("GET /v1/client/hosts/{*id}", "/v1/client/hosts/local/repositories"),
     get("GET /v1/client/devices", "/v1/client/devices"),
     get("GET /v1/client/attention", "/v1/client/attention"),
     get(
@@ -825,15 +723,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/client/mail-backlog", "/v1/client/mail-backlog"),
     get("GET /v1/client/slo", "/v1/client/slo"),
-    get(
-        "GET /v1/client/slo/history",
-        "/v1/client/slo/history?id=cpu",
-    ),
-    post(
-        "POST /v1/messages/cleanup",
-        "/v1/messages/cleanup",
-        |_, _| json!({ "all": true, "older_than_ms": 1, "dry_run": true }),
-    ),
+    get("GET /v1/client/slo/history", "/v1/client/slo/history?id=cpu"),
+    post("POST /v1/messages/cleanup", "/v1/messages/cleanup", |_, _| {
+        json!({ "all": true, "older_than_ms": 1, "dry_run": true })
+    }),
     get("GET /v1/client/messages", "/v1/client/messages"),
     get(
         "GET /v1/client/messages/{*id}",
@@ -962,10 +855,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/harness-prompts/answer",
         "/v1/harness-prompts/answer?agent={seat}&episode={seat_claim}",
     ),
-    get(
-        "GET /v1/usage",
-        "/v1/usage?since_ms={usage_since}&until_ms={usage_until}",
-    ),
+    get("GET /v1/usage", "/v1/usage?since_ms={usage_since}&until_ms={usage_until}"),
     get("GET /v1/usage/messages", "/v1/usage/messages"),
     get("GET /v1/slo", "/v1/slo"),
     get("GET /v1/slo/history", "/v1/slo/history?id=cpu"),
@@ -976,10 +866,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
-    get(
-        "GET /v1/messages/recipient",
-        "/v1/messages/recipient?to={seat}",
-    ),
+    get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
         "/v1/messages/by-key?key=cost-fixture-message",
@@ -1066,10 +953,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/mission-runs/{run}/revision-proposal",
         "/v1/mission-runs/{run}/revision-proposal",
     ),
-    get(
-        "GET /v1/mission-runs/{run}/waiting-on",
-        "/v1/mission-runs/{run}/waiting-on",
-    ),
+    get("GET /v1/mission-runs/{run}/waiting-on", "/v1/mission-runs/{run}/waiting-on"),
     get("GET /v1/mission-runs/{run}", "/v1/mission-runs/{run}"),
     get(
         "GET /v1/run-generations/{generation}",
@@ -1195,19 +1079,15 @@ const PROBES: &[Probe] = &[
             "idempotency_key": format!("cost-ask-{attempt}"),
         })
     }),
-    post(
-        "POST /v1/work/delegation",
-        "/v1/work/delegation",
-        |fixture, attempt| {
-            json!({
-                "person": "person/bench-operator",
-                "actor": "person/bench-operator",
-                "actions": ["answer-ask"],
-                "evidence": [fixture.items["claim"]],
-                "idempotency_key": format!("cost-delegation-{attempt}"),
-            })
-        },
-    ),
+    post("POST /v1/work/delegation", "/v1/work/delegation", |fixture, attempt| {
+        json!({
+            "person": "person/bench-operator",
+            "actor": "person/bench-operator",
+            "actions": ["answer-ask"],
+            "evidence": [fixture.items["claim"]],
+            "idempotency_key": format!("cost-delegation-{attempt}"),
+        })
+    }),
     post("POST /v1/work/done", "/v1/work/done", |fixture, attempt| {
         json!({
             "subject": fixture.asks.get(attempt).cloned().unwrap_or_default(),
@@ -1299,30 +1179,18 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
     // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
     // attempt renames its own fresh identity.
-    post(
-        "POST /v1/agents/rename-id",
-        "/v1/agents/rename-id",
-        |_, attempt| {
-            json!({
-                "from": format!("agent/bench/cost/rename-{attempt}"),
-                "to": format!("agent/bench/cost/renamed-{attempt}"),
-                "actor": "person/bench-operator", "reason": "Invented rename",
-                "idempotency_key": format!("cost-agent-rename-{attempt}"),
-            })
-        },
-    ),
-    post(
-        "POST /v1/missions/rename-id",
-        "/v1/missions/rename-id",
-        |_, attempt| {
-            json!({
-                "from": format!("mission/cost-rename-{attempt}"),
-                "to": format!("mission/cost-renamed-{attempt}"),
-                "actor": "person/bench-operator", "reason": "Invented rename",
-                "idempotency_key": format!("cost-mission-rename-{attempt}"),
-            })
-        },
-    ),
+    post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id", "/v1/missions/rename-id", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -1509,21 +1377,15 @@ fn item_count(value: &Value) -> u64 {
         match value {
             Value::Array(items) => {
                 let inner = if depth < 3 {
-                    items
-                        .iter()
-                        .map(|item| longest(item, depth + 1))
-                        .max()
-                        .unwrap_or(0)
+                    items.iter().map(|item| longest(item, depth + 1)).max().unwrap_or(0)
                 } else {
                     0
                 };
                 (items.len() as u64).max(inner)
             }
-            Value::Object(map) if depth < 3 => map
-                .values()
-                .map(|value| longest(value, depth + 1))
-                .max()
-                .unwrap_or(0),
+            Value::Object(map) if depth < 3 => {
+                map.values().map(|value| longest(value, depth + 1)).max().unwrap_or(0)
+            }
             _ => 0,
         }
     }
@@ -1537,16 +1399,9 @@ fn most_repeated_shape() -> (u64, String) {
         .into_iter()
         .filter(|(shape, _)| {
             let shape = shape.trim_start().to_ascii_uppercase();
-            ![
-                "BEGIN",
-                "COMMIT",
-                "ROLLBACK",
-                "SAVEPOINT",
-                "RELEASE",
-                "PRAGMA",
-            ]
-            .iter()
-            .any(|control| shape.starts_with(control))
+            !["BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "PRAGMA"]
+                .iter()
+                .any(|control| shape.starts_with(control))
         })
         .map(|(shape, counted)| (counted.count, shape))
         .max()
@@ -1570,22 +1425,10 @@ fn item_units_keep_runs_and_steps_apart_and_ignore_lists_of_plain_values() {
         {"id": "a", "steps": [1, 2, 3], "tags": ["x", "y"]},
         {"id": "b", "steps": [1, 2, 3, 4, 5], "tags": []},
     ]}});
-    assert_eq!(
-        item_units(&runs),
-        vec![8, 2],
-        "eight steps in two runs; the tags are fields"
-    );
+    assert_eq!(item_units(&runs), vec![8, 2], "eight steps in two runs; the tags are fields");
     assert_eq!(item_units(&json!({"ok": true})), vec![1]);
-    assert_eq!(
-        item_units(&json!(["a", "b", "c"])),
-        vec![1],
-        "plain values are not a unit"
-    );
-    assert_eq!(
-        item_count(&json!(["a", "b", "c"])),
-        3,
-        "but they still count as returned items"
-    );
+    assert_eq!(item_units(&json!(["a", "b", "c"])), vec![1], "plain values are not a unit");
+    assert_eq!(item_count(&json!(["a", "b", "c"])), 3, "but they still count as returned items");
 }
 
 /// Items of the generated store the probes refer to.
@@ -1641,115 +1484,68 @@ mission "cost/history" state="ready" {
   step "work" { assigned-to "agent/cost-worker" }
 }"#;
     let intent = fractal_daemon::graph::parse_intent(source, NODE).unwrap();
-    let planned = store
-        .mission(
-            &intent,
-            fractal_daemon::model::IntentInput {
-                kdl: source.into(),
-                source_name: None,
-            },
-        )
-        .unwrap();
-    store
-        .apply(&intent, &planned.subject_tokens, "cost-history-definition")
-        .unwrap();
+    let planned = store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    store.apply(&intent, &planned.subject_tokens, "cost-history-definition").unwrap();
     for message in 0..500 {
-        store
-            .append_claim(&fractal_daemon::model::ClaimInput {
-                subject: format!("message/cost-history-{message}"),
-                kind: "message.sent".into(),
-                actor: Some("person/bench-operator".into()),
-                fields: BTreeMap::from([
-                    ("from".into(), json!("person/bench-operator")),
-                    ("to".into(), json!("agent/cost-worker")),
-                    ("content".into(), json!("Historical message")),
-                    ("status".into(), json!("sent")),
-                ]),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        store.append_claim(&fractal_daemon::model::ClaimInput {
+            subject: format!("message/cost-history-{message}"),
+            kind: "message.sent".into(),
+            actor: Some("person/bench-operator".into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!("person/bench-operator")),
+                ("to".into(), json!("agent/cost-worker")),
+                ("content".into(), json!("Historical message")),
+                ("status".into(), json!("sent")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
     }
-    let app = fractal_daemon::api::router(AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.path().join("state"),
-        pty_root: root.path().join("pty"),
-        pty_binary: stub_pty(root.path()),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: Some(root.path().join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    });
+    let app = fractal_daemon::api::router(AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.path().join("state"),
+    pty_root: root.path().join("pty"),
+    pty_binary: stub_pty(root.path()),
+    fleet_id: None, configured_peers: Vec::new(), client_relay: None,
+    native_session_home: Some(root.path().join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  });
     let mut measurements = Vec::new();
     for run in 0..100 {
-        let view = store
-            .create_mission_run(&fractal_daemon::model::MissionRunRequest {
-                mission: "cost/history".into(),
-                revision: None,
-                workspace: root.path().display().to_string(),
-                requester: Some("person/bench-operator".into()),
-                mode: None,
-                inputs: BTreeMap::new(),
-                idempotency_key: format!("cost-history-{run}"),
-            })
-            .unwrap();
-        store
-            .set_mission_run_state(&view.id, "cancelled", "terminal", None)
-            .unwrap();
+        let view = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
+            mission: "cost/history".into(), revision: None,
+            workspace: root.path().display().to_string(),
+            requester: Some("person/bench-operator".into()), mode: None,
+            inputs: BTreeMap::new(), idempotency_key: format!("cost-history-{run}"),
+        }).unwrap();
+        store.set_mission_run_state(&view.id, "cancelled", "terminal", None).unwrap();
         if matches!(run, 9 | 99) {
             let mut samples = Vec::new();
             for _ in 0..4 {
                 let before = work::total();
-                let response = app
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .uri("/v1/client/missions/mission%2Fcost%2Fhistory")
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
+                let response = app.clone().oneshot(Request::builder()
+                    .uri("/v1/client/missions/mission%2Fcost%2Fhistory")
+                    .body(Body::empty()).unwrap()).await.unwrap();
                 assert_eq!(response.status(), axum::http::StatusCode::OK);
-                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
                 let value: Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(
-                    value["value"]["run_details"].as_array().unwrap().len(),
-                    run + 1
-                );
+                assert_eq!(value["value"]["run_details"].as_array().unwrap().len(), run + 1);
                 samples.push(work::total() - before);
             }
-            measurements.push(
-                samples
-                    .into_iter()
-                    .skip(1)
-                    .min_by_key(|work| work.fullscan_steps)
-                    .unwrap(),
-            );
+            measurements.push(samples.into_iter().skip(1).min_by_key(|work| work.fullscan_steps).unwrap());
         }
     }
     let (small, large) = (measurements[0], measurements[1]);
     println!("mission detail 10 -> 100 finished runs: {small:?} -> {large:?}");
     // Allow 400 VM instructions per additional historical row, plus the standard slack.
     // Current lightweight state/summary reads cost about 316; full enrichment costs about 891.
-    assert!(
-        large.vm_steps <= small.vm_steps + 90 * 400 + SLACK,
-        "historical runs added full work-view enrichment: {small:?} -> {large:?}"
-    );
-    assert!(
-        large.fullscan_steps <= small.fullscan_steps * 3 + SLACK,
-        "historical runs repeated the per-step history scans: {small:?} -> {large:?}"
-    );
+    assert!(large.vm_steps <= small.vm_steps + 90 * 400 + SLACK,
+        "historical runs added full work-view enrichment: {small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps * 3 + SLACK,
+        "historical runs repeated the per-step history scans: {small:?} -> {large:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1767,9 +1563,7 @@ async fn no_request_does_work_that_grows_with_the_store() {
     assert_eq!(scales.len(), 2, "ST_COST_SCALES names two scales");
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench")
-        });
+        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
     std::fs::create_dir_all(&keep).unwrap();
 
     let started = Instant::now();
@@ -2103,17 +1897,15 @@ fn conversation_owner_history_cost(other_origin: bool) {
     let store = Store::open(&root.path().join("tester.sqlite3"), "tester").unwrap();
     let reviewer = Store::open(&root.path().join("reviewer.sqlite3"), "reviewer").unwrap();
     let append = |store: &Store, kind: &str, fields: Value| {
-        store
-            .append_claim(&ClaimInput {
-                subject: "agent/ada".into(),
-                kind: kind.into(),
-                actor: Some("agent/ada".into()),
-                fields: serde_json::from_value(fields).unwrap(),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap()
+        store.append_claim(&ClaimInput {
+            subject: "agent/ada".into(),
+            kind: kind.into(),
+            actor: Some("agent/ada".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
     };
     let historical_resource = |store: &Store, fields: Value| {
         // Current admission correctly rejects resource observations on agent subjects.
@@ -2123,52 +1915,34 @@ fn conversation_owner_history_cost(other_origin: bool) {
         (scaffold.id, json!({"fields": fields}).to_string())
     };
     let mut historical_resources = Vec::new();
-    append(
-        &store,
-        "runtime.observed",
-        json!({
-            "status": "running", "incarnation_id": "ada", "runtime_id": "tester",
-        }),
-    );
+    append(&store, "runtime.observed", json!({
+        "status": "running", "incarnation_id": "ada", "runtime_id": "tester",
+    }));
     let mut measurements = Vec::new();
     let mut earlier = None;
     for history in 1..=1000 {
         // Keep identity fields on the first observation only. Seeking an inherited field
         // must not scan every intervening heartbeat, even when the current fields omit it.
         append(&store, "runtime.observed", json!({"status": "running"}));
-        append(
-            &store,
-            "harness.observed",
-            json!({
-                "incarnation_id": "ada", "state": "idle",
-            }),
-        );
+        append(&store, "harness.observed", json!({
+            "incarnation_id": "ada", "state": "idle",
+        }));
         // Ordinary resource observations participate in the actual-state field fold;
         // their presence alone must not force a historical owner reduction.
-        historical_resources.push(historical_resource(
-            &store,
-            json!({
-                "kind": "custom.tester", "facts": {"opened_by": "person/alex"},
-            }),
-        ));
+        historical_resources.push(historical_resource(&store, json!({
+            "kind": "custom.tester", "facts": {"opened_by": "person/alex"},
+        })));
         if other_origin {
-            append(
-                &reviewer,
-                "runtime.reconcile-decision",
-                json!({
-                    "decision": "hold", "reason": "historical observation",
-                }),
-            );
+            append(&reviewer, "runtime.reconcile-decision", json!({
+                "decision": "hold", "reason": "historical observation",
+            }));
             // Opener attribution receipts are not runtime identity, even if their
             // recorded fields look like a different managed session.
-            historical_resources.push(historical_resource(
-                &reviewer,
-                json!({
-                    "kind": "vcs.issue", "attribution_only": true,
-                    "facts": {"opened_by": "person/alex", "number": history},
-                    "incarnation_id": "reviewer", "runtime_id": "reviewer",
-                }),
-            ));
+            historical_resources.push(historical_resource(&reviewer, json!({
+                "kind": "vcs.issue", "attribution_only": true,
+                "facts": {"opened_by": "person/alex", "number": history},
+                "incarnation_id": "reviewer", "runtime_id": "reviewer",
+            })));
         }
         if !matches!(history, 100 | 1000) {
             continue;
@@ -2179,66 +1953,39 @@ fn conversation_owner_history_cost(other_origin: bool) {
         install_historical_owner_resources(root.path(), &mut historical_resources);
         let frontier = store.index().unwrap();
         // The full status fold is the semantic oracle, outside the measured owner lookup.
-        let status = store
-            .status_at(Some("agent/ada"), None, Some(frontier))
-            .unwrap();
+        let status = store.status_at(Some("agent/ada"), None, Some(frontier)).unwrap();
         let actual = status.subjects[0].actual.as_ref().unwrap();
         let mut samples = Vec::new();
         for _ in 0..4 {
             let scope = work::SqliteWorkScope::start();
-            let owner = store
-                .conversation_owner_at("agent/ada", frontier)
-                .unwrap()
-                .unwrap();
+            let owner = store.conversation_owner_at("agent/ada", frontier).unwrap().unwrap();
             let spent = scope.finish();
             assert_eq!(owner.subject, "agent/ada");
-            assert_eq!(
-                owner.incarnation.as_deref(),
-                actual["incarnation_id"].as_str()
-            );
+            assert_eq!(owner.incarnation.as_deref(), actual["incarnation_id"].as_str());
             assert_eq!(owner.runtime.as_deref(), actual["runtime_id"].as_str());
             assert_eq!(owner.origin.as_deref(), Some("tester"));
             samples.push(spent);
         }
-        measurements.push(
-            samples
-                .into_iter()
-                .skip(1)
-                .min_by_key(|spent| spent.vm_steps)
-                .unwrap(),
-        );
+        measurements.push(samples.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap());
         if let Some((old_frontier, old_owner)) = &earlier {
             assert_eq!(
-                store
-                    .conversation_owner_at("agent/ada", *old_frontier)
-                    .unwrap(),
+                store.conversation_owner_at("agent/ada", *old_frontier).unwrap(),
                 *old_owner,
                 "later subject history must not change a pinned owner",
             );
         } else {
-            earlier = Some((
-                frontier,
-                store.conversation_owner_at("agent/ada", frontier).unwrap(),
-            ));
+            earlier = Some((frontier, store.conversation_owner_at("agent/ada", frontier).unwrap()));
         }
     }
     let (small, large) = (measurements[0], measurements[1]);
-    println!(
-        "conversation owner 100 -> 1000 subject observations (other_origin={other_origin}): {small:?} -> {large:?}"
-    );
+    println!("conversation owner 100 -> 1000 subject observations (other_origin={other_origin}): {small:?} -> {large:?}");
     assert!(small.statements > 0, "owner SQL work must be traced");
-    assert!(
-        large.statements <= small.statements + 2,
-        "owner SQL calls grew with subject history: {small:?} -> {large:?}"
-    );
-    assert!(
-        large.vm_steps <= small.vm_steps + SLACK,
-        "owner indexed row work grew with subject history: {small:?} -> {large:?}"
-    );
-    assert!(
-        large.fullscan_steps <= small.fullscan_steps + 8,
-        "owner scanned subject history: {small:?} -> {large:?}"
-    );
+    assert!(large.statements <= small.statements + 2,
+        "owner SQL calls grew with subject history: {small:?} -> {large:?}");
+    assert!(large.vm_steps <= small.vm_steps + SLACK,
+        "owner indexed row work grew with subject history: {small:?} -> {large:?}");
+    assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+        "owner scanned subject history: {small:?} -> {large:?}");
 }
 
 fn install_historical_owner_resources(root: &Path, resources: &mut Vec<(String, String)>) {
@@ -2248,12 +1995,10 @@ fn install_historical_owner_resources(root: &Path, resources: &mut Vec<(String, 
     let mut setup = rusqlite::Connection::open(root.join("tester.sqlite3")).unwrap();
     let transaction = setup.transaction().unwrap();
     for (id, body) in resources.drain(..) {
-        let changed = transaction
-            .execute(
-                "UPDATE claims SET kind='resource.observed', body=?2 WHERE id=?1",
-                rusqlite::params![id, body],
-            )
-            .unwrap();
+        let changed = transaction.execute(
+            "UPDATE claims SET kind='resource.observed', body=?2 WHERE id=?1",
+            rusqlite::params![id, body],
+        ).unwrap();
         assert_eq!(changed, 1, "the historical fixture scaffold must exist");
     }
     transaction.commit().unwrap();
@@ -2261,11 +2006,9 @@ fn install_historical_owner_resources(root: &Path, resources: &mut Vec<(String, 
 
 /// `METHOD /path` for every `.route(...)` in the router's source.
 fn declared_routes(source: &str) -> BTreeSet<String> {
-    routes_in(
-        &source[source
-            .find("fn router_for_transport")
-            .expect("api.rs builds its router in router_for_transport")..],
-    )
+    routes_in(&source[source
+        .find("fn router_for_transport")
+        .expect("api.rs builds its router in router_for_transport")..])
 }
 
 /// The routes of a route family a crate above fractal-api-core adds to the router (its `routes` fn).
@@ -2273,10 +2016,7 @@ fn family_routes(source: &str) -> BTreeSet<String> {
     let start = source
         .find("pub fn routes(")
         .expect("a route family is built in its `routes` fn");
-    let end = start
-        + source[start..]
-            .find("\n}\n")
-            .expect("the `routes` fn closes");
+    let end = start + source[start..].find("\n}\n").expect("the `routes` fn closes");
     routes_in(&source[start..end])
 }
 
@@ -2305,9 +2045,7 @@ fn routes_in(router: &str) -> BTreeSet<String> {
             .split_once(',')
             .expect("a .route call has a path and a handler");
         let path = match path_argument.trim() {
-            "crate::peer::CLIENT_READ_FORWARD_PATH" => {
-                fractal_daemon::peer::CLIENT_READ_FORWARD_PATH
-            }
+            "crate::peer::CLIENT_READ_FORWARD_PATH" => fractal_daemon::peer::CLIENT_READ_FORWARD_PATH,
             literal if literal.starts_with('"') && literal.ends_with('"') => {
                 literal.trim_matches('"')
             }
@@ -2370,14 +2108,7 @@ async fn invented_client_read_owner(
     body: Bytes,
 ) -> Response {
     let sender = auth
-        .verify_sender(
-            &headers,
-            "POST",
-            "/v1/peer/client-read",
-            &body,
-            Some(NODE),
-            None,
-        )
+        .verify_sender(&headers, "POST", "/v1/peer/client-read", &body, Some(NODE), None)
         .expect("the forward probe must use its invented fleet credentials");
     assert_eq!(sender.name, NODE);
     let request: ClientReadRequest = serde_json::from_slice(&body).unwrap();
@@ -2390,15 +2121,11 @@ async fn invented_client_read_owner(
             &auth,
             &body,
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            PeerResponse::new(
-                "cost-owner",
-                1,
-                json!({
-                    "code": "remote-unavailable",
-                    "message": "invented cost owner has no onward route",
-                    "details": {"reason": "no-route", "owner_host_id": route.target},
-                }),
-            ),
+            PeerResponse::new("cost-owner", 1, json!({
+                "code": "remote-unavailable",
+                "message": "invented cost owner has no onward route",
+                "details": {"reason": "no-route", "owner_host_id": route.target},
+            })),
         );
     }
     assert_eq!(request.authority_actor, "person/bench-operator");
@@ -2464,38 +2191,23 @@ async fn invented_cost_owner_refuses_foreign_relays_but_serves_its_direct_probe(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = Router::new()
-        .route(
-            "/v1/peer/client-read",
-            axum_post(invented_client_read_owner),
-        )
+        .route("/v1/peer/client-read", axum_post(invented_client_read_owner))
         .with_state(auth);
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let relay = ClientRelay::from_config(&Config {
         node: NODE.into(),
         fleet_id: Some(FLEET.into()),
         shared_secret_file: Some(secret),
-        peers: vec![PeerConfig {
-            name: "cost-owner".into(),
-            url: format!("http://{address}"),
-        }],
+        peers: vec![PeerConfig { name: "cost-owner".into(), url: format!("http://{address}") }],
         ..Default::default()
-    })
-    .unwrap()
-    .unwrap();
-    let request = |target: &str| {
-        serde_json::from_value::<ClientReadRequest>(json!({
+    }).unwrap().unwrap();
+    let request = |target: &str| serde_json::from_value::<ClientReadRequest>(json!({
         "authority_actor": "person/bench-operator",
         "request": {"operation": "messages", "actor": "agent/bench/cost/reader", "history": false, "limit": 20, "cursor": null},
         "relay": {"target": target, "path": ["cost-source"], "hops_left": 3},
-    })).unwrap()
-    };
-    let error = relay
-        .forward(&request("host/unreachable-owner"))
-        .await
-        .unwrap_err();
-    let rejected = error
-        .downcast_ref::<fractal_daemon::peer::ClientReadRejected>()
-        .unwrap();
+    })).unwrap();
+    let error = relay.forward(&request("host/unreachable-owner")).await.unwrap_err();
+    let rejected = error.downcast_ref::<fractal_daemon::peer::ClientReadRejected>().unwrap();
     assert_eq!(rejected.code, "remote-unavailable");
     assert_eq!(rejected.reason(), Some("no-route"));
     let answer = relay.forward(&request("host/cost-owner")).await.unwrap();
@@ -2537,7 +2249,11 @@ where
         Ok(value) => Cost {
             items: item_count(value),
             item_units: item_units(value),
-            ..Cost::from_work(spent, serde_json::to_vec(value).unwrap().len() as u64, None)
+            ..Cost::from_work(
+                spent,
+                serde_json::to_vec(value).unwrap().len() as u64,
+                None,
+            )
         },
         Err(error) => Cost::from_work(spent, 0, Some(error.clone())),
     };
@@ -2549,61 +2265,31 @@ where
 }
 
 fn seed_git_change_reads(store: &Store, scale: f64) {
-    use fractal_daemon::changes::config::{Config, Repository};
     use fractal_daemon::changes::{Record, Revision, State, TrailerStatus};
-    store
-        .install_git_change_registry(Arc::new(
-            fractal_daemon::changes::service::Registry::new(
-                &Config {
-                    enabled: true,
-                    repositories: vec![Repository {
-                        name: "cost/garden".into(),
-                        reader_node: "cost-other".into(),
-                        transport_directory: PathBuf::from("/missing/cost/transport"),
-                        remote: "origin".into(),
-                        remote_url: "https://example.invalid/cost/garden.git".into(),
-                        pilot_started_at: "2026-01-01T00:00:00Z".into(),
-                        ..Repository::default()
-                    }],
-                },
-                NODE,
-            )
-            .unwrap(),
-        ))
-        .unwrap();
+    use fractal_daemon::changes::config::{Config, Repository};
+    store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(
+        &Config { enabled: true, repositories: vec![Repository {
+            name: "cost/garden".into(), reader_node: "cost-other".into(),
+            transport_directory: PathBuf::from("/missing/cost/transport"),
+            remote: "origin".into(), remote_url: "https://example.invalid/cost/garden.git".into(),
+            pilot_started_at: "2026-01-01T00:00:00Z".into(), ..Repository::default()
+        }] }, NODE,
+    ).unwrap())).unwrap();
     // A fixed populated answer and increasing unrelated repositories. No request is
     // allowed to enumerate these unrelated receipts before selecting its page.
-    for (repository, count) in [
-        ("cost/garden", 12),
-        ("cost/unrelated", (scale * 100_000.0).ceil() as usize),
-    ] {
+    for (repository, count) in [("cost/garden", 12), ("cost/unrelated", (scale * 100_000.0).ceil() as usize)] {
         for n in 1..=count {
-            store
-                .index_git_change(
-                    repository,
-                    &Revision {
-                        oid: format!("{n:040x}"),
-                        record: Record {
-                            schema_version: 1,
-                            change_id: format!("I{n:040x}"),
-                            generation: 1,
-                            previous_record: None,
-                            source_commit: "1".repeat(40),
-                            source_tree: "2".repeat(40),
-                            base_commit: "3".repeat(40),
-                            trailer_status: TrailerStatus::Present,
-                            state: State::Draft,
-                            next: None,
-                            depends_on: vec![],
-                            actor: "agent/cost/builder".into(),
-                            created_at: "2026-01-01T00:00:00Z".into(),
-                            updated_at: "2026-01-01T00:00:00Z".into(),
-                            claim: None,
-                            mirror: None,
-                        },
-                    },
-                )
-                .unwrap();
+            store.index_git_change(repository, &Revision {
+                oid: format!("{n:040x}"),
+                record: Record {
+                    schema_version: 1, change_id: format!("I{n:040x}"), generation: 1,
+                    previous_record: None, source_commit: "1".repeat(40), source_tree: "2".repeat(40),
+                    base_commit: "3".repeat(40), trailer_status: TrailerStatus::Present,
+                    state: State::Draft, next: None, depends_on: vec![],
+                    actor: "agent/cost/builder".into(), created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(), claim: None, mirror: None,
+                },
+            }).unwrap();
         }
     }
 }
@@ -2626,27 +2312,17 @@ async fn paired_push(
     use axum::{body::Body, http::Request};
     use tower::ServiceExt as _;
 
-    let bytes = body
-        .map(serde_json::to_vec)
-        .transpose()
-        .map_err(|error| error.to_string())?
+    let bytes = body.map(serde_json::to_vec).transpose().map_err(|error| error.to_string())?
         .unwrap_or_default();
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri("/v1/client/push-registration")
-                .header("authorization", format!("Bearer {credential}"))
-                .header("content-type", "application/json")
-                .body(Body::from(bytes))
-                .map_err(|error| error.to_string())?,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    let response = app.clone().oneshot(Request::builder()
+        .method(method)
+        .uri("/v1/client/push-registration")
+        .header("authorization", format!("Bearer {credential}"))
+        .header("content-type", "application/json")
+        .body(Body::from(bytes)).map_err(|error| error.to_string())?)
+        .await.map_err(|error| error.to_string())?;
     let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), 65536)
-        .await
+    let bytes = axum::body::to_bytes(response.into_body(), 65536).await
         .map_err(|error| error.to_string())?;
     if !status.is_success() {
         return Err(format!("paired push {method} failed: {status}"));
@@ -2658,19 +2334,12 @@ async fn paired_push(
         json!({"registered":false})
     };
     if response["value"] != expected {
-        return Err(format!(
-            "paired push {method} did not return its registration status"
-        ));
+        return Err(format!("paired push {method} did not return its registration status"));
     }
     Ok(response)
 }
 
-async fn measure(
-    scale: f64,
-    source: &Path,
-    peer_source: &Path,
-    usage_window: (u64, u64),
-) -> Measured {
+async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u64, u64)) -> Measured {
     let work_directory = tempfile::tempdir().unwrap();
     let root = work_directory.path();
     let database = root.join("state/claims.sqlite3");
@@ -2693,24 +2362,15 @@ async fn measure(
     let peer_key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
     store.pin_fleet_anchor(anchor.public()).unwrap();
     store.set_member_key(Some(anchor.clone())).unwrap();
-    store
-        .admit_fleet_anchor(FLEET, anchor.public(), "listening")
-        .unwrap();
-    store
-        .append_claim(&ClaimInput {
-            subject: format!("host/{PEER}"),
-            kind: "fleet.member-admitted".into(),
-            actor: None,
-            fields: serde_json::from_value(json!({
-                "fleet_id":FLEET, "member_key":peer_key.public(), "via":"invite",
-                "sponsor":format!("host/{NODE}"), "mode":"listening",
-            }))
-            .unwrap(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
+    store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:format!("host/{PEER}"), kind:"fleet.member-admitted".into(), actor:None,
+        fields:serde_json::from_value(json!({
+            "fleet_id":FLEET, "member_key":peer_key.public(), "via":"invite",
+            "sponsor":format!("host/{NODE}"), "mode":"listening",
+        })).unwrap(),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
     peer.pin_fleet_anchor(anchor.public()).unwrap();
     peer.set_member_key(Some(peer_key)).unwrap();
     sync(&store, NODE, &peer);
@@ -2734,7 +2394,9 @@ async fn measure(
 
     let socket = root.join("st3.sock");
     let pty = stub_pty(root);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let secret = root.join("cost-forward-secret");
     std::fs::write(&secret, [13_u8; 32]).unwrap();
@@ -2742,10 +2404,7 @@ async fn measure(
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
     let auth = FleetAuth::load(FLEET, &secret).unwrap();
     let owner_router = Router::new()
-        .route(
-            "/v1/peer/client-read",
-            axum_post(invented_client_read_owner),
-        )
+        .route("/v1/peer/client-read", axum_post(invented_client_read_owner))
         .with_state(auth);
     let owner_server = tokio::spawn(async move { axum::serve(listener, owner_router).await });
     let relay = ClientRelay::from_config(&Config {
@@ -2759,103 +2418,63 @@ async fn measure(
         ..Default::default()
     })
     .unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.join("state"),
-        pty_root: root.join("pty"),
-        pty_binary: pty,
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![PEER.into()],
-        client_relay: relay,
-        native_session_home: Some(root.join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.join("state"),
+    pty_root: root.join("pty"),
+    pty_binary: pty,
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![PEER.into()],
+    client_relay: relay,
+    native_session_home: Some(root.join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut),
-    )
-    .await
-    .expect("cost census lists publish the seeded store cut")
-    .unwrap();
+    tokio::time::timeout(Duration::from_secs(120),
+        fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut))
+        .await.expect("cost census lists publish the seeded store cut").unwrap();
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
-    });
+    let server =
+        tokio::spawn(
+            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
+        );
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let client = Client::unix(&socket);
     // Client reads come from a person, as Fractal TUI and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
-    let challenge: Value = person
-        .post(
-            "/v1/client/pairings",
-            &json!({
-                "api_version":"st3.client.v0", "device_name":"Cost phone",
-                "person_id":"person/bench-operator",
-            }),
-        )
-        .await
-        .unwrap();
-    let pairing = challenge["pairing_id"]
-        .as_str()
-        .unwrap()
-        .trim_start_matches("pairing/");
-    let paired: Value = client
-        .post(
-            &format!(
-                "/v1/client/pairings/{}/complete",
-                urlencoding::encode(pairing)
-            ),
-            &json!({
-                "api_version":"st3.client.v0", "code":challenge["code"],
-                "device_public_key":"cost-phone-key-00000000000000000000000000",
-            }),
-        )
-        .await
-        .unwrap();
+    let challenge: Value = person.post("/v1/client/pairings", &json!({
+        "api_version":"st3.client.v0", "device_name":"Cost phone",
+        "person_id":"person/bench-operator",
+    })).await.unwrap();
+    let pairing = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let paired: Value = client.post(
+        &format!("/v1/client/pairings/{}/complete", urlencoding::encode(pairing)),
+        &json!({
+            "api_version":"st3.client.v0", "code":challenge["code"],
+            "device_public_key":"cost-phone-key-00000000000000000000000000",
+        }),
+    ).await.unwrap();
     let push_credential = paired["credential"].as_str().unwrap();
     let push_rows = rusqlite::Connection::open_with_flags(
-        &database,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let changes: Value = person
-        .get("/v1/client/changes?repository=cost/garden&offline=true&limit=10")
-        .await
-        .unwrap();
+        &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    let changes: Value = person.get("/v1/client/changes?repository=cost/garden&offline=true&limit=10").await.unwrap();
     assert_eq!(changes["items"].as_array().unwrap().len(), 10);
     assert!(changes["items"][0]["last_indexed"].is_object());
     let change: Value = person.get("/v1/client/change?repository=cost/garden&offline=true&id=I0000000000000000000000000000000000000001").await.unwrap();
     assert!(change["item"]["last_indexed"].is_object());
-    let sync: Value = person
-        .post(
-            "/v1/client/changes/sync",
-            &json!({"repository":"cost/garden"}),
-        )
-        .await
-        .unwrap();
+    let sync: Value = person.post("/v1/client/changes/sync", &json!({"repository":"cost/garden"})).await.unwrap();
     assert_eq!(sync["sync"]["status"], "unavailable");
-    let seeded: Value = person
-        .request(
-            "PUT",
-            "/v1/notes",
-            Some(&json!({
-                "person":"person/bench-operator", "actor":"person/bench-operator",
-                "text":"Invented current person context",
-            })),
-        )
-        .await
-        .expect("the note write probe must pass the real feature barrier");
+    let seeded: Value = person.request("PUT", "/v1/notes", Some(&json!({
+        "person":"person/bench-operator", "actor":"person/bench-operator",
+        "text":"Invented current person context",
+    }))).await.expect("the note write probe must pass the real feature barrier");
     assert_eq!(seeded["note"]["person"], "person/bench-operator");
     let notes: Value = person.get("/v1/client/notes").await.unwrap();
     assert_eq!(notes["notes"], json!([seeded["note"]]));
@@ -2879,84 +2498,44 @@ async fn measure(
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
-    fixture
-        .items
-        .insert("usage_since", usage_window.0.to_string());
-    fixture
-        .items
-        .insert("usage_until", usage_window.1.to_string());
+    fixture.items.insert("usage_since", usage_window.0.to_string());
+    fixture.items.insert("usage_until", usage_window.1.to_string());
     fixture.items.insert(
         "event_after",
-        store
-            .event_bounds()
-            .unwrap()
-            .0
-            .saturating_sub(1)
-            .to_string(),
+        store.event_bounds().unwrap().0.saturating_sub(1).to_string(),
     );
     // Exercise successful enrolled imports and a fixed-size incremental reply page,
     // rather than measuring a refused request or a historical mailbox scan.
     let adapter = Client::unix_agent(&socket, ADAPTER_ACTOR).unwrap();
     let adapter_kdl = format!(
         "version 2\nagent \"bench/cost/adapter\" {{ workspace {:?}; argv \"/usr/bin/true\"; restart \"never\"; tags st3.adapter.source=\"external/discord/user/404\" st3.adapter.target={:?} }}\n",
-        root.to_str().unwrap(),
-        fixture.subjects.seats[0],
+        root.to_str().unwrap(), fixture.subjects.seats[0],
     );
     let intent = fractal_daemon::parse_intent(&adapter_kdl, NODE).unwrap();
-    let preview = store
-        .mission(
-            &intent,
-            fractal_daemon::model::IntentInput {
-                kdl: adapter_kdl,
-                source_name: None,
-            },
-        )
-        .unwrap();
-    store
-        .apply_as(
-            &intent,
-            &preview.subject_tokens,
-            "cost-adapter-enrollment",
-            Some("person/bench-operator"),
-        )
-        .unwrap();
-    let incoming: Value = adapter
-        .post(
-            "/v1/client/adapter/import",
-            &json!({
-                "from":"external/discord/user/404", "to":fixture.subjects.seats[0],
-                "content":"Invented provider seed", "attachments":[],
-                "idempotency_key":"cost-adapter-seed",
-            }),
-        )
-        .await
-        .expect("enrolled adapter seed import must succeed");
-    fixture
-        .items
-        .insert("adapter_frontier", store.index().unwrap().to_string());
-    store
-        .append_claim(&ClaimInput {
-            subject: "message/cost-adapter-reply".into(),
-            kind: "message.sent".into(),
-            actor: Some(fixture.subjects.seats[0].clone()),
-            fields: serde_json::from_value(json!({
-                "from":fixture.subjects.seats[0], "to":"external/discord/user/404",
-                "content":"Invented provider reply", "status":"sent",
-                "in_reply_to":incoming["subject"],
-            }))
-            .unwrap(),
-            evidence: vec![],
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
-    let delivery: Value = adapter
-        .get(&format!(
-            "/v1/client/adapter/deliveries?after={}&wait_ms=0",
-            fixture.items["adapter_frontier"],
-        ))
-        .await
-        .expect("enrolled adapter delivery fixture must succeed");
+    let preview = store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: adapter_kdl, source_name: None,
+    }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, "cost-adapter-enrollment", Some("person/bench-operator")).unwrap();
+    let incoming: Value = adapter.post("/v1/client/adapter/import", &json!({
+        "from":"external/discord/user/404", "to":fixture.subjects.seats[0],
+        "content":"Invented provider seed", "attachments":[],
+        "idempotency_key":"cost-adapter-seed",
+    })).await.expect("enrolled adapter seed import must succeed");
+    fixture.items.insert("adapter_frontier", store.index().unwrap().to_string());
+    store.append_claim(&ClaimInput {
+        subject:"message/cost-adapter-reply".into(), kind:"message.sent".into(),
+        actor:Some(fixture.subjects.seats[0].clone()),
+        fields:serde_json::from_value(json!({
+            "from":fixture.subjects.seats[0], "to":"external/discord/user/404",
+            "content":"Invented provider reply", "status":"sent",
+            "in_reply_to":incoming["subject"],
+        })).unwrap(),
+        evidence:vec![], expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let delivery: Value = adapter.get(&format!(
+        "/v1/client/adapter/deliveries?after={}&wait_ms=0",
+        fixture.items["adapter_frontier"],
+    )).await.expect("enrolled adapter delivery fixture must succeed");
     assert_eq!(delivery["items"].as_array().unwrap().len(), 1);
     assert_eq!(delivery["items"][0]["in_reply_to"], incoming["subject"]);
     // An offline source needs no live runtime: publish its exact departure before measuring
@@ -3073,16 +2652,14 @@ async fn measure(
     let populated_since = populated_until.saturating_sub(86_400_000);
     for (reader, path) in [(&person, "/v1/client/usage"), (&client, "/v1/usage")] {
         let answer: Value = reader
-            .get(&format!(
-                "{path}?since_ms={populated_since}&until_ms={populated_until}"
-            ))
+            .get(&format!("{path}?since_ms={populated_since}&until_ms={populated_until}"))
             .await
             .expect("the generated usage fixture must be readable");
         let period = answer.get("value").unwrap_or(&answer);
         assert!(
-            period["rows"].as_array().is_some_and(|rows| rows
-                .iter()
-                .any(|row| { row["total_tokens"].as_u64().unwrap_or(0) > 0 })),
+            period["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| {
+                row["total_tokens"].as_u64().unwrap_or(0) > 0
+            })),
             "{path} must preserve populated usage coverage: {answer}",
         );
     }
@@ -3110,26 +2687,17 @@ async fn measure(
                 } else {
                     ("POST", Some(push_body()))
                 };
-                paired_push(
-                    &paired_router,
-                    push_credential,
-                    setup_method,
-                    setup_body.as_ref(),
-                )
-                .await
-                .unwrap();
-                let rows: u64 = push_rows
-                    .query_row("SELECT COUNT(*) FROM local_push_registrations", [], |row| {
-                        row.get(0)
-                    })
-                    .unwrap();
+                paired_push(&paired_router, push_credential, setup_method, setup_body.as_ref())
+                    .await.unwrap();
+                let rows: u64 = push_rows.query_row(
+                    "SELECT COUNT(*) FROM local_push_registrations", [], |row| row.get(0),
+                ).unwrap();
                 assert_eq!(rows, u64::from(probe.body.is_none()));
             }
             let cost = if push {
                 let method = probe.route.split_once(' ').unwrap().0;
                 let body = probe.body.map(|body| body(&fixture, attempt));
-                counted(|| paired_push(&paired_router, push_credential, method, body.as_ref()))
-                    .await
+                counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
             } else if let Some(call) = probe.direct {
                 let (store, fixture) = (store.clone(), &fixture);
                 counted(|| async move {
@@ -3193,11 +2761,9 @@ async fn measure(
                 .await
             };
             if push {
-                let rows: u64 = push_rows
-                    .query_row("SELECT COUNT(*) FROM local_push_registrations", [], |row| {
-                        row.get(0)
-                    })
-                    .unwrap();
+                let rows: u64 = push_rows.query_row(
+                    "SELECT COUNT(*) FROM local_push_registrations", [], |row| row.get(0),
+                ).unwrap();
                 assert_eq!(rows, u64::from(probe.body.is_some()));
             }
             if attempt > 0 {
@@ -3511,9 +3077,7 @@ fn prepare_renames(store: &Store) {
         ))
         .collect::<String>();
     let intent = fractal_daemon::parse_intent(&format!("version 2\n{kdl}"), NODE).unwrap();
-    store
-        .apply_internal(&intent, "cost-rename-identities")
-        .unwrap();
+    store.apply_internal(&intent, "cost-rename-identities").unwrap();
 }
 
 fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {

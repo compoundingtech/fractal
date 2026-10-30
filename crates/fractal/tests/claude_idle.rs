@@ -13,9 +13,7 @@ fn unscoped_claude_channel_serves_mcp_until_eof_without_a_daemon_or_state() {
     let mut child = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
-        .env("XDG_STATE_HOME", root.path().join("state"))
-        .env_remove("ST3_SUBJECT")
-        .env_remove("FRACTAL_SUBJECT")
+        .env("XDG_STATE_HOME", root.path().join("state")).env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
         .arg("--endpoint")
         .arg(root.path().join("absent.sock"))
         .args(["driver", "claude-mcp"])
@@ -46,10 +44,7 @@ fn unscoped_claude_channel_serves_mcp_until_eof_without_a_daemon_or_state() {
         }
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "unscoped MCP must stay alive until its input closes"
-    );
+    assert!(child.try_wait().unwrap().is_none(), "unscoped MCP must stay alive until its input closes");
     drop(stdin);
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -136,9 +131,7 @@ fn identity_without_subject_is_a_configuration_error_instead_of_idle_mcp() {
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_RUNTIME_DIR", root.path().join("run"))
-        .env("XDG_STATE_HOME", root.path().join("state"))
-        .env_remove("ST3_SUBJECT")
-        .env_remove("FRACTAL_SUBJECT")
+        .env("XDG_STATE_HOME", root.path().join("state")).env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
         .arg("--endpoint")
         .arg(root.path().join("absent.sock"))
         .args(["driver", "claude-mcp", "--identity", "example/one"])

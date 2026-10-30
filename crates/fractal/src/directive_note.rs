@@ -2,15 +2,13 @@ use fractal_daemon::cli_println as println;
 
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand};
-use fractal_daemon::client::{Client, Endpoint};
-use fractal_daemon::store::directive_notes::DirectiveNote;
 use serde::Deserialize;
 use serde_json::json;
+use fractal_daemon::client::{Client, Endpoint};
+use fractal_daemon::store::directive_notes::DirectiveNote;
 
 #[derive(Args)]
-#[command(
-    after_help = "Notes are explicit reads only: no launch delivery, notifications or UI. Only a person can set or clear their own note. Notes never assign work, approve a gate or grant authority."
-)]
+#[command(after_help = "Notes are explicit reads only: no launch delivery, notifications or UI. Only a person can set or clear their own note. Notes never assign work, approve a gate or grant authority.")]
 pub(super) struct NoteArgs {
     /// Read as this person or agent; defaults to the harness identity, else configured person.
     #[arg(long, global = true, value_parser = super::parse_actor_subject)]
@@ -50,14 +48,8 @@ pub(super) async fn run(
 ) -> Result<()> {
     let actor = super::configured_actor(args.actor.as_deref(), configured_person, "note")?;
     if let Some(own) = fractal_drivers::contracts::env("ST_AGENT").filter(|own| !own.is_empty()) {
-        anyhow::ensure!(
-            actor == own,
-            "an agent must read notes as its own harness identity"
-        );
-        anyhow::ensure!(
-            args.command.is_none(),
-            "only a person outside an agent seat can set or clear a note"
-        );
+        anyhow::ensure!(actor == own, "an agent must read notes as its own harness identity");
+        anyhow::ensure!(args.command.is_none(), "only a person outside an agent seat can set or clear a note");
     }
     if args.command.is_some() {
         super::parse_person_subject(&actor).map_err(anyhow::Error::msg)?;
@@ -73,10 +65,7 @@ pub(super) async fn run(
     match args.command {
         None => {
             let response: NotesResponse = client
-                .get(&format!(
-                    "/v1/client/notes?actor={}",
-                    urlencoding::encode(&actor)
-                ))
+                .get(&format!("/v1/client/notes?actor={}", urlencoding::encode(&actor)))
                 .await?;
             if json_output {
                 return super::print_value(&response, true);
@@ -98,29 +87,18 @@ pub(super) async fn run(
                 NoteCommand::Clear => (None, None),
             };
             let response: NoteResponse = client
-                .request(
-                    "PUT",
-                    "/v1/notes",
-                    Some(&json!({
-                        "person": actor,
-                        "actor": actor,
-                        "text": text,
-                        "expires_at": expires_at,
-                    })),
-                )
+                .request("PUT", "/v1/notes", Some(&json!({
+                    "person": actor,
+                    "actor": actor,
+                    "text": text,
+                    "expires_at": expires_at,
+                })))
                 .await
                 .context("could not update your directive note")?;
             if json_output {
                 return super::print_value(&response, true);
             }
-            println!(
-                "{}",
-                if text.is_some() {
-                    "Note set."
-                } else {
-                    "Note cleared."
-                }
-            );
+            println!("{}", if text.is_some() { "Note set." } else { "Note cleared." });
         }
     }
     Ok(())
@@ -128,50 +106,30 @@ pub(super) async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser as _;
+    use super::*;
 
     #[test]
     fn note_parser_reads_and_accepts_actor_after_subcommand() {
-        let cli =
-            super::super::Cli::try_parse_from(["st", "note", "--actor", "agent/helper"]).unwrap();
-        let super::super::Command::Note(args) = cli.command else {
-            panic!("expected note")
-        };
+        let cli = super::super::Cli::try_parse_from(["st", "note", "--actor", "agent/helper"]).unwrap();
+        let super::super::Command::Note(args) = cli.command else { panic!("expected note") };
         assert_eq!(args.actor.as_deref(), Some("agent/helper"));
         assert!(args.command.is_none());
-        let cli =
-            super::super::Cli::try_parse_from(["st", "note", "clear", "--actor", "person/avery"])
-                .unwrap();
-        let super::super::Command::Note(args) = cli.command else {
-            panic!("expected note")
-        };
+        let cli = super::super::Cli::try_parse_from(["st", "note", "clear", "--actor", "person/avery"]).unwrap();
+        let super::super::Command::Note(args) = cli.command else { panic!("expected note") };
         assert!(matches!(args.command, Some(NoteCommand::Clear)));
     }
 
     #[test]
     fn note_parser_preserves_text_and_expiry_without_person_override() {
         let cli = super::super::Cli::try_parse_from([
-            "st",
-            "note",
-            "set",
-            "Review before merging",
-            "--expires-at",
-            "2099-01-01T00:00:00Z",
-        ])
-        .unwrap();
-        let super::super::Command::Note(args) = cli.command else {
-            panic!("expected note")
-        };
-        let Some(NoteCommand::Set { text, expires_at }) = args.command else {
-            panic!("expected set")
-        };
+            "st", "note", "set", "Review before merging", "--expires-at", "2099-01-01T00:00:00Z",
+        ]).unwrap();
+        let super::super::Command::Note(args) = cli.command else { panic!("expected note") };
+        let Some(NoteCommand::Set { text, expires_at }) = args.command else { panic!("expected set") };
         assert_eq!(text, "Review before merging");
         assert_eq!(expires_at.as_deref(), Some("2099-01-01T00:00:00Z"));
-        assert!(
-            super::super::Cli::try_parse_from(["st", "note", "clear", "--person", "person/other"])
-                .is_err()
-        );
+        assert!(super::super::Cli::try_parse_from(["st", "note", "clear", "--person", "person/other"]).is_err());
         assert!(super::super::Cli::try_parse_from(["st", "note", "set"]).is_err());
     }
 }

@@ -93,9 +93,7 @@ fn actor_contract_effective_uses_real_config_resolution() {
             .keys()
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>(),
-        ["config_path", "instance", "state_dir"]
-            .into_iter()
-            .collect(),
+        ["config_path", "instance", "state_dir"].into_iter().collect(),
         "effective mode must expose metadata only, not config values"
     );
     let static_output = command(home.path())

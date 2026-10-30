@@ -212,9 +212,7 @@ fn canary(harness: &str, scenario: &str) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn first_claim_socket_denial_names_cause_and_recovers_on_an_isolated_daemon() {
-    if fractal_daemon::test_support::supervise_test() {
-        return;
-    }
+    if fractal_daemon::test_support::supervise_test() { return; }
     canary("codex", "claim-socket-denied");
 }
 
@@ -268,43 +266,43 @@ macro_rules! harness {
             #[test]
             fn a_fresh_seat_boots() {
                 if fractal_daemon::test_support::supervise_test() {
-                    return;
-                }
+                return;
+            }
                 super::canary($harness, "fresh");
             }
             #[test]
             fn a_restarted_seat_boots() {
                 if fractal_daemon::test_support::supervise_test() {
-                    return;
-                }
+                return;
+            }
                 super::canary($harness, "restart");
             }
             #[test]
             fn a_seat_boots_after_the_daemon_restarts_with_its_predecessor_still_observed() {
                 if fractal_daemon::test_support::supervise_test() {
-                    return;
-                }
+                return;
+            }
                 super::canary($harness, "daemon-restart");
             }
             #[test]
             fn a_driver_re_execs_into_a_new_binary_and_still_takes_a_message() {
                 if fractal_daemon::test_support::supervise_test() {
-                    return;
-                }
+                return;
+            }
                 super::canary($harness, "reexec");
             }
             #[test]
             fn five_seats_launching_at_once_all_boot() {
                 if fractal_daemon::test_support::supervise_test() {
-                    return;
-                }
+                return;
+            }
                 super::canary($harness, "concurrent");
             }
             #[test]
             fn a_suspended_seat_resumes_its_own_native_session() {
                 if fractal_daemon::test_support::supervise_test() {
-                    return;
-                }
+                return;
+            }
                 super::canary($harness, "suspend");
             }
         }

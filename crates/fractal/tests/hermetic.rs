@@ -95,19 +95,12 @@ fn conflicting_agent_aliases_cannot_fall_back_to_native_driver_identity() {
         .env("ST_DRIVER_SESSION_DIR", root.path().join("session"))
         .args(["driver-hook", "claude-observe", "SessionStart"])
         .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
+        .output().unwrap();
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no agent identity"), "{stderr}");
-    assert!(
-        stderr.contains("conflicting environment variables"),
-        "{stderr}"
-    );
-    assert!(
-        !stderr.contains("agent/legacy") && !stderr.contains("agent/preferred"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("conflicting environment variables"), "{stderr}");
+    assert!(!stderr.contains("agent/legacy") && !stderr.contains("agent/preferred"), "{stderr}");
 }
 
 #[test]
@@ -121,8 +114,7 @@ fn legacy_daemon_wait_preserves_invalid_empty_and_non_utf8_values() {
             .env_clear()
             .env("ST3_DAEMON_WAIT", value)
             .args(["work", "start", "task", "--as", "person/explicit"])
-            .output()
-            .unwrap();
+            .output().unwrap();
         assert!(!output.status.success(), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains(diagnostic), "{stderr}");

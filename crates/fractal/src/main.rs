@@ -5,12 +5,12 @@ mod ci_test_paths;
 
 use fractal_daemon::AgentMessagesStore;
 use fractal_daemon::CoordinationStore;
-use fractal_daemon::GitChangesStore;
-use fractal_daemon::LimitsStore;
 use fractal_daemon::MissionsStore;
-use fractal_daemon::PublicationFactsStore;
+use fractal_daemon::LimitsStore;
 use fractal_daemon::SeatsStore;
 use fractal_daemon::StopDeferralStore;
+use fractal_daemon::PublicationFactsStore;
+use fractal_daemon::GitChangesStore;
 use fractal_daemon::cli_output;
 use fractal_daemon::{cli_print as print, cli_println as println};
 
@@ -24,21 +24,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use base64::Engine as _;
-use clap::builder::TypedValueParser as _;
 use clap::{Args, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
-use fractal_client::{
-    API_VERSION as CLIENT_V0_API_VERSION, AssistantGrantPolicy, AssistantMinimalReadMode,
-    AssistantPairingBegin, AssistantPrincipal, AssistantReadTrustRequest, AssistantScope,
-    Client as GeneratedClient, ClientError as GeneratedClientError, Envelope as ClientEnvelope,
-    ErrorCode as ClientErrorCode, EventPage as ClientEventPage, EventType as ClientEventType,
-    Fence as ClientFence, Page as ClientPage, PairingBegin, PersonPairingBegin,
-    Resource as ClientResource, TargetParameters as ClientTargetParameters,
-    TerminalInputMode as ClientTerminalInputMode,
-    TerminalInputParameters as ClientTerminalInputParameters,
-    TerminalScreen as ClientTerminalScreen, TimelineBody as ClientTimelineBody,
-    TimelineEntry as ClientTimelineEntry, TimelinePage as ClientTimelinePage, catch_up_estimate,
-    envelope_count,
-};
+use clap::builder::TypedValueParser as _;
+use kdl::{KdlDocument, KdlEntry, KdlNode};
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 #[cfg(test)]
 use fractal_daemon::api::serve_unix;
 use fractal_daemon::api::{AppState, fabric_router, router};
@@ -54,49 +44,58 @@ use fractal_daemon::model::{
     LaunchStartRequest, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
     MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
     MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
-    MissionRunReportRequest, MissionRunReportView, MissionRunView, MissionSpec, MissionState,
-    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult,
-    PersonAskRequest, PersonStepResponse, PlannerSpec, PlanningApprovalRequest,
-    PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningSessionView,
-    ReplicaRecordView, ReplicationPeerStatus, ReplicationRepairRequest, ReplicationStatus,
-    ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionProposalView,
-    RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode,
-    SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse, StepRunView,
-    SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest, WorkRequest,
-    WorkRetryRequest, WorkWakeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunView, MissionSpec, MissionState, OperationalRepairApplyRequest,
+    OperationalRepairPlan, OperationalRepairResult, PersonAskRequest, PersonStepResponse,
+    PlannerSpec, PlanningApprovalRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest,
+    PlanningSessionView, ReplicaRecordView, ReplicationPeerStatus, ReplicationRepairRequest,
+    ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest,
+    RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse,
+    SessionInputMode, SessionInputRequest, SessionScreen, SessionSignalRequest, StatusResponse,
+    StepRunView, SubscriptionRequestDecision, SubscriptionRequestView, WorkExtendRequest,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use fractal_daemon::reconcile::Reconciler;
 use fractal_daemon::store::Store;
-use kdl::{KdlDocument, KdlEntry, KdlNode};
-use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
+use fractal_client::{
+    API_VERSION as CLIENT_V0_API_VERSION, Client as GeneratedClient,
+    ClientError as GeneratedClientError, Envelope as ClientEnvelope, ErrorCode as ClientErrorCode,
+    EventPage as ClientEventPage, EventType as ClientEventType, Fence as ClientFence,
+    Page as ClientPage, PairingBegin, PersonPairingBegin, AssistantGrantPolicy, AssistantReadTrustRequest,
+    AssistantMinimalReadMode, AssistantPairingBegin, AssistantPrincipal, AssistantScope,
+    Resource as ClientResource,
+    TargetParameters as ClientTargetParameters, TerminalInputMode as ClientTerminalInputMode,
+    TerminalInputParameters as ClientTerminalInputParameters,
+    TerminalScreen as ClientTerminalScreen, TimelineBody as ClientTimelineBody,
+    TimelineEntry as ClientTimelineEntry, TimelinePage as ClientTimelinePage, catch_up_estimate,
+    envelope_count,
+};
 use tokio::sync::{Notify, watch};
 
 use clap_complete::engine::ArgValueCompleter;
 use completion::{Complete, Entity, WorkFilter};
 
-mod actor_contract;
-mod change_cli;
 mod cli_help;
-mod completion;
 mod demo;
+mod setup;
+mod onboarding;
+mod change_cli;
 mod directive_note;
+mod completion;
 mod doctor_cli;
+mod fractal;
+mod release_version;
 #[cfg(test)]
 mod follow_tests;
-mod fractal;
-mod onboarding;
 mod presentation;
-mod release_version;
-mod setup;
+mod actor_contract;
 
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
 mod attention_cli;
 mod conversations_cli;
-mod deploy_cli;
 mod driver_cli;
 mod fleet_cli;
+mod deploy_cli;
 mod launch_cli;
 mod migrate_cli;
 mod replication_cli;
@@ -104,8 +103,8 @@ mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod validate_cli;
-mod waiting_on_cli;
 mod work_cli;
+mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
 use conversations_cli::{run_message, upload_attachments};
@@ -120,9 +119,9 @@ use work_cli::{run_wait, run_work};
 
 use presentation::{
     OutputStyle, follow_snapshot, glance, mission_run_signature, relative_time,
-    render_attention_show, render_claim_lease, render_generation, render_generations,
-    render_host_facts, render_human_value, render_mission_run_page, render_revision_proposal,
-    render_step_run, shell_argument,
+    render_attention_show, render_claim_lease, render_generation, render_generations, render_host_facts,
+    render_human_value, render_mission_run_page, render_revision_proposal, render_step_run,
+    shell_argument,
 };
 
 #[derive(Parser)]
@@ -183,7 +182,9 @@ fn cli_command() -> clap::Command {
     // Resolve each family once, not once per argument, to warn once per conflict.
     // Leave legacy bindings untouched unless the preferred alias is actually present.
     let bindings = CLI_ENVIRONMENT_NAMES.map(|(old, new)| {
-        std::env::var_os(new).map(|_| (old, fractal_drivers::contracts::env(old).map(|_| new)))
+        std::env::var_os(new).map(|_| {
+            (old, fractal_drivers::contracts::env(old).map(|_| new))
+        })
     });
     let mut command = cli_command_with_bindings(Cli::command(), &bindings);
     // Materialize inherited globals before hiding only web's copies. They remain
@@ -191,11 +192,7 @@ fn cli_command() -> clap::Command {
     command.build();
     command.mut_subcommand("web", |web| {
         web.mut_args(|argument| {
-            if argument.is_global_set() {
-                argument.hide(true)
-            } else {
-                argument
-            }
+            if argument.is_global_set() { argument.hide(true) } else { argument }
         })
     })
 }
@@ -209,20 +206,15 @@ fn reject_web_global_flags(
     if matches.subcommand_name() != Some("web") {
         return Ok(());
     }
-    let rejected = command
-        .get_arguments()
-        .find(|argument| {
-            argument.is_global_set()
-                && matches.value_source(argument.get_id().as_str())
-                    == Some(clap::parser::ValueSource::CommandLine)
-        })
-        .map(ToString::to_string);
+    let rejected = command.get_arguments().find(|argument| {
+        argument.is_global_set()
+            && matches.value_source(argument.get_id().as_str())
+                == Some(clap::parser::ValueSource::CommandLine)
+    }).map(ToString::to_string);
     if let Some(argument) = rejected {
         return Err(command.error(
             clap::error::ErrorKind::ArgumentConflict,
-            format!(
-                "{argument} cannot be used with `web`; select the local daemon with --state-dir DIR"
-            ),
+            format!("{argument} cannot be used with `web`; select the local daemon with --state-dir DIR"),
         ));
     }
     Ok(())
@@ -979,12 +971,12 @@ async fn fleet_leave(
         .transports
         .iter()
         .any(|transport| transport == "fabric")
-        && let Some(fabric) =
-            fractal_daemon::fleet::transport::resolve_tool(file.fabric.as_deref(), "fabric")
+        && let Some(fabric) = fractal_daemon::fleet::transport::resolve_tool(file.fabric.as_deref(), "fabric")
     {
-        let protocol = file.fabric_protocol.clone().unwrap_or_else(|| {
-            fractal_daemon::fleet::transport::default_fabric_protocol(&file.fleet_id)
-        });
+        let protocol = file
+            .fabric_protocol
+            .clone()
+            .unwrap_or_else(|| fractal_daemon::fleet::transport::default_fabric_protocol(&file.fleet_id));
         let _ = std::process::Command::new(fabric)
             .args(["unexpose", &protocol])
             .stdout(std::process::Stdio::null())
@@ -1045,6 +1037,7 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
     }
     removals
 }
+
 
 #[derive(Args)]
 struct FleetModeArgs {
@@ -1460,12 +1453,7 @@ struct MissionReportToArgs {
     agent: Option<String>,
     /// How long the run may go without progress before it counts as stalled, such as `1h`.
     /// Defaults to the mission's `stalled-after`, else 30 minutes.
-    #[arg(
-        long,
-        value_name = "DURATION",
-        requires = "agent",
-        conflicts_with = "clear"
-    )]
+    #[arg(long, value_name = "DURATION", requires = "agent", conflicts_with = "clear")]
     #[arg(value_parser = parse_stalled_after)]
     stalled_after: Option<u64>,
     /// Report stalls (true or false). Defaults to the mission's policy, else true.
@@ -2335,14 +2323,8 @@ mod host_migration_cli_tests {
     #[test]
     fn parses_host_cutover_modes_and_rejects_conflicting_modes() {
         for flags in [vec![], vec!["--dry-run"], vec!["--rollback"]] {
-            let cli =
-                Cli::try_parse_from(["st", "migrate", "host"].into_iter().chain(flags)).unwrap();
-            assert!(matches!(
-                cli.command,
-                Command::Migrate {
-                    command: MigrateCommand::Host(_)
-                }
-            ));
+            let cli = Cli::try_parse_from(["st", "migrate", "host"].into_iter().chain(flags)).unwrap();
+            assert!(matches!(cli.command, Command::Migrate { command: MigrateCommand::Host(_) }));
         }
         assert!(Cli::try_parse_from(["st", "migrate", "host", "--dry-run", "--rollback"]).is_err());
     }
@@ -2354,10 +2336,7 @@ mod host_migration_cli_tests {
             (vec!["st", "service", "install", "--stage-fractal"], true),
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
-            let Command::Service {
-                command: ServiceCommand::Install { stage_fractal, .. },
-            } = cli.command
-            else {
+            let Command::Service { command: ServiceCommand::Install { stage_fractal, .. } } = cli.command else {
                 panic!("expected service install");
             };
             assert_eq!(stage_fractal, expected);
@@ -2549,8 +2528,7 @@ enum BlobCommand {
 }
 
 #[derive(Subcommand)]
-#[command(
-    after_help = "An agent keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
+#[command(after_help = "An agent keeps one handoff, doc/agents/IDENTITY/handoff, versioned like any document. \
 fractal restarts an agent for an account or model change, a declaration change, or an operator's or agent's \
 request; every session that starts after a restart is given the handoff and the live state of the \
 agent's work as its first message. Write what the graph does not hold: what you were in the middle of, \
@@ -2558,8 +2536,7 @@ the branches and pull requests you own, what you wait on, what to do next, and a
 that you started. Same-session resume (claude --resume, codex resume) stays preferred where it works.\n\n\
 Before a planned restart fractal sends the agent a \"Prepare for restart\" message with a deadline. Writing the \
 handoff acknowledges it; `ready` acknowledges a handoff that is already current. The restart goes ahead \
-at the acknowledgement or the deadline, whichever comes first."
-)]
+at the acknowledgement or the deadline, whichever comes first.")]
 enum HandoffCommand {
     /// Replace this agent's handoff with FILE, or with standard input when FILE is `-` or absent.
     Write {
@@ -2796,9 +2773,7 @@ async fn run_identity_rename(
         reason: args.reason,
         expected_naming_revision: args.expected_naming_revision,
         expected_declaration: args.expected_declaration,
-        idempotency_key: args
-            .idempotency_key
-            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+        idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
     };
     let client = generated_client(endpoint, None)?;
     let receipt = if agent {
@@ -2809,14 +2784,8 @@ async fn run_identity_rename(
     if json_output {
         return print_value(&serde_json::to_value(&receipt)?, true);
     }
-    println!(
-        "{} -> {} ({})",
-        receipt.from, receipt.canonical_id, receipt.applied
-    );
-    println!(
-        "{} at frontier {}",
-        receipt.replication.state, receipt.replication.frontier
-    );
+    println!("{} -> {} ({})", receipt.from, receipt.canonical_id, receipt.applied);
+    println!("{} at frontier {}", receipt.replication.state, receipt.replication.frontier);
     Ok(())
 }
 
@@ -3095,7 +3064,9 @@ enum OwnedSetsCommand {
     /// List selected owned sets and their source receipts.
     Ls,
     /// Show a set's live membership, retirements and blockers.
-    Show { name: String },
+    Show {
+        name: String,
+    },
     /// Inspect publication and rollout for one source commit.
     Status {
         name: String,
@@ -3188,14 +3159,9 @@ async fn run_owned_set_apply(
         rollout: args
             .rollout
             .map(|_| {
-                fractal_daemon::graph::parse_duration(&args.rollout_deadline, true).map(
-                    |duration| {
-                        fractal_daemon::rollout::Policy::when_idle(
-                            duration,
-                            args.force_after_deadline,
-                        )
-                    },
-                )
+                fractal_daemon::graph::parse_duration(&args.rollout_deadline, true).map(|duration| {
+                    fractal_daemon::rollout::Policy::when_idle(duration, args.force_after_deadline)
+                })
             })
             .transpose()?,
         adopt: args.adopt.into_iter().collect(),
@@ -4472,10 +4438,7 @@ struct DelegationArgs {
 }
 
 impl DelegationArgs {
-    fn proof(
-        self,
-        episode: Option<&str>,
-    ) -> Result<Option<fractal_daemon::model::DelegationProof>> {
+    fn proof(self, episode: Option<&str>) -> Result<Option<fractal_daemon::model::DelegationProof>> {
         let Some(person) = self.acted_for else {
             return Ok(None);
         };
@@ -4601,9 +4564,7 @@ fn run_admission(command: AdmissionCommand, json_output: bool) -> Result<()> {
     };
     let binary = build.binary.as_deref().unwrap_or(&build.harness);
     let path = if let Some(reason) = &reason {
-        fractal_drivers::harness_admission::override_build(
-            binary, driver, extension, &cache, reason,
-        )?
+        fractal_drivers::harness_admission::override_build(binary, driver, extension, &cache, reason)?
     } else {
         fractal_drivers::harness_admission::revoke_override(binary, driver, extension, &cache)?
     };
@@ -4754,12 +4715,12 @@ fn cli_main() -> ExitCode {
     // for an unrelated option. Inspect clap's value sources, never raw tokens.
     if arguments.get(1).is_some_and(|argument| argument == "web") {
         let mut command = cli_command();
-        let matches = command
-            .try_get_matches_from_mut(&arguments)
+        let matches = command.try_get_matches_from_mut(&arguments)
             .unwrap_or_else(|error| exit_usage_error(error));
         reject_web_global_flags(&mut command, &matches)
             .unwrap_or_else(|error| exit_usage_error(error));
-        let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+        let cli = Cli::from_arg_matches(&matches)
+            .unwrap_or_else(|error| exit_usage_error(error));
         let Command::Web { state_dir } = cli.command else {
             unreachable!("the selected subcommand is web");
         };
@@ -4777,10 +4738,7 @@ fn cli_main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some(false) => {
-            stderr_message(
-                "st",
-                format_args!("--checkpoint-space-gate-capabilities must be used alone"),
-            );
+            stderr_message("st", format_args!("--checkpoint-space-gate-capabilities must be used alone"));
             return ExitCode::from(2);
         }
         None => {}
@@ -4791,10 +4749,7 @@ fn cli_main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some(false) => {
-            stderr_message(
-                "st",
-                format_args!("--read-contract-inventory-json must be used alone"),
-            );
+            stderr_message("st", format_args!("--read-contract-inventory-json must be used alone"));
             return ExitCode::from(2);
         }
         None => {}
@@ -4813,9 +4768,7 @@ fn cli_main() -> ExitCode {
     clap_complete::env::CompleteEnv::with_factory(cli_command).complete();
     // A seat process asks a replacement binary which resume formats it reads before executing it.
     if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new(
-            fractal_drivers::reexec::PROBE_SUBCOMMAND,
-        ))
+        == Some(std::ffi::OsStr::new(fractal_drivers::reexec::PROBE_SUBCOMMAND))
     {
         println!("{}", fractal_drivers::reexec::probe_answer());
         return ExitCode::SUCCESS;
@@ -4824,9 +4777,7 @@ fn cli_main() -> ExitCode {
     // daemon or config to start, and the status line runs every few seconds, so they skip the
     // CLI parser and the async runtime.
     if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new(
-            fractal_daemon::driver_hook::SUBCOMMAND,
-        ))
+        == Some(std::ffi::OsStr::new(fractal_daemon::driver_hook::SUBCOMMAND))
     {
         return run_driver_hook();
     }
@@ -4868,7 +4819,8 @@ fn cli_main() -> ExitCode {
     }
     let json_version = arguments.iter().any(|arg| arg == "--json");
     let mut command = cli_command().override_help(cli_help::root_help(false));
-    let matches = match command.try_get_matches_from_mut(arguments) {
+    let matches = match command.try_get_matches_from_mut(arguments)
+    {
         Ok(matches) => matches,
         Err(error) if error.kind() == clap::error::ErrorKind::DisplayVersion && json_version => {
             println!(
@@ -4883,18 +4835,15 @@ fn cli_main() -> ExitCode {
         }
         Err(error) => exit_usage_error(error),
     };
-    reject_web_global_flags(&mut command, &matches).unwrap_or_else(|error| exit_usage_error(error));
+    reject_web_global_flags(&mut command, &matches)
+        .unwrap_or_else(|error| exit_usage_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
     // Validation must precede identity lookup, configuration loading and client construction.
     if let Command::Validate(args) = &cli.command {
         return match run_validate(args, cli.json) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!(
-                    "{}: {}",
-                    ClientMessage::for_output(false).diagnostic_prefix("st"),
-                    plain_error(&error)
-                );
+                eprintln!("{}: {}", ClientMessage::for_output(false).diagnostic_prefix("st"), plain_error(&error));
                 ExitCode::from(2)
             }
         };
@@ -4903,10 +4852,7 @@ fn cli_main() -> ExitCode {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!(
-                    "{} actor-contract: {error:#}",
-                    ClientMessage::for_output(false).diagnostic_prefix("st")
-                );
+                eprintln!("{} actor-contract: {error:#}", ClientMessage::for_output(false).diagnostic_prefix("st"));
                 ExitCode::FAILURE
             }
         };
@@ -4917,10 +4863,7 @@ fn cli_main() -> ExitCode {
         return match fractal_daemon::tiles::cli::run(args) {
             Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
             Err(error) => {
-                eprintln!(
-                    "{} tiles: {error:#}",
-                    ClientMessage::for_output(false).diagnostic_prefix("st")
-                );
+                eprintln!("{} tiles: {error:#}", ClientMessage::for_output(false).diagnostic_prefix("st"));
                 ExitCode::FAILURE
             }
         };
@@ -4935,10 +4878,7 @@ fn cli_main() -> ExitCode {
         return run_demo(command);
     }
     // Set the CLI identity only after the TUI path has chosen its stui client identity.
-    fractal_client::set_client_name(format!(
-        "st {}",
-        fractal_drivers::version::machine_version()
-    ));
+    fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
         record_daemon_commands(args);
     }
@@ -5076,9 +5016,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
     if !subject.starts_with("agent/") {
         return Ok(None);
     }
-    if let Some(path) =
-        fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV)
-    {
+    if let Some(path) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
         let resume: DriverResume = fractal_drivers::reexec::peek_state(&path)?;
         anyhow::ensure!(
             resume.subject == subject && resume.driver == args.driver,
@@ -5086,9 +5024,7 @@ fn driver_environment_incarnation(cli: &Cli) -> Result<Option<String>> {
         );
         return Ok(Some(resume.incarnation));
     }
-    if let Some(path) =
-        fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV)
-    {
+    if let Some(path) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV) {
         let resume: Value = fractal_drivers::reexec::peek_state(&path)?;
         let incarnation = resume
             .get("incarnation")
@@ -5158,9 +5094,7 @@ fn record_daemon_commands(args: &UpArgs) {
     let Ok(directory) = fractal_daemon::recorder::directory(&state_dir) else {
         return;
     };
-    let Ok(path) =
-        fractal_daemon::recorder::prepend(&directory, std::env::var_os("PATH").as_deref())
-    else {
+    let Ok(path) = fractal_daemon::recorder::prepend(&directory, std::env::var_os("PATH").as_deref()) else {
         return;
     };
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
@@ -5247,10 +5181,7 @@ fn native_driver_requested(arguments: impl Iterator<Item = std::ffi::OsString>) 
             skip_value = false;
             continue;
         }
-        if matches!(
-            argument.to_str(),
-            Some("--endpoint" | "--instance" | "--catalog" | "--daemon-wait")
-        ) {
+        if matches!(argument.to_str(), Some("--endpoint" | "--instance" | "--catalog" | "--daemon-wait")) {
             skip_value = true;
         } else if argument.as_encoded_bytes().starts_with(b"-") {
             continue;
@@ -5271,11 +5202,7 @@ impl ClientMessage {
         static IN_GATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
             std::env::var_os(fractal_daemon::gate_report::ENV).is_some()
         });
-        if native_driver || *IN_GATE {
-            Self::Stable
-        } else {
-            Self::Human
-        }
+        if native_driver || *IN_GATE { Self::Stable } else { Self::Human }
     }
 
     fn diagnostic_prefix(self, legacy_prefix: &'static str) -> &'static str {
@@ -5421,11 +5348,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Staging must bypass normal service-family conflict checks and all install
     // initialization: the legacy daemon and definitions intentionally remain live.
     if let Command::Service {
-        command:
-            ServiceCommand::Install {
-                config,
-                stage_fractal: true,
-            },
+        command: ServiceCommand::Install { config, stage_fractal: true },
     } = &cli.command
     {
         return fractal_daemon::service::stage_fractal(
@@ -5496,8 +5419,7 @@ async fn run(cli: Cli) -> Result<()> {
     }
     if let Command::Store {
         command: StoreCommand::PrepareIndexes { ref store },
-    } = cli.command
-    {
+    } = cli.command {
         return fractal_daemon::owner_indexes::prepare(store, &mut cli_output::stdout());
     }
     // The gateway runs as the sekrets user, which has no st configuration.
@@ -5538,16 +5460,11 @@ async fn run(cli: Cli) -> Result<()> {
         }
         config.apply_fleet_file()?;
         fractal_daemon::node_identity::resolve(&mut config)?;
-        let mut telemetry = fractal_daemon::otel::Telemetry::init(
-            fractal_daemon::otel::Unit::ReplicationWorker,
-            Some(&config.node),
-        );
+        let mut telemetry =
+            fractal_daemon::otel::Telemetry::init(fractal_daemon::otel::Unit::ReplicationWorker, Some(&config.node));
         let result = fractal_daemon::task_cpu::account(
             "replication.worker",
-            fractal_daemon::peer::run_worker(
-                config,
-                fractal_daemon::api::raw_terminal_owner_splice,
-            ),
+            fractal_daemon::peer::run_worker(config, fractal_daemon::api::raw_terminal_owner_splice),
         )
         .await;
         telemetry.shutdown();
@@ -5566,9 +5483,7 @@ async fn run(cli: Cli) -> Result<()> {
     // Drivers outlive daemon restarts and handle an outage in their own loops; doctor reports one.
     let immediate = Client::new(endpoint.clone());
     match cli.command {
-        Command::ActorContract { .. } => {
-            unreachable!("the actor contract runs before the CLI runtime")
-        }
+        Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
         Command::Validate(_) => unreachable!("validation runs before the CLI runtime"),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
@@ -5628,9 +5543,7 @@ async fn run(cli: Cli) -> Result<()> {
             command: Some(DevicesCommand::Fabric { command }),
             ..
         }) => run_devices_fabric(&config, command, cli.json).await,
-        Command::Schedules { command } => {
-            schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await
-        }
+        Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
             run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
         }
@@ -5653,9 +5566,7 @@ async fn run(cli: Cli) -> Result<()> {
                     .map_err(anyhow::Error::msg)?,
                 };
                 let Endpoint::Unix(socket) = &endpoint else {
-                    anyhow::bail!(
-                        "Git change control commands require the trusted local Unix socket"
-                    );
+                    anyhow::bail!("Git change control commands require the trusted local Unix socket");
                 };
                 let named = if actor.starts_with("agent/") {
                     Client::unix_agent(socket, actor)?
@@ -5747,9 +5658,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Fleet { command } => run_fleet(&endpoint, command, cli.json).await,
         Command::Uninstall(args) => run_uninstall(&endpoint, args, cli.json).await,
-        Command::Migrate {
-            command: MigrateCommand::Host(args),
-        } => migrate_cli::run(&endpoint, args, cli.json).await,
+        Command::Migrate { command: MigrateCommand::Host(args) } => {
+            migrate_cli::run(&endpoint, args, cli.json).await
+        }
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
@@ -5772,19 +5683,22 @@ async fn run(cli: Cli) -> Result<()> {
             clap_complete::env::Shells::builtins()
                 .completer(shell)
                 .context("clap_complete lacks a built-in shell")?
-                .write_registration("COMPLETE", "st", "st", "st", &mut cli_output::stdout())?;
+                .write_registration(
+                    "COMPLETE",
+                    "st",
+                    "st",
+                    "st",
+                    &mut cli_output::stdout(),
+                )?;
             Ok(())
         }
         Command::Driver(args) => run_driver(&immediate, args, cli.catalog.as_deref()).await,
         Command::Gate { command } => {
-            if matches!(
-                &command,
-                GateCommand::Merged { .. } | GateCommand::CiPassed { .. }
-            ) {
+            if matches!(&command, GateCommand::Merged { .. } | GateCommand::CiPassed { .. }) {
                 fractal_daemon::resource::configure_github(&config)?;
             }
             run_gate(command).await
-        }
+        },
     }
 }
 
@@ -5838,26 +5752,18 @@ fn guard_mutating_cli_actor(
     };
     // Bind explicit repair actors locally as well as at the daemon's authenticated
     // harness boundary; possession of a repair token is not a caller identity.
-    let repair_actor =
-        match command {
-            Command::Repair {
-                command: RepairCommand::Apply { actor, .. },
-            } => Some(actor.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("an agent repair apply needs explicit --as {own}")
-            })?),
-            Command::Repair {
-                command: RepairCommand::DryRun { ignored_actor, .. },
-            } => ignored_actor.as_deref(),
-            Command::Conversations {
-                command: MessageCommand::Status(args),
-            } => args.ignored_actor.as_deref(),
-            _ => None,
-        };
+    let repair_actor = match command {
+        Command::Repair { command: RepairCommand::Apply { actor, .. } } => {
+            Some(actor.as_deref().ok_or_else(|| anyhow::anyhow!(
+                "an agent repair apply needs explicit --as {own}"
+            ))?)
+        }
+        Command::Repair { command: RepairCommand::DryRun { ignored_actor, .. } } => ignored_actor.as_deref(),
+        Command::Conversations { command: MessageCommand::Status(args) } => args.ignored_actor.as_deref(),
+        _ => None,
+    };
     if let Some(actor) = repair_actor {
-        anyhow::ensure!(
-            actor == own,
-            "actor flag must equal ST_AGENT literally ({own})"
-        );
+        anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
     }
     let actor = match command {
         Command::Apply(args) => Some(args.actor.as_str()),
@@ -6028,11 +5934,7 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
 
 const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
 
-async fn run_gh(
-    client: &fractal_daemon::client::Client,
-    command: GhCommand,
-    json: bool,
-) -> Result<()> {
+async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, json: bool) -> Result<()> {
     match command {
         GhCommand::Watch(args) => {
             let view: Value = client
@@ -6192,9 +6094,7 @@ fn run_claude_channel(command: ClaudeChannelCommand) -> Result<()> {
         ClaudeChannelCommand::InstallPolicy => {
             fractal_drivers::claude_channel::install_fractal_policy().map(|_| ())
         }
-        ClaudeChannelCommand::UninstallPolicy => {
-            fractal_drivers::claude_channel::uninstall_fractal_policy()
-        }
+        ClaudeChannelCommand::UninstallPolicy => fractal_drivers::claude_channel::uninstall_fractal_policy(),
     }
 }
 
@@ -6252,14 +6152,8 @@ fn raise_open_file_limit() {
     };
     // SAFETY: setrlimit only reads the rlimit it is given.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
-        stderr_message(
-            "st3",
-            format_args!(
-                "could not raise the open file limit from {}: {}",
-                limit.rlim_cur,
-                std::io::Error::last_os_error()
-            ),
-        );
+        stderr_message("st3", format_args!("could not raise the open file limit from {}: {}", limit.rlim_cur,
+        std::io::Error::last_os_error()));
     }
 }
 
@@ -6326,8 +6220,7 @@ fn gateway_path_for_comparison(socket: &Path) -> Result<PathBuf> {
                                 missing_depth = 1;
                             }
                             Ok(_) => {
-                                return Err(error)
-                                    .context("resolve existing gateway socket ancestor");
+                                return Err(error).context("resolve existing gateway socket ancestor");
                             }
                             Err(error) => {
                                 return Err(error).context("inspect gateway socket ancestor");
@@ -6453,21 +6346,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let identity_duration = startup_started.elapsed();
     let mut telemetry = fractal_daemon::otel::Telemetry::init(
         fractal_daemon::otel::Unit::Daemon,
-        Some(if state_identity.is_ok() {
-            &config.node
-        } else {
-            &configured_node
-        }),
+        Some(if state_identity.is_ok() { &config.node } else { &configured_node }),
     );
     if fractal_daemon::otel::metrics_enabled() {
         fractal_daemon::reconcile::init_metrics();
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     fractal_daemon::malloc_trim::spawn()?;
-    let startup_telemetry = fractal_daemon::startup_telemetry::StartupTelemetry::begin_at(
-        identity_started,
-        startup_started,
-    );
+    let startup_telemetry =
+        fractal_daemon::startup_telemetry::StartupTelemetry::begin_at(identity_started, startup_started);
     startup_telemetry.node_identity(
         identity_started,
         identity_ended,
@@ -6500,19 +6387,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let reserved_bind_ms = phase_elapsed_ms();
     startup.phase("install-hooks");
     startup_telemetry.phase("install-hooks");
-    fractal_daemon::hooks::ensure_installed(&fractal_daemon::hooks::root(&config.state_dir))
-        .context(
-            "publishing this st binary's required lifecycle hook set before starting the daemon",
-        )?;
+    fractal_daemon::hooks::ensure_installed(&fractal_daemon::hooks::root(&config.state_dir)).context(
+        "publishing this st binary's required lifecycle hook set before starting the daemon",
+    )?;
     fractal_daemon::profile::init_from_env();
     raise_open_file_limit();
     startup_phases.install_hooks_ms = phase_elapsed_ms();
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
     let store = Arc::new(startup_telemetry.task("startup.open_store", || {
-        fractal_daemon::task_cpu::blocking("startup.open_store", || {
-            Store::open(&config.state_dir.join("claims.sqlite3"), &config.node)
-        })
+        fractal_daemon::task_cpu::blocking("startup.open_store", || Store::open(&config.state_dir.join("claims.sqlite3"), &config.node))
     })?);
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
@@ -6527,9 +6411,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // The daily answers check also covers the readers that fold claims themselves.
     store
         .extension::<smallclaims::answers::AnswersCache>()
-        .set_readers(Arc::new(
-            fractal_store::store::answers_check::fold_reader_answers,
-        ));
+        .set_readers(Arc::new(fractal_store::store::answers_check::fold_reader_answers));
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6546,74 +6428,48 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
-    startup_telemetry.task("startup.judge_claims", || {
-        fractal_daemon::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true))
-    })?;
+    startup_telemetry.task("startup.judge_claims", || fractal_daemon::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true)))?;
     startup_phases.judge_claims_ms = phase_elapsed_ms();
     startup.phase("validate-replication-backlog");
     startup_telemetry.phase("validate-replication-backlog");
     let admission = startup_telemetry.task("startup.validate_replication_backlog", || {
-        fractal_daemon::task_cpu::blocking("startup.validate_replication_backlog", || {
-            store.validate_replication_backlog()
-        })
+        fractal_daemon::task_cpu::blocking("startup.validate_replication_backlog", || store.validate_replication_backlog())
     })?;
     startup_phases.validate_replication_backlog_ms = phase_elapsed_ms();
     startup.phase("apply-replication-repairs");
     startup_telemetry.phase("apply-replication-repairs");
     startup_telemetry.task("startup.apply_replication_repairs", || {
-        fractal_daemon::task_cpu::blocking("startup.apply_replication_repairs", || {
-            store.apply_replication_repairs()
-        })
+        fractal_daemon::task_cpu::blocking("startup.apply_replication_repairs", || store.apply_replication_repairs())
     })?;
     startup_phases.apply_replication_repairs_ms = phase_elapsed_ms();
     startup.phase("settle-runs");
     startup_telemetry.phase("settle-runs");
     for run in startup_telemetry.task("startup.settle_runs", || {
-        fractal_daemon::task_cpu::blocking("startup.settle_runs", || {
-            store.settle_runs_for_canonical_replay()
-        })
+        fractal_daemon::task_cpu::blocking("startup.settle_runs", || store.settle_runs_for_canonical_replay())
     })? {
-        stderr_message(
-            "st",
-            format_args!("mission run `{run}` stays over as this node's graph showed it"),
-        );
+        stderr_message("st", format_args!("mission run `{run}` stays over as this node's graph showed it"));
     }
     startup.phase("project-replication-backlog");
     startup_telemetry.phase("project-replication-backlog");
-    let projected = startup_telemetry
-        .task("startup.project_replication_backlog", || {
-            fractal_daemon::task_cpu::blocking("startup.project_replication_backlog", || {
-                store.project_replication_backlog_with_progress(
-                    "startup/project-replication-backlog",
-                    |progress| {
-                        startup_telemetry.progress(progress);
-                        startup.progress(progress);
-                    },
-                )
-            })
+    let projected = startup_telemetry.task("startup.project_replication_backlog", || {
+        fractal_daemon::task_cpu::blocking("startup.project_replication_backlog", || {
+        store.project_replication_backlog_with_progress(
+            "startup/project-replication-backlog",
+            |progress| {
+                startup_telemetry.progress(progress);
+                startup.progress(progress);
+            },
+        )
         })
-        .context(
-            "startup projection failed; stopping before daemon.started and runtime initialization",
-        )?;
+    }).context("startup projection failed; stopping before daemon.started and runtime initialization")?;
     if !projected {
-        stderr_message(
-            "st",
-            format_args!(
-                "the replicated projection remains deferred; the daemon will use its last good graph"
-            ),
-        );
+        stderr_message("st", format_args!("the replicated projection remains deferred; the daemon will use its last good graph"));
     }
     if admission.unknown != 0 {
-        stderr_message(
-            "st",
-            format_args!("{} claims waiting for a newer build", admission.unknown),
-        );
+        stderr_message("st", format_args!("{} claims waiting for a newer build", admission.unknown));
     }
     if admission.invalid != 0 {
-        stderr_message(
-            "st",
-            format_args!("replication has {} invalid records", admission.invalid),
-        );
+        stderr_message("st", format_args!("replication has {} invalid records", admission.invalid));
     }
     startup_phases.settlement_projection_ms = phase_elapsed_ms();
     startup.phase("initialize-runtime");
@@ -6661,13 +6517,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let login_environment = fractal_daemon::environment::snapshot_at_startup()?;
     startup_phases.login_environment_ms = phase_elapsed_ms();
     let isolation_environment = login_environment.clone();
-    tokio::task::spawn_blocking(move || {
-        fractal_daemon::task_cpu::blocking("startup.isolation", || {
-            fractal_runtime::initialize_isolation(&isolation_environment)
-        })
-    })
-    .await
-    .context("probe task isolation during daemon startup")?;
+    tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("startup.isolation", || fractal_runtime::initialize_isolation(&isolation_environment)))
+        .await
+        .context("probe task isolation during daemon startup")?;
     let pty_binary = match args.pty_binary.clone() {
         Some(pty_binary) => pty_binary,
         None => fractal_runtime::resolve_executable("pty", &login_environment)?,
@@ -6679,10 +6531,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         let _ = fractal_daemon::sekrets_daemon::PERSON.set(person.clone());
     }
     // Long message bodies this machine owns that no claim names any longer are removed.
-    fractal_daemon::store::message_bodies::spawn_reconciler(
-        store.clone(),
-        config.state_dir.clone(),
-    );
+    fractal_daemon::store::message_bodies::spawn_reconciler(store.clone(), config.state_dir.clone());
     // Sekrets is opt-in: this records a gateway's calls once one listens on this host.
     fractal_daemon::sekrets_daemon::spawn_importer(
         store.clone(),
@@ -6690,9 +6539,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.state_dir.clone(),
         fractal_daemon::sekrets::client::socket_path(),
     );
-    store.install_git_change_registry(Arc::new(
-        fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?,
-    ))?;
+    store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         owning_person: config.person.clone(),
         store: store.clone(),
@@ -6713,245 +6560,132 @@ async fn run_up(args: UpArgs) -> Result<()> {
             catalogs: config.private_notes_catalogs.clone(),
         }),
     };
-    fractal_daemon::api::configure_claude_ownership_observation(
-        &config.state_dir,
-        config.claude_primary_ownership_observe == Some(true),
-    );
+    fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
+        config.claude_primary_ownership_observe == Some(true));
     // Tiles this daemon's user supervises reach it only through their restricted endpoint.
     #[cfg(target_os = "linux")]
     fractal_daemon::api::spawn_tile_endpoints(state.clone());
     fractal_daemon::gate_check::set_endpoint(config.socket.display().to_string());
     startup_phases.app_state_ms = phase_elapsed_ms();
-    let reconciler = Arc::new(
-        Reconciler::native(
-            store.clone(),
-            &config.state_dir,
-            Some(&pty_root),
-            &pty_binary,
-            config.node.clone(),
-            config.socket.display().to_string(),
-            notify.clone(),
-            event_notify.clone(),
-            recorder.map(|installation| installation.directory),
-        )?
-        .with_access_mode(config.active_access_mode())
-        .with_claude_primary_ownership(config.claude_primary_ownership_enabled())
-        .with_seat_priority(config.active_seat_priority())
-        .with_codex_asks(config.codex_work_without_asking == Some(false))
-        .with_schedule_peers(state.configured_peers.clone())
-        .with_client_relay(state.client_relay.clone())
-        .with_person(config.person.clone()),
-    );
-    reconciler.set_max_passes_per_minute(
-        config
-            .reconcile
-            .max_passes_per_minute_or(default_max_passes_per_minute()),
-    )?;
+    let reconciler = Arc::new(Reconciler::native(
+        store.clone(),
+        &config.state_dir,
+        Some(&pty_root),
+        &pty_binary,
+        config.node.clone(),
+        config.socket.display().to_string(),
+        notify.clone(),
+        event_notify.clone(),
+        recorder.map(|installation| installation.directory),
+    )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?);
     store.set_ask_deadlines(config.asks.deadlines);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "reconcile.supervise",
-        reconciler.clone().supervise(),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "reconcile.mission_reads",
-        reconciler.clone().follow_mission_reads(),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "profile.runtime_lag",
-        fractal_daemon::profile::watch_runtime_lag(),
-    ));
+    tokio::spawn(fractal_daemon::task_cpu::account("reconcile.supervise", reconciler.clone().supervise()));
+    tokio::spawn(fractal_daemon::task_cpu::account("reconcile.mission_reads", reconciler.clone().follow_mission_reads()));
+    tokio::spawn(fractal_daemon::task_cpu::account("profile.runtime_lag", fractal_daemon::profile::watch_runtime_lag()));
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     fractal_daemon::config::set_daemon_config(args_config.as_deref());
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "account_limits.enforce",
-        enforce_account_limits(store.clone(), config.limits.clone(), reconciler),
-    ));
+    tokio::spawn(fractal_daemon::task_cpu::account("account_limits.enforce", enforce_account_limits(store.clone(), config.limits.clone(), reconciler)));
     recycle_idle_wal(store.path.clone(), Arc::downgrade(&store));
-    let _contention_retry = retry_projection_contention(
-        Arc::downgrade(&store),
-        notify.clone(),
-        event_notify.clone(),
-        config.state_dir.clone(),
-    );
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.signature_candidates",
-        migrate_signature_candidates(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.envelope_payloads",
-        convert_envelope_payloads(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.signature_backfill",
-        backfill_envelope_signatures(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.retired_identities",
-        import_retired_identities(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.claim_ranges",
-        fold_claim_ranges(store.clone(), event_notify.subscribe()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.event_payloads",
-        migrate_event_payloads(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.coordination_counts",
-        catch_up_coordination_counts(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.agent_message_days",
-        backfill_agent_message_days(store.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.stop_deferral_history",
-        copy_stop_deferral_history(store.clone()),
-    ));
+    let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.coordination_counts", catch_up_coordination_counts(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
-        std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV)
-            .ok()
-            .as_deref(),
+        std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
-        tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(
-            store.clone(),
-            interval,
-        ));
+        tokio::spawn(fractal_daemon::maintenance::check_projection_divergences(store.clone(), interval));
     }
     spawn_response_expiry(store.clone());
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "observations.trim",
-        trim_local_observations(store.clone(), config.observations.clone()),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "account_limits.catch_up",
-        catch_up_account_limits(store.clone(), notify.clone()),
-    ));
+    tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
+        store.clone(),
+        config.observations.clone(),
+    )));
+    tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
     {
         let store = store.clone();
-        tokio::spawn(fractal_daemon::task_cpu::account(
-            "slo.history",
-            fractal_daemon::slo_history::run(
-                fractal_daemon::slo_history::dir(&config.state_dir),
-                move || {
-                    let rows = fractal_daemon::api::slo_rows(&store)?;
-                    fractal_daemon::objective_faults::check_and_report(&store, &rows);
-                    Ok(rows)
-                },
-            ),
-        ));
+        tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
+            fractal_daemon::slo_history::dir(&config.state_dir),
+            move || {
+                let rows = fractal_daemon::api::slo_rows(&store)?;
+                fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                Ok(rows)
+            },
+        )));
     }
     // The member's CPU by closed minute, for the CPU targets. A member in a fleet runs one
     // replication worker, whose CPU counts with the daemon's; `run_worker` needs a fleet.
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "slo.cpu_minutes",
-        fractal_daemon::api::run_cpu_minutes(store.clone(), usize::from(config.fleet_id.is_some())),
-    ));
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "recorder.receipts",
-        fractal_daemon::recorder_receipts::run(
-            store.clone(),
-            fractal_daemon::recorder::receipt_path(&config.state_dir),
-            notify.clone(),
-            event_notify.clone(),
-        ),
-    ));
+    tokio::spawn(fractal_daemon::task_cpu::account("slo.cpu_minutes", fractal_daemon::api::run_cpu_minutes(
+        store.clone(),
+        usize::from(config.fleet_id.is_some()),
+    )));
+    tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
+        store.clone(),
+        fractal_daemon::recorder::receipt_path(&config.state_dir),
+        notify.clone(),
+        event_notify.clone(),
+    )));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?;
-        stderr_message(
-            "st3",
-            format_args!(
-                "exporting local observations to OpenTelemetry at {}",
-                otlp.endpoint
-            ),
-        );
-        tokio::spawn(fractal_daemon::task_cpu::account(
-            "observations.export",
-            fractal_daemon::otlp::run(store.clone(), exporter),
-        ));
+        stderr_message("st3", format_args!("exporting local observations to OpenTelemetry at {}", otlp.endpoint));
+        tokio::spawn(fractal_daemon::task_cpu::account("observations.export", fractal_daemon::otlp::run(store.clone(), exporter)));
         // The live SLO windows go out as gauges, once a minute, on a timer of their own.
-        tokio::spawn(fractal_daemon::task_cpu::account(
-            "slo.export",
-            fractal_daemon::otlp::run_slo(
-                fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?,
-                fractal_daemon::api::request_latency_target_windows,
-            ),
-        ));
+        tokio::spawn(fractal_daemon::task_cpu::account("slo.export", fractal_daemon::otlp::run_slo(
+            fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?,
+            fractal_daemon::api::request_latency_target_windows,
+        )));
     }
     #[cfg(target_os = "macos")]
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.malloc_relief",
-        async {
-            // Startup and replication can leave large, empty malloc zones resident on macOS.
-            // Give the system a chance to reclaim those pages without making request handling wait.
-            loop {
-                tokio::time::sleep(Duration::from_secs(120)).await;
-                let _ = tokio::task::spawn_blocking(|| {
-                    fractal_daemon::task_cpu::blocking("maintenance.malloc_relief", || unsafe {
-                        malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
-                    })
-                })
-                .await;
-            }
-        },
-    ));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.malloc_relief", async {
+        // Startup and replication can leave large, empty malloc zones resident on macOS.
+        // Give the system a chance to reclaim those pages without making request handling wait.
+        loop {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            let _ = tokio::task::spawn_blocking(|| fractal_daemon::task_cpu::blocking("maintenance.malloc_relief", || unsafe {
+                malloc_zone_pressure_relief(std::ptr::null_mut(), 0)
+            }))
+            .await;
+        }
+    }));
     // The first diagnostic report and delayed repair share one operation audit. Later reports
     // audit current state independently; no request waits for this startup report.
     if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
         let store = store.clone();
-        tokio::spawn(fractal_daemon::task_cpu::account(
-            "operations.repair_drift",
-            async move {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                let drift = match audit.await {
-                    Ok(Ok(drift)) => drift,
-                    Ok(Err(error)) => {
-                        stderr_message(
-                            "st3",
-                            format_args!("operation projection check failed: {error:#}"),
-                        );
-                        return;
-                    }
-                    Err(error) => {
-                        stderr_message(
-                            "st3",
-                            format_args!("operation projection check stopped: {error}"),
-                        );
-                        return;
-                    }
-                };
-                match store
-                    .connection
-                    .write_workers()
-                    .spawn_blocking(move || {
-                        fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
-                            store.repair_operation_projection_drift_from_audit(&drift)
-                        })
-                    })
-                    .await
-                {
-                    Ok(Ok(true)) => stderr_message(
-                        "st3",
-                        format_args!("rebuilt an operation projection that drifted"),
-                    ),
-                    Ok(Ok(false)) => {}
-                    Ok(Err(error)) => stderr_message(
-                        "st3",
-                        format_args!("operation projection check failed: {error:#}"),
-                    ),
-                    Err(error) => stderr_message(
-                        "st3",
-                        format_args!("operation projection check stopped: {error}"),
-                    ),
+        tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let drift = match audit.await {
+                Ok(Ok(drift)) => drift,
+                Ok(Err(error)) => {
+                    stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
+                    return;
                 }
-            },
-        ));
+                Err(error) => {
+                    stderr_message("st3", format_args!("operation projection check stopped: {error}"));
+                    return;
+                }
+            };
+            match store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("operations.repair_drift", || {
+                store.repair_operation_projection_drift_from_audit(&drift)
+            }))
+            .await
+            {
+                Ok(Ok(true)) => stderr_message("st3", format_args!("rebuilt an operation projection that drifted")),
+                Ok(Ok(false)) => {}
+                Ok(Err(error)) => stderr_message("st3", format_args!("operation projection check failed: {error:#}")),
+                Err(error) => stderr_message("st3", format_args!("operation projection check stopped: {error}")),
+            }
+        }));
     }
     // Nor does the first session list wait to read every native transcript's header.
     fractal_daemon::api::start_native_session_discovery(&state);
@@ -6972,27 +6706,14 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let terminal_socket = fractal_daemon::config::terminal_socket(&config.state_dir);
     let _terminal_socket = match std::path::absolute(&state.pty_root)
         .map_err(anyhow::Error::from)
-        .and_then(|pty_root| {
-            fractal_daemon::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root)
-        }) {
+        .and_then(|pty_root| fractal_daemon::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root))
+    {
         Ok(service) => {
-            stderr_message(
-                "st",
-                format_args!(
-                    "Fabric terminal socket listening at {}",
-                    terminal_socket.display()
-                ),
-            );
+            stderr_message("st", format_args!("Fabric terminal socket listening at {}", terminal_socket.display()));
             Some(service)
         }
         Err(error) => {
-            stderr_message(
-                "st",
-                format_args!(
-                    "Fabric terminal socket {} is unavailable, so attaches from other hosts use the client gateway: {error:#}",
-                    terminal_socket.display()
-                ),
-            );
+            stderr_message("st", format_args!("Fabric terminal socket {} is unavailable, so attaches from other hosts use the client gateway: {error:#}", terminal_socket.display()));
             None
         }
     };
@@ -7002,8 +6723,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             let activation_store = store.clone();
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
-            let checkpoint_context = (config.checkpoint.enabled || config.trim.local).then(|| {
-                fractal_daemon::store::CheckpointContext {
+            let checkpoint_context = (config.checkpoint.enabled || config.trim.local)
+                .then(|| fractal_daemon::store::CheckpointContext {
                     now_unix_ms: 0,
                     configured_peers: config.peers.iter().map(|peer| peer.name.clone()).collect(),
                     scratch: config.state_dir.join("checkpoint"),
@@ -7011,48 +6732,28 @@ async fn run_up(args: UpArgs) -> Result<()> {
                         .person
                         .clone()
                         .unwrap_or_else(|| "person/operator".into()),
+                });
+            tokio::spawn(fractal_daemon::task_cpu::account("replication.activate", async move {
+                match activation_store.connection.write_workers().spawn_blocking({
+                    let store = activation_store.clone();
+                    move || fractal_daemon::task_cpu::blocking("replication.activate", || store.complete_replication_activation())
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        stderr_message("st", format_args!("replication history activation failed: {error:#}"));
+                        return;
+                    }
+                    Err(error) => {
+                        stderr_message("st", format_args!("replication history activation stopped: {error}"));
+                        return;
+                    }
                 }
-            });
-            tokio::spawn(fractal_daemon::task_cpu::account(
-                "replication.activate",
-                async move {
-                    match activation_store
-                        .connection
-                        .write_workers()
-                        .spawn_blocking({
-                            let store = activation_store.clone();
-                            move || {
-                                fractal_daemon::task_cpu::blocking("replication.activate", || {
-                                    store.complete_replication_activation()
-                                })
-                            }
-                        })
-                        .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => {
-                            stderr_message(
-                                "st",
-                                format_args!("replication history activation failed: {error:#}"),
-                            );
-                            return;
-                        }
-                        Err(error) => {
-                            stderr_message(
-                                "st",
-                                format_args!("replication history activation stopped: {error}"),
-                            );
-                            return;
-                        }
-                    }
-                    if let Some(context) = checkpoint_context {
-                        tokio::spawn(fractal_daemon::task_cpu::account(
-                            "maintenance.checkpoint",
-                            run_checkpoints(activation_store, context),
-                        ));
-                    }
-                },
-            ));
+                if let Some(context) = checkpoint_context {
+                    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.checkpoint", run_checkpoints(activation_store, context)));
+                }
+            }));
             spawn_publication_evidence(store.clone());
             tokio::spawn(build_transport_observation_index(store.clone()));
             startup_telemetry.serving();
@@ -7064,39 +6765,20 @@ async fn run_up(args: UpArgs) -> Result<()> {
             startup.serving();
             // Index population must not compete with either API's first bind.
             tokio::spawn(fractal_daemon::maintenance::run_client_message_selectors(
-                Arc::downgrade(&store),
-                notify.clone(),
-                event_notify.clone(),
+                Arc::downgrade(&store), notify.clone(), event_notify.clone(),
             ));
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
-            stderr_message(
-                "st",
-                format_args!("local API listening at {}", config.socket.display()),
-            );
-            stderr_message(
-                "st",
-                format_args!(
-                    "paired client gateway listening at {}",
-                    config.client_gateway_socket.display()
-                ),
-            );
+            stderr_message("st", format_args!("local API listening at {}", config.socket.display()));
+            stderr_message("st", format_args!("paired client gateway listening at {}", config.client_gateway_socket.display()));
         }
     };
-    let web_dist = args.web_dist.unwrap_or(
-        std::env::current_exe()?
-            .parent()
-            .context("executable directory")?
-            .join("../share/fractal-web"),
-    );
+    let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
+        .parent().context("executable directory")?.join("../share/fractal-web"));
     let web = fractal_daemon::web::prepare(
-        &args.web_listen,
-        web_dist,
-        &state.state_dir,
-        config.person.clone(),
-    )
-    .await?;
+        &args.web_listen, web_dist, &state.state_dir, config.person.clone(),
+    ).await?;
     let web_status = axum::Extension(web.status.clone());
     let web_state = state.clone();
     let receipts = state.assistant_receipts.clone();
@@ -7113,10 +6795,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                gateway_reserved,
-                fabric_router(state).layer(web_status),
-                None,
-                ready,
+                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
             ),
             web.serve(web_state),
         )
@@ -7176,28 +6855,16 @@ fn install_recorder(
         });
     match installed {
         Ok(installation) if installation.programs.is_empty() => {
-            stderr_message(
-                "st",
-                format_args!("neither git nor gh is on PATH, so no calls are recorded"),
-            );
+            stderr_message("st", format_args!("neither git nor gh is on PATH, so no calls are recorded"));
             Some(installation)
         }
         Ok(installation) => {
-            stderr_message(
-                "st",
-                format_args!(
-                    "recording {} calls in {}",
-                    installation.programs.join(" and "),
-                    installation.log.display()
-                ),
-            );
+            stderr_message("st", format_args!("recording {} calls in {}", installation.programs.join(" and "),
+            installation.log.display()));
             Some(installation)
         }
         Err(error) => {
-            stderr_message(
-                "st",
-                format_args!("not recording git and gh calls: {error:#}"),
-            );
+            stderr_message("st", format_args!("not recording git and gh calls: {error:#}"));
             None
         }
     }
@@ -7210,10 +6877,7 @@ unsafe extern "C" {
 
 fn notice_ignored_read_actor(actor: Option<&str>) {
     if actor.is_some() {
-        stderr_message(
-            "st",
-            format_args!("--as is ignored for this read; no actor is required"),
-        );
+        stderr_message("st", format_args!("--as is ignored for this read; no actor is required"));
     }
 }
 
@@ -7310,13 +6974,7 @@ async fn check_before_publish(
             !required,
             "this st daemon cannot check exec gates; update it"
         );
-        stderr_message(
-            "st",
-            format_args!(
-                "this {} daemon cannot check exec gates; publishing without the check",
-                ClientMessage::for_output(false).product_name()
-            ),
-        );
+        stderr_message("st", format_args!("this {} daemon cannot check exec gates; publishing without the check", ClientMessage::for_output(false).product_name()));
         return Ok(());
     };
     let broken = view
@@ -7350,10 +7008,7 @@ async fn run_gate_check(
     intent: &IntentInput,
     workspace: &Path,
     inputs: &[(String, String)],
-    mut report: impl FnMut(
-        &fractal_daemon::model::GateCheckView,
-        &fractal_daemon::model::GateCheckItemView,
-    ),
+    mut report: impl FnMut(&fractal_daemon::model::GateCheckView, &fractal_daemon::model::GateCheckItemView),
 ) -> Result<Option<fractal_daemon::model::GateCheckView>> {
     let workspace = std::path::absolute(workspace)
         .with_context(|| format!("resolve the workspace {}", workspace.display()))?;
@@ -7362,10 +7017,7 @@ async fn run_gate_check(
         workspace: workspace.display().to_string(),
         inputs: inputs.iter().cloned().collect(),
     };
-    let mut view: fractal_daemon::model::GateCheckView = match client
-        .post("/v1/gate-checks", &request)
-        .await
-    {
+    let mut view: fractal_daemon::model::GateCheckView = match client.post("/v1/gate-checks", &request).await {
         Ok(view) => view,
         Err(error) if matches!(fractal_daemon::client::http_status(&error), Some(404 | 405)) => {
             return Ok(None);
@@ -7693,15 +7345,8 @@ async fn follow_mission_run(
         None
     };
     follow_mission_run_to(
-        client,
-        run,
-        json_output,
-        interactive,
-        limit,
-        OutputStyle::stdout(),
-        &mut cli_output::stdout(),
-    )
-    .await
+        client, run, json_output, interactive, limit, OutputStyle::stdout(), &mut cli_output::stdout(),
+    ).await
 }
 
 async fn follow_mission_run_to(
@@ -7736,9 +7381,7 @@ async fn follow_mission_run_to(
         } else {
             String::new()
         };
-        if summary != prior
-            && let Some(page) = &page
-        {
+        if summary != prior && let Some(page) = &page {
             let mut frame = render_mission_run_page(&run, &page.runs, style, current_unix_ms()?);
             if let Some(cursor) = &page.next_cursor {
                 frame.push_str(&format!(
@@ -7796,7 +7439,9 @@ async fn load_mission_run_tree(
         query.push_str("&after=");
         query.push_str(&urlencoding::encode(after));
     }
-    client.get(&query).await
+    client
+        .get(&query)
+        .await
 }
 
 fn mission_run_follow_succeeded(status: &str) -> bool {
@@ -7997,12 +7642,7 @@ async fn attach_terminal(
     // are any, the daemon has a moment to choose one and refuse; a daemon that cannot answer that
     // fast must not keep anyone from debugging this host.
     let local = pty_root
-        .map(|root| {
-            (
-                root,
-                fractal_daemon::client::tagged_pty_sessions(root, subject),
-            )
-        })
+        .map(|root| (root, fractal_daemon::client::tagged_pty_sessions(root, subject)))
         .filter(|(_, sessions)| !sessions.is_empty());
     let daemon = format!("st daemon at {}", endpoint_label(endpoint));
     let mut consult = std::pin::pin!(consult_attach(client, subject));
@@ -8019,9 +7659,7 @@ async fn attach_terminal(
                 return terminal_exit(code);
             }
             (None, _) if budget.is_some() => {
-                anyhow::bail!(
-                    "fractal terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`"
-                );
+                anyhow::bail!("fractal terminals attach: daemon did not answer within 1 s and no local PTY session matches `{subject}`");
             }
             (None, Some(root)) => {
                 eprintln!(
@@ -8034,17 +7672,13 @@ async fn attach_terminal(
         },
     };
     let code = match answer {
-        Ok(AttachAnswer::Local(terminal)) => {
-            fractal_daemon::client::attach_local_terminal(&terminal).await?
-        }
+        Ok(AttachAnswer::Local(terminal)) => fractal_daemon::client::attach_local_terminal(&terminal).await?,
         Ok(AttachAnswer::Bridge(attachment)) => {
             client
                 .proxy_terminal_resilient(subject, &attachment)
                 .await?
         }
-        Err(error)
-            if fractal_daemon::client::api_error_code(&error) == Some("runtime-not-local") =>
-        {
+        Err(error) if fractal_daemon::client::api_error_code(&error) == Some("runtime-not-local") => {
             attach_remote_terminal(client, endpoint, person, subject, error).await?
         }
         Err(error) => match &local {
@@ -8092,17 +7726,13 @@ async fn attach_remote_terminal(
     let person = parse_actor_subject(person).map_err(anyhow::Error::msg)?;
     let gateway = generated_client(endpoint, Some(&person))?;
     let unreached = match fabric_route(client, &gateway, subject).await {
-        Ok((target, request)) => {
-            match fractal_daemon::terminal_fabric::attach(&target, &request).await? {
-                Ok(code) => return Ok(code),
-                Err(error) => format!("Fabric did not reach its PTY session: {error}"),
-            }
-        }
+        Ok((target, request)) => match fractal_daemon::terminal_fabric::attach(&target, &request).await? {
+            Ok(code) => return Ok(code),
+            Err(error) => format!("Fabric did not reach its PTY session: {error}"),
+        },
         Err(error) => format!("{error:#}"),
     };
-    eprintln!(
-        "fractal terminals attach: {unreached}. Attaching through the client gateway instead."
-    );
+    eprintln!("fractal terminals attach: {unreached}. Attaching through the client gateway instead.");
     fractal_daemon::remote_terminal::attach(&gateway, subject, subject).await
 }
 
@@ -8122,8 +7752,7 @@ async fn fabric_route(
     for scope in ["terminal.read", "terminal.control"] {
         anyhow::ensure!(
             capabilities.capabilities.iter().any(|capability| {
-                capability.id == scope
-                    && capability.state == fractal_client::CapabilityState::Granted
+                capability.id == scope && capability.state == fractal_client::CapabilityState::Granted
             }),
             "the client gateway does not grant `{scope}` for a direct attachment"
         );
@@ -8156,8 +7785,7 @@ async fn fabric_route(
         .with_context(|| format!("this machine is in no fleet to reach `{owner}` through"))?;
     let fabric =
         fabric.with_context(|| format!("this machine has no `fabric` to reach `{owner}` with"))?;
-    let view: fractal_daemon::fleet::FleetView =
-        client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
     let peer = fractal_daemon::terminal_fabric::owner_peer(&fabric, &view.members, owner)
         .await
         .with_context(|| {
@@ -8174,10 +7802,7 @@ async fn fabric_route(
 }
 
 /// This machine's `fabric`, the fleet file's override or the one on `PATH`, and its fleet.
-fn configured_fabric() -> Result<(
-    Option<fractal_daemon::fleet::transport::Fabric>,
-    Option<String>,
-)> {
+fn configured_fabric() -> Result<(Option<fractal_daemon::fleet::transport::Fabric>, Option<String>)> {
     let mut config = Config::load_unvalidated(None)?;
     config.apply_fleet_file()?;
     let override_path = config
@@ -8221,8 +7846,7 @@ async fn expose_fabric(config: &Config, args: PtyExposeFabricArgs) -> Result<()>
         fabric.expose_exec(&protocol, &argv).await?;
         println!("Fabric serves the PTY sessions under {pty_root} as `{protocol}`, with `{st}`.");
     } else {
-        let socket =
-            std::path::absolute(fractal_daemon::config::terminal_socket(&config.state_dir))?;
+        let socket = std::path::absolute(fractal_daemon::config::terminal_socket(&config.state_dir))?;
         fabric.expose_socket(&protocol, &socket).await?;
         println!(
             "Fabric forwards `{protocol}` to the st daemon's terminal socket {}.",
@@ -8294,11 +7918,8 @@ async fn run_inspect(client: &Client, args: InspectArgs, json_output: bool) -> R
         ))
         .await?;
     let mut shown = json!({ "status": status, "recent_claims": claims.claims });
-    if let Some(standby) = shown["status"]["subjects"].as_array().and_then(|subjects| {
-        subjects
-            .iter()
-            .find_map(|subject| subject.pointer("/actual/schedule_standby"))
-    }) {
+    if let Some(standby) = shown["status"]["subjects"].as_array().and_then(|subjects|
+        subjects.iter().find_map(|subject| subject.pointer("/actual/schedule_standby"))) {
         let standby = standby.clone();
         shown["schedule_standby"] = standby;
     }
@@ -8332,34 +7953,13 @@ async fn run_trace_to(
         client.clone()
     };
     let client = &client;
-    let schedule_standby = if let Some(subject) = args
-        .subject
-        .as_deref()
-        .filter(|subject| subject.starts_with("schedule/"))
-    {
-        status_for(client, subject)
-            .await?
-            .subjects
-            .into_iter()
-            .find_map(|subject| {
-                subject
-                    .actual
-                    .and_then(|actual| actual.get("schedule_standby").cloned())
-            })
-    } else {
-        None
-    };
+    let schedule_standby = if let Some(subject) = args.subject.as_deref().filter(|subject| subject.starts_with("schedule/")) {
+        status_for(client, subject).await?.subjects.into_iter()
+            .find_map(|subject| subject.actual.and_then(|actual| actual.get("schedule_standby").cloned()))
+    } else { None };
     if !json_output && schedule_standby.is_some() {
-        writeln!(
-            output,
-            "{}",
-            fractal_daemon::schedule_standby::RUN_TWICE_WARNING
-        )?;
-        writeln!(
-            output,
-            "{}",
-            fractal_daemon::schedule_standby::COLD_STANDBY_LIMIT
-        )?;
+        writeln!(output, "{}", fractal_daemon::schedule_standby::RUN_TWICE_WARNING)?;
+        writeln!(output, "{}", fractal_daemon::schedule_standby::COLD_STANDBY_LIMIT)?;
     }
     let claims = trace_claims(client, &args).await?;
     let mut cursor = args.after_index.unwrap_or_default();
@@ -8370,9 +7970,7 @@ async fn run_trace_to(
         cursor = cursor.max(claim.store_index);
         if json_output {
             let mut shown = serde_json::to_value(&claim)?;
-            if let Some(standby) = &schedule_standby {
-                shown["schedule_standby"] = standby.clone();
-            }
+            if let Some(standby) = &schedule_standby { shown["schedule_standby"] = standby.clone(); }
             writeln!(output, "{}", serde_json::to_string(&shown)?)?;
         } else {
             write_trace_claim(output, &claim)?;
@@ -8414,9 +8012,7 @@ async fn run_trace_to(
             }
             if json_output {
                 let mut shown = serde_json::to_value(&event)?;
-                if let Some(standby) = &schedule_standby {
-                    shown["schedule_standby"] = standby.clone();
-                }
+                if let Some(standby) = &schedule_standby { shown["schedule_standby"] = standby.clone(); }
                 writeln!(output, "{}", serde_json::to_string(&shown)?)?;
             } else {
                 let claims: ClaimsPage = client
@@ -8526,9 +8122,8 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
                 })?;
                 client = client.with_credential(credential);
             }
-            return Ok(
-                client.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
-            );
+            return Ok(client
+                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true));
         }
         Endpoint::Http(_) => anyhow::bail!(
             "client-v0 product commands require a trusted local Unix or native Fabric endpoint"
@@ -8725,16 +8320,12 @@ async fn run_devices_fabric(
                 !service.trim().is_empty(),
                 "the Fabric service name must not be empty"
             );
-            let override_path =
-                fractal_daemon::config::FleetFile::load(state_dir)?.and_then(|file| file.fabric);
+            let override_path = fractal_daemon::config::FleetFile::load(state_dir)?.and_then(|file| file.fabric);
             let program = resolve_tool(override_path.as_deref(), "fabric")
                 .context("this machine cannot use Fabric: fabric is not installed")?;
             let program = std::fs::canonicalize(&program).unwrap_or(program);
             let fabric = Fabric::new(program.clone());
-            if let Some(previous) = exposure
-                .as_ref()
-                .filter(|previous| previous.service != service)
-            {
+            if let Some(previous) = exposure.as_ref().filter(|previous| previous.service != service) {
                 anyhow::bail!(
                     "the client gateway is already exposed as {}; run st devices fabric disable first",
                     previous.service
@@ -8768,19 +8359,13 @@ async fn run_devices_fabric(
                 fabric.remove(&peer).await?;
                 removed.push(peer);
             }
-            fabric.unexpose(&exposure.service).await.with_context(|| {
-                format!(
-                    "removed {} device grant(s); run fabric unexpose {}",
-                    removed.len(),
-                    exposure.service
-                )
-            })?;
+            fabric
+                .unexpose(&exposure.service)
+                .await
+                .with_context(|| format!("removed {} device grant(s); run fabric unexpose {}", removed.len(), exposure.service))?;
             GatewayExposure::remove(state_dir)?;
             if json_output {
-                println!(
-                    "{}",
-                    json!({"service": exposure.service, "enabled": false, "removed": removed})
-                );
+                println!("{}", json!({"service": exposure.service, "enabled": false, "removed": removed}));
             } else {
                 println!(
                     "The client gateway is no longer exposed over Fabric; removed {} device grant(s).",
@@ -8799,10 +8384,7 @@ async fn run_devices_fabric(
                     json!({"service": exposure.as_ref().map(|exposure| &exposure.service), "enabled": exposure.is_some(), "granted": peers})
                 );
             } else if let Some(exposure) = exposure {
-                println!(
-                    "The client gateway is exposed over Fabric as {}.",
-                    exposure.service
-                );
+                println!("The client gateway is exposed over Fabric as {}.", exposure.service);
                 if peers.is_empty() {
                     println!("No paired device has a grant yet.");
                 }
@@ -8859,11 +8441,7 @@ async fn run_devices(
             );
             print!(
                 "{}",
-                with_device_presence(
-                    &rendered,
-                    clients.as_ref().map(|found| &found.value),
-                    now_ms()
-                )
+                with_device_presence(&rendered, clients.as_ref().map(|found| &found.value), now_ms())
             );
             note_partial_page(&response.value);
             Ok(())
@@ -8946,13 +8524,8 @@ async fn run_devices(
                 AssistantGrantCommand::Revoke { grant } => {
                     client.assistant_grant_revoke(&grant).await?
                 }
-                AssistantGrantCommand::Policy {
-                    grant,
-                    terms,
-                    recipients,
-                } => {
-                    let terms =
-                        SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
+                AssistantGrantCommand::Policy { grant, terms, recipients } => {
+                    let terms = SealedAssistantGrantTerms::from_cli(&person, configured_person, terms)?;
                     let mut policy = terms.into_policy();
                     policy.recipient_allowlist = Some(recipients);
                     client.assistant_grant_policy(&grant, &policy).await?
@@ -8983,29 +8556,13 @@ async fn run_devices(
                     policy.recipient_allowlist = Some(current.value.recipient_allowlist);
                     client.assistant_grant_policy(&grant, &policy).await?
                 }
-                AssistantGrantCommand::ReadTrust {
-                    grant,
-                    issuer,
-                    key_id,
-                    attestor_public_key,
-                    shim_public_key,
-                    default_response_bytes,
-                    max_response_bytes,
-                } => {
-                    client
-                        .assistant_grant_read_trust(
-                            &grant,
-                            &AssistantReadTrustRequest {
-                                api_version: CLIENT_V0_API_VERSION.into(),
-                                issuer,
-                                key_id,
-                                attestor_public_key,
-                                shim_public_key,
-                                default_response_bytes: Some(default_response_bytes),
-                                max_response_bytes: Some(max_response_bytes),
-                            },
-                        )
-                        .await?
+                AssistantGrantCommand::ReadTrust { grant, issuer, key_id, attestor_public_key, shim_public_key, default_response_bytes, max_response_bytes } => {
+                    client.assistant_grant_read_trust(&grant, &AssistantReadTrustRequest {
+                        api_version: CLIENT_V0_API_VERSION.into(), issuer, key_id,
+                        attestor_public_key, shim_public_key,
+                        default_response_bytes: Some(default_response_bytes),
+                        max_response_bytes: Some(max_response_bytes),
+                    }).await?
                 }
             };
             print_client_value(&response, json_output)
@@ -9270,9 +8827,7 @@ fn ago(timestamp: &str, now_ms: u128) -> String {
     let Ok(then) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
         return timestamp.to_owned();
     };
-    let seconds = (now_ms as i64 / 1_000)
-        .saturating_sub(then.timestamp())
-        .max(0);
+    let seconds = (now_ms as i64 / 1_000).saturating_sub(then.timestamp()).max(0);
     match seconds {
         0..60 => "just now".into(),
         60..3_600 => format!("{}m ago", seconds / 60),
@@ -9359,8 +8914,8 @@ fn configured_actor(
     if let Some(explicit) = explicit {
         return parse_actor_subject(explicit).map_err(anyhow::Error::msg);
     }
-    if let Some(own) =
-        fractal_drivers::contracts::env("ST_AGENT").filter(|own| own.starts_with("agent/"))
+    if let Some(own) = fractal_drivers::contracts::env("ST_AGENT")
+        .filter(|own| own.starts_with("agent/"))
     {
         return Ok(own);
     }
@@ -9529,12 +9084,7 @@ async fn run_collection_watch(
                     render_alert_sections(&page.value, Some(title), "fractal alerts ls --watch")
                 );
             } else {
-                print_product_page(
-                    title,
-                    &page,
-                    false,
-                    &format!("fractal {collection} ls --watch"),
-                )?;
+                print_product_page(title, &page, false, &format!("fractal {collection} ls --watch"))?;
             }
             cli_output::stdout().flush()?;
             if cli_output::closed() {
@@ -9615,10 +9165,7 @@ fn attention_heading(item: &fractal_client::Attention, now_unix_ms: u128) -> Str
     // The agent whose conversation it belongs to, which a gate or an approval names even though
     // no agent asked it; an older daemon names only the requester.
     if let Some(from) = item.conversation_id.as_ref().or(item.requester_id.as_ref()) {
-        about.push(format!(
-            "from {}",
-            from.strip_prefix("agent/").unwrap_or(from)
-        ));
+        about.push(format!("from {}", from.strip_prefix("agent/").unwrap_or(from)));
     }
     about.push(ago(&item.requested_at, now_unix_ms));
     if item.priority != "normal" {
@@ -9637,10 +9184,7 @@ fn attention_heading(item: &fractal_client::Attention, now_unix_ms: u128) -> Str
 }
 
 /// `target mission/fleet/typecase: cancelled 4h ago`
-fn attention_target_line(
-    target: &fractal_client::AttentionTargetState,
-    now_unix_ms: u128,
-) -> String {
+fn attention_target_line(target: &fractal_client::AttentionTargetState, now_unix_ms: u128) -> String {
     let since = target
         .since
         .as_deref()
@@ -9703,8 +9247,7 @@ fn render_alert_sections(
     continuation_command: &str,
 ) -> String {
     let attention = |item: &ClientResource| matches!(item, ClientResource::Attention(_));
-    let alert =
-        |item: &ClientResource| matches!(item, ClientResource::Attention(item) if is_alert(item));
+    let alert = |item: &ClientResource| matches!(item, ClientResource::Attention(item) if is_alert(item));
     let mut alerts = page.clone();
     alerts.items.retain(alert);
     alerts.page.next_cursor = None;
@@ -9722,11 +9265,7 @@ fn render_alert_sections(
         if !output.is_empty() {
             output.push('\n');
         }
-        output.push_str(&render_product_page(
-            "UPDATES",
-            &updates,
-            continuation_command,
-        ));
+        output.push_str(&render_product_page("UPDATES", &updates, continuation_command));
     }
     if let Some(cursor) = page.page.next_cursor.as_deref() {
         use std::fmt::Write as _;
@@ -9817,11 +9356,7 @@ fn render_product_page_headed(
                     let _ = writeln!(output, "  usage {}", render_usage(usage));
                 }
                 if item.runs_truncated {
-                    let _ = writeln!(
-                        output,
-                        "  inspect: fractal missions show {}",
-                        item.header.id
-                    );
+                    let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
                     let _ = writeln!(output, "  inspect: fractal missions show {run}");
                 }
@@ -9867,11 +9402,7 @@ fn render_product_page_headed(
                 let _ = writeln!(output, "  runtime: {}", item.runtime_id);
                 if item.terminal_id.is_some() && item.state == "running" {
                     let _ = writeln!(output, "  peek: fractal terminals peek {}", item.owner_id);
-                    let _ = writeln!(
-                        output,
-                        "  attach: fractal terminals attach {}",
-                        item.owner_id
-                    );
+                    let _ = writeln!(output, "  attach: fractal terminals attach {}", item.owner_id);
                 }
                 if let Some(owner) = &item.owner_run_id {
                     let _ = writeln!(output, "  owner: {owner}");
@@ -9925,8 +9456,7 @@ fn render_product_page_headed(
                 );
                 if let Some(person) = &item.person_id {
                     let _ = writeln!(
-                        output,
-                        "  action: fractal devices --as {} revoke {}",
+                        output, "  action: fractal devices --as {} revoke {}",
                         person, item.header.id
                     );
                 } else if let Some(grant) = &item.grant_id {
@@ -10021,9 +9551,7 @@ async fn run_usage(client: &Client, args: UsageArgs, json_output: bool) -> Resul
     }
     // Coordination cost beside spend. A daemon without the count read shows spend alone.
     if let Ok(counts) = client
-        .get::<Value>(&format!(
-            "/v1/usage/messages?since_ms={since}&until_ms={until}"
-        ))
+        .get::<Value>(&format!("/v1/usage/messages?since_ms={since}&until_ms={until}"))
         .await
     {
         report["coordination"] = counts;
@@ -10044,14 +9572,11 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             }
         }
         SloCommand::Chart { id, over, width } => {
-            let row = fractal_daemon::objectives::find(rows, &id)
-                .map_err(|message| anyhow::anyhow!(message))?;
+            let row = fractal_daemon::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             let period_ms = parse_slo_period(&over)?;
             let until = current_unix_ms()? as u64;
             let since = until.saturating_sub(period_ms);
-            let columns = width
-                .unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7))
-                .clamp(10, 400);
+            let columns = width.unwrap_or_else(|| terminal_columns().unwrap_or(80).saturating_sub(7)).clamp(10, 400);
             let history: Value = client
                 .get(&format!(
                     "/v1/slo/history?id={}&since_ms={since}&until_ms={until}&steps={columns}",
@@ -10065,8 +9590,7 @@ async fn run_slo(client: &Client, args: SloArgs, json_output: bool) -> Result<()
             }
         }
         SloCommand::Explain { id } => {
-            let row = fractal_daemon::objectives::find(rows, &id)
-                .map_err(|message| anyhow::anyhow!(message))?;
+            let row = fractal_daemon::objectives::find(rows, &id).map_err(|message| anyhow::anyhow!(message))?;
             if json_output {
                 println!("{}", serde_json::to_string_pretty(row)?);
             } else {
@@ -10088,16 +9612,10 @@ fn render_slo_list(rows: &[Value]) -> String {
     };
     let mut output = String::new();
     for (kind, heading) in [
-        (
-            "objective",
-            "OBJECTIVES  a target with windows and an error budget",
-        ),
+        ("objective", "OBJECTIVES  a target with windows and an error budget"),
         ("budget", "BUDGETS  an allowance that resets"),
     ] {
-        let group = rows
-            .iter()
-            .filter(|row| row["kind"] == kind)
-            .collect::<Vec<_>>();
+        let group = rows.iter().filter(|row| row["kind"] == kind).collect::<Vec<_>>();
         if group.is_empty() {
             continue;
         }
@@ -10146,13 +9664,11 @@ fn render_slo_list(rows: &[Value]) -> String {
 
 /// A period such as `90m`, `24h` or `7d`, in milliseconds. The daemon keeps seven days.
 fn parse_slo_period(text: &str) -> Result<u64> {
-    let split = text
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(text.len());
+    let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
     let (number, unit) = text.split_at(split);
-    let number: u64 = number.parse().map_err(|_| {
-        anyhow::anyhow!("--over takes a number then m, h or d, such as 24h; got {text:?}")
-    })?;
+    let number: u64 = number
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--over takes a number then m, h or d, such as 24h; got {text:?}"))?;
     let unit_ms = match unit {
         "m" => 60_000,
         "h" => 3_600_000,
@@ -10161,10 +9677,7 @@ fn parse_slo_period(text: &str) -> Result<u64> {
     };
     let period = number.saturating_mul(unit_ms);
     anyhow::ensure!(period >= 60_000, "--over must be at least a minute");
-    anyhow::ensure!(
-        period <= 7 * 86_400_000,
-        "the history keeps seven days; --over can be at most 7d"
-    );
+    anyhow::ensure!(period <= 7 * 86_400_000, "the history keeps seven days; --over can be at most 7d");
     Ok(period)
 }
 
@@ -10180,11 +9693,7 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
         .map(|steps| steps.iter().map(Value::as_f64).collect::<Vec<_>>())
         .unwrap_or_default();
     let id = row["id"].as_str().unwrap_or_default();
-    let what = if row["kind"] == "budget" {
-        "allowance left"
-    } else {
-        "error budget left"
-    };
+    let what = if row["kind"] == "budget" { "allowance left" } else { "error budget left" };
     let mut output = String::new();
     let _ = writeln!(output, "{id} · {what} · last {over}");
     let readings = history["samples"].as_u64().unwrap_or(0);
@@ -10207,14 +9716,9 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
             .iter()
             .map(|step| match step {
                 Some(percent) => {
-                    let eighths =
-                        (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
+                    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (HEIGHT * 8) as f64).round() as usize;
                     // Even a spent budget shows its reading as the lowest sliver, never a gap.
-                    let eighths = if line == HEIGHT - 1 {
-                        eighths.max(1)
-                    } else {
-                        eighths
-                    };
+                    let eighths = if line == HEIGHT - 1 { eighths.max(1) } else { eighths };
                     LEVELS[eighths.saturating_sub((HEIGHT - 1 - line) * 8).min(8)]
                 }
                 None if line == HEIGHT - 1 => '·',
@@ -10231,22 +9735,11 @@ fn render_slo_chart(row: &Value, history: &Value, over: &str) -> String {
             .map_or_else(|| "?".to_owned(), |at| at.format("%m-%d %H:%M").to_string())
     };
     let (from, to) = (time(&history["since_ms"]), time(&history["until_ms"]));
-    let gap = (steps.len() + 1)
-        .saturating_sub(from.chars().count() + to.chars().count() + 4)
-        .max(1);
+    let gap = (steps.len() + 1).saturating_sub(from.chars().count() + to.chars().count() + 4).max(1);
     let _ = writeln!(output, "      {from} UTC{}{to}", " ".repeat(gap));
     let low = known.iter().copied().fold(f64::INFINITY, f64::min);
-    let now = steps
-        .iter()
-        .rev()
-        .flatten()
-        .next()
-        .copied()
-        .unwrap_or_default();
-    let _ = writeln!(
-        output,
-        "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading"
-    );
+    let now = steps.iter().rev().flatten().next().copied().unwrap_or_default();
+    let _ = writeln!(output, "LOW {low:.0}% · LATEST {now:.0}% · {readings} readings · a column is its lowest reading");
     output
 }
 
@@ -10255,25 +9748,11 @@ fn render_slo_explanation(row: &Value) -> String {
 
     let text = |field: &str| row[field].as_str().unwrap_or_default();
     let mut output = String::new();
-    let _ = writeln!(
-        output,
-        "{}  {} · {}",
-        text("id"),
-        text("kind"),
-        text("status")
-    );
+    let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
     if let Some(left) = row["remaining_percent"].as_f64() {
-        let _ = writeln!(
-            output,
-            "LEFT     {left:.0}% of the {}",
-            if row["kind"] == "budget" {
-                "allowance"
-            } else {
-                "error budget"
-            }
-        );
+        let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
     if let Some(at) = row["resets_at_unix_ms"]
         .as_u64()
@@ -10340,10 +9819,7 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
             total[6]
         );
     }
-    if let Some(counts) = report
-        .get("coordination")
-        .filter(|counts| counts.is_object())
-    {
+    if let Some(counts) = report.get("coordination").filter(|counts| counts.is_object()) {
         let _ = write!(
             output,
             "MESSAGES  {} agent to agent ({} silent)",
@@ -10432,20 +9908,17 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
         );
         for account in declared_accounts {
             let name = account["name"].as_str().unwrap_or("unknown");
-            let limit = limits.iter().find(|limit| {
-                limit["account"] == account["account"] && !account["account"].is_null()
-            });
-            let dollars =
-                |microusd: &Value| format!("${}", microusd.as_u64().unwrap_or(0) / 1_000_000);
+            let limit = limits
+                .iter()
+                .find(|limit| limit["account"] == account["account"] && !account["account"].is_null());
+            let dollars = |microusd: &Value| {
+                format!("${}", microusd.as_u64().unwrap_or(0) / 1_000_000)
+            };
             let detail = if let Some(credits) = account.get("credits") {
                 format!(
                     "credits {}{} of {} this month",
                     dollars(&credits["used_microusd"]),
-                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 {
-                        "+"
-                    } else {
-                        ""
-                    },
+                    if credits["unpriced_tokens"].as_u64().unwrap_or(0) > 0 { "+" } else { "" },
                     dollars(&credits["budget_microusd"])
                 )
             } else if let Some(limit) = limit {
@@ -10454,17 +9927,9 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                     .map_or_else(|| "?".to_owned(), |value| format!("{value:.0}%"));
                 let reset = limit["weekly_resets_at_unix_ms"]
                     .as_u64()
-                    .and_then(|at| {
-                        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64)
-                    })
-                    .map_or_else(String::new, |at| {
-                        format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC"))
-                    });
-                let stale = if limit["stale"].as_bool() == Some(true) {
-                    "  stale"
-                } else {
-                    ""
-                };
+                    .and_then(|at| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at as i64))
+                    .map_or_else(String::new, |at| format!(" resets {}", at.format("%Y-%m-%d %H:%M UTC")));
+                let stale = if limit["stale"].as_bool() == Some(true) { "  stale" } else { "" };
                 format!("weekly {weekly}{reset}{stale}")
             } else {
                 "no limits reported".to_owned()
@@ -10529,16 +9994,8 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 output,
                 "EXEMPT  never stopped at {}% · accounts: {} · harnesses: {}",
                 report["limits_policy"]["stop_at_weekly_percent"],
-                if accounts.is_empty() {
-                    "none"
-                } else {
-                    &accounts
-                },
-                if harnesses.is_empty() {
-                    "none"
-                } else {
-                    &harnesses
-                },
+                if accounts.is_empty() { "none" } else { &accounts },
+                if harnesses.is_empty() { "none" } else { &harnesses },
             );
         }
         let kept = names("keep");
@@ -10561,14 +10018,15 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
     }
     // A harness bound to a declared account reports that account's name beside the provider's
     // label, so usage reads against the accounts a person declared.
-    let declared =
-        limits
-            .iter()
-            .filter_map(|limit| Some((limit["account"].as_str()?, limit["account_ref"].as_str()?)))
-            .chain(declared_accounts.iter().filter_map(|account| {
-                Some((account["account"].as_str()?, account["name"].as_str()?))
-            }))
-            .collect::<BTreeMap<_, _>>();
+    let declared = limits
+        .iter()
+        .filter_map(|limit| Some((limit["account"].as_str()?, limit["account_ref"].as_str()?)))
+        .chain(
+            declared_accounts
+                .iter()
+                .filter_map(|account| Some((account["account"].as_str()?, account["name"].as_str()?))),
+        )
+        .collect::<BTreeMap<_, _>>();
     let groups = only
         .map(|by| vec![by])
         .unwrap_or_else(|| UsageBy::ALL.to_vec());
@@ -10933,8 +10391,7 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 }
                 return Ok(());
             }
-            if args.subject.starts_with("custom/")
-                && !args.kdl
+            if args.subject.starts_with("custom/") && !args.kdl
                 && let Ok(result) = client
                     .get::<Value>(&format!(
                         "/v1/client/custom-subjects/{}",
@@ -10973,10 +10430,7 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                         uris.insert(reference.subject, uri.to_owned());
                     }
                 }
-                print!(
-                    "{}",
-                    fractal_daemon::graph::render_agent_desired_kdl(&desired, &uris)?
-                );
+                print!("{}", fractal_daemon::graph::render_agent_desired_kdl(&desired, &uris)?);
                 Ok(())
             } else {
                 run_inspect(
@@ -11021,8 +10475,7 @@ impl std::fmt::Display for EventCursorGap {
 impl std::error::Error for EventCursorGap {}
 
 fn event_cursor_error(error: anyhow::Error, query: &str, trace: bool) -> anyhow::Error {
-    let Some((410, "cursor-gap", _, details)) = fractal_daemon::client::api_error_parts(&error)
-    else {
+    let Some((410, "cursor-gap", _, details)) = fractal_daemon::client::api_error_parts(&error) else {
         return error;
     };
     let Some(floor) = details.get("resume_floor").and_then(Value::as_u64) else {
@@ -11190,8 +10643,7 @@ async fn condition_value(client: &Client, subject: &str, condition: &str) -> Res
         return Ok((eval.verdict.as_deref() == Some(expected)).then(|| json!(eval)));
     }
     let status = status_for(client, subject).await?;
-    let matches =
-        fractal_daemon::model::status_wait_condition_holds(condition, status.subjects.first());
+    let matches = fractal_daemon::model::status_wait_condition_holds(condition, status.subjects.first());
     Ok(matches.then(|| json!(status)))
 }
 
@@ -11493,14 +10945,11 @@ async fn doctor_request<T: serde::de::DeserializeOwned>(
         }
         Err(error) if fractal_daemon::client::daemon_unreachable(&error).is_some() => {
             if json_output {
-                let message =
-                    doctor_cli::outage_message(&error).unwrap_or_else(|| plain_error(&error));
-                print_value(
-                    &json!({"status": "fail", "checks": [{
-                        "name": "daemon", "status": "fail", "message": message
-                    }]}),
-                    true,
-                )?;
+                let message = doctor_cli::outage_message(&error)
+                    .unwrap_or_else(|| plain_error(&error));
+                print_value(&json!({"status": "fail", "checks": [{
+                    "name": "daemon", "status": "fail", "message": message
+                }]}), true)?;
             }
             Err(error)
         }
@@ -11599,19 +11048,11 @@ async fn run_doctor(
             println!("{status}\tstartup\t{}", startup.summary());
         }
         for check in &report.checks {
-            println!(
-                "{}\t{}\t{}",
-                check.status,
-                check.name,
-                presentation::human_command_hints(&check.message)
-            );
+            println!("{}\t{}\t{}", check.status, check.name, presentation::human_command_hints(&check.message));
         }
         print!("{}", render_performance(&report.performance));
     }
-    anyhow::ensure!(
-        report.status != "fail",
-        "fractal doctor found a failed check"
-    );
+    anyhow::ensure!(report.status != "fail", "fractal doctor found a failed check");
     anyhow::ensure!(
         !args.strict || report.status == "pass",
         "fractal doctor found a warning in strict mode"
@@ -11620,20 +11061,14 @@ async fn run_doctor(
 }
 
 fn repair_plan_path(subjects: &[String], classes: &[String]) -> Result<String> {
-    if subjects.is_empty() && classes.is_empty() {
-        return Ok("/v1/repair".into());
-    }
-    Ok(format!(
-        "/v1/repair?subjects={}&classes={}",
+    if subjects.is_empty() && classes.is_empty() { return Ok("/v1/repair".into()); }
+    Ok(format!("/v1/repair?subjects={}&classes={}",
         urlencoding::encode(&serde_json::to_string(subjects)?),
-        urlencoding::encode(&serde_json::to_string(classes)?)
-    ))
+        urlencoding::encode(&serde_json::to_string(classes)?)))
 }
 
 fn validate_repair_plan_filters(
-    plan: &OperationalRepairPlan,
-    subjects: &[String],
-    classes: &[String],
+    plan: &OperationalRepairPlan, subjects: &[String], classes: &[String],
 ) -> Result<()> {
     let mut subjects = subjects.to_vec();
     let mut classes = classes.to_vec();
@@ -11642,45 +11077,30 @@ fn validate_repair_plan_filters(
     classes.sort();
     classes.dedup();
     let actual = Store::operational_repair_token_filters(&plan.token)?;
-    anyhow::ensure!(
-        actual == (subjects.clone(), classes.clone()),
-        "the serving daemon did not bind the requested repair filters; upgrade the daemon before applying repair"
-    );
-    anyhow::ensure!(
-        plan.items.iter().all(|item| (subjects.is_empty()
-            || subjects.binary_search(&item.subject).is_ok())
+    anyhow::ensure!(actual == (subjects.clone(), classes.clone()),
+        "the serving daemon did not bind the requested repair filters; upgrade the daemon before applying repair");
+    anyhow::ensure!(plan.items.iter().all(|item|
+        (subjects.is_empty() || subjects.binary_search(&item.subject).is_ok())
             && (classes.is_empty() || classes.binary_search(&item.class).is_ok())),
-        "the serving daemon returned repair items outside the requested filters"
-    );
+        "the serving daemon returned repair items outside the requested filters");
     Ok(())
 }
 
 fn repair_apply_path(actor: Option<&str>) -> &'static str {
-    if actor.is_some() {
-        "/v1/repair/apply-attributed"
-    } else {
-        "/v1/repair/apply"
-    }
+    if actor.is_some() { "/v1/repair/apply-attributed" } else { "/v1/repair/apply" }
 }
 
 fn repair_apply_guidance(token: &str, own: Option<&str>) -> String {
     let token = presentation::shell_argument(token);
     match own.filter(|own| own.starts_with("agent/") && own.len() > "agent/".len()) {
-        Some(own) => format!(
-            "fractal repair apply --as {} {token}",
-            presentation::shell_argument(own)
-        ),
+        Some(own) => format!("fractal repair apply --as {} {token}", presentation::shell_argument(own)),
         None => format!("fractal repair apply {token}"),
     }
 }
 
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
-        RepairCommand::DryRun {
-            subjects,
-            classes,
-            ignored_actor,
-        } => {
+        RepairCommand::DryRun { subjects, classes, ignored_actor } => {
             notice_ignored_read_actor(ignored_actor.as_deref());
             let path = repair_plan_path(&subjects, &classes)?;
             let plan: OperationalRepairPlan = client.get(&path).await?;
@@ -11710,10 +11130,7 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                     }
                 }
                 let own = fractal_drivers::contracts::env("ST_AGENT");
-                println!(
-                    "Apply this exact plan with: {}",
-                    repair_apply_guidance(&plan.token, own.as_deref())
-                );
+                println!("Apply this exact plan with: {}", repair_apply_guidance(&plan.token, own.as_deref()));
             }
         }
         RepairCommand::Apply { token, actor } => {
@@ -11811,9 +11228,7 @@ fn render_caught_up(caught_up: &CaughtUp, now: u128) -> String {
 }
 
 /// Envelopes this node admitted beyond a writer's high water, which the fleet fenced, or None.
-fn render_fenced_admissions(
-    residue: &[smallclaims::store::FleetAdmissionResidue],
-) -> Option<String> {
+fn render_fenced_admissions(residue: &[smallclaims::store::FleetAdmissionResidue]) -> Option<String> {
     let fenced = residue
         .iter()
         .filter(|item| item.reason == "admitted-beyond-high-water")
@@ -12107,9 +11522,7 @@ fn render_replication_peers(
 fn arrival_estimate(sync: &fractal_daemon::model::ReplicationPeerSync) -> String {
     // The lower of the catch-up and receive rates: nothing arriving is not catching up either.
     if sync.peer_only_envelopes != 0
-        && sync
-            .closing_rate_per_second()
-            .is_some_and(|rate| rate <= 0.0)
+        && sync.closing_rate_per_second().is_some_and(|rate| rate <= 0.0)
     {
         return "not catching up".into();
     }
@@ -12127,10 +11540,7 @@ fn peer_graphs_equal(peer: &ReplicationPeerStatus, local_graph_digest: &str) -> 
 /// presented as current.
 fn compared_ago(peer: &ReplicationPeerStatus, now: u128) -> String {
     peer.projection_compared_at_unix_ms
-        .or(peer
-            .sync
-            .as_ref()
-            .and_then(|sync| sync.graph_compared_at_unix_ms))
+        .or(peer.sync.as_ref().and_then(|sync| sync.graph_compared_at_unix_ms))
         .map(|at| relative_time(at, now))
         .unwrap_or_else(|| "at the last exchange".into())
 }
@@ -12172,11 +11582,7 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
     for member in &status.participants {
         output.push_str(&format!(
             "  machine_version  {member}: {}\n",
-            status
-                .machine_version
-                .get(member)
-                .map(String::as_str)
-                .unwrap_or("not advertised")
+            status.machine_version.get(member).map(String::as_str).unwrap_or("not advertised")
         ));
     }
     if !status.excused.is_empty() {
@@ -12211,10 +11617,7 @@ fn render_checkpoint_status(status: &fractal_daemon::store::CheckpointStatusView
 
 fn run_service(command: ServiceCommand, json_output: bool) -> Result<()> {
     match command {
-        ServiceCommand::Install {
-            config,
-            stage_fractal,
-        } => {
+        ServiceCommand::Install { config, stage_fractal } => {
             if stage_fractal {
                 return fractal_daemon::service::stage_fractal(
                     Config::load_unvalidated(config.as_deref())?,
@@ -12357,13 +11760,7 @@ async fn resolve_member_subject(
                 .map(|candidate| format!("  {}  {}", candidate.subject, candidate.description))
                 .collect::<Vec<_>>()
                 .join("\n");
-            stderr_message(
-                "st",
-                format_args!(
-                    "`{subject}` matches {} subjects; name one exactly:\n{listing}",
-                    matches.len()
-                ),
-            );
+            stderr_message("st", format_args!("`{subject}` matches {} subjects; name one exactly:\n{listing}", matches.len()));
             Err(CommandExit(2).into())
         }
     }
@@ -12387,7 +11784,10 @@ fn normalize_member_subject(subject: &str, namespace: &str) -> String {
 /// The identity an attachment command acts as: the one named, the seat's, or the configured person.
 fn blob_actor(named: Option<String>, configured_person: Option<&str>) -> Result<String> {
     let actor = named
-        .or_else(|| fractal_drivers::contracts::env("ST_AGENT").filter(|agent| !agent.is_empty()))
+        .or_else(|| {
+            fractal_drivers::contracts::env("ST_AGENT")
+                .filter(|agent| !agent.is_empty())
+        })
         .or_else(|| configured_person.map(str::to_owned))
         .context("name who acts with --as, or run inside a seat or with a configured person")?;
     reject_foreign_agent_actor(&actor)?;
@@ -12432,11 +11832,7 @@ async fn upload_attachment(
             if let Some(note) = &prepared.note {
                 eprintln!("{note}");
             }
-            (
-                prepared.bytes,
-                prepared.media_type.to_owned(),
-                prepared.name,
-            )
+            (prepared.bytes, prepared.media_type.to_owned(), prepared.name)
         }
     };
     let uploaded = generated_client(endpoint, Some(actor))?
@@ -12507,9 +11903,9 @@ async fn run_rules(
 ) -> Result<()> {
     use smallclaims::rules::{Mode, NamedRule};
     let person = |actor: Option<String>| -> Result<String> {
-        actor.or_else(|| config.person.clone()).context(
-            "rules are set by a person: set person in config.toml or pass --as person/NAME",
-        )
+        actor
+            .or_else(|| config.person.clone())
+            .context("rules are set by a person: set person in config.toml or pass --as person/NAME")
     };
     let set = |actor: &str, name: &str, rule: smallclaims::rules::Rule| {
         let request = fractal_daemon::api::RuleSetRequest {
@@ -12529,9 +11925,7 @@ async fn run_rules(
                 return print_value(&rules, true);
             }
             if rules.is_empty() {
-                println!(
-                    "no rules: every principal may write what its person may (fractal rules lockdown sets the presets)"
-                );
+                println!("no rules: every principal may write what its person may (fractal rules lockdown sets the presets)");
             }
             for rule in rules {
                 println!(
@@ -12614,11 +12008,7 @@ async fn run_rules(
 fn render_document(bytes: &[u8], width: usize) -> Option<String> {
     let text = std::str::from_utf8(bytes).ok()?;
     let start = text.trim_start();
-    if text.contains('\0')
-        || start.starts_with('{')
-        || start.starts_with('[')
-        || start.starts_with("version ")
-    {
+    if text.contains('\0') || start.starts_with('{') || start.starts_with('[') || start.starts_with("version ") {
         return None;
     }
     let theme = fractal_conversation_ui::Theme::default();
@@ -13107,12 +12497,7 @@ fn agent_new_document(args: &AgentNewArgs, workspace: &str, create_workspace: bo
         .message
         .as_ref()
         .map(|_| uuid::Uuid::now_v7().to_string());
-    fractal_daemon::creation::agent_document(
-        &parameters,
-        workspace,
-        create_workspace,
-        key.as_deref(),
-    )
+    fractal_daemon::creation::agent_document(&parameters, workspace, create_workspace, key.as_deref())
 }
 
 fn seat_subject(value: &str) -> String {
@@ -13158,8 +12543,8 @@ async fn run_lanes(
     command: LaneCommand,
     json_output: bool,
 ) -> Result<()> {
-    let change = |lane: String, change: &str, entry: String, actor: String| {
-        fractal_daemon::model::LaneChangeRequest {
+    let change =
+        |lane: String, change: &str, entry: String, actor: String| fractal_daemon::model::LaneChangeRequest {
             lane,
             change: change.into(),
             entry,
@@ -13172,8 +12557,7 @@ async fn run_lanes(
             head: None,
             actor,
             idempotency_key: format!("lane-change:{}", uuid::Uuid::now_v7().simple()),
-        }
-    };
+        };
     let request = match command {
         LaneCommand::Ls { all } => {
             let lanes: Vec<fractal_daemon::model::LaneView> =
@@ -13662,15 +13046,12 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
             match introducer {
                 Some('[') => {
                     for next in characters.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&next) {
-                            break;
-                        }
+                        if ('\u{40}'..='\u{7e}').contains(&next) { break; }
                     }
                 }
                 Some(']') => {
                     while let Some(next) = characters.next() {
-                        if next == '\u{7}' || (next == '\u{1b}' && characters.next() == Some('\\'))
-                        {
+                        if next == '\u{7}' || (next == '\u{1b}' && characters.next() == Some('\\')) {
                             break;
                         }
                     }
@@ -13682,9 +13063,7 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
         if character.is_whitespace() {
             space = written;
         } else if !character.is_control() {
-            if space {
-                output.push(' ');
-            }
+            if space { output.push(' '); }
             output.push(character);
             written = true;
             space = false;
@@ -13702,11 +13081,7 @@ fn render_client_agent(
     let mut output = String::new();
     let _ = writeln!(output, "AGENT  {}", agent.header.id);
     let _ = writeln!(output, "NAME         {}", agent.name);
-    match agent
-        .down_since
-        .as_deref()
-        .filter(|_| agent.state == "down")
-    {
+    match agent.down_since.as_deref().filter(|_| agent.state == "down") {
         Some(since) => {
             let _ = writeln!(output, "STATE        down · no session since {since}");
         }
@@ -13716,11 +13091,7 @@ fn render_client_agent(
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     if let Some(custody) = &agent.mail_custody {
-        let _ = writeln!(
-            output,
-            "MAIL CUSTODY retired; mail held for {}",
-            custody.successor
-        );
+        let _ = writeln!(output, "MAIL CUSTODY retired; mail held for {}", custody.successor);
     }
     let _ = writeln!(
         output,
@@ -13728,16 +13099,15 @@ fn render_client_agent(
         agent.driver.as_deref().unwrap_or("none"),
         agent.harness_state.as_deref().unwrap_or("unobserved")
     );
-    if agent.blocked_on.as_deref() == Some("human") && agent.ask.as_deref() == Some("permission") {
+    if agent.blocked_on.as_deref() == Some("human")
+        && agent.ask.as_deref() == Some("permission")
+    {
         let _ = writeln!(output, "AWAITING     approval");
     }
     if let Some(todo) = &agent.todo {
         let snapshot = &todo.snapshot;
         let _ = write!(output, "Todo         ");
-        if let Some(active) = snapshot
-            .phases
-            .iter()
-            .flat_map(|phase| &phase.tasks)
+        if let Some(active) = snapshot.phases.iter().flat_map(|phase| &phase.tasks)
             .find(|task| task.status == fractal_client::HarnessTaskStatus::InProgress)
         {
             output.push_str("▶ ");
@@ -13745,15 +13115,9 @@ fn render_client_agent(
             output.push_str(" · ");
         }
         let totals = &snapshot.totals;
-        let total = u128::from(totals.pending)
-            + u128::from(totals.in_progress)
-            + u128::from(totals.completed)
-            + u128::from(totals.blocked);
-        let _ = write!(
-            output,
-            "{}/{total} done · {} blocked",
-            totals.completed, totals.blocked
-        );
+        let total = u128::from(totals.pending) + u128::from(totals.in_progress)
+            + u128::from(totals.completed) + u128::from(totals.blocked);
+        let _ = write!(output, "{}/{total} done · {} blocked", totals.completed, totals.blocked);
         if totals.abandoned > 0 {
             let _ = write!(output, " · {} abandoned", totals.abandoned);
         }
@@ -13770,22 +13134,11 @@ fn render_client_agent(
         let _ = writeln!(output, "FAULT        {fault}");
     }
     if let Some(handoff) = &agent.handoff {
-        let pending = if handoff.pending_sources.is_empty() {
-            String::new()
-        } else {
-            format!(" · waiting for {}", handoff.pending_sources.join(", "))
-        };
-        let _ = writeln!(
-            output,
-            "HANDOFF      {} → {}{pending}",
-            handoff.phase, handoff.destination
-        );
+        let pending = if handoff.pending_sources.is_empty() { String::new() }
+            else { format!(" · waiting for {}", handoff.pending_sources.join(", ")) };
+        let _ = writeln!(output, "HANDOFF      {} → {}{pending}", handoff.phase, handoff.destination);
         if !handoff.overridden_sources.is_empty() {
-            let _ = writeln!(
-                output,
-                "SOURCE OFFLINE {} · override recorded",
-                handoff.overridden_sources.join(", ")
-            );
+            let _ = writeln!(output, "SOURCE OFFLINE {} · override recorded", handoff.overridden_sources.join(", "));
         }
     }
     if let Some(suspension) = &agent.suspension {
@@ -13865,27 +13218,14 @@ fn render_client_agent(
         let phase = operation["phase"].as_str().unwrap_or("unknown");
         let id = operation["operation_id"].as_str().unwrap_or("unknown");
         let running = operation["worker_running"] == true;
-        let _ = writeln!(
-            output,
-            "START        {phase} · {id}{}",
-            if running && phase == "revoked" {
-                " · launch worker still running"
-            } else {
-                ""
-            }
-        );
-        let _ = writeln!(
-            output,
-            "START JOBS   {} running · {} revoked and still running",
+        let _ = writeln!(output, "START        {phase} · {id}{}",
+            if running && phase == "revoked" { " · launch worker still running" } else { "" });
+        let _ = writeln!(output, "START JOBS   {} running · {} revoked and still running",
             operation["running_jobs"].as_u64().unwrap_or(0),
-            operation["revoked_running_jobs"].as_u64().unwrap_or(0)
-        );
-        let _ = writeln!(
-            output,
-            "START OPEN   {} unresolved · {} revoked and unresolved",
+            operation["revoked_running_jobs"].as_u64().unwrap_or(0));
+        let _ = writeln!(output, "START OPEN   {} unresolved · {} revoked and unresolved",
             operation["unresolved_jobs"].as_u64().unwrap_or(0),
-            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0)
-        );
+            operation["revoked_unresolved_jobs"].as_u64().unwrap_or(0));
     }
     if let Some(owner) = &agent.owner_run_id {
         let _ = writeln!(output, "MISSION      {owner}");
@@ -14133,8 +13473,8 @@ fn render_client_agents(
 /// The process may still act as a non-agent subject, such as its exec or a person its work names.
 fn reject_foreign_agent_actor(actor: &str) -> Result<()> {
     let own = fractal_drivers::contracts::env("ST_AGENT");
-    let mission_run =
-        fractal_drivers::contracts::env("ST_MISSION_RUN").filter(|value| !value.is_empty());
+    let mission_run = fractal_drivers::contracts::env("ST_MISSION_RUN")
+        .filter(|value| !value.is_empty());
     match foreign_agent_actor(actor, own.as_deref(), mission_run.as_deref()) {
         Some(message) => anyhow::bail!(message),
         None => Ok(()),
@@ -14163,8 +13503,8 @@ fn foreign_agent_actor(
 }
 
 fn normalize_message_subject(value: &str) -> String {
-    let mission_run =
-        fractal_drivers::contracts::env("ST_MISSION_RUN").filter(|value| !value.is_empty());
+    let mission_run = fractal_drivers::contracts::env("ST_MISSION_RUN")
+        .filter(|value| !value.is_empty());
     normalize_message_subject_in_run(value, mission_run.as_deref())
 }
 
@@ -14414,17 +13754,10 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
         let _ = writeln!(output, "Submitted incarnation: {incarnation}");
     }
     if let Some(expires) = work.claim_expires_at_unix_ms {
-        let _ = writeln!(
-            output,
-            "Lease: {}",
-            render_claim_lease(
-                &work.header.id,
-                work.claimant.as_deref(),
-                work.claim_incarnation.as_deref(),
-                u128::from(expires),
-                driver_held,
-            )
-        );
+        let _ = writeln!(output, "Lease: {}", render_claim_lease(
+            &work.header.id, work.claimant.as_deref(), work.claim_incarnation.as_deref(),
+            u128::from(expires), driver_held,
+        ));
     }
     if let Some(nudged) = work
         .nudged_at_unix_ms
@@ -14451,9 +13784,7 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
         let _ = writeln!(output, "Blocker: {blocker}");
     }
     if let Some(progress) = &work.last_progress {
-        let age = work
-            .progress_at
-            .as_deref()
+        let age = work.progress_at.as_deref()
             .map(|at| ago(at, now_ms()))
             .unwrap_or_else(|| "age unknown".to_owned());
         let _ = writeln!(output, "Progress ({age}): {progress}");
@@ -14738,32 +14069,21 @@ async fn for_each_message(
     }
 }
 
-async fn preflight_message_recipient(
-    client: &Client,
-    to: &str,
-    allow_undeclared: bool,
-) -> Result<()> {
+async fn preflight_message_recipient(client: &Client, to: &str, allow_undeclared: bool) -> Result<()> {
     let to = normalize_message_subject(to);
     fractal_daemon::model::refuse_person_recipient(&to)
         .map_err(|error| anyhow::anyhow!(error.message))?;
     if !to.starts_with("agent/") || allow_undeclared {
         return Ok(());
     }
-    match client
-        .get::<serde::de::IgnoredAny>(&format!(
-            "/v1/messages/recipient?to={}",
-            urlencoding::encode(&to),
-        ))
-        .await
-    {
+    match client.get::<serde::de::IgnoredAny>(&format!(
+        "/v1/messages/recipient?to={}", urlencoding::encode(&to),
+    )).await {
         Ok(_) => Ok(()),
-        Err(error)
-            if fractal_daemon::client::http_status(&error) == Some(404)
-                && fractal_daemon::client::api_error_code(&error) != Some("unknown-recipient") =>
+        Err(error) if fractal_daemon::client::http_status(&error) == Some(404)
+            && fractal_daemon::client::api_error_code(&error) != Some("unknown-recipient") =>
         {
-            eprintln!(
-                "st: this daemon has no recipient preflight; sending without checking the recipient. Upgrade the daemon to reject unknown recipients."
-            );
+            eprintln!("st: this daemon has no recipient preflight; sending without checking the recipient. Upgrade the daemon to reject unknown recipients.");
             Ok(())
         }
         Err(error) => Err(error),
@@ -14779,17 +14099,11 @@ async fn send_message(
     let mission_id = format!("message/{id}");
     // Before anything else: an agent that sends to a person needs this answer, not another.
     let to = normalize_message_subject(&args.to);
-    fractal_daemon::model::refuse_person_recipient(&to)
-        .map_err(|error| anyhow::anyhow!(error.message))?;
+    fractal_daemon::model::refuse_person_recipient(&to).map_err(|error| anyhow::anyhow!(error.message))?;
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
-    if !args.wake.silent()
-        && args
-            .tags
-            .iter()
-            .any(|tag| tag == fractal_daemon::silent::SILENT_TAG)
-    {
+    if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
     for tag in args.wake.tags() {
@@ -14843,13 +14157,7 @@ async fn send_message(
                     Err(error) if fractal_daemon::client::http_status(&error) == Some(404) => {}
                     // A busy daemon still takes the send: only a send whose answer was lost in
                     // the hour's last moments could repeat, and refusing every send is worse.
-                    Err(error) => stderr_message(
-                        "st",
-                        format_args!(
-                            "could not check the previous hour for this message ({}); sending it with idempotency key {key}",
-                            plain_error(&error)
-                        ),
-                    ),
+                    Err(error) => stderr_message("st", format_args!("could not check the previous hour for this message ({}); sending it with idempotency key {key}", plain_error(&error))),
                 }
             }
             key
@@ -14872,12 +14180,7 @@ fn warn_unconfirmed_silent(request: &MessageSendRequest, receipt: &MessageSendRe
             .any(|tag| tag == fractal_daemon::silent::SILENT_TAG)
         && receipt.kind.as_deref() != Some("silent")
     {
-        stderr_message(
-            "st",
-            format_args!(
-                "daemon did not confirm silent holding; this message may wake its recipient. Upgrade the sender and recipient owner daemons."
-            ),
-        );
+        stderr_message("st", format_args!("daemon did not confirm silent holding; this message may wake its recipient. Upgrade the sender and recipient owner daemons."));
     }
 }
 
@@ -14943,9 +14246,7 @@ fn message_send_error(error: anyhow::Error, key: &str) -> anyhow::Error {
         return anyhow::anyhow!("{unconfirmed}. st did not answer: {}", error.reason());
     }
     // A refusal is an answer: the daemon wrote nothing for this key.
-    if fractal_daemon::client::http_status(&error)
-        .is_some_and(|status| (400..500).contains(&status))
-    {
+    if fractal_daemon::client::http_status(&error).is_some_and(|status| (400..500).contains(&status)) {
         return error.context(format!("st refused the message (idempotency key {key})"));
     }
     error.context(unconfirmed)
@@ -14971,19 +14272,13 @@ fn print_message_receipt(receipt: &MessageSendReceipt, json_output: bool) -> Res
         return print_value(receipt, true);
     }
     if receipt.already_sent {
-        stderr_message(
-            "st",
-            format_args!(
-                "{} was already sent{} (idempotency key {}); nothing new was sent",
-                receipt.message.subject,
-                receipt
-                    .sent_at
-                    .as_deref()
-                    .map(|sent_at| format!(" at {sent_at}"))
-                    .unwrap_or_default(),
-                receipt.idempotency_key
-            ),
-        );
+        stderr_message("st", format_args!("{} was already sent{} (idempotency key {}); nothing new was sent", receipt.message.subject,
+        receipt
+            .sent_at
+            .as_deref()
+            .map(|sent_at| format!(" at {sent_at}"))
+            .unwrap_or_default(),
+        receipt.idempotency_key));
     }
     println!("{}", receipt.message.subject);
     Ok(())
@@ -15134,13 +14429,9 @@ async fn read_message_after_lifecycle(
         if !message.to.starts_with("agent/") {
             return Ok(message);
         }
-        let detail: Option<Value> = match client
-            .get(&format!(
-                "/v1/client/agents/{}",
-                urlencoding::encode(&message.to),
-            ))
-            .await
-        {
+        let detail: Option<Value> = match client.get(&format!(
+            "/v1/client/agents/{}", urlencoding::encode(&message.to),
+        )).await {
             Ok(detail) => Some(detail),
             Err(error)
                 if fractal_daemon::client::api_error_parts(&error)
@@ -15150,11 +14441,8 @@ async fn read_message_after_lifecycle(
             }
             Err(error) => return Err(error),
         };
-        if detail
-            .as_ref()
-            .and_then(|detail| detail["mail_custody"]["successor"].as_str())
-            != Some(actor.as_str())
-        {
+        if detail.as_ref().and_then(|detail| detail["mail_custody"]["successor"].as_str())
+            != Some(actor.as_str()) {
             return Ok(message);
         }
     }
@@ -15176,10 +14464,7 @@ async fn read_message_after_lifecycle(
 
 async fn accept_message(client: &Client, message: &MessageView, actor: &str) -> Result<()> {
     let actor = normalize_message_subject(actor);
-    if !matches!(
-        message.status.as_str(),
-        "sent" | "staged" | "delivered" | "read"
-    ) {
+    if !matches!(message.status.as_str(), "sent" | "staged" | "delivered" | "read") {
         return Ok(());
     }
     let reference = message.subject.trim_start_matches("message/");
@@ -15494,11 +14779,8 @@ impl NativePaths {
             .join(&hex::encode(Sha256::digest(subject.as_bytes()))[..24])
             .join("catalog");
         let identity = subject.strip_prefix("agent/").unwrap_or(subject).to_owned();
-        let agent_dir = fractal_daemon::hooks::legacy_claude_agent_dir(
-            &drivers,
-            subject,
-            &fractal_drivers::run::detect_host(),
-        );
+        let agent_dir =
+            fractal_daemon::hooks::legacy_claude_agent_dir(&drivers, subject, &fractal_drivers::run::detect_host());
         let session_dir = match driver {
             "claude" => fractal_drivers::claude_session::state_dir(&driver_root, &identity),
             "opencode" => fractal_drivers::opencode_session::state_dir(&driver_root, &identity),
@@ -15783,8 +15065,7 @@ impl DriverReplacement {
                 resume.driver
             ),
         );
-        let error = match fractal_drivers::reexec::write_state(state_root, "driver-resume", resume)
-        {
+        let error = match fractal_drivers::reexec::write_state(state_root, "driver-resume", resume) {
             Ok(path) => {
                 let error = fractal_drivers::reexec::exec_unless_stopped(
                     &binary,
@@ -15950,8 +15231,7 @@ fn harness_activity_state(activity: fractal_drivers::harness_state::Activity) ->
     match activity {
         fractal_drivers::harness_state::Activity::Ready => "ready",
         fractal_drivers::harness_state::Activity::Idle => "idle",
-        fractal_drivers::harness_state::Activity::Active
-        | fractal_drivers::harness_state::Activity::Child => "working",
+        fractal_drivers::harness_state::Activity::Active | fractal_drivers::harness_state::Activity::Child => "working",
         fractal_drivers::harness_state::Activity::Ended => "ended",
         fractal_drivers::harness_state::Activity::Unknown => "indeterminate",
     }
@@ -15990,19 +15270,11 @@ impl NativeObservations {
             None
         };
         let provider_incarnation = snapshot.as_deref().and_then(|raw| {
-            fractal_drivers::harness_state::read_raw_at(
-                raw,
-                None,
-                fractal_drivers::message::now_ms(),
-            )
-            .evidence_incarnation
+            fractal_drivers::harness_state::read_raw_at(raw, None, fractal_drivers::message::now_ms())
+                .evidence_incarnation
         });
         let native_state_seen = snapshot.as_deref().is_some_and(|raw| {
-            let state = fractal_drivers::harness_state::read_raw_at(
-                raw,
-                None,
-                fractal_drivers::message::now_ms(),
-            );
+            let state = fractal_drivers::harness_state::read_raw_at(raw, None, fractal_drivers::message::now_ms());
             !(state.state == fractal_drivers::harness_state::Activity::Unknown
                 && state.reason.as_deref() == Some("claimed"))
         });
@@ -16081,8 +15353,7 @@ impl NativeObservations {
         driver: &str,
         ready: &mut bool,
     ) -> Result<bool> {
-        self.drain_events(client, subject, driver, ready, true)
-            .await
+        self.drain_events(client, subject, driver, ready, true).await
     }
 
     async fn drain(
@@ -16114,18 +15385,11 @@ impl NativeObservations {
         for event in &mut events {
             // Account binding is outbox metadata, not part of the producer's observation.
             // Preserve it separately for the accounting claim builders below.
-            let account_ref = event
-                .payload
-                .as_object_mut()
+            let account_ref = event.payload.as_object_mut()
                 .and_then(|fields| fields.remove("account_ref"));
             let publisher = ObservationClient {
                 client,
-                event: Some((
-                    &self.runtime,
-                    event.sequence,
-                    &self.dir,
-                    account_ref.as_ref().and_then(Value::as_str),
-                )),
+                event: Some((&self.runtime, event.sequence, &self.dir, account_ref.as_ref().and_then(Value::as_str))),
             };
             let raw = serde_json::to_vec(&event.payload)?;
             let source_driver = event.payload["harness"]
@@ -16151,8 +15415,7 @@ impl NativeObservations {
                     } else {
                         event.queued_at_ms
                     };
-                    let observed =
-                        fractal_drivers::harness_state::read_raw_at(&raw, None, decode_at);
+                    let observed = fractal_drivers::harness_state::read_raw_at(&raw, None, decode_at);
                     if event.runtime_incarnation == self.runtime && source_driver == driver {
                         // The wrapper writes its terminal receipt before its blocking task
                         // returns. Publishing it now would fence our mailbox before the task's
@@ -16164,21 +15427,16 @@ impl NativeObservations {
                             && observed.state == fractal_drivers::harness_state::Activity::Ended
                             && observed.exit.is_some()
                             && observed.evidence_incarnation.is_some()
-                            && fractal_drivers::harness_events::read_runtime_state(
-                                &self.dir,
-                                &self.runtime,
-                            )?
-                            .is_some_and(|current| {
-                                let current = fractal_drivers::harness_state::read_raw_at(
-                                    &current,
-                                    None,
-                                    event.queued_at_ms,
-                                );
-                                current.evidence_incarnation == observed.evidence_incarnation
-                                    && current.ownership_sequence == observed.ownership_sequence
-                                    && current.transition_sequence == observed.transition_sequence
-                                    && current.exit == observed.exit
-                            })
+                            && fractal_drivers::harness_events::read_runtime_state(&self.dir, &self.runtime)?
+                                .is_some_and(|current| {
+                                    let current = fractal_drivers::harness_state::read_raw_at(
+                                        &current, None, event.queued_at_ms,
+                                    );
+                                    current.evidence_incarnation == observed.evidence_incarnation
+                                        && current.ownership_sequence == observed.ownership_sequence
+                                        && current.transition_sequence == observed.transition_sequence
+                                        && current.exit == observed.exit
+                                })
                         {
                             return Ok(true);
                         }
@@ -16282,65 +15540,53 @@ impl NativeObservations {
                     fields.remove("workspace");
                     fields.remove("workspace_identity");
                     fields.remove("account_ref");
-                    fields.insert(
-                        "incarnation_id".into(),
-                        event.runtime_incarnation.clone().into(),
-                    );
-                    let _: ClaimRecord = publisher
-                        .post(
-                            "/v1/claims",
-                            &ClaimInput {
-                                subject: subject.into(),
-                                kind: "harness.inventory.observed".into(),
-                                actor: Some(subject.into()),
-                                fields,
-                                evidence: Vec::new(),
-                                expected_subject: None,
-                                idempotency_key: Some(format!(
-                                    "harness-inventory:{subject}:{}:{}",
-                                    event.runtime_incarnation, event.sequence,
-                                )),
-                            },
-                        )
-                        .await?;
+                    fields.insert("incarnation_id".into(), event.runtime_incarnation.clone().into());
+                    let _: ClaimRecord = publisher.post(
+                        "/v1/claims",
+                        &ClaimInput {
+                            subject: subject.into(),
+                            kind: "harness.inventory.observed".into(),
+                            actor: Some(subject.into()),
+                            fields,
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: Some(format!(
+                                "harness-inventory:{subject}:{}:{}", event.runtime_incarnation, event.sequence,
+                            )),
+                        },
+                    ).await?;
                 }
                 "harness-todo" => {
                     let mut fields: BTreeMap<String, Value> =
                         serde_json::from_value(event.payload.clone())?;
                     fields.remove("incarnation");
-                    fields.insert(
-                        "incarnation_id".into(),
-                        event.runtime_incarnation.clone().into(),
-                    );
-                    let _: ClaimRecord = publisher
-                        .post(
-                            "/v1/claims",
-                            &ClaimInput {
-                                subject: subject.into(),
-                                kind: "harness.todo.observed".into(),
-                                actor: Some(subject.into()),
-                                fields,
-                                evidence: Vec::new(),
-                                expected_subject: None,
-                                idempotency_key: Some(format!(
-                                    "harness-todo:{subject}:{}:{}",
-                                    event.runtime_incarnation, event.sequence,
-                                )),
-                            },
-                        )
-                        .await?;
+                    fields.insert("incarnation_id".into(), event.runtime_incarnation.clone().into());
+                    let _: ClaimRecord = publisher.post(
+                        "/v1/claims",
+                        &ClaimInput {
+                            subject: subject.into(),
+                            kind: "harness.todo.observed".into(),
+                            actor: Some(subject.into()),
+                            fields,
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: Some(format!(
+                                "harness-todo:{subject}:{}:{}", event.runtime_incarnation, event.sequence,
+                            )),
+                        },
+                    ).await?;
                 }
                 "harness-timeline" => {
                     let operation: fractal_drivers::harness_timeline::Operation =
                         serde_json::from_slice(&raw)?;
-                    let claim = native_timeline_claim(
-                        client,
-                        subject,
-                        &event.runtime_incarnation,
-                        operation,
-                    )
-                    .await?;
-                    let _: ClaimRecord = publisher.post("/v1/claims", &claim).await?;
+                    let claim = native_timeline_claim(client, subject,
+                        &event.runtime_incarnation, operation).await?;
+                    let _: ClaimRecord = publisher
+                        .post(
+                            "/v1/claims",
+                            &claim,
+                        )
+                        .await?;
                 }
                 other => anyhow::bail!("unsupported harness event `{other}`"),
             }
@@ -16382,19 +15628,14 @@ impl ObservationClient<'_> {
                     .fields
                     .get("semantics")
                     .and_then(Value::as_str)
-                    .unwrap_or(if claim.kind == "harness.todo.observed" {
-                        "normalized"
-                    } else {
-                        ""
-                    })
+                    .unwrap_or(if claim.kind == "harness.todo.observed" { "normalized" } else { "" })
             );
-            let claim: ClaimInput =
-                serde_json::from_value(fractal_drivers::harness_events::prepare_publication(
-                    dir,
-                    sequence,
-                    &slot,
-                    &serde_json::to_value(&claim)?,
-                )?)?;
+            let claim: ClaimInput = serde_json::from_value(fractal_drivers::harness_events::prepare_publication(
+                dir,
+                sequence,
+                &slot,
+                &serde_json::to_value(&claim)?,
+            )?)?;
             // Diagnostics are retained graph facts, not local observation slots. Preserve
             // their episode key; /harness-events replaces keys with its observation slot.
             if claim.kind == "harness.diagnostic" {
@@ -16480,13 +15721,7 @@ async fn publish_harness_activity(
             Value::String(observed.blocked_on.as_str().into()),
         ),
         ("ask".into(), Value::String(observed.ask.as_str().into())),
-        (
-            "background_jobs".into(),
-            observed
-                .background_jobs
-                .map(Value::from)
-                .unwrap_or(Value::Null),
-        ),
+        ("background_jobs".into(), observed.background_jobs.map(Value::from).unwrap_or(Value::Null)),
         (
             "input_buffer".into(),
             Value::String(observed.input_buffer.as_str().into()),
@@ -16799,35 +16034,22 @@ fn timeline_record_is_current(
 /// Bind a reported failure to the current ready wake before promoting it to a diagnostic.
 /// The CLI cannot report through the socket it was denied; the native driver can.
 async fn native_timeline_claim(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
+    client: &Client, subject: &str, incarnation: &str,
     operation: fractal_drivers::harness_timeline::Operation,
 ) -> Result<ClaimInput> {
     let mut failure = None;
     if operation.entry_type == "error"
         && operation.body["code"] == fractal_drivers::work_claim_failure::CODE
-        && let Ok(receipt) = serde_json::from_value::<fractal_drivers::work_claim_failure::Receipt>(
-            operation.body["details"].clone(),
-        )
-        && receipt.valid()
-        && receipt.actor == subject
+        && let Ok(receipt) = serde_json::from_value::<fractal_drivers::work_claim_failure::Receipt>(operation.body["details"].clone())
+        && receipt.valid() && receipt.actor == subject
     {
-        let work: Vec<StepRunView> = client
-            .get(&format!(
-                "/v1/work?actor={}&caller=timeline-binding",
-                urlencoding::encode(subject)
-            ))
-            .await?;
+        let work: Vec<StepRunView> = client.get(&format!(
+            "/v1/work?actor={}&caller=timeline-binding", urlencoding::encode(subject))).await?;
         if let Some(step) = work.into_iter().find(|step| {
-            step.subject == receipt.step_run
-                && step.status == "ready"
+            step.subject == receipt.step_run && step.status == "ready"
                 && step.wake.as_ref().is_some_and(|wake| {
-                    wake.incarnation_id == incarnation
-                        && wake.attempts > 0
-                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| {
-                            receipt.follows_wake(sent, operation.observed_at_unix_ms)
-                        })
+                    wake.incarnation_id == incarnation && wake.attempts > 0
+                        && wake.last_attempt_at_unix_ms.is_some_and(|sent| receipt.follows_wake(sent, operation.observed_at_unix_ms))
                 })
         }) {
             failure = Some((receipt, step));
@@ -16835,51 +16057,27 @@ async fn native_timeline_claim(
     }
     if let Some((receipt, step)) = failure {
         return Ok(ClaimInput {
-            subject: subject.into(),
-            kind: "harness.diagnostic".into(),
-            actor: Some(subject.into()),
+            subject: subject.into(), kind: "harness.diagnostic".into(), actor: Some(subject.into()),
             fields: BTreeMap::from([
-                (
-                    "code".into(),
-                    fractal_drivers::work_claim_failure::CODE.into(),
-                ),
-                ("status".into(), "failed".into()),
-                ("severity".into(), "error".into()),
+                ("code".into(), fractal_drivers::work_claim_failure::CODE.into()),
+                ("status".into(), "failed".into()), ("severity".into(), "error".into()),
                 ("reason".into(), receipt.reason().into()),
                 ("incarnation_id".into(), incarnation.into()),
                 ("step_run".into(), step.subject.clone().into()),
                 ("attempt".into(), step.attempt.into()),
                 ("readiness_epoch".into(), step.readiness_epoch.into()),
-                (
-                    "matched_line".into(),
-                    serde_json::to_string(&receipt)?.into(),
-                ),
-                (
-                    "observed_since_ms".into(),
-                    receipt.observed_at_unix_ms.into(),
-                ),
+                ("matched_line".into(), serde_json::to_string(&receipt)?.into()),
+                ("observed_since_ms".into(), receipt.observed_at_unix_ms.into()),
                 ("driver".into(), operation.driver.into()),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: Some(fractal_drivers::work_claim_failure::key(
-                subject,
-                &step.subject,
-                step.attempt,
-                step.readiness_epoch,
-                incarnation,
-            )),
+            ]), evidence: Vec::new(), expected_subject: None,
+            idempotency_key: Some(fractal_drivers::work_claim_failure::key(subject, &step.subject,
+                step.attempt, step.readiness_epoch, incarnation)),
         });
     }
     let fields = timeline_claim_fields(operation, incarnation);
     let digest = hex::encode(Sha256::digest(serde_json::to_vec(&fields)?));
-    Ok(ClaimInput {
-        subject: subject.into(),
-        kind: "harness.timeline".into(),
-        actor: Some(subject.into()),
-        fields,
-        evidence: Vec::new(),
-        expected_subject: None,
+    Ok(ClaimInput { subject: subject.into(), kind: "harness.timeline".into(),
+        actor: Some(subject.into()), fields, evidence: Vec::new(), expected_subject: None,
         idempotency_key: Some(format!("harness-timeline:{subject}:{digest}")),
     })
 }
@@ -16970,10 +16168,7 @@ fn accept_managed_channel_frame(
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
 ) -> Result<bool> {
     if let Ok(frame) = serde_json::from_str::<Value>(line) {
-        let frame_type = frame
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
+        let frame_type = frame.get("type").and_then(Value::as_str).unwrap_or("unknown");
         let handled = match frame_type {
             "state" | "session" | "ready" | "delivered" | "read" | "failed" | "todo" => true,
             "timeline" | "context" | "turn" | "subagent" => observer.is_some(),
@@ -17037,31 +16232,20 @@ fn prepare_channel_todo_outbox(root: &Path, subject: &str, incarnation: &str) ->
 
 fn todo_runtime_has_ended(actual: &Value, incarnation: &str) -> bool {
     let fields = actual.get("fields").unwrap_or(actual);
-    fields["incarnation_id"]
-        .as_str()
-        .is_some_and(|current| current != incarnation)
-        || matches!(
-            fields["status"].as_str(),
-            Some("absent" | "stopped" | "exited" | "vanished")
-        )
+    fields["incarnation_id"].as_str().is_some_and(|current| current != incarnation)
+        || matches!(fields["status"].as_str(), Some("absent" | "stopped" | "exited" | "vanished"))
 }
 
 // Wall-clock minute boundaries can be one second apart; confirmations need a full period.
 const CHANNEL_TODO_END_CONFIRMATION_GAP: Duration = Duration::from_secs(60);
 
 async fn remove_confirmed_ended_channel_todo_outbox(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    dir: &Path,
+    client: &Client, subject: &str, incarnation: &str, dir: &Path,
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
-    let status: Result<StatusResponse> = client
-        .get(&format!(
-            "/v1/status?subject={}",
-            urlencoding::encode(subject),
-        ))
-        .await;
+    let status: Result<StatusResponse> = client.get(&format!(
+        "/v1/status?subject={}", urlencoding::encode(subject),
+    )).await;
     let status = match status {
         Ok(status) => status,
         Err(error) => {
@@ -17069,10 +16253,7 @@ async fn remove_confirmed_ended_channel_todo_outbox(
             return Err(error);
         }
     };
-    let ended = status
-        .subjects
-        .first()
-        .and_then(|seat| seat.actual.as_ref())
+    let ended = status.subjects.first().and_then(|seat| seat.actual.as_ref())
         .is_some_and(|actual| todo_runtime_has_ended(actual, incarnation));
     if !ended {
         *end_seen = None;
@@ -17087,21 +16268,16 @@ async fn remove_confirmed_ended_channel_todo_outbox(
 }
 
 async fn finish_channel_todo_outbox(
-    client: &Client,
-    subject: &str,
-    incarnation: &str,
-    dir: &Path,
+    client: &Client, subject: &str, incarnation: &str, dir: &Path,
     end_seen: &mut Option<tokio::time::Instant>,
 ) -> Result<bool> {
     loop {
-        if remove_confirmed_ended_channel_todo_outbox(client, subject, incarnation, dir, end_seen)
-            .await?
-        {
+        if remove_confirmed_ended_channel_todo_outbox(
+            client, subject, incarnation, dir, end_seen,
+        ).await? {
             return Ok(true);
         }
-        let Some(first_seen) = *end_seen else {
-            return Ok(false);
-        };
+        let Some(first_seen) = *end_seen else { return Ok(false); };
         // EOF is not an independent liveness confirmation until the same gap has elapsed.
         tokio::time::sleep_until(first_seen + CHANNEL_TODO_END_CONFIRMATION_GAP).await;
     }
@@ -17162,28 +16338,18 @@ impl PiChannelResume {
     }
 
     fn apply_ask_bridge_frame(&mut self, subject: &str, line: &str) {
-        let Ok(frame) = serde_json::from_str::<Value>(line) else {
-            return;
-        };
+        let Ok(frame) = serde_json::from_str::<Value>(line) else { return };
         let expected = std::env::var("ST3_OMP_PENDING_ASK").ok();
         if let Some(id) = self.take_pending_ask_retry(&frame, expected.as_deref()) {
             let sent = (|| -> Result<()> {
-                let root =
-                    std::env::var_os("PTY_ROOT").context("pending ask retry has no PTY_ROOT")?;
-                let session =
-                    std::env::var("PTY_SESSION").context("pending ask retry has no PTY_SESSION")?;
-                fractal_runtime::PtyRuntime::new(root.into()).send_raw_if(
-                    &session,
-                    b"\x1b[15~",
-                    None,
-                )?;
+                let root = std::env::var_os("PTY_ROOT").context("pending ask retry has no PTY_ROOT")?;
+                let session = std::env::var("PTY_SESSION").context("pending ask retry has no PTY_SESSION")?;
+                fractal_runtime::PtyRuntime::new(root.into()).send_raw_if(&session, b"\x1b[15~", None)?;
                 Ok(())
             })();
             let record = match sent {
                 Ok(()) => json!({"type":"omp_pending_ask_retry","toolCallId":id}),
-                Err(error) => {
-                    json!({"type":"omp_pending_ask_retry_failed","toolCallId":id,"error":format!("{error:#}")})
-                }
+                Err(error) => json!({"type":"omp_pending_ask_retry_failed","toolCallId":id,"error":format!("{error:#}")}),
             };
             let _ = write_driver_log(subject, &record.to_string());
         }
@@ -17200,10 +16366,7 @@ impl PiChannelResume {
         match frame.get("type").and_then(Value::as_str) {
             Some("todo") => {
                 let Some(fields) = fractal_drivers::pi_channel::todo_observation(
-                    &frame,
-                    "omp",
-                    self.native_session.as_deref(),
-                    &self.incarnation,
+                    &frame, "omp", self.native_session.as_deref(), &self.incarnation,
                 ) else {
                     return false;
                 };
@@ -17381,10 +16544,7 @@ impl PiFamilyReports {
                                     .map(Value::String)
                                     .unwrap_or(Value::Null),
                             ),
-                            (
-                                "background_jobs".into(),
-                                self.background_jobs.map(Value::from).unwrap_or(Value::Null),
-                            ),
+                            ("background_jobs".into(), self.background_jobs.map(Value::from).unwrap_or(Value::Null)),
                             ("input_buffer".into(), Value::Null),
                             ("exit".into(), Value::Null),
                         ])),
@@ -17432,15 +16592,7 @@ impl PiFamilyReports {
             // Both transports retain the native receipt until the graph acknowledges it.
             use tokio::io::AsyncWriteExt as _;
             let mut stdout = cli_output::async_stdout();
-            stdout
-                .write_all(
-                    format!(
-                        "{}\n",
-                        json!({"type":"settled","meta":{"messageId":message}})
-                    )
-                    .as_bytes(),
-                )
-                .await?;
+            stdout.write_all(format!("{}\n", json!({"type":"settled","meta":{"messageId":message}})).as_bytes()).await?;
             stdout.flush().await?;
             self.reads.remove(&message);
         }
@@ -17462,24 +16614,21 @@ impl PiFamilyReports {
                     Some(path)
                 }
                 None => {
-                    let recovered = (driver == "omp")
-                        .then(|| {
-                            fractal_daemon::omp_process_transcript(
-                                subject,
-                                incarnation,
-                                &native,
-                                std::env::var("ST3_ACCOUNT").ok().as_deref(),
-                            )
-                        })
-                        .flatten();
+                    let recovered = (driver == "omp").then(|| {
+                        fractal_daemon::omp_process_transcript(
+                            subject,
+                            incarnation,
+                            &native,
+                            std::env::var("ST3_ACCOUNT").ok().as_deref(),
+                        )
+                    }).flatten();
                     if recovered.is_none()
                         && std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV)
                             .is_some_and(|dir| {
                                 fractal_daemon::native_resume::pi_family_transcript(
                                     &PathBuf::from(dir).join("provider-sessions"),
                                     &native,
-                                )
-                                .is_none()
+                                ).is_none()
                             })
                     {
                         return Ok(());
@@ -17663,8 +16812,7 @@ fn native_delivery_control_report(
     let mut report: Value = serde_json::from_str(&native_delivery_report(transport, None))
         .expect("native delivery reports are JSON");
     // A deliberate graph hold is normal control, independent of mailbox readiness.
-    let unavailable = gate
-        .blocked_reason()
+    let unavailable = gate.blocked_reason()
         .filter(|reason| *reason == DeliveryBlockReason::ControlUnavailable);
     report["ready"] = json!(unavailable.is_none());
     report["reason"] = json!(unavailable.map(|reason| reason.description()));
@@ -17701,6 +16849,7 @@ async fn refresh_native_delivery_control(
     }
     refresh_graph_delivery_gate_with_report(client, subject, &paths.delivery_gate, report).await
 }
+
 
 const PROVIDER_CAPACITY_MAX_RETRIES: u32 = 6;
 const PROVIDER_CAPACITY_BASE_BACKOFF_MS: u64 = 30_000;
@@ -17790,10 +16939,7 @@ async fn publish_provider_capacity_diagnostic(
         fields.insert("retry_after_unix_ms".into(), Value::from(retry_after));
     }
     let work: Vec<StepRunView> = client
-        .get(&format!(
-            "/v1/work?actor={}&caller=capacity-diagnostics",
-            urlencoding::encode(subject)
-        ))
+        .get(&format!("/v1/work?actor={}&caller=capacity-diagnostics", urlencoding::encode(subject)))
         .await?;
     if let Some(step) = work.into_iter().find(|step| {
         matches!(step.status.as_str(), "claimed" | "working")
@@ -17893,10 +17039,7 @@ async fn renew_claimed_work(
     retry: &mut fractal_daemon::client::DriverRetry,
 ) -> Result<()> {
     let work: Vec<StepRunView> = client
-        .get(&format!(
-            "/v1/work?actor={}&view=renewal",
-            urlencoding::encode(subject)
-        ))
+        .get(&format!("/v1/work?actor={}&view=renewal", urlencoding::encode(subject)))
         .await?;
     update_renewal_retry_lease(retry, &work, subject, current_unix_ms()?);
     // Most resident seats hold no work. Only a held claim needs the status reduction
@@ -17923,10 +17066,7 @@ async fn renew_claimed_work(
         // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
-                &format!(
-                    "/v1/work/renew/{}?view=lease",
-                    urlencoding::encode(&step.subject)
-                ),
+                &format!("/v1/work/renew/{}?view=lease", urlencoding::encode(&step.subject)),
                 &WorkRequest {
                     wait_ms: None,
                     actor: Some(subject.into()),
@@ -17972,9 +17112,7 @@ fn update_renewal_retry_lease(
         retry.clear_lease_margin();
     } else if let Some(expiry) = held.filter_map(|step| step.claim_expires_at_unix_ms).min() {
         let remaining = expiry.saturating_sub(now_ms);
-        retry.lease_margin(Duration::from_millis(
-            remaining.min(u128::from(u64::MAX)) as u64
-        ));
+        retry.lease_margin(Duration::from_millis(remaining.min(u128::from(u64::MAX)) as u64));
     }
 }
 
@@ -17999,16 +17137,10 @@ async fn claim_has_driver(
     let Some(incarnation) = incarnation else {
         return Some(false);
     };
-    let status: StatusResponse = client
-        .get(&format!(
-            "/v1/status?subject={}&harness_only=true",
-            urlencoding::encode(subject),
-        ))
-        .await
-        .ok()?;
-    let harness = status
-        .subjects
-        .iter()
+    let status: StatusResponse = client.get(&format!(
+        "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
+    )).await.ok()?;
+    let harness = status.subjects.iter()
         .find(|candidate| candidate.subject == subject)
         .and_then(|candidate| candidate.harness.as_ref());
     Some(claim_has_active_harness(Some(incarnation), harness))
@@ -18023,10 +17155,7 @@ fn work_claim_has_active_harness(
         && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
 }
 
-fn claim_has_active_harness(
-    incarnation: Option<&str>,
-    harness: Option<&CurrentHarnessView>,
-) -> bool {
+fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
     harness.is_some_and(|harness| {
         harness.state != "ended" && incarnation == Some(harness.incarnation_id.as_str())
     })
@@ -18184,9 +17313,8 @@ async fn publish_admission_diagnostic(
     agent_dir: &Path,
     last: &mut Option<String>,
 ) -> Result<()> {
-    let observed = fractal_drivers::driver_diagnostic::read(
-        &fractal_drivers::driver_diagnostic::path(agent_dir),
-    );
+    let observed =
+        fractal_drivers::driver_diagnostic::read(&fractal_drivers::driver_diagnostic::path(agent_dir));
     let Some(input) = admission_diagnostic(subject, incarnation, &observed) else {
         return Ok(());
     };
@@ -18308,11 +17436,7 @@ struct ClaudeReadinessFallback {
     native_state_seen: bool,
 }
 impl ClaudeReadinessFallback {
-    fn observe_attachment(
-        &mut self,
-        checked: &Result<fractal_daemon::mailbox::Attachment>,
-        now_ms: u64,
-    ) {
+    fn observe_attachment(&mut self, checked: &Result<fractal_daemon::mailbox::Attachment>, now_ms: u64) {
         if checked.as_ref().is_ok_and(|attachment| attachment.attached) {
             self.initialized_at_ms.get_or_insert(now_ms);
         } else {
@@ -18335,7 +17459,9 @@ async fn publish_claude_readiness_fallback(
         || !state
             .claude_readiness_fallback
             .initialized_at_ms
-            .is_some_and(|started| now_ms.saturating_sub(started) >= claude_readiness_grace_ms())
+            .is_some_and(|started| {
+                now_ms.saturating_sub(started) >= claude_readiness_grace_ms()
+            })
     {
         return Ok(false);
     }
@@ -18346,10 +17472,9 @@ async fn publish_claude_readiness_fallback(
     );
     // A bounded drain may leave a backlog. The current runtime snapshot still reveals
     // native state already queued behind that backlog, without granting readiness.
-    if let Some(raw) = fractal_drivers::harness_events::read_runtime_state(
-        &observations.dir,
-        &observations.runtime,
-    )? {
+    if let Some(raw) =
+        fractal_drivers::harness_events::read_runtime_state(&observations.dir, &observations.runtime)?
+    {
         let observed = fractal_drivers::harness_state::read_raw_at(&raw, None, now_ms);
         if !(observed.state == fractal_drivers::harness_state::Activity::Unknown
             && observed.reason.as_deref() == Some("claimed"))
@@ -18437,14 +17562,11 @@ fn claude_attachment_check_due(
         && state.claude_attachment_terminal.is_none();
     // A replacement binding, or a wall clock stepped backwards, checks at once.
     if settled
-        && state
-            .claude_attachment_polled
-            .as_ref()
-            .is_some_and(|(polled_binding, polled)| {
-                *polled_binding == binding
-                    && now_ms >= *polled
-                    && now_ms - polled < UNPUSHED_ATTACHMENT_RECHECK_MS
-            })
+        && state.claude_attachment_polled.as_ref().is_some_and(|(polled_binding, polled)| {
+            *polled_binding == binding
+                && now_ms >= *polled
+                && now_ms - polled < UNPUSHED_ATTACHMENT_RECHECK_MS
+        })
     {
         return false;
     }
@@ -18539,9 +17661,7 @@ async fn check_claude_attachment(
     // window counts again from the daemon's next answer, so a slow daemon start never reads as a
     // lost channel.
     if checked.is_ok() {
-        state
-            .claude_attachment_answered
-            .get_or_insert_with(Instant::now);
+        state.claude_attachment_answered.get_or_insert_with(Instant::now);
     } else {
         state.claude_attachment_answered = None;
     }
@@ -18643,10 +17763,7 @@ fn claude_readiness_grace_ms() -> u64 {
         .map_or(DEFAULT_MS, |cap| cap.min(DEFAULT_MS))
 }
 
-fn same_claude_attachment_binding(
-    a: &fractal_daemon::mailbox::Fence,
-    b: &fractal_daemon::mailbox::Fence,
-) -> bool {
+fn same_claude_attachment_binding(a: &fractal_daemon::mailbox::Fence, b: &fractal_daemon::mailbox::Fence) -> bool {
     a.subject == b.subject
         && a.incarnation == b.incarnation
         && a.component == b.component
@@ -18956,9 +18073,7 @@ async fn provider_task_settled(task: &tokio::task::JoinHandle<Result<()>>) -> bo
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     };
-    tokio::time::timeout(Duration::from_secs(5), settled)
-        .await
-        .is_ok()
+    tokio::time::timeout(Duration::from_secs(5), settled).await.is_ok()
 }
 
 struct NativeMailbox {
@@ -18971,12 +18086,7 @@ struct NativeMailbox {
 }
 impl NativeMailbox {
     /// A mailbox with no subscription, for a provider that ended before it could be bound.
-    fn unbound(
-        subject: &str,
-        incarnation: &str,
-        driver: &str,
-        state: &mut NativeLoopState,
-    ) -> Self {
+    fn unbound(subject: &str, incarnation: &str, driver: &str, state: &mut NativeLoopState) -> Self {
         let component = if matches!(driver, "codex" | "opencode") {
             "delivery"
         } else {
@@ -18984,9 +18094,7 @@ impl NativeMailbox {
         };
         let fence = state
             .mailbox_fence
-            .get_or_insert_with(|| {
-                fractal_daemon::mailbox::Fence::new(subject, incarnation, component)
-            })
+            .get_or_insert_with(|| fractal_daemon::mailbox::Fence::new(subject, incarnation, component))
             .clone();
         Self {
             subscription: None,
@@ -19011,9 +18119,7 @@ impl NativeMailbox {
         };
         let mut fence = state
             .mailbox_fence
-            .get_or_insert_with(|| {
-                fractal_daemon::mailbox::Fence::new(subject, incarnation, component)
-            })
+            .get_or_insert_with(|| fractal_daemon::mailbox::Fence::new(subject, incarnation, component))
             .clone();
         if push_mailbox_enabled() {
             fence.bind(client).await?;
@@ -19025,17 +18131,12 @@ impl NativeMailbox {
             "opencode-server"
         };
         let report = if matches!(driver, "codex" | "opencode") {
-            native_delivery_control_report(
-                transport,
-                &fractal_drivers::session_control::DeliveryGate::default(),
-            )
+            native_delivery_control_report(transport, &fractal_drivers::session_control::DeliveryGate::default())
         } else {
-            serde_json::from_str(&native_delivery_report(transport, None))
-                .expect("native report is JSON")
+            serde_json::from_str(&native_delivery_report(transport, None)).expect("native report is JSON")
         };
-        let subscription = push_mailbox_enabled().then(|| {
-            fractal_daemon::mailbox::Subscription::start(client.clone(), fence.clone(), report)
-        });
+        let subscription = push_mailbox_enabled()
+            .then(|| fractal_daemon::mailbox::Subscription::start(client.clone(), fence.clone(), report));
         Ok(Self {
             subscription,
             fence,
@@ -19057,16 +18158,10 @@ impl NativeMailbox {
             .as_ref()
             .and_then(fractal_daemon::mailbox::Subscription::attachment)
     }
-    fn accept(
-        &mut self,
-        frame: Option<fractal_daemon::mailbox::Frame>,
-        runtime_id: &str,
-    ) -> Result<()> {
+    fn accept(&mut self, frame: Option<fractal_daemon::mailbox::Frame>, runtime_id: &str) -> Result<()> {
         match frame {
             Some(fractal_daemon::mailbox::Frame::Replay { nonce }) => {
-                if let Some(subscription) = &self.subscription {
-                    subscription.acknowledge_replay(nonce);
-                }
+                if let Some(subscription) = &self.subscription { subscription.acknowledge_replay(nonce); }
                 Ok(())
             }
             Some(fractal_daemon::mailbox::Frame::Drain { operation }) => {
@@ -19084,10 +18179,9 @@ impl NativeMailbox {
                 }
                 if let Err(error) = update_native_title(&seat, runtime_id) {
                     let now = Instant::now();
-                    if self
-                        .last_title_warning
-                        .is_none_or(|prior| now.duration_since(prior) >= Duration::from_secs(10))
-                    {
+                    if self.last_title_warning.is_none_or(|prior| {
+                        now.duration_since(prior) >= Duration::from_secs(10)
+                    }) {
                         let _ = write_driver_log(
                             &self.fence.subject,
                             &format!("could not update seat title: {error:#}"),
@@ -19219,8 +18313,7 @@ fn native_queued_message(
         view.tags
             .iter()
             .filter(|tag| {
-                (tag.as_str() == fractal_daemon::silent::SILENT_TAG
-                    && fractal_daemon::silent::is_held(view))
+                (tag.as_str() == fractal_daemon::silent::SILENT_TAG && fractal_daemon::silent::is_held(view))
                     || tag.as_str() == "dictated"
                     || tag.starts_with(fractal_daemon::silent::REMAINING_PREFIX)
             })
@@ -19276,12 +18369,12 @@ async fn mailbox_receipt_claim(
 }
 
 fn seat_label(seat: &fractal_daemon::model::DesiredSubject) -> String {
-    fractal_daemon::mailbox::seat_label(seat, std::env::var("AGENT_PERSONA_SHORT").ok().as_deref())
+    fractal_daemon::mailbox::seat_label(
+        seat,
+        std::env::var("AGENT_PERSONA_SHORT").ok().as_deref(),
+    )
 }
-fn update_native_title(
-    seat: &fractal_daemon::model::DesiredSubject,
-    runtime_id: &str,
-) -> Result<()> {
+fn update_native_title(seat: &fractal_daemon::model::DesiredSubject, runtime_id: &str) -> Result<()> {
     let label = seat_label(seat);
     // The launcher's registry name can differ from the provider's logical runtime ID.
     let session = std::env::var("PTY_SESSION")
@@ -19374,8 +18467,7 @@ async fn supervise_native_delivery(
             }
         }
         Err(error) => {
-            let outage =
-                fractal_daemon::client::daemon_unreachable(&error).map(|outage| outage.summary());
+            let outage = fractal_daemon::client::daemon_unreachable(&error).map(|outage| outage.summary());
             let backoff = supervisor.failed(outage.is_some());
             let now = Instant::now();
             if supervisor
@@ -19451,9 +18543,7 @@ async fn forward_projected_messages_reporting(
             state_dir,
             identity,
             runtime_id,
-        } => fractal_drivers::codex_app_server::consumed_delivery_filenames(
-            state_dir, identity, runtime_id,
-        ),
+        } => fractal_drivers::codex_app_server::consumed_delivery_filenames(state_dir, identity, runtime_id),
         NativeDeliveryReceipts::ClaudeChannel {
             agent_dir,
             incarnation,
@@ -19462,11 +18552,9 @@ async fn forward_projected_messages_reporting(
             session_dir,
             identity,
             runtime_id,
-        } => fractal_drivers::opencode_session::consumed_delivery_paths(
-            session_dir,
-            identity,
-            runtime_id,
-        ),
+        } => {
+            fractal_drivers::opencode_session::consumed_delivery_paths(session_dir, identity, runtime_id)
+        }
     }?;
     let mut cursor = None;
     let mut failures = Vec::new();
@@ -19520,11 +18608,7 @@ async fn forward_projected_messages_reporting(
                     };
                     let mut tags = message.tags.clone();
                     tags.push(format!("{TAG_PREFIX}{}", message.subject));
-                    tags.push(format!(
-                        "{}{}",
-                        fractal_drivers::ding::FRACTAL_TO_TAG,
-                        message.to
-                    ));
+                    tags.push(format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, message.to));
                     tags.push(format!(
                         "{}{}",
                         fractal_drivers::ding::FRACTAL_SHA256_TAG,
@@ -19629,9 +18713,9 @@ fn claude_channel_consumed_delivery_filenames(
     incarnation: &str,
 ) -> Result<BTreeSet<String>> {
     const PREFIX: &str = "[st3-delivery:";
-    let Some(record) = fractal_drivers::harness_timeline::read(
-        &fractal_drivers::harness_timeline::timeline_path(agent_dir),
-    ) else {
+    let Some(record) =
+        fractal_drivers::harness_timeline::read(&fractal_drivers::harness_timeline::timeline_path(agent_dir))
+    else {
         return Ok(BTreeSet::new());
     };
     if record.driver != "claude" || record.incarnation_id != incarnation {
@@ -19741,38 +18825,24 @@ fn idempotency(kdl: &str, tokens: &BTreeMap<String, Vec<String>>) -> String {
 /// never replicate, so this never changes what any peer holds.
 /// Apply this node's `[limits]` policy every two minutes: stop the seats it hosts on an account
 /// past its weekly limit, and notify operations once per weekly window.
-async fn enforce_account_limits(
-    store: Arc<Store>,
-    started_with: fractal_daemon::config::LimitsConfig,
-    reconciler: Arc<Reconciler>,
-) {
+async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon::config::LimitsConfig, reconciler: Arc<Reconciler>) {
     const LIMITS_INTERVAL: Duration = Duration::from_secs(2 * 60);
     let mut limits = started_with;
     let mut last_error = None::<String>;
     loop {
         // A config file that is missing, cannot be read or does not validate keeps the last
         // good policy. The reason is logged when it changes, not on every pass.
-        let reloaded = tokio::task::spawn_blocking(|| {
-            fractal_daemon::task_cpu::blocking(
-                "config.reload_policies",
-                fractal_daemon::config::reload_daemon_policies,
-            )
-        })
-        .await
-        .ok()
-        .flatten();
+        let reloaded = tokio::task::spawn_blocking(|| fractal_daemon::task_cpu::blocking("config.reload_policies", fractal_daemon::config::reload_daemon_policies))
+            .await
+            .ok()
+            .flatten();
         match reloaded {
             Some(Ok((reloaded, reconcile, asks))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
-                reconciler
-                    .set_max_passes_per_minute(
-                        reconcile.max_passes_per_minute_or(default_max_passes_per_minute()),
-                    )
+                reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
-                store.set_default_ask_deadline_ms(
-                    asks.default_deadline_ms().expect("validated ask deadline"),
-                );
+                store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline"));
                 store.set_ask_deadlines(asks.deadlines);
                 limits = reloaded;
                 last_error = None;
@@ -19780,10 +18850,7 @@ async fn enforce_account_limits(
             Some(Err(error)) => {
                 let error = format!("{error:#}");
                 if last_error.as_ref() != Some(&error) {
-                    stderr_message(
-                        "st3",
-                        format_args!("daemon policies keep their last config: {error}"),
-                    );
+                    stderr_message("st3", format_args!("daemon policies keep their last config: {error}"));
                     last_error = Some(error);
                 }
             }
@@ -19794,18 +18861,15 @@ async fn enforce_account_limits(
             continue;
         };
         let pass = store.clone();
-        match pass
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking("account_limits.enforce", || {
-                    let now = now_ms();
-                    let check = pass.account_limits_check(now, policy.fresh_ms)?;
-                    let outcome = pass.enforce_account_limits(&policy, now)?;
-                    Ok::<_, anyhow::Error>((outcome, check))
-                })
+        match pass.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("account_limits.enforce", || {
+                let now = now_ms();
+                let check = pass.account_limits_check(now, policy.fresh_ms)?;
+                let outcome = pass.enforce_account_limits(&policy, now)?;
+                Ok::<_, anyhow::Error>((outcome, check))
             })
-            .await
+        })
+        .await
         {
             Ok(Ok((outcome, check))) => {
                 if check.status == "warn" {
@@ -19815,10 +18879,7 @@ async fn enforce_account_limits(
                     stderr_message("st3", format_args!("limits policy stopped {seat}"));
                 }
                 for (seat, account) in outcome.switched {
-                    stderr_message(
-                        "st3",
-                        format_args!("limits policy restarted {seat} on account {account}"),
-                    );
+                    stderr_message("st3", format_args!("limits policy restarted {seat} on account {account}"));
                 }
             }
             Ok(Err(error)) => stderr_message("st3", format_args!("limits policy failed: {error}")),
@@ -19895,97 +18956,74 @@ fn retry_projection_contention_observed(
     state_dir: PathBuf,
     mut on_poll: impl FnMut(bool) + Send + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "replication.retry_projection",
-        async move {
-            let mut schedule = ProjectionContentionRetry::default();
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                let Some(store) = store.upgrade() else { break };
-                let generation = store.projection_contention_generation();
-                let attempt = schedule.poll(
-                    tokio::time::Instant::now(),
-                    generation,
-                    store.replication_projection_deferred(),
-                );
-                on_poll(schedule.due.is_some());
-                let Some(attempt) = attempt else { continue };
-                // Only this task schedules these attempts. The existing projection mutex also
-                // serializes them with receive/wake passes. Store ownership ends at attempt return.
-                let result = store
-                    .connection
-                    .write_workers()
-                    .spawn_blocking(move || {
-                        fractal_daemon::task_cpu::profiled_blocking(
-                            "replication.retry_projection",
-                            || {
-                                let result = store.project_replication_backlog_unless_catching_up();
-                                (
-                                    result,
-                                    store.projection_contention_generation(),
-                                    store.replication_projection_deferred(),
-                                )
-                            },
-                        )
-                    })
-                    .await;
-                let still_deferred = match &result {
-                    Ok((_, _, deferred)) => Some(*deferred),
-                    Err(_) => None,
-                };
-                let (recovered, retry, generation, outcome) = match result {
-                    // Own success cannot advance contention generation. Retain the pre-call
-                    // watermark, so an external contention racing the success is observed on
-                    // the next poll rather than cancelled as part of the completed episode.
-                    Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
-                    Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
-                    Ok((Ok(Some(false)), current, _)) => {
-                        (false, current != generation, current, "deferred")
-                    }
-                    Ok((Err(error), current, _)) => {
-                        let busy = error
-                            .downcast_ref::<smallclaims::Error>()
-                            .is_some_and(|error| error.is_sqlite_contention());
-                        (
-                            false,
-                            busy,
-                            current,
-                            if busy {
-                                "sqlite-contention"
-                            } else {
-                                "other-error"
-                            },
-                        )
-                    }
-                    Err(_) => (false, false, generation, "worker-failed"),
-                };
-                schedule.finish(tokio::time::Instant::now(), generation, retry);
-                stderr_message(
-                    "st3",
-                    format_args!(
-                        "projection contention retry {}",
-                        json!({
-                            "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
-                            "projection_deferred_after_attempt": still_deferred,
-                            "stop_reason": if schedule.due.is_some() { None } else if recovered {
-                                Some("recovered")
-                            } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
-                        })
-                    ),
-                );
-                if recovered {
-                    fractal_daemon::performance::record_wake("projection-contention-retry", None);
-                    notify.notify_one();
-                    event_notify
-                        .send_modify(|generation| *generation = generation.saturating_add(1));
-                    let _ = fs::write(
-                        state_dir.join("replication.wake"),
-                        format!("{}\n", uuid::Uuid::now_v7()),
-                    );
+    tokio::spawn(fractal_daemon::task_cpu::account("replication.retry_projection", async move {
+        let mut schedule = ProjectionContentionRetry::default();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let Some(store) = store.upgrade() else { break };
+            let generation = store.projection_contention_generation();
+            let attempt = schedule.poll(
+                tokio::time::Instant::now(), generation, store.replication_projection_deferred());
+            on_poll(schedule.due.is_some());
+            let Some(attempt) = attempt else { continue };
+            // Only this task schedules these attempts. The existing projection mutex also
+            // serializes them with receive/wake passes. Store ownership ends at attempt return.
+            let result = store.connection.write_workers().spawn_blocking(move || {
+                fractal_daemon::task_cpu::profiled_blocking("replication.retry_projection", || {
+                let result = store.project_replication_backlog_unless_catching_up();
+                (result, store.projection_contention_generation(), store.replication_projection_deferred())
+                })
+            })
+            .await;
+            let still_deferred = match &result {
+                Ok((_, _, deferred)) => Some(*deferred),
+                Err(_) => None,
+            };
+            let (recovered, retry, generation, outcome) = match result {
+                // Own success cannot advance contention generation. Retain the pre-call
+                // watermark, so an external contention racing the success is observed on
+                // the next poll rather than cancelled as part of the completed episode.
+                Ok((Ok(Some(true)), _current, _)) => (true, false, generation, "projected"),
+                Ok((Ok(None), current, _)) => (false, true, current, "catch-up-throttled"),
+                Ok((Ok(Some(false)), current, _)) => {
+                    (false, current != generation, current, "deferred")
                 }
+                Ok((Err(error), current, _)) => {
+                    let busy = error
+                        .downcast_ref::<smallclaims::Error>()
+                        .is_some_and(|error| error.is_sqlite_contention());
+                    (
+                        false,
+                        busy,
+                        current,
+                        if busy {
+                            "sqlite-contention"
+                        } else {
+                            "other-error"
+                        },
+                    )
+                }
+                Err(_) => (false, false, generation, "worker-failed"),
+            };
+            schedule.finish(tokio::time::Instant::now(), generation, retry);
+            stderr_message("st3", format_args!("projection contention retry {}", json!({
+                "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                "projection_deferred_after_attempt": still_deferred,
+                "stop_reason": if schedule.due.is_some() { None } else if recovered {
+                    Some("recovered")
+                } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
+            })));
+            if recovered {
+                fractal_daemon::performance::record_wake("projection-contention-retry", None);
+                notify.notify_one();
+                event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+                let _ = fs::write(
+                    state_dir.join("replication.wake"),
+                    format!("{}\n", uuid::Uuid::now_v7()),
+                );
             }
-        },
-    ))
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -20053,11 +19091,9 @@ struct WalPinTracker {
 impl WalPinTracker {
     /// Samples in a row, including this one, that made no backfill progress.
     fn observe(&mut self, report: Option<&smallclaims::sqlite::WalCheckpointReport>) -> u32 {
-        let Some(report) = report else {
-            return self.stuck;
-        };
-        let pinned =
-            report.frames > report.backfilled && self.last_backfilled == Some(report.backfilled);
+        let Some(report) = report else { return self.stuck };
+        let pinned = report.frames > report.backfilled
+            && self.last_backfilled == Some(report.backfilled);
         self.last_backfilled = Some(report.backfilled);
         self.stuck = if pinned { self.stuck + 1 } else { 0 };
         self.stuck
@@ -20208,8 +19244,7 @@ async fn build_transport_observation_index(store: Arc<Store>) {
                 return Ok(None);
             }
             index::advance(&page_store.connection).map(Some)
-        })
-        .await;
+        }).await;
         match result {
             Ok(Ok(None)) => {
                 fractal_daemon::otel::record_index_migration(index::NAME, true, None, None);
@@ -20228,10 +19263,7 @@ async fn build_transport_observation_index(store: Arc<Store>) {
             }
             Ok(Err(error)) if maintenance_contention(&error) => {}
             error => {
-                stderr_message(
-                    "st",
-                    format_args!("transport observation index build stopped: {error:?}"),
-                );
+                stderr_message("st", format_args!("transport observation index build stopped: {error:?}"));
                 return;
             }
         }
@@ -20250,34 +19282,15 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
     let result = tokio::task::spawn_blocking(move || -> Result<()> {
         let initial = worker.signature_migration()?;
         let mut phase = initial.phase.clone();
-        if !initial.done() {
-            stderr_message(
-                "st3",
-                format_args!(
-                    "signature bootstrap starting (legacy selected={}, available={}): {}",
-                    initial.serving_legacy,
-                    initial.serving_legacy && initial.legacy_fault.is_none(),
-                    initial.progress_description()
-                ),
-            );
-        }
+        if !initial.done() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
         loop {
             let page_started = std::time::Instant::now();
             let report = worker.advance_signature_migration()?;
             if report.phase != phase {
-                stderr_message(
-                    "st3",
-                    format_args!(
-                        "signature bootstrap phase {}: {}",
-                        report.phase,
-                        report.progress_description()
-                    ),
-                );
+                stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
                 phase = report.phase.clone();
             }
-            if let Some(reason) = report.unavailable_reason()
-                && report.fault.is_some()
-            {
+            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
                 anyhow::bail!("{reason}");
             }
             if report.phase == "judging" {
@@ -20289,42 +19302,21 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
             std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
             if worker.signature_migration()?.done() {
                 let complete = worker.signature_migration()?;
-                if !initial.done() {
-                    stderr_message(
-                        "st3",
-                        format_args!(
-                            "signature candidate authority activated: {}",
-                            complete.progress_description()
-                        ),
-                    );
-                }
+                if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                 loop {
                     let retired_started = std::time::Instant::now();
-                    if !worker.retire_legacy_signature_page()? {
-                        break;
-                    }
-                    std::thread::sleep(
-                        retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK,
-                    );
+                    if !worker.retire_legacy_signature_page()? { break; }
+                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
                 }
                 return Ok(());
             }
         }
-    })
-    .await;
+    }).await;
     if !matches!(result, Ok(Ok(()))) {
-        if let Err(error) =
-            store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}"))
-        {
-            stderr_message(
-                "st3",
-                format_args!("signature migration fault could not be persisted: {error:#}"),
-            );
+        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+            stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
         }
-        stderr_message(
-            "st3",
-            format_args!("signature candidate migration stopped: {result:?}"),
-        );
+        stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
     }
 }
 
@@ -20335,20 +19327,14 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
 async fn import_retired_identities(store: Arc<Store>) {
     loop {
         let worker = store.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            fractal_daemon::task_cpu::blocking("maintenance.retired_identities", || {
-                worker.import_retired_identities_paced(std::thread::sleep)?;
-                worker.import_retired_claim_facts_paced(std::thread::sleep)
-            })
-        })
-        .await;
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.retired_identities", || {
+            worker.import_retired_identities_paced(std::thread::sleep)?;
+            worker.import_retired_claim_facts_paced(std::thread::sleep)
+        })).await;
         match result {
             Ok(Ok(())) => return,
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("retired identity import failed: {error:?}"),
-                );
+                stderr_message("st3", format_args!("retired identity import failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -20362,12 +19348,7 @@ async fn import_retired_identities(store: Arc<Store>) {
 async fn fold_claim_ranges(store: Arc<Store>, mut events: watch::Receiver<u64>) {
     loop {
         let worker = store.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            fractal_daemon::task_cpu::blocking("maintenance.claim_ranges", || {
-                worker.fold_claim_ranges_paced(std::thread::sleep)
-            })
-        })
-        .await;
+        let result = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.claim_ranges", || worker.fold_claim_ranges_paced(std::thread::sleep))).await;
         match result {
             Ok(Ok(())) => {
                 if events.changed().await.is_err() {
@@ -20387,23 +19368,12 @@ async fn fold_claim_ranges(store: Arc<Store>, mut events: watch::Receiver<u64>) 
 async fn convert_envelope_payloads(store: Arc<Store>) {
     loop {
         let store = store.clone();
-        let result = store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::blocking("maintenance.envelope_payloads", || {
-                    store.convert_envelope_payloads()
-                })
-            })
-            .await;
+        let result = store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.envelope_payloads", || store.convert_envelope_payloads())).await;
         match result {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("binary envelope conversion failed: {error:?}"),
-                );
+                stderr_message("st3", format_args!("binary envelope conversion failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -20416,16 +19386,10 @@ async fn backfill_envelope_signatures(store: Arc<Store>) {
     loop {
         let worker = store.clone();
         let result = tokio::task::spawn_blocking(move || {
-            fractal_daemon::task_cpu::blocking("maintenance.signature_backfill", || {
-                worker.advance_signature_backfill()
-            })
-        })
-        .await;
+            fractal_daemon::task_cpu::blocking("maintenance.signature_backfill", || worker.advance_signature_backfill())
+        }).await;
         if !matches!(result, Ok(Ok(_))) {
-            stderr_message(
-                "st3",
-                format_args!("signature backfill scan failed: {result:?}"),
-            );
+            stderr_message("st3", format_args!("signature backfill scan failed: {result:?}"));
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -20436,24 +19400,16 @@ async fn backfill_envelope_signatures(store: Arc<Store>) {
 async fn catch_up_coordination_counts(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = page_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking(
-                    "maintenance.coordination_counts",
-                    || page_store.advance_coordination_counts(),
-                )
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.coordination_counts", || {
+                page_store.advance_coordination_counts()
             })
-            .await;
+        }).await;
         match result {
             Ok(Ok(true)) => return,
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("coordination count bootstrap failed: {error:?}"),
-                );
+                stderr_message("st3", format_args!("coordination count bootstrap failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -20466,24 +19422,16 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
 async fn backfill_agent_message_days(store: Arc<Store>) {
     loop {
         let page_store = store.clone();
-        let result = page_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking(
-                    "maintenance.agent_message_days",
-                    || page_store.advance_agent_message_days(),
-                )
+        let result = page_store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.agent_message_days", || {
+                page_store.advance_agent_message_days()
             })
-            .await;
+        }).await;
         match result {
             Ok(Ok(true)) => return,
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("agent message usage backfill failed: {error:?}"),
-                );
+                stderr_message("st3", format_args!("agent message usage backfill failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -20506,10 +19454,7 @@ async fn copy_stop_deferral_history(store: Arc<Store>) {
         match result {
             Ok(Ok(_)) => return,
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("stop-deferral history copy failed: {error:?}"),
-                );
+                stderr_message("st3", format_args!("stop-deferral history copy failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -20526,79 +19471,48 @@ fn spawn_publication_evidence(store: Arc<Store>) {
             changed.send_replace(());
         }
     });
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "publication.evidence",
-        async move {
-            let _observer = observer;
-            loop {
-                receiver.borrow_and_update();
-                let read_store = store.clone();
-                match tokio::task::spawn_blocking(move || {
-                    fractal_daemon::task_cpu::blocking("publication.evidence_ready", || {
-                        read_store.publication_evidence_ready()
-                    })
-                })
-                .await
-                {
-                    Ok(Ok(true)) => {
-                        if receiver.changed().await.is_err() {
-                            return;
-                        }
-                    }
-                    Ok(Ok(false)) => {
-                        let page_store = store.clone();
-                        match page_store
-                            .connection
-                            .write_workers()
-                            .spawn_blocking(move || {
-                                fractal_daemon::task_cpu::blocking(
-                                    "publication.advance_evidence",
-                                    || page_store.advance_publication_evidence(),
-                                )
-                            })
-                            .await
-                        {
-                            Ok(Ok(_)) => tokio::task::yield_now().await,
-                            error => {
-                                stderr_message(
-                                    "st3",
-                                    format_args!(
-                                        "publication evidence bootstrap stopped: {error:?}"
-                                    ),
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    error => {
-                        stderr_message(
-                            "st3",
-                            format_args!("publication evidence status failed: {error:?}"),
-                        );
+    tokio::spawn(fractal_daemon::task_cpu::account("publication.evidence", async move {
+        let _observer = observer;
+        loop {
+            receiver.borrow_and_update();
+            let read_store = store.clone();
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("publication.evidence_ready", || read_store.publication_evidence_ready())).await
+            {
+                Ok(Ok(true)) => {
+                    if receiver.changed().await.is_err() {
                         return;
                     }
                 }
+                Ok(Ok(false)) => {
+                    let page_store = store.clone();
+                    match page_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("publication.advance_evidence", || {
+                        page_store.advance_publication_evidence()
+                    }))
+                    .await
+                    {
+                        Ok(Ok(_)) => tokio::task::yield_now().await,
+                        error => {
+                            stderr_message("st3", format_args!("publication evidence bootstrap stopped: {error:?}"));
+                            return;
+                        }
+                    }
+                }
+                error => {
+                    stderr_message("st3", format_args!("publication evidence status failed: {error:?}"));
+                    return;
+                }
             }
-        },
-    ));
+        }
+    }));
 }
 
 async fn migrate_event_payloads(store: Arc<Store>) {
     match fractal_daemon::maintenance::migrate_event_payloads(store).await {
         Ok(report) if report.pending_at_start => {
-            stderr_message(
-                "st3",
-                format_args!(
-                    "event payload migration completed: {} rows in {} chunks, {:.0} ms elapsed, {:.1} ms maximum chunk call",
-                    report.moved_rows, report.chunks, report.elapsed_ms, report.max_chunk_call_ms
-                ),
-            );
+            stderr_message("st3", format_args!("event payload migration completed: {} rows in {} chunks, {:.0} ms elapsed, {:.1} ms maximum chunk call", report.moved_rows, report.chunks, report.elapsed_ms, report.max_chunk_call_ms));
         }
         Ok(_) => {}
-        Err(error) => stderr_message(
-            "st3",
-            format_args!("event payload migration stopped: {error:#}"),
-        ),
+        Err(error) => stderr_message("st3", format_args!("event payload migration stopped: {error:#}")),
     }
 }
 
@@ -20620,13 +19534,10 @@ fn spawn_response_expiry(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
             changed.send_replace(());
         }
     });
-    tokio::spawn(fractal_daemon::task_cpu::account(
-        "maintenance.response_expiry",
-        async move {
-            let _observer = observer;
-            expire_completed_responses(store, receiver).await;
-        },
-    ))
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.response_expiry", async move {
+        let _observer = observer;
+        expire_completed_responses(store, receiver).await;
+    }))
 }
 
 async fn expire_completed_responses(
@@ -20640,33 +19551,20 @@ async fn expire_completed_responses(
         // commit between that read and the wait remains visible to changed().
         changed.borrow_and_update();
         let read_store = store.clone();
-        let deadline = match tokio::task::spawn_blocking(move || {
-            fractal_daemon::task_cpu::blocking("maintenance.response_expiry_deadline", || {
-                read_store.next_idempotency_expiry()
-            })
-        })
-        .await
-        {
-            Ok(Ok(deadline)) => deadline,
-            Ok(Err(error)) if maintenance_contention(&error) => {
-                stderr_message(
-                    "st3",
-                    format_args!(
-                        "response expiry read contention; retrying in {retry:?}: {error:#}"
-                    ),
-                );
-                tokio::time::sleep(retry).await;
-                retry = (retry * 2).min(Duration::from_secs(5));
-                continue;
-            }
-            error => {
-                stderr_message(
-                    "st3",
-                    format_args!("response expiry scheduler stopped: {error:?}"),
-                );
-                return;
-            }
-        };
+        let deadline =
+            match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
+                Ok(Ok(deadline)) => deadline,
+                Ok(Err(error)) if maintenance_contention(&error) => {
+                    stderr_message("st3", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
+                    tokio::time::sleep(retry).await;
+                    retry = (retry * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+                error => {
+                    stderr_message("st3", format_args!("response expiry scheduler stopped: {error:?}"));
+                    return;
+                }
+            };
         let now = now_ms().min(i64::MAX as u128) as i64;
         if deadline.is_none_or(|deadline| deadline > now) {
             match deadline {
@@ -20689,41 +19587,26 @@ async fn expire_completed_responses(
             continue;
         }
         let clock_store = store.clone();
-        let clock_limit = match tokio::task::spawn_blocking(move || {
-            fractal_daemon::task_cpu::blocking("maintenance.response_expiry_clock", || {
-                clock_store.idempotency_clock_limit()
-            })
-        })
+        let clock_limit = match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_clock", || {
+            clock_store.idempotency_clock_limit()
+        }))
         .await
         {
             Ok(Ok(limit)) => limit,
             Ok(Err(error)) if maintenance_contention(&error) => {
-                stderr_message(
-                    "st3",
-                    format_args!(
-                        "response expiry clock contention; retrying in {retry:?}: {error:#}"
-                    ),
-                );
+                stderr_message("st3", format_args!("response expiry clock contention; retrying in {retry:?}: {error:#}"));
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
                 continue;
             }
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("response expiry clock read stopped: {error:?}"),
-                );
+                stderr_message("st3", format_args!("response expiry clock read stopped: {error:?}"));
                 return;
             }
         };
         if clock_limit.is_none_or(|limit| deadline.unwrap() > limit) {
             if !clock_deferred {
-                stderr_message(
-                    "st3",
-                    format_args!(
-                        "response expiry deferred until committed claim time validates the deadline"
-                    ),
-                );
+                stderr_message("st3", format_args!("response expiry deferred until committed claim time validates the deadline"));
                 clock_deferred = true;
             }
             if changed.changed().await.is_err() {
@@ -20733,35 +19616,24 @@ async fn expire_completed_responses(
         }
         clock_deferred = false;
         let clean_store = store.clone();
-        match clean_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
-                    clean_store.cleanup_idempotency(now)
-                })
+        match clean_store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.response_expiry", || {
+                clean_store.cleanup_idempotency(now)
             })
-            .await
+        })
+        .await
         {
             Ok(Ok(_)) => {
                 retry = Duration::from_millis(200);
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Ok(Err(error)) if maintenance_contention(&error) => {
-                stderr_message(
-                    "st3",
-                    format_args!(
-                        "response expiry write contention; retrying in {retry:?}: {error:#}"
-                    ),
-                );
+                stderr_message("st3", format_args!("response expiry write contention; retrying in {retry:?}: {error:#}"));
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             }
             error => {
-                stderr_message(
-                    "st3",
-                    format_args!("response expiry cleanup stopped: {error:?}"),
-                );
+                stderr_message("st3", format_args!("response expiry cleanup stopped: {error:?}"));
                 return;
             }
         }
@@ -20781,26 +19653,19 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
     let mut announced = false;
     loop {
         let page_store = store.clone();
-        let more = page_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking("account_limits.catch_up", || {
-                    page_store.catch_up_account_limits(fractal_daemon::store::LIMITS_CATCH_UP_PAGE)
-                })
+        let more = page_store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("account_limits.catch_up", || {
+                page_store.catch_up_account_limits(fractal_daemon::store::LIMITS_CATCH_UP_PAGE)
             })
-            .await;
+        })
+        .await;
         if !announced && matches!(more, Ok(Ok(_))) {
             let ready_store = store.clone();
-            let ready = tokio::task::spawn_blocking(move || {
-                fractal_daemon::task_cpu::blocking("account_limits.ready", || {
-                    ready_store.account_limits_ready()
-                })
-            })
-            .await
-            .ok()
-            .and_then(|result| result.ok())
-            .unwrap_or(false);
+            let ready = tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("account_limits.ready", || ready_store.account_limits_ready()))
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .unwrap_or(false);
             if ready {
                 announced = true;
                 notify.notify_one();
@@ -20816,10 +19681,7 @@ async fn catch_up_account_limits(store: Arc<Store>, notify: Arc<Notify>) {
 #[cfg(test)]
 mod limits_catch_up_wake_tests;
 
-async fn trim_local_observations(
-    store: Arc<Store>,
-    observations: fractal_daemon::config::ObservationsConfig,
-) {
+async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon::config::ObservationsConfig) {
     const LOCAL_OBSERVATION_TRIM_INTERVAL: Duration = Duration::from_secs(60 * 60);
     const LOCAL_OBSERVATION_TRIM_CHUNK: usize = 5_000;
     let retention_ms = observations
@@ -20828,109 +19690,61 @@ async fn trim_local_observations(
     loop {
         let observation_store = store.clone();
         let max_per_subject_kind = observations.max_per_subject_kind;
-        let trimmed = observation_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking("observations.trim", || {
-                    observation_store.trim_local_observations(
-                        now_ms().saturating_sub(u128::from(retention_ms)),
-                        max_per_subject_kind,
-                        LOCAL_OBSERVATION_TRIM_CHUNK,
-                    )
-                })
+        let trimmed = observation_store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("observations.trim", || {
+                observation_store.trim_local_observations(
+                    now_ms().saturating_sub(u128::from(retention_ms)),
+                    max_per_subject_kind,
+                    LOCAL_OBSERVATION_TRIM_CHUNK,
+                )
             })
-            .await;
+        })
+        .await;
         let usage_store = store.clone();
-        if let Ok(Err(error)) = usage_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::blocking("observations.trim_usage_responses", || {
-                    usage_store.trim_usage_responses(
-                        now_ms().saturating_sub(fractal_daemon::store::USAGE_RESPONSE_HORIZON_MS),
-                        LOCAL_OBSERVATION_TRIM_CHUNK,
-                    )
-                })
-            })
-            .await
+        if let Ok(Err(error)) = usage_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.trim_usage_responses", || {
+            usage_store.trim_usage_responses(
+                now_ms().saturating_sub(fractal_daemon::store::USAGE_RESPONSE_HORIZON_MS),
+                LOCAL_OBSERVATION_TRIM_CHUNK,
+            )
+        }))
+        .await
         {
             stderr_message("st3", format_args!("usage response trim failed: {error:#}"));
         }
         match trimmed {
             Ok(Ok(0)) => {}
-            Ok(Ok(count)) => {
-                stderr_message("st3", format_args!("trimmed {count} local observations"))
-            }
-            Ok(Err(error)) => stderr_message(
-                "st3",
-                format_args!("local observation trim failed: {error:#}"),
-            ),
-            Err(error) => stderr_message(
-                "st3",
-                format_args!("local observation trim stopped: {error}"),
-            ),
+            Ok(Ok(count)) => stderr_message("st3", format_args!("trimmed {count} local observations")),
+            Ok(Err(error)) => stderr_message("st3", format_args!("local observation trim failed: {error:#}")),
+            Err(error) => stderr_message("st3", format_args!("local observation trim stopped: {error}")),
         }
         // What these trims, checkpoints and response expiry freed goes back to the filesystem,
         // one short write at a time so other writes run between them.
         let mut released = 0;
         loop {
             let vacuum_store = store.clone();
-            match vacuum_store
-                .connection
-                .write_workers()
-                .spawn_blocking(move || {
-                    fractal_daemon::task_cpu::blocking("observations.release_free_pages", || {
-                        vacuum_store.release_free_pages()
-                    })
-                })
-                .await
-            {
+            match vacuum_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.release_free_pages", || vacuum_store.release_free_pages())).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(pages)) => released += pages,
                 Ok(Err(error)) => {
-                    stderr_message(
-                        "st3",
-                        format_args!("giving free pages back failed: {error:#}"),
-                    );
+                    stderr_message("st3", format_args!("giving free pages back failed: {error:#}"));
                     break;
                 }
                 Err(error) => {
-                    stderr_message(
-                        "st3",
-                        format_args!("giving free pages back stopped: {error}"),
-                    );
+                    stderr_message("st3", format_args!("giving free pages back stopped: {error}"));
                     break;
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         if released > 0 {
-            stderr_message(
-                "st3",
-                format_args!("gave {released} free pages back to the filesystem"),
-            );
+            stderr_message("st3", format_args!("gave {released} free pages back to the filesystem"));
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
-        match size_store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::blocking("observations.database_size", || {
-                    size_store.record_database_size(now_ms())
-                })
-            })
-            .await
-        {
+        match size_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
             Ok(Ok(size)) => fractal_daemon::slo::note_database_size(&size),
-            Ok(Err(error)) => stderr_message(
-                "st3",
-                format_args!("database size sample failed: {error:#}"),
-            ),
-            Err(error) => {
-                stderr_message("st3", format_args!("database size sample stopped: {error}"))
-            }
+            Ok(Err(error)) => stderr_message("st3", format_args!("database size sample failed: {error:#}")),
+            Err(error) => stderr_message("st3", format_args!("database size sample stopped: {error}")),
         }
         tokio::time::sleep(LOCAL_OBSERVATION_TRIM_INTERVAL).await;
     }
@@ -20944,20 +19758,10 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
     // proof or a cleanup error stays visible and prevents a later proof from consuming space.
     let sweep_store = store.clone();
     let sweep_dir = context.scratch.clone();
-    match tokio::task::spawn_blocking(move || {
-        sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)
-    })
-    .await
-    {
+    match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => stderr_message(
-            "st3",
-            format_args!("checkpoint proof startup cleanup failed: {error:#}"),
-        ),
-        Err(error) => stderr_message(
-            "st3",
-            format_args!("checkpoint proof startup cleanup stopped: {error}"),
-        ),
+        Ok(Err(error)) => stderr_message("st3", format_args!("checkpoint proof startup cleanup failed: {error:#}")),
+        Err(error) => stderr_message("st3", format_args!("checkpoint proof startup cleanup stopped: {error}")),
     }
     loop {
         let store = store.clone();
@@ -20965,30 +19769,17 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
             now_unix_ms: now_ms(),
             ..context.clone()
         };
-        match store
-            .connection
-            .write_workers()
-            .spawn_blocking(move || {
-                fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || {
-                    store.checkpoint_step(&context)
-                })
-            })
-            .await
+        match store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
+        })
+        .await
         {
             Ok(Ok(actions)) => {
                 for action in actions {
-                    stderr_message(
-                        "st3",
-                        format_args!(
-                            "checkpoint {}",
-                            serde_json::to_string(&action).unwrap_or_default()
-                        ),
-                    );
+                    stderr_message("st3", format_args!("checkpoint {}", serde_json::to_string(&action).unwrap_or_default()));
                 }
             }
-            Ok(Err(error)) => {
-                stderr_message("st3", format_args!("checkpoint work failed: {error:#}"))
-            }
+            Ok(Err(error)) => stderr_message("st3", format_args!("checkpoint work failed: {error:#}")),
             Err(error) => stderr_message("st3", format_args!("checkpoint work stopped: {error}")),
         }
         tokio::time::sleep(CHECKPOINT_INTERVAL).await;

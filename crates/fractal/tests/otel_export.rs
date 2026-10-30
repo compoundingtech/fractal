@@ -103,18 +103,15 @@ fn int_attribute(record: &Value, name: &str) -> Option<i64> {
 
 #[cfg(target_os = "linux")]
 fn double_attribute(record: &Value, name: &str) -> Option<f64> {
-    record["attributes"]
-        .as_array()?
-        .iter()
-        .find_map(|attribute| {
-            if attribute["key"] != name {
-                return None;
-            }
-            let value = &attribute["value"]["doubleValue"];
-            value
-                .as_f64()
-                .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-        })
+    record["attributes"].as_array()?.iter().find_map(|attribute| {
+        if attribute["key"] != name {
+            return None;
+        }
+        let value = &attribute["value"]["doubleValue"];
+        value
+            .as_f64()
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -290,8 +287,8 @@ fn cli_success_exports_root_span() {
         Some(2),
         "successful command must not carry ERROR status: {span}"
     );
-    let metrics =
-        std::fs::read_to_string(root.path().join("capture/metrics.ndjson")).unwrap_or_default();
+    let metrics = std::fs::read_to_string(root.path().join("capture/metrics.ndjson"))
+        .unwrap_or_default();
     for line in metrics.lines() {
         let request: Value = serde_json::from_str(line).expect("valid OTLP metric request");
         for batch in request["resourceMetrics"].as_array().into_iter().flatten() {
@@ -331,10 +328,7 @@ fn daemon_memory_exported(metrics: &str) -> bool {
     let states = ["allocated", "free", "mmapped", "arena", "releasable"];
     let mut heap_snapshot = false;
     let mut rss = false;
-    for line in metrics
-        .split_inclusive('\n')
-        .filter(|line| line.ends_with('\n'))
-    {
+    for line in metrics.split_inclusive('\n').filter(|line| line.ends_with('\n')) {
         let request: Value = serde_json::from_str(line).expect("valid OTLP metric request");
         for batch in request["resourceMetrics"].as_array().into_iter().flatten() {
             if string_attribute(&batch["resource"], "service.name") != Some("st-daemon") {
@@ -343,50 +337,33 @@ fn daemon_memory_exported(metrics: &str) -> bool {
             for scope in batch["scopeMetrics"].as_array().into_iter().flatten() {
                 for metric in scope["metrics"].as_array().into_iter().flatten() {
                     if metric["name"] == "st.allocator.heap" && metric["unit"] == "By" {
-                        let points = metric["gauge"]["dataPoints"]
-                            .as_array()
+                        let points = metric["gauge"]["dataPoints"].as_array()
                             .expect("heap gauge points");
                         assert_eq!(points.len(), states.len(), "exactly five heap states");
                         let timestamp = &points[0]["timeUnixNano"];
                         assert!(!timestamp.is_null(), "heap sample has a timestamp");
                         for state in states {
-                            let matching: Vec<_> = points
-                                .iter()
+                            let matching: Vec<_> = points.iter()
                                 .filter(|point| string_attribute(point, "state") == Some(state))
                                 .collect();
                             assert_eq!(matching.len(), 1, "one point per heap state: {state}");
                             let point = matching[0];
-                            assert_eq!(
-                                &point["timeUnixNano"], timestamp,
-                                "all states belong to the same collection"
-                            );
-                            assert_eq!(
-                                point["attributes"].as_array().unwrap().len(),
-                                1,
-                                "state is the only heap attribute"
-                            );
-                            let bytes = point["asInt"]
-                                .as_u64()
-                                .or_else(|| {
-                                    point["asInt"].as_str().and_then(|value| value.parse().ok())
-                                })
-                                .expect("heap bytes are an unsigned integer");
+                            assert_eq!(&point["timeUnixNano"], timestamp,
+                                "all states belong to the same collection");
+                            assert_eq!(point["attributes"].as_array().unwrap().len(), 1,
+                                "state is the only heap attribute");
+                            let bytes = point["asInt"].as_u64().or_else(|| {
+                                point["asInt"].as_str().and_then(|value| value.parse().ok())
+                            }).expect("heap bytes are an unsigned integer");
                             if state == "allocated" {
                                 heap_snapshot |= bytes > 0;
                             }
                         }
                     }
-                    for point in metric["gauge"]["dataPoints"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                    {
-                        let positive = point["asInt"]
-                            .as_u64()
-                            .or_else(|| {
-                                point["asInt"].as_str().and_then(|value| value.parse().ok())
-                            })
-                            .is_some_and(|value| value > 0);
+                    for point in metric["gauge"]["dataPoints"].as_array().into_iter().flatten() {
+                        let positive = point["asInt"].as_u64().or_else(|| {
+                            point["asInt"].as_str().and_then(|value| value.parse().ok())
+                        }).is_some_and(|value| value > 0);
                         if metric["name"] == "st.process.memory.rss" && metric["unit"] == "By" {
                             rss |= positive;
                         }
@@ -415,15 +392,8 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
         .env("OTEL_LOGS_EXPORTER", "none")
         .args(["run", "--out"])
         .arg(root.path().join("capture"))
-        .args([
-            "--protocol",
-            "http/json",
-            "--",
-            "sh",
-            "-c",
-            "echo $$ > \"$1\"; shift; exec \"$@\"",
-            "sh",
-        ])
+        .args(["--protocol", "http/json", "--", "sh", "-c",
+            "echo $$ > \"$1\"; shift; exec \"$@\"", "sh"])
         .arg(&pid_path)
         .arg(st3())
         .args(["up", "--node", "memory-test", "--state-dir"])
@@ -435,9 +405,7 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
         .arg("/bin/false")
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let mut capture = command
-        .spawn()
-        .expect("start isolated daemon under otelite");
+    let mut capture = command.spawn().expect("start isolated daemon under otelite");
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut observed = false;
     while Instant::now() < deadline {
@@ -470,10 +438,8 @@ fn daemon_exports_allocator_heap_and_resident_memory() {
     let _ = capture.kill();
     let output = capture.wait_with_output().expect("finish otelite capture");
     let metrics = std::fs::read_to_string(&metrics_path).unwrap_or_default();
-    assert!(
-        observed && daemon_memory_exported(&metrics),
-        "daemon must export all heap states and positive allocated heap and RSS:\n{metrics}\n{output:?}"
-    );
+    assert!(observed && daemon_memory_exported(&metrics),
+        "daemon must export all heap states and positive allocated heap and RSS:\n{metrics}\n{output:?}");
 }
 
 fn timed_cli(root: &Path, endpoint: &str, success: bool) -> Duration {
@@ -622,8 +588,7 @@ impl ExportDaemon {
                 .args(["--protocol", "http/json", "--"])
                 .arg(st3());
         }
-        command
-            .args(["up", "--node", "otel-test", "--state-dir"])
+        command.args(["up", "--node", "otel-test", "--state-dir"])
             .arg(root.join("daemon-state"))
             .arg("--socket")
             .arg(&socket)
@@ -671,25 +636,16 @@ impl ExportDaemon {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let mut socket = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            write!(
-                socket,
-                "GET /v1/client/missions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
-                x-st3-client: fractal\r\nx-st3-person: person/ada\r\n\r\n"
-            )
-            .unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(socket, "GET /v1/client/missions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                x-st3-client: fractal\r\nx-st3-person: person/ada\r\n\r\n").unwrap();
             let mut response = String::new();
             socket.read_to_string(&mut response).unwrap();
             if response.starts_with("HTTP/1.1 200 ") {
                 return;
             }
-            assert!(
-                response.contains("mission-list-not-ready") && Instant::now() < deadline,
-                "mission list: {response}\n{}",
-                self.diagnostics()
-            );
+            assert!(response.contains("mission-list-not-ready") && Instant::now() < deadline,
+                "mission list: {response}\n{}", self.diagnostics());
             std::thread::sleep(Duration::from_millis(50));
         }
     }
@@ -732,10 +688,9 @@ impl ExportDaemon {
         // Exercise the local API boundary; the separate fabric gateway requires pairing.
         let socket = &self.socket;
         let stream = tokio::net::UnixStream::connect(socket).await.unwrap();
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-                .await
-                .unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(
+            hyper_util::rt::TokioIo::new(stream),
+        ).await.unwrap();
         let connection = tokio::spawn(connection);
         let mut request = hyper::Request::builder()
             .method(method)
@@ -750,26 +705,15 @@ impl ExportDaemon {
         if let Some(key) = key {
             request = request.header("idempotency-key", key);
         }
-        let body = body
-            .map(|body| serde_json::to_vec(&body).unwrap())
-            .unwrap_or_default();
+        let body = body.map(|body| serde_json::to_vec(&body).unwrap()).unwrap_or_default();
         let response = tokio::time::timeout(
             Duration::from_secs(10),
             sender.send_request(request.body(axum::body::Body::from(body)).unwrap()),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        ).await.unwrap().unwrap();
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         connection.abort();
-        assert_eq!(
-            status,
-            hyper::StatusCode::OK,
-            "{}\n{}",
-            String::from_utf8_lossy(&body),
-            self.diagnostics()
-        );
+        assert_eq!(status, hyper::StatusCode::OK, "{}\n{}", String::from_utf8_lossy(&body), self.diagnostics());
         (serde_json::from_slice(&body).unwrap(), body.len())
     }
 
@@ -780,29 +724,17 @@ impl ExportDaemon {
         traceparent: &str,
     ) -> tokio_tungstenite::WebSocketStream<tokio::net::UnixStream> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
-        let stream = tokio::net::UnixStream::connect(&self.socket).await.unwrap();
-        let mut request = format!("ws://localhost{path}")
-            .into_client_request()
-            .unwrap();
-        request
-            .headers_mut()
-            .insert("sec-websocket-protocol", protocol.parse().unwrap());
-        request
-            .headers_mut()
-            .insert("traceparent", traceparent.parse().unwrap());
-        request
-            .headers_mut()
-            .insert("x-st3-client", "fractal".parse().unwrap());
-        request
-            .headers_mut()
-            .insert("x-st3-person", "person/ada".parse().unwrap());
+        let stream = tokio::net::UnixStream::connect(&self.socket)
+            .await.unwrap();
+        let mut request = format!("ws://localhost{path}").into_client_request().unwrap();
+        request.headers_mut().insert("sec-websocket-protocol", protocol.parse().unwrap());
+        request.headers_mut().insert("traceparent", traceparent.parse().unwrap());
+        request.headers_mut().insert("x-st3-client", "fractal".parse().unwrap());
+        request.headers_mut().insert("x-st3-person", "person/ada".parse().unwrap());
         let (socket, response) = tokio::time::timeout(
             Duration::from_secs(10),
             tokio_tungstenite::client_async(request, stream),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        ).await.unwrap().unwrap();
         assert_eq!(response.status(), hyper::StatusCode::SWITCHING_PROTOCOLS);
         assert_eq!(response.headers()["sec-websocket-protocol"], protocol);
         socket
@@ -812,15 +744,11 @@ impl ExportDaemon {
         let request = self.await_export(&root.join("capture/traces.ndjson"), |request| {
             exported_spans(request).any(&matches)
         });
-        exported_spans(&request)
-            .find(|span| matches(span))
-            .unwrap()
-            .clone()
+        exported_spans(&request).find(|span| matches(span)).unwrap().clone()
     }
 
     fn captured_spans(&self, root: &Path) -> Vec<Value> {
-        std::fs::read_to_string(root.join("capture/traces.ndjson"))
-            .unwrap_or_default()
+        std::fs::read_to_string(root.join("capture/traces.ndjson")).unwrap_or_default()
             .split_inclusive('\n')
             .filter(|line| line.ends_with('\n'))
             .flat_map(|line| {
@@ -930,9 +858,7 @@ fn cli_request_and_daemon_server_share_one_trace() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(
-            fractal_client::Client::unix(&daemon.socket).agents_list_after(None, None, false, 0),
-        )
+        .block_on(fractal_client::Client::unix(&daemon.socket).agents_list_after(None, None, false, 0))
         .expect("the fixture must publish its initial roster");
     let mut command = isolated_command(&collector, root.path());
     command
@@ -943,9 +869,7 @@ fn cli_request_and_daemon_server_share_one_trace() {
         .arg("--endpoint")
         .arg(&daemon.socket)
         .args(["--daemon-wait", "0", "agents", "ls"]);
-    let output = command
-        .output()
-        .expect("run CLI against exporting test daemon");
+    let output = command.output().expect("run CLI against exporting test daemon");
     assert!(
         output.status.success(),
         "CLI request failed: {output:?}\n{}",
@@ -969,20 +893,16 @@ fn cli_request_and_daemon_server_share_one_trace() {
                                 spans.iter().any(|server| {
                                     server["traceId"].as_str() == Some(trace_id)
                                         && server["parentSpanId"].as_str() == Some(cli_span_id)
-                                        && string_attribute(server, "http.request.method")
-                                            == Some("GET")
-                                        && int_attribute(server, "http.response.status_code")
-                                            == Some(200)
+                                        && string_attribute(server, "http.request.method") == Some("GET")
+                                        && int_attribute(server, "http.response.status_code") == Some(200)
                                         && (server["kind"].as_str() == Some("SPAN_KIND_SERVER")
                                             || server["kind"].as_u64() == Some(2))
-                                        && server["attributes"].as_array().is_some_and(
-                                            |attributes| {
-                                                !attributes.iter().any(|attribute| {
-                                                    attribute["key"] == "st.parent.sampled"
-                                                        && attribute["value"]["boolValue"] == true
-                                                })
-                                            },
-                                        )
+                                        && server["attributes"].as_array().is_some_and(|attributes| {
+                                            !attributes.iter().any(|attribute| {
+                                                attribute["key"] == "st.parent.sampled"
+                                                    && attribute["value"]["boolValue"] == true
+                                            })
+                                        })
                                 })
                             })
                         })
@@ -1146,9 +1066,7 @@ fn daemon_write_request_exports_storage_metrics() {
     // The COMMIT's frames are in the daemon's WAL before the response returns, so the file
     // on disk is the same WAL the gauge must report.
     let wal = root.path().join("daemon-state").join("claims.sqlite3-wal");
-    let wal_bytes = std::fs::metadata(&wal)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0);
+    let wal_bytes = std::fs::metadata(&wal).map(|metadata| metadata.len()).unwrap_or(0);
     assert!(
         wal_bytes > 0,
         "the written claim must fill {}: {} bytes",
@@ -1197,7 +1115,8 @@ fn daemon_write_request_exports_storage_metrics() {
                     && span["name"].as_str() == Some("POST /v1/claims")
                     && string_attribute(span, "http.route") == Some("/v1/claims")
                     && int_attribute(span, "st.writer.ops").is_some_and(|ops| ops >= 1)
-                    && double_attribute(span, "st.writer.wait_ms").is_none_or(|wait| wait >= 1.0)
+                    && double_attribute(span, "st.writer.wait_ms")
+                        .is_none_or(|wait| wait >= 1.0)
             })
     });
 }
@@ -1205,7 +1124,8 @@ fn daemon_write_request_exports_storage_metrics() {
 #[cfg(target_os = "linux")]
 #[test]
 fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
-    let Some(collector) = otelite("daemon_write_exports_independent_reconcile_pass_and_metrics")
+    let Some(collector) =
+        otelite("daemon_write_exports_independent_reconcile_pass_and_metrics")
     else {
         return;
     };
@@ -1268,11 +1188,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
         .flat_map(|scope| scope["metrics"].as_array().into_iter().flatten())
         .filter(|metric| metric["name"].as_str() == Some("st.reconcile.pass.duration"))
     {
-        assert_eq!(
-            metric["unit"].as_str(),
-            Some("s"),
-            "duration unit: {metric}"
-        );
+        assert_eq!(metric["unit"].as_str(), Some("s"), "duration unit: {metric}");
     }
     let wakes = daemon.await_export(&metrics_path, |request| {
         metric_points(request, "st.reconcile.wakes")
@@ -1287,21 +1203,17 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
     });
     for point in metric_points(&wakes, "st.reconcile.wakes") {
         let cause = string_attribute(point, "cause").expect("wake counter cause attribute");
-        assert!(
-            WAKE_CAUSES.contains(&cause),
-            "unbounded wake counter cause: {point}"
-        );
+        assert!(WAKE_CAUSES.contains(&cause), "unbounded wake counter cause: {point}");
     }
     daemon.await_export(&metrics_path, |request| {
         metric_points(request, "st.fifo.depth")
             .into_iter()
             .any(|point| {
-                string_attribute(point, "queue").is_some_and(|queue| {
-                    ["writer", "conversation", "terminal_emulation"].contains(&queue)
-                }) && point["asInt"]
-                    .as_u64()
-                    .or_else(|| point["asInt"].as_str().and_then(|value| value.parse().ok()))
-                    .is_some()
+                string_attribute(point, "queue").is_some_and(|queue| ["writer", "conversation", "terminal_emulation"].contains(&queue))
+                    && point["asInt"]
+                        .as_u64()
+                        .or_else(|| point["asInt"].as_str().and_then(|value| value.parse().ok()))
+                        .is_some()
             })
     });
     // Stop and drain the collector before checking every pass, including passes
@@ -1319,98 +1231,44 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
                 "reconcile pass must be a root, not a request child: {span}"
             );
             let trace_id = span["traceId"].as_str().expect("reconcile pass trace id");
-            assert_ne!(
-                trace_id, TRACE_ID,
-                "reconcile pass inherited the request trace: {span}"
-            );
+            assert_ne!(trace_id, TRACE_ID, "reconcile pass inherited the request trace: {span}");
             let cause = string_attribute(span, "st.reconcile.wake_cause")
                 .expect("reconcile pass wake cause attribute");
-            assert!(
-                WAKE_CAUSES.contains(&cause),
-                "unbounded reconcile wake cause: {span}"
-            );
+            assert!(WAKE_CAUSES.contains(&cause), "unbounded reconcile wake cause: {span}");
             if cause == "api" {
                 api_count += 1;
             }
         }
     }
     assert!(pass_count > 0, "no reconcile pass exported:\n{traces}");
-    assert!(
-        api_count > 0,
-        "write must export an API-woken reconcile pass:\n{traces}"
-    );
-    let requests: Vec<Value> = traces
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let passes: Vec<_> = requests
-        .iter()
-        .flat_map(|request| daemon_spans(request, "st.reconcile_pass"))
-        .collect();
+    assert!(api_count > 0, "write must export an API-woken reconcile pass:\n{traces}");
+    let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let passes: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile_pass")).collect();
     for name in [
-        "st.reconcile.changes",
-        "st.reconcile.gate-runners",
-        "st.reconcile.desired",
-        "st.reconcile.pty-snapshot",
-        "st.reconcile.render",
-        "st.reconcile.members",
-        "st.reconcile.work-messages",
-        "st.reconcile.stage.intake",
-        "st.reconcile.stage.observers",
-        "st.reconcile.stage.schedules",
-        "st.reconcile.stage.scheduled-work",
-        "st.reconcile.stage.subscriptions",
-        "st.reconcile.stage.provider-capacity-retries",
-        "st.reconcile.stage.person-asks",
-        "st.reconcile.stage.disk-space",
-        "st.reconcile.stage.faults",
+        "st.reconcile.changes", "st.reconcile.gate-runners", "st.reconcile.desired",
+        "st.reconcile.pty-snapshot", "st.reconcile.render", "st.reconcile.members",
+        "st.reconcile.work-messages", "st.reconcile.stage.intake",
+        "st.reconcile.stage.observers", "st.reconcile.stage.schedules",
+        "st.reconcile.stage.scheduled-work", "st.reconcile.stage.subscriptions",
+        "st.reconcile.stage.provider-capacity-retries", "st.reconcile.stage.person-asks",
+        "st.reconcile.stage.disk-space", "st.reconcile.stage.faults",
         "st.reconcile.stage.subagents",
-        "st.reconcile.stage.github-watches",
-        "st.reconcile.stage.missions",
+        "st.reconcile.stage.github-watches", "st.reconcile.stage.missions",
     ] {
-        assert!(
-            requests
-                .iter()
-                .flat_map(|request| daemon_spans(request, name))
-                .any(|child| {
-                    passes.iter().any(|pass| {
-                        child["parentSpanId"] == pass["spanId"]
-                            && child["traceId"] == pass["traceId"]
-                    })
-                }),
-            "missing reconcile child {name}: {traces}"
-        );
+        assert!(requests.iter().flat_map(|request| daemon_spans(request, name)).any(|child| {
+            passes.iter().any(|pass| child["parentSpanId"] == pass["spanId"] && child["traceId"] == pass["traceId"])
+        }), "missing reconcile child {name}: {traces}");
     }
-    assert!(
-        requests
-            .iter()
-            .flat_map(|request| daemon_spans(request, "st.reconcile.desired"))
-            .any(|span| int_attribute(span, "st.reconcile.items") == Some(0)),
-        "{traces}"
-    );
+    assert!(requests.iter().flat_map(|request| daemon_spans(request, "st.reconcile.desired"))
+        .any(|span| int_attribute(span, "st.reconcile.items") == Some(0)), "{traces}");
     for request in &requests {
-        assert!(
-            daemon_spans(request, "st.reconcile.member-stop").is_empty(),
-            "{traces}"
-        );
-        assert!(
-            daemon_spans(request, "st.reconcile.member-live").is_empty(),
-            "{traces}"
-        );
+        assert!(daemon_spans(request, "st.reconcile.member-stop").is_empty(), "{traces}");
+        assert!(daemon_spans(request, "st.reconcile.member-live").is_empty(), "{traces}");
         for span in daemon_spans(request, "st.reconcile.members") {
             for kind in ["stop", "live"] {
-                assert_eq!(
-                    int_attribute(span, &format!("st.reconcile.members.{kind}.count")),
-                    Some(0)
-                );
-                assert_eq!(
-                    double_attribute(span, &format!("st.reconcile.members.{kind}.total_ms")),
-                    Some(0.)
-                );
-                assert_eq!(
-                    double_attribute(span, &format!("st.reconcile.members.{kind}.max_ms")),
-                    Some(0.)
-                );
+                assert_eq!(int_attribute(span, &format!("st.reconcile.members.{kind}.count")), Some(0));
+                assert_eq!(double_attribute(span, &format!("st.reconcile.members.{kind}.total_ms")), Some(0.));
+                assert_eq!(double_attribute(span, &format!("st.reconcile.members.{kind}.max_ms")), Some(0.));
             }
         }
     }
@@ -1419,8 +1277,7 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
 #[cfg(target_os = "linux")]
 #[test]
 fn daemon_startup_exports_completed_root_phases_and_duration() {
-    let Some(collector) = otelite("daemon_startup_exports_completed_root_phases_and_duration")
-    else {
+    let Some(collector) = otelite("daemon_startup_exports_completed_root_phases_and_duration") else {
         return;
     };
     let root = tempfile::tempdir().unwrap();
@@ -1429,111 +1286,62 @@ fn daemon_startup_exports_completed_root_phases_and_duration() {
     let metrics_path = root.path().join("capture/metrics.ndjson");
     // Observe the completed root while the daemon is still serving: no flush at readiness.
     daemon.await_export(&traces_path, |request| {
-        daemon_spans(request, "st.startup")
-            .into_iter()
-            .any(|span| string_attribute(span, "st.startup.outcome") == Some("serving"))
+        daemon_spans(request, "st.startup").into_iter().any(|span| {
+            string_attribute(span, "st.startup.outcome") == Some("serving")
+        })
     });
     let durations = daemon.await_export(&metrics_path, |request| {
-        ["total", "node_identity", "open_store"]
-            .iter()
-            .all(|phase| {
-                metric_points(request, "st.startup.duration")
-                    .into_iter()
-                    .any(|point| {
-                        string_attribute(point, "phase") == Some(*phase)
-                            && histogram_count(point) == Some(1)
-                    })
+        ["total", "node_identity", "open_store"].iter().all(|phase| {
+            metric_points(request, "st.startup.duration").into_iter().any(|point| {
+                string_attribute(point, "phase") == Some(*phase)
+                    && histogram_count(point) == Some(1)
             })
+        })
     });
     for point in metric_points(&durations, "st.startup.duration") {
-        assert_eq!(
-            histogram_count(point),
-            Some(1),
-            "one duration per phase: {point}"
-        );
-        let boundaries = point["explicitBounds"]
-            .as_array()
-            .expect("explicit startup boundaries");
+        assert_eq!(histogram_count(point), Some(1), "one duration per phase: {point}");
+        let boundaries = point["explicitBounds"].as_array().expect("explicit startup boundaries");
         assert_eq!(boundaries.first().and_then(Value::as_f64), Some(0.01));
         assert_eq!(boundaries.last().and_then(Value::as_f64), Some(1800.0));
     }
     drop(daemon);
     let traces = std::fs::read_to_string(&traces_path).unwrap();
-    let requests: Vec<Value> = traces
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let roots: Vec<_> = requests
-        .iter()
-        .flat_map(|request| daemon_spans(request, "st.startup"))
-        .collect();
+    let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let roots: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.startup")).collect();
     assert_eq!(roots.len(), 1, "one root per start: {traces}");
     let startup = roots[0];
-    assert_eq!(
-        string_attribute(startup, "st.startup.outcome"),
-        Some("serving")
-    );
-    assert!(
-        startup["parentSpanId"]
-            .as_str()
-            .is_none_or(|id| id.is_empty() || id == "0000000000000000")
-    );
+    assert_eq!(string_attribute(startup, "st.startup.outcome"), Some("serving"));
+    assert!(startup["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"));
     assert_ne!(startup["status"]["code"].as_u64(), Some(2));
-    let phases: Vec<_> = requests
-        .iter()
-        .flat_map(|request| daemon_spans(request, "st.startup.phase"))
-        .collect();
-    assert_eq!(
-        phases.len(),
-        11,
-        "one aggregate span per startup phase: {traces}"
-    );
+    let phases: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.startup.phase")).collect();
+    assert_eq!(phases.len(), 11, "one aggregate span per startup phase: {traces}");
     for phase in &phases {
         assert_eq!(phase["traceId"], startup["traceId"]);
         assert_eq!(phase["parentSpanId"], startup["spanId"]);
         assert!(string_attribute(phase, "span.label").is_some());
     }
-    let identity = phases
-        .iter()
-        .find(|phase| string_attribute(phase, "st.startup.phase") == Some("node_identity"))
-        .expect("node identity phase");
+    let identity = phases.iter().find(|phase| {
+        string_attribute(phase, "st.startup.phase") == Some("node_identity")
+    }).expect("node identity phase");
     let timestamp = |span: &Value, key: &str| {
-        span[key]
-            .as_str()
-            .and_then(|value| value.parse::<u64>().ok())
-            .or_else(|| span[key].as_u64())
-            .expect("OTLP timestamp")
+        span[key].as_str().and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| span[key].as_u64()).expect("OTLP timestamp")
     };
     assert!(timestamp(startup, "startTimeUnixNano") <= timestamp(identity, "startTimeUnixNano"));
-    let hooks = phases
-        .iter()
-        .find(|phase| string_attribute(phase, "st.startup.phase") == Some("install_hooks"))
-        .unwrap();
+    let hooks = phases.iter().find(|phase| {
+        string_attribute(phase, "st.startup.phase") == Some("install_hooks")
+    }).unwrap();
     assert!(timestamp(identity, "endTimeUnixNano") <= timestamp(hooks, "startTimeUnixNano"));
     for name in ["open_store", "project_replication_backlog"] {
-        assert!(
-            phases
-                .iter()
-                .any(|phase| string_attribute(phase, "st.startup.phase") == Some(name))
-        );
+        assert!(phases.iter().any(|phase| string_attribute(phase, "st.startup.phase") == Some(name)));
     }
-    let projection = phases
-        .iter()
-        .find(|phase| {
-            string_attribute(phase, "st.startup.phase") == Some("project_replication_backlog")
-        })
-        .unwrap();
+    let projection = phases.iter().find(|phase| {
+        string_attribute(phase, "st.startup.phase") == Some("project_replication_backlog")
+    }).unwrap();
     assert!(int_attribute(projection, "st.startup.claims_processed").is_some());
-    assert!(
-        projection["attributes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|attribute| {
-                attribute["key"] == "st.startup.full_replay"
-                    && attribute["value"]["boolValue"].is_boolean()
-            })
-    );
+    assert!(projection["attributes"].as_array().unwrap().iter().any(|attribute| {
+        attribute["key"] == "st.startup.full_replay" && attribute["value"]["boolValue"].is_boolean()
+    }));
 }
 
 #[cfg(target_os = "linux")]
@@ -1562,9 +1370,7 @@ fn assert_startup_failure(failed_phase: &str) {
     } else {
         // Identity inspection accepts this readable database; store schema admission does not.
         let database = rusqlite::Connection::open(state.join("claims.sqlite3")).unwrap();
-        database
-            .execute_batch("PRAGMA user_version = 999;")
-            .unwrap();
+        database.execute_batch("PRAGMA user_version = 999;").unwrap();
     }
     let mut command = isolated_command(&collector, root.path());
     let output = command
@@ -1579,39 +1385,18 @@ fn assert_startup_failure(failed_phase: &str) {
         .arg("--client-gateway-socket")
         .arg(root.path().join("run/client.sock"))
         .args(["--pty-binary", "pty"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "{failed_phase} must fail: {output:?}"
-    );
+        .output().unwrap();
+    assert!(!output.status.success(), "{failed_phase} must fail: {output:?}");
     let traces = std::fs::read_to_string(root.path().join("capture/traces.ndjson")).unwrap();
-    let requests: Vec<Value> = traces
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let roots: Vec<_> = requests
-        .iter()
-        .flat_map(|request| daemon_spans(request, "st.startup"))
-        .collect();
-    assert_eq!(
-        roots.len(),
-        1,
-        "one failed startup root: {traces}\n{output:?}"
-    );
-    assert_eq!(
-        string_attribute(roots[0], "st.startup.outcome"),
-        Some("failed")
-    );
+    let requests: Vec<Value> = traces.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let roots: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.startup")).collect();
+    assert_eq!(roots.len(), 1, "one failed startup root: {traces}\n{output:?}");
+    assert_eq!(string_attribute(roots[0], "st.startup.outcome"), Some("failed"));
     assert_eq!(roots[0]["status"]["code"].as_u64(), Some(2));
-    let phases: Vec<_> = requests
-        .iter()
-        .flat_map(|request| daemon_spans(request, "st.startup.phase"))
-        .collect();
-    let failed = phases
-        .iter()
-        .find(|phase| string_attribute(phase, "st.startup.phase") == Some(failed_phase))
-        .expect("failed startup phase");
+    let phases: Vec<_> = requests.iter().flat_map(|request| daemon_spans(request, "st.startup.phase")).collect();
+    let failed = phases.iter().find(|phase| {
+        string_attribute(phase, "st.startup.phase") == Some(failed_phase)
+    }).expect("failed startup phase");
     assert_eq!(failed["status"]["code"].as_u64(), Some(2));
     assert_eq!(failed["traceId"], roots[0]["traceId"]);
     assert_eq!(failed["parentSpanId"], roots[0]["spanId"]);
@@ -1626,30 +1411,16 @@ async fn daemon_collection_stream_without_export_delivers_first_frame() {
     let daemon = ExportDaemon::start_without_export(root.path());
     let client = fractal_client::Client::unix_as(&daemon.socket, "person/ada");
     let mut stream = client.collection_stream().await.unwrap();
-    stream
-        .subscribe("missions", "missions", 2, None, None)
-        .await
-        .unwrap();
+    stream.subscribe("missions", "missions", 2, None, None).await.unwrap();
     // Readiness does not wait for the mission list's first publication. A window that subscribes
     // before then resyncs once, is kept, and gets its snapshot when the list publishes.
     let frame = tokio::time::timeout(Duration::from_secs(15), async {
         let first = stream.next().await.unwrap().unwrap();
-        if first["kind"] != "resync" {
-            return first;
-        }
-        assert_eq!(
-            (
-                first["id"].as_str(),
-                first["code"].as_str(),
-                first["retryable"].as_bool()
-            ),
-            (Some("missions"), Some("mission-list-not-ready"), Some(true)),
-            "{first}"
-        );
+        if first["kind"] != "resync" { return first; }
+        assert_eq!((first["id"].as_str(), first["code"].as_str(), first["retryable"].as_bool()),
+            (Some("missions"), Some("mission-list-not-ready"), Some(true)), "{first}");
         stream.next().await.unwrap().unwrap()
-    })
-    .await
-    .unwrap();
+    }).await.unwrap();
     assert_eq!(frame["kind"], "snapshot", "{frame}");
     assert_eq!(frame["id"], "missions", "{frame}");
     assert!(frame["items"].is_array(), "{frame}");
@@ -1725,17 +1496,15 @@ fn daemon_normal_request_exports_no_log_stream() {
 fn storage_stage_gates_export_detached_roots() {
     const CHILD: &str = "ST3_OTEL_STORAGE_STAGE_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        use opentelemetry::trace::TraceContextExt as _;
         use tracing_opentelemetry::OpenTelemetrySpanExt as _;
-        let mut telemetry =
-            fractal_daemon::otel::Telemetry::init(fractal_daemon::otel::Unit::Daemon, None);
+        use opentelemetry::trace::TraceContextExt as _;
+        let mut telemetry = fractal_daemon::otel::Telemetry::init(fractal_daemon::otel::Unit::Daemon, None);
         assert!(telemetry.enabled());
         assert!(std::env::var_os("ST3_PROFILE_DIR").is_none());
         assert!(!smallclaims::profile::enabled());
         for wait in [0.0, 0.999, 1.0, 1.001] {
             let server = tracing::info_span!(
-                "writer gate",
-                otel.kind = "server",
+                "writer gate", otel.kind = "server",
                 "st.writer.wait_ms" = tracing::field::Empty,
                 "st.writer.ops" = tracing::field::Empty,
             );
@@ -1755,31 +1524,15 @@ fn storage_stage_gates_export_detached_roots() {
         fractal_daemon::otel::record_wal_checkpoint(started, Some(&truncated), false);
         let ordinary = store.checkpoint_idle_wal_report(&connection).unwrap();
         assert!(ordinary.truncate_ms.is_none());
-        fractal_daemon::otel::record_wal_checkpoint(
-            std::time::SystemTime::now(),
-            Some(&ordinary),
-            false,
-        );
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
         let ambient = tracing::info_span!("ambient checkpoint");
         let ambient_context = ambient.context();
         let _entered = ambient.enter();
         let _attached = ambient_context.attach();
         // Repeat both gates under a tracing span and an attached OTel context.
-        fractal_daemon::otel::record_wal_checkpoint(
-            std::time::SystemTime::now(),
-            Some(&ordinary),
-            false,
-        );
-        fractal_daemon::otel::record_wal_checkpoint(
-            std::time::SystemTime::now(),
-            Some(&truncated),
-            false,
-        );
-        fractal_daemon::otel::record_wal_checkpoint(
-            std::time::SystemTime::now(),
-            Some(&ordinary),
-            true,
-        );
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), false);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&truncated), false);
+        fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), Some(&ordinary), true);
         fractal_daemon::otel::record_wal_checkpoint(std::time::SystemTime::now(), None, true);
         let writer_path = directory.path().join("writer.sqlite3");
         let writer_connection = rusqlite::Connection::open(&writer_path).unwrap();
@@ -1791,38 +1544,26 @@ fn storage_stage_gates_export_detached_roots() {
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
         let origin = smallclaims::sqlite::telemetry::enter_origin(
-            smallclaims::sqlite::telemetry::route_origin(
-                "POST",
-                "/v1/internal/replication/receive",
-            ),
-        );
+            smallclaims::sqlite::telemetry::route_origin("POST", "/v1/internal/replication/receive"));
         let held = writer.write_background();
         drop(origin);
         let (done, answer) = std::sync::mpsc::sync_channel(1);
         writer.send(smallclaims::sqlite::WriterJob::Batched {
-            run: Box::new(|_| true),
-            profile: None,
-            wait: None,
+            run: Box::new(|_| true), profile: None, wait: None,
             holder: smallclaims::windows::holds::Holder::current(),
-            enqueued: Instant::now(),
-            done,
+            enqueued: Instant::now(), done,
         });
         // Enqueue synchronously while the connection is lent; the wait has a fixed lower bound.
         std::thread::sleep(Duration::from_millis(260));
         drop(held);
         answer.recv().unwrap().unwrap();
         let checkpoint = rusqlite::Connection::open(&writer_path).unwrap();
-        smallclaims::profile::task("task checkpoint", || {
-            writer
-                .batched(move |_| {
-                    // A lower bound, not a race with a timeout: the operation itself exceeds 250 ms.
-                    std::thread::sleep(Duration::from_millis(260));
-                    smallclaims::sqlite::checkpoint_wal_report(&checkpoint)?;
-                    Ok::<_, anyhow::Error>(())
-                })
-                .unwrap()
-                .unwrap()
-        });
+        smallclaims::profile::task("task checkpoint", || writer.batched(move |_| {
+            // A lower bound, not a race with a timeout: the operation itself exceeds 250 ms.
+            std::thread::sleep(Duration::from_millis(260));
+            smallclaims::sqlite::checkpoint_wal_report(&checkpoint)?;
+            Ok::<_, anyhow::Error>(())
+        }).unwrap().unwrap());
         // ACK precedes retrospective export; joining the writer guarantees its root is ended.
         drop(writer);
         let current = opentelemetry::Context::current();
@@ -1839,188 +1580,84 @@ fn storage_stage_gates_export_detached_roots() {
     let root = tempfile::tempdir().unwrap();
     let output = isolated_command(&collector, root.path())
         .env(CHILD, "1")
-        .args(["run", "--out"])
-        .arg(root.path().join("capture"))
+        .args(["run", "--out"]).arg(root.path().join("capture"))
         .args(["--protocol", "http/json", "--"])
         .arg(std::env::current_exe().unwrap())
-        .args([
-            "otel_export::storage_stage_gates_export_detached_roots",
-            "--exact",
-            "--nocapture",
-        ])
-        .output()
-        .unwrap();
+        .args(["otel_export::storage_stage_gates_export_detached_roots", "--exact", "--nocapture"])
+        .output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let traces = std::fs::read_to_string(root.path().join("capture/traces.ndjson")).unwrap();
-    let spans: Vec<Value> = traces
-        .lines()
-        .flat_map(|line| {
-            let request: Value = serde_json::from_str(line).unwrap();
-            request["resourceSpans"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|batch| batch["scopeSpans"].as_array().unwrap())
-                .flat_map(|scope| scope["spans"].as_array().unwrap())
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let writers: Vec<_> = spans
-        .iter()
-        .filter(|span| span["name"] == "writer gate")
-        .collect();
+    let spans: Vec<Value> = traces.lines().flat_map(|line| {
+        let request: Value = serde_json::from_str(line).unwrap();
+        request["resourceSpans"].as_array().unwrap().iter()
+            .flat_map(|batch| batch["scopeSpans"].as_array().unwrap())
+            .flat_map(|scope| scope["spans"].as_array().unwrap())
+            .cloned().collect::<Vec<_>>()
+    }).collect();
+    let writers: Vec<_> = spans.iter().filter(|span| span["name"] == "writer gate").collect();
     assert_eq!(writers.len(), 4, "{traces}");
-    let waits: Vec<_> = writers
-        .iter()
-        .filter_map(|span| double_attribute(span, "st.writer.wait_ms"))
-        .collect();
+    let waits: Vec<_> = writers.iter().filter_map(|span| double_attribute(span, "st.writer.wait_ms")).collect();
     assert_eq!(waits.len(), 2, "{traces}");
     assert!(waits.contains(&1.0) && waits.contains(&1.001), "{traces}");
-    assert!(
-        writers
-            .iter()
-            .all(|span| int_attribute(span, "st.writer.ops") == Some(2))
-    );
-    let batches: Vec<_> = spans
-        .iter()
-        .filter(|span| span["name"] == "st.db.writer.batch")
-        .collect();
-    let batch = batches
-        .into_iter()
-        .find(|batch| {
-            int_attribute(batch, "st.db.writer.batch.ops") == Some(1)
-                && double_attribute(batch, "st.db.writer.batch.operations_ms")
-                    .is_some_and(|ms| ms >= 250.)
-        })
-        .unwrap_or_else(|| panic!("sleeping operation did not export a slow batch: {traces}"));
+    assert!(writers.iter().all(|span| int_attribute(span, "st.writer.ops") == Some(2)));
+    let batches: Vec<_> = spans.iter().filter(|span| span["name"] == "st.db.writer.batch").collect();
+    let batch = batches.into_iter().find(|batch| {
+        int_attribute(batch, "st.db.writer.batch.ops") == Some(1)
+            && double_attribute(batch, "st.db.writer.batch.operations_ms").is_some_and(|ms| ms >= 250.)
+    }).unwrap_or_else(|| panic!("sleeping operation did not export a slow batch: {traces}"));
     for attribute in [
-        "st.db.writer.batch.begin_ms",
-        "st.db.writer.batch.operations_ms",
+        "st.db.writer.batch.begin_ms", "st.db.writer.batch.operations_ms",
         "st.db.writer.batch.finalizers_ms",
-        "st.db.writer.batch.commit_ms",
-        "st.db.writer.batch.post_commit_ms",
+        "st.db.writer.batch.commit_ms", "st.db.writer.batch.post_commit_ms",
         "st.db.writer.batch.slowest_op_ms",
-        "st.db.writer.batch.checkpoint_overlap_ms",
-        "st.writer.wait_ms",
+        "st.db.writer.batch.checkpoint_overlap_ms", "st.writer.wait_ms",
     ] {
-        assert!(
-            double_attribute(batch, attribute).is_some_and(|ms| ms >= 0.),
-            "{batch}"
-        );
+        assert!(double_attribute(batch, attribute).is_some_and(|ms| ms >= 0.), "{batch}");
     }
-    assert!(
-        double_attribute(batch, "st.db.writer.batch.operations_ms").unwrap() >= 250.,
-        "{batch}"
-    );
+    assert!(double_attribute(batch, "st.db.writer.batch.operations_ms").unwrap() >= 250., "{batch}");
     assert_eq!(int_attribute(batch, "st.db.writer.batch.ops"), Some(1));
-    assert_eq!(
-        string_attribute(batch, "st.db.writer.batch.slowest_op_origin"),
-        Some("task checkpoint")
-    );
-    assert!(
-        batch["parentSpanId"]
-            .as_str()
-            .is_none_or(|id| id.is_empty() || id == "0000000000000000"),
-        "{batch}"
-    );
+    assert_eq!(string_attribute(batch, "st.db.writer.batch.slowest_op_origin"), Some("task checkpoint"));
+    assert!(batch["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"), "{batch}");
     println!("slow writer batch example: {batch}");
-    assert!(
-        double_attribute(batch, "st.db.writer.batch.checkpoint_overlap_ms").unwrap() > 0.,
-        "{batch}"
-    );
-    let waiting = spans
-        .iter()
-        .find(|span| {
-            span["name"] == "st.db.writer.batch"
-                && double_attribute(span, "st.writer.wait_ms").is_some_and(|ms| ms >= 250.)
-        })
+    assert!(double_attribute(batch, "st.db.writer.batch.checkpoint_overlap_ms").unwrap() > 0., "{batch}");
+    let waiting = spans.iter().find(|span| span["name"] == "st.db.writer.batch"
+        && double_attribute(span, "st.writer.wait_ms").is_some_and(|ms| ms >= 250.))
         .unwrap_or_else(|| panic!("long writer wait did not export a batch: {traces}"));
-    assert_eq!(
-        string_attribute(waiting, "st.writer.holder"),
-        Some("POST /v1/internal/replication/receive"),
-        "{waiting}"
-    );
+    assert_eq!(string_attribute(waiting, "st.writer.holder"), Some("POST /v1/internal/replication/receive"), "{waiting}");
     println!("writer holder example: {waiting}");
-    let checkpoints: Vec<_> = spans
-        .iter()
-        .filter(|span| span["name"] == "st.db.checkpoint")
-        .collect();
-    assert_eq!(
-        checkpoints.len(),
-        4,
-        "ordinary passes must emit none: {traces}"
-    );
-    assert_eq!(
-        checkpoints
-            .iter()
-            .filter(|span| span["status"]["code"] == 2)
-            .count(),
-        2,
-        "{traces}"
-    );
-    assert_eq!(
-        checkpoints
-            .iter()
-            .filter(
-                |span| string_attribute(span, "db.operation.name") == Some("checkpoint.truncate")
-            )
-            .count(),
-        2
-    );
-    let ambient = spans
-        .iter()
-        .find(|span| span["name"] == "ambient checkpoint")
-        .unwrap();
+    let checkpoints: Vec<_> = spans.iter().filter(|span| span["name"] == "st.db.checkpoint").collect();
+    assert_eq!(checkpoints.len(), 4, "ordinary passes must emit none: {traces}");
+    assert_eq!(checkpoints.iter().filter(|span| span["status"]["code"] == 2).count(), 2, "{traces}");
+    assert_eq!(checkpoints.iter().filter(|span| string_attribute(span, "db.operation.name") == Some("checkpoint.truncate")).count(), 2);
+    let ambient = spans.iter().find(|span| span["name"] == "ambient checkpoint").unwrap();
     assert_ne!(batch["traceId"], ambient["traceId"], "{batch}");
-    assert!(
-        batch["links"].as_array().is_none_or(Vec::is_empty),
-        "{batch}"
-    );
+    assert!(batch["links"].as_array().is_none_or(Vec::is_empty), "{batch}");
     for span in checkpoints {
-        assert!(
-            span["parentSpanId"]
-                .as_str()
-                .is_none_or(|id| id.is_empty() || id == "0000000000000000"),
-            "{span}"
-        );
+        assert!(span["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"), "{span}");
         assert_ne!(span["traceId"], ambient["traceId"], "{span}");
         assert!(span["links"].as_array().is_none_or(Vec::is_empty), "{span}");
         assert_eq!(string_attribute(span, "db.system.name"), Some("sqlite"));
     }
     let disabled = tempfile::tempdir().unwrap();
     let output = isolated_command(&collector, disabled.path())
-        .env(CHILD, "1")
-        .env_remove("ST3_STORAGE_PHASE_SPANS")
-        .args(["run", "--out"])
-        .arg(disabled.path().join("capture"))
+        .env(CHILD, "1").env_remove("ST3_STORAGE_PHASE_SPANS")
+        .args(["run", "--out"]).arg(disabled.path().join("capture"))
         .args(["--protocol", "http/json", "--"])
         .arg(std::env::current_exe().unwrap())
-        .args([
-            "otel_export::storage_stage_gates_export_detached_roots",
-            "--exact",
-            "--nocapture",
-        ])
-        .output()
-        .unwrap();
+        .args(["otel_export::storage_stage_gates_export_detached_roots", "--exact", "--nocapture"])
+        .output().unwrap();
     assert!(output.status.success(), "{output:?}");
-    let disabled_traces =
-        std::fs::read_to_string(disabled.path().join("capture/traces.ndjson")).unwrap();
+    let disabled_traces = std::fs::read_to_string(disabled.path().join("capture/traces.ndjson")).unwrap();
     for line in disabled_traces.lines() {
         let request: Value = serde_json::from_str(line).unwrap();
-        assert!(
-            daemon_spans(&request, "st.db.writer.batch").is_empty(),
-            "storage phase instrumentation must be off by default: {line}"
-        );
+        assert!(daemon_spans(&request, "st.db.writer.batch").is_empty(),
+            "storage phase instrumentation must be off by default: {line}");
     }
 }
 
 #[cfg(target_os = "linux")]
 fn exported_spans(request: &Value) -> impl Iterator<Item = &Value> {
-    request["resourceSpans"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    request["resourceSpans"].as_array().into_iter().flatten()
         .filter(|batch| string_attribute(&batch["resource"], "service.name") == Some("st-daemon"))
         .flat_map(|batch| batch["scopeSpans"].as_array().into_iter().flatten())
         .flat_map(|scope| scope["spans"].as_array().into_iter().flatten())
@@ -2029,9 +1666,7 @@ fn exported_spans(request: &Value) -> impl Iterator<Item = &Value> {
 #[cfg(target_os = "linux")]
 fn assert_internal_root(span: &Value) {
     assert!(
-        span["parentSpanId"]
-            .as_str()
-            .is_none_or(|id| id.is_empty() || id == "0000000000000000"),
+        span["parentSpanId"].as_str().is_none_or(|id| id.is_empty() || id == "0000000000000000"),
         "stage span must be parentless: {span}"
     );
     assert!(
@@ -2045,10 +1680,7 @@ fn assert_internal_root(span: &Value) {
 #[cfg(target_os = "linux")]
 fn assert_upgrade_link(stage: &Value, upgrade: &Value) {
     assert_internal_root(stage);
-    assert_ne!(
-        stage["traceId"], upgrade["traceId"],
-        "the stage must not retain the server trace as parent"
-    );
+    assert_ne!(stage["traceId"], upgrade["traceId"], "the stage must not retain the server trace as parent");
     let links = stage["links"].as_array().expect("linked root");
     assert_eq!(links.len(), 1, "{stage}");
     assert_eq!(links[0]["traceId"], upgrade["traceId"]);
@@ -2062,8 +1694,7 @@ const STAGE_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 fn stage_replication_source(root: &Path) -> fractal_daemon::store::Store {
     let state = root.join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
-    let target =
-        fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
+    let target = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
     target.bind_fleet(STAGE_FLEET).unwrap();
     target.project_replication_backlog().unwrap();
     let source = fractal_daemon::store::Store::open_memory("otel-source").unwrap();
@@ -2072,49 +1703,31 @@ fn stage_replication_source(root: &Path) -> fractal_daemon::store::Store {
 }
 
 #[cfg(target_os = "linux")]
-async fn receive_stage_claims(
-    daemon: &ExportDaemon,
-    source: &fractal_daemon::store::Store,
-    traceparent: &str,
-) {
-    let exchange = source
-        .export_replication_exchange(
-            STAGE_FLEET,
-            &fractal_daemon::model::ReplicationInventory::default(),
-        )
-        .unwrap();
+async fn receive_stage_claims(daemon: &ExportDaemon, source: &fractal_daemon::store::Store, traceparent: &str) {
+    let exchange = source.export_replication_exchange(
+        STAGE_FLEET, &fractal_daemon::model::ReplicationInventory::default(),
+    ).unwrap();
     let (response, _) = daemon.request("POST", "/v1/internal/replication/receive",
         Some(serde_json::json!({"peer":"otel-source", "fleet_id":STAGE_FLEET, "exchange":exchange})),
         traceparent, None).await;
-    assert!(
-        response["value"]["receipt"]["received"]
-            .as_u64()
-            .is_some_and(|count| count > 0),
-        "{response}"
-    );
+    assert!(response["value"]["receipt"]["received"].as_u64().is_some_and(|count| count > 0), "{response}");
 }
 
 #[cfg(target_os = "linux")]
 fn seed_roster(root: &Path, subject: &str) {
     let state = root.join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
-    let store =
-        fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
-    store
-        .append_claim(&fractal_daemon::model::ClaimInput {
-            subject: subject.into(),
-            kind: "runtime.observed".into(),
-            actor: None,
-            fields: serde_json::from_value(serde_json::json!({
-                "status":"stopped", "runtime_id":"otel-observed", "host":"otel-test",
-                "incarnation_id":"otel-session"
-            }))
-            .unwrap(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
+    let store = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
+    store.append_claim(&fractal_daemon::model::ClaimInput {
+        subject: subject.into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "status":"stopped", "runtime_id":"otel-observed", "host":"otel-test",
+            "incarnation_id":"otel-session"
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
 }
 
 #[cfg(target_os = "linux")]
@@ -2133,9 +1746,7 @@ async fn next_json_frame(
                 other => panic!("unexpected websocket frame: {other:?}"),
             }
         }
-    })
-    .await
-    .expect("deterministic first/change frame")
+    }).await.expect("deterministic first/change frame")
 }
 
 #[cfg(target_os = "linux")]
@@ -2144,74 +1755,38 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     const TRACE: &str = "31af7651916cd43dd8448eb211c80319";
     const PARENT: &str = "b7ad6b7169203331";
     const TRACEPARENT: &str = "00-31af7651916cd43dd8448eb211c80319-b7ad6b7169203331-01";
-    let Some(collector) = otelite("daemon_request_id_and_roster_stages_match_response") else {
-        return;
-    };
+    let Some(collector) = otelite("daemon_request_id_and_roster_stages_match_response") else { return };
     let root = tempfile::tempdir().unwrap();
-    let actor = std::env::var("ST_AGENT")
-        .ok()
-        .filter(|actor| actor.starts_with("agent/"))
+    let actor = std::env::var("ST_AGENT").ok().filter(|actor| actor.starts_with("agent/"))
         .unwrap_or_else(|| "agent/otel-test.observed".into());
     seed_roster(root.path(), &actor);
     let mut daemon = ExportDaemon::start(&collector, root.path());
     const STARTUP_BARRIER: &str = "00-21af7651916cd43dd8448eb211c80319-b7ad6b7169203330-01";
     daemon.health(Some(STARTUP_BARRIER));
-    daemon.await_span(root.path(), |span| {
-        span["traceId"] == "21af7651916cd43dd8448eb211c80319"
-    });
+    daemon.await_span(root.path(), |span| span["traceId"] == "21af7651916cd43dd8448eb211c80319");
     // History rosters are published on demand; await that publication before measuring hits.
-    daemon
-        .request(
-            "GET",
-            "/v1/client/agents?history=true&fresh=true&status=stopped",
-            None,
-            STARTUP_BARRIER,
-            None,
-        )
-        .await;
+    daemon.request("GET", "/v1/client/agents?history=true&fresh=true&status=stopped",
+        None, STARTUP_BARRIER, None).await;
     // Reads serve published cuts, including after a new claim. A fresh history read
     // waits for the refresher's publication; neither kind folds cards in the request.
     let mut responses = Vec::new();
     let mut minimum_card_cut = None;
     for attempt in 0..3 {
         if attempt != 0 {
-            let (changed, _) = daemon
-                .request(
-                    "POST",
-                    "/v1/diagnostics/harness",
-                    Some(serde_json::json!({
-                        "actor":actor, "code":"otel-roster-advance", "reason":"stage fixture",
-                        "severity":"warning", "status":"healthy", "incarnation_id":"otel-session",
-                        "idempotency_key":format!("otel-roster-advance-{attempt}"),
-                    })),
-                    TRACEPARENT,
-                    None,
-                )
-                .await;
+            let (changed, _) = daemon.request("POST", "/v1/diagnostics/harness", Some(serde_json::json!({
+                "actor":actor, "code":"otel-roster-advance", "reason":"stage fixture",
+                "severity":"warning", "status":"healthy", "incarnation_id":"otel-session",
+                "idempotency_key":format!("otel-roster-advance-{attempt}"),
+            })), TRACEPARENT, None).await;
             // Use the actual card-affecting claim's cut, not a response snapshot that
             // might also include an unrelated later daemon claim.
-            minimum_card_cut = Some(
-                changed["value"]["store_index"]
-                    .as_i64()
-                    .expect("diagnostic claim store_index"),
-            );
+            minimum_card_cut = Some(changed["value"]["store_index"].as_i64()
+                .expect("diagnostic claim store_index"));
         }
         for (path, expected_path, expected_fresh) in [
-            (
-                "/v1/client/agents?history=true&status=stopped",
-                "filtered_full",
-                false,
-            ),
-            (
-                "/v1/client/agents?history=true&fresh=true&status=stopped",
-                "filtered_full",
-                true,
-            ),
-            (
-                "/v1/client/agents?history=true",
-                "published_complete",
-                false,
-            ),
+            ("/v1/client/agents?history=true&status=stopped", "filtered_full", false),
+            ("/v1/client/agents?history=true&fresh=true&status=stopped", "filtered_full", true),
+            ("/v1/client/agents?history=true", "published_complete", false),
         ] {
             let (body, bytes) = daemon.request("GET", path, None, TRACEPARENT, None).await;
             responses.push((body, bytes, expected_path, expected_fresh, minimum_card_cut));
@@ -2220,10 +1795,7 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     for (body, bytes, expected_path, expected_fresh, minimum_card_cut) in responses {
         let request_id = body["request_id"].as_str().expect("response request_id");
         assert!(request_id.starts_with("request/"), "{body}");
-        let rows = body["value"]["items"]
-            .as_array()
-            .expect("roster page")
-            .len();
+        let rows = body["value"]["items"].as_array().expect("roster page").len();
         assert_eq!(rows, 1, "{body}");
         let span = daemon.await_span(root.path(), |span| {
             string_attribute(span, "st.request.id") == Some(request_id)
@@ -2235,67 +1807,33 @@ async fn daemon_request_id_and_roster_stages_match_response() {
         assert_eq!(mode, "hit", "HTTP reads serve the published roster: {span}");
         assert!(body["snapshot"]["published_at"].is_string(), "{body}");
         assert_eq!(int_attribute(&span, "st.roster.cards"), Some(1), "{span}");
-        assert_eq!(
-            int_attribute(&span, "st.page.rows"),
-            Some(i64::try_from(rows).unwrap())
-        );
-        assert_eq!(
-            int_attribute(&span, "st.page.bytes"),
-            Some(i64::try_from(bytes).unwrap())
-        );
+        assert_eq!(int_attribute(&span, "st.page.rows"), Some(i64::try_from(rows).unwrap()));
+        assert_eq!(int_attribute(&span, "st.page.bytes"), Some(i64::try_from(bytes).unwrap()));
         // Filtered and ordinary complete pages report the publication actually served.
-        assert_eq!(
-            string_attribute(&span, "st.roster.path"),
-            Some(expected_path),
-            "{span}"
-        );
-        let fresh =
-            bool_attribute(&span, "st.roster.fresh_requested").expect("fresh_requested bool");
+        assert_eq!(string_attribute(&span, "st.roster.path"), Some(expected_path), "{span}");
+        let fresh = bool_attribute(&span, "st.roster.fresh_requested").expect("fresh_requested bool");
         assert_eq!(fresh, expected_fresh, "{span}");
-        let requested =
-            int_attribute(&span, "st.roster.requested_cut").expect("requested_cut integer");
-        let published =
-            int_attribute(&span, "st.roster.publication_cut").expect("publication_cut integer");
-        assert_eq!(
-            Some(published),
-            body["snapshot"]["store_index"].as_i64(),
-            "{span}\n{body}"
-        );
+        let requested = int_attribute(&span, "st.roster.requested_cut").expect("requested_cut integer");
+        let published = int_attribute(&span, "st.roster.publication_cut").expect("publication_cut integer");
+        assert_eq!(Some(published), body["snapshot"]["store_index"].as_i64(), "{span}\n{body}");
         if fresh {
-            let outcome =
-                string_attribute(&span, "st.roster.fresh_wait").expect("fresh wait outcome");
-            let wanted =
-                int_attribute(&span, "st.roster.fresh_wait_cut").expect("actual wait target");
-            let proof = string_attribute(&span, "st.roster.fresh_proof")
-                .expect("served-publication proof outcome");
-            let verified = bool_attribute(&span, "st.roster.fresh_unchanged_verified")
-                .expect("unchanged verification bool");
-            assert!(
-                wanted >= requested,
-                "wait target cannot precede request cut: {span}"
-            );
+            let outcome = string_attribute(&span, "st.roster.fresh_wait").expect("fresh wait outcome");
+            let wanted = int_attribute(&span, "st.roster.fresh_wait_cut").expect("actual wait target");
+            let proof = string_attribute(&span, "st.roster.fresh_proof").expect("served-publication proof outcome");
+            let verified = bool_attribute(&span, "st.roster.fresh_unchanged_verified").expect("unchanged verification bool");
+            assert!(wanted >= requested, "wait target cannot precede request cut: {span}");
             assert_eq!(verified, proof == "verified", "{span}");
             if verified {
-                assert_eq!(
-                    outcome, "unchanged",
-                    "only that wait exit may carry this proof: {span}"
-                );
-                assert!(
-                    published <= wanted,
-                    "proof must cover the actual served publication: {span}"
-                );
+                assert_eq!(outcome, "unchanged", "only that wait exit may carry this proof: {span}");
+                assert!(published <= wanted, "proof must cover the actual served publication: {span}");
             }
             // Eviction after selection can honestly yield Refused. It is not an unchanged
             // certificate, so an older cut still fails this assertion; never waive it here.
-            assert!(
-                published >= requested || (outcome == "unchanged" && verified),
-                "fresh read lacks a current cut or exact-served unchanged proof: {span}"
-            );
+            assert!(published >= requested || (outcome == "unchanged" && verified),
+                "fresh read lacks a current cut or exact-served unchanged proof: {span}");
             if let Some(card_cut) = minimum_card_cut {
-                assert!(
-                    published >= card_cut,
-                    "fresh read missed an actual card-affecting diagnostic: {span}"
-                );
+                assert!(published >= card_cut,
+                    "fresh read missed an actual card-affecting diagnostic: {span}");
             }
         }
     }
@@ -2309,82 +1847,34 @@ async fn daemon_request_id_and_roster_stages_match_response() {
     let spans = daemon.captured_spans(root.path());
     // The refresher's history publication is a detached cold rebuild; it carries the closed
     // invalidation reason, bounded counts and synchronous phase wall/CPU time on the root.
-    let rebuilds: Vec<_> = spans
-        .iter()
-        .filter(|span| span["name"] == "st.roster.rebuild")
-        .collect();
-    assert!(
-        !rebuilds.is_empty(),
-        "published roster requires a rebuild root: {spans:?}"
-    );
+    let rebuilds: Vec<_> = spans.iter().filter(|span| span["name"] == "st.roster.rebuild").collect();
+    assert!(!rebuilds.is_empty(), "published roster requires a rebuild root: {spans:?}");
     for rebuild in &rebuilds {
         assert_internal_root(rebuild);
         assert_ne!(rebuild["traceId"], TRACE);
-        let reason =
-            string_attribute(rebuild, "st.roster.invalidation").expect("invalidation reason");
-        assert!(
-            matches!(
-                reason,
-                "cold"
-                    | "unknown_kind"
-                    | "structural_claim"
-                    | "missing_message"
-                    | "membership"
-                    | "local_frontier"
-                    | "queue_deadline"
-                    | "coverage_gap"
-                    | "safe_delta"
-                    | "historical_snapshot"
-            ),
-            "unbounded invalidation reason: {rebuild}"
-        );
-        for count in [
-            "st.roster.changed",
-            "st.roster.covered",
-            "st.roster.refolded",
-        ] {
-            assert!(
-                int_attribute(rebuild, count).is_some_and(|value| value >= 0),
-                "{count}: {rebuild}"
-            );
+        let reason = string_attribute(rebuild, "st.roster.invalidation").expect("invalidation reason");
+        assert!(matches!(reason, "cold" | "unknown_kind" | "structural_claim" | "missing_message"
+            | "membership" | "local_frontier" | "queue_deadline" | "coverage_gap" | "safe_delta"
+            | "historical_snapshot"), "unbounded invalidation reason: {rebuild}");
+        for count in ["st.roster.changed", "st.roster.covered", "st.roster.refolded"] {
+            assert!(int_attribute(rebuild, count).is_some_and(|value| value >= 0), "{count}: {rebuild}");
         }
     }
     let cold = &cold_publication;
     // The refresher builds publications under admission; the root names that holder.
-    assert_eq!(
-        string_attribute(cold, "st.roster.admission.holder_class"),
-        Some("refresher"),
-        "{cold}"
-    );
-    assert!(
-        int_attribute(cold, "st.roster.admission.id").is_some(),
-        "{cold}"
-    );
-    assert!(
-        double_attribute(cold, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0),
-        "{cold}"
-    );
+    assert_eq!(string_attribute(cold, "st.roster.admission.holder_class"), Some("refresher"), "{cold}");
+    assert!(int_attribute(cold, "st.roster.admission.id").is_some(), "{cold}");
+    assert!(double_attribute(cold, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0), "{cold}");
     // The cold card projection always folds status and presents cards.
     for phase in ["status_fold", "card_presentation"] {
         for unit in ["wall_ms", "cpu_ms"] {
             let key = format!("st.roster.phase.{phase}.{unit}");
-            assert!(
-                double_attribute(cold, &key).is_some_and(|ms| ms >= 0.0),
-                "{key}: {cold}"
-            );
+            assert!(double_attribute(cold, &key).is_some_and(|ms| ms >= 0.0), "{key}: {cold}");
         }
     }
-    assert!(
-        spans
-            .iter()
-            .all(
-                |span| span["parentSpanId"].as_str().is_none_or(|parent| !spans
-                    .iter()
-                    .any(|server| server["traceId"] == TRACE
-                        && server["spanId"].as_str() == Some(parent)))
-            ),
-        "request stage children leaked: {spans:?}"
-    );
+    assert!(spans.iter().all(|span| span["parentSpanId"].as_str()
+        .is_none_or(|parent| !spans.iter().any(|server| server["traceId"] == TRACE
+            && server["spanId"].as_str() == Some(parent)))), "request stage children leaked: {spans:?}");
 }
 
 #[cfg(target_os = "linux")]
@@ -2395,153 +1885,67 @@ async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
     const TRACE: &str = "b1af7651916cd43dd8448eb211c80319";
     const PARENT: &str = "b7ad6b7169203339";
     const UPGRADE: &str = "00-c1af7651916cd43dd8448eb211c80319-b7ad6b7169203340-01";
-    let Some(collector) = otelite("subscribe_frame_context_is_lenient_and_continues_action_trace")
-    else {
-        return;
-    };
+    let Some(collector) = otelite("subscribe_frame_context_is_lenient_and_continues_action_trace") else { return };
     let root = tempfile::tempdir().unwrap();
     seed_roster(root.path(), "agent/otel-test.observed");
     let mut daemon = ExportDaemon::start(&collector, root.path());
     // Each missions window's first frame must be its snapshot (see collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans).
     daemon.await_mission_list();
-    let mut socket = daemon
-        .websocket(
-            "/v1/client/collections/stream",
-            "st3.client.collections.v0",
-            UPGRADE,
-        )
-        .await;
+    let mut socket = daemon.websocket("/v1/client/collections/stream",
+        "st3.client.collections.v0", UPGRADE).await;
     let upgrade = daemon.await_span(root.path(), |span| {
         span["traceId"] == "c1af7651916cd43dd8448eb211c80319"
             && span["name"] == "GET /v1/client/collections/stream"
     });
     let cases = [
-        (
-            "sampled",
-            serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"vendor=value"}),
-            Some(true),
-        ),
-        (
-            "unsampled",
-            serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-00")}),
-            Some(false),
-        ),
-        (
-            "st-marked",
-            serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"st=1"}),
-            Some(false),
-        ),
-        (
-            "conversation",
-            serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01")}),
-            Some(true),
-        ),
-        (
-            "invalid",
-            serde_json::json!({"traceparent":"not-a-traceparent", "tracestate":"vendor=value"}),
-            None,
-        ),
-        (
-            "zero-trace",
-            serde_json::json!({"traceparent":format!("00-00000000000000000000000000000000-{PARENT}-01")}),
-            None,
-        ),
-        (
-            "zero-span",
-            serde_json::json!({"traceparent":format!("00-{TRACE}-0000000000000000-01")}),
-            None,
-        ),
-        (
-            "invalid-version",
-            serde_json::json!({"traceparent":format!("ff-{TRACE}-{PARENT}-01")}),
-            None,
-        ),
+        ("sampled", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"vendor=value"}), Some(true)),
+        ("unsampled", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-00")}), Some(false)),
+        ("st-marked", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"st=1"}), Some(false)),
+        ("conversation", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01")}), Some(true)),
+        ("invalid", serde_json::json!({"traceparent":"not-a-traceparent", "tracestate":"vendor=value"}), None),
+        ("zero-trace", serde_json::json!({"traceparent":format!("00-00000000000000000000000000000000-{PARENT}-01")}), None),
+        ("zero-span", serde_json::json!({"traceparent":format!("00-{TRACE}-0000000000000000-01")}), None),
+        ("invalid-version", serde_json::json!({"traceparent":format!("ff-{TRACE}-{PARENT}-01")}), None),
         ("number", serde_json::json!(42), None),
         ("string", serde_json::json!("not-an-object"), None),
         ("array", serde_json::json!([]), None),
-        (
-            "missing-parent",
-            serde_json::json!({"tracestate":"vendor=value"}),
-            None,
-        ),
-        (
-            "wrong-parent-type",
-            serde_json::json!({"traceparent":42}),
-            None,
-        ),
+        ("missing-parent", serde_json::json!({"tracestate":"vendor=value"}), None),
+        ("wrong-parent-type", serde_json::json!({"traceparent":42}), None),
         ("null", Value::Null, None),
     ];
     for (id, trace, sampled) in &cases {
-        socket
-            .send(Message::Text(
-                serde_json::json!({
-                    "kind":"subscribe", "id":id,
-                    "collection": if *id == "conversation" { "conversation" } else { "missions" },
-                    "conversation":"agent/otel-test.observed", "trace":trace
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .unwrap();
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"subscribe", "id":id,
+            "collection": if *id == "conversation" { "conversation" } else { "missions" },
+            "conversation":"agent/otel-test.observed", "trace":trace
+        }).to_string().into())).await.unwrap();
         let (frame, _) = next_json_frame(&mut socket).await;
-        assert_eq!(
-            frame["kind"],
-            if *id == "conversation" {
-                "conversation"
-            } else {
-                "snapshot"
-            },
-            "{frame}"
-        );
+        assert_eq!(frame["kind"], if *id == "conversation" { "conversation" } else { "snapshot" }, "{frame}");
         assert_eq!(frame["id"], *id);
         let first = daemon.await_span(root.path(), |span| {
             span["name"] == "st.subscription.first_frame"
                 && string_attribute(span, "st.subscription.id") == Some(*id)
         });
         if let Some(sampled) = sampled {
-            assert!(
-                first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER",
-                "{first}"
-            );
+            assert!(first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER", "{first}");
             assert_eq!(first["traceId"], TRACE);
             assert_eq!(first["parentSpanId"], PARENT);
             let links = first["links"].as_array().expect("upgrade link");
             assert_eq!(links.len(), 1, "{first}");
             assert_eq!(links[0]["traceId"], upgrade["traceId"]);
             assert_eq!(links[0]["spanId"], upgrade["spanId"]);
-            assert!(
-                first["attributes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|attribute| {
-                        attribute["key"] == "st.parent.sampled"
-                            && attribute["value"]["boolValue"] == *sampled
-                    }),
-                "{first}"
-            );
+            assert!(first["attributes"].as_array().unwrap().iter().any(|attribute| {
+                attribute["key"] == "st.parent.sampled"
+                    && attribute["value"]["boolValue"] == *sampled
+            }), "{first}");
         } else {
             assert_upgrade_link(&first, &upgrade);
-            assert!(
-                first["attributes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|attribute| attribute["key"] != "st.parent.sampled"),
-                "{first}"
-            );
+            assert!(first["attributes"].as_array().unwrap().iter()
+                .all(|attribute| attribute["key"] != "st.parent.sampled"), "{first}");
         }
-        socket
-            .send(Message::Text(
-                serde_json::json!({
-                    "kind":"unsubscribe", "id":id
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .unwrap();
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"unsubscribe", "id":id
+        }).to_string().into())).await.unwrap();
     }
     socket.close(None).await.unwrap();
 }
@@ -2554,55 +1958,29 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     const TRACE: &str = "41af7651916cd43dd8448eb211c80319";
     const TRACEPARENT: &str = "00-41af7651916cd43dd8448eb211c80319-b7ad6b7169203332-01";
     const BARRIER: &str = "00-51af7651916cd43dd8448eb211c80319-b7ad6b7169203333-01";
-    let Some(collector) =
-        otelite("collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans")
-    else {
-        return;
-    };
+    let Some(collector) = otelite("collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans") else { return };
     let root = tempfile::tempdir().unwrap();
     let source = stage_replication_source(root.path());
     let mut daemon = ExportDaemon::start(&collector, root.path());
     // Each window's first frame must be its snapshot (a resync before it is covered by
     // daemon_collection_stream_without_export_delivers_first_frame).
     daemon.await_mission_list();
-    let mut socket = daemon
-        .websocket(
-            "/v1/client/collections/stream",
-            "st3.client.collections.v0",
-            TRACEPARENT,
-        )
-        .await;
+    let mut socket = daemon.websocket("/v1/client/collections/stream",
+        "st3.client.collections.v0", TRACEPARENT).await;
     let upgrade = daemon.await_span(root.path(), |span| {
         span["traceId"] == TRACE && span["name"] == "GET /v1/client/collections/stream"
     });
     assert_eq!(upgrade["parentSpanId"], "b7ad6b7169203332");
-    assert_eq!(
-        int_attribute(&upgrade, "http.response.status_code"),
-        Some(101)
-    );
+    assert_eq!(int_attribute(&upgrade, "http.response.status_code"), Some(101));
     // Cover every ordinary collection with its real initial bounded window.
-    for collection in [
-        "missions",
-        "attention",
-        "agents",
-        "work",
-        "glasses",
-        "arrangements",
-    ] {
-        socket
-            .send(Message::Text(
-                serde_json::json!({
-                    "kind":"subscribe", "id":collection, "collection":collection, "limit":2,
-                    "person": if collection == "arrangements" { Some("person/ada") } else { None },
-                    "trace": if collection == "glasses" {
-                        serde_json::json!({"traceparent":BARRIER})
-                    } else { Value::Null }
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .unwrap();
+    for collection in ["missions", "attention", "agents", "work", "glasses", "arrangements"] {
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"subscribe", "id":collection, "collection":collection, "limit":2,
+            "person": if collection == "arrangements" { Some("person/ada") } else { None },
+            "trace": if collection == "glasses" {
+                serde_json::json!({"traceparent":BARRIER})
+            } else { Value::Null }
+        }).to_string().into())).await.unwrap();
         let (frame, bytes) = next_json_frame(&mut socket).await;
         assert_eq!(frame["kind"], "snapshot", "{frame}");
         assert_eq!(frame["id"], collection);
@@ -2611,10 +1989,7 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
                 && string_attribute(span, "st.subscription.id") == Some(collection)
         });
         if collection == "glasses" {
-            assert!(
-                first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER",
-                "{first}"
-            );
+            assert!(first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER", "{first}");
             assert_eq!(first["traceId"], "51af7651916cd43dd8448eb211c80319");
             assert_eq!(first["parentSpanId"], "b7ad6b7169203333");
             assert_eq!(first["links"][0]["traceId"], upgrade["traceId"]);
@@ -2623,37 +1998,16 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
             assert_upgrade_link(&first, &upgrade);
         }
         assert_eq!(string_attribute(&first, "st.collection"), Some(collection));
-        assert!(
-            string_attribute(&first, "span.label").is_some_and(|label| !label.is_empty()),
-            "{first}"
-        );
-        assert_eq!(
-            int_attribute(&first, "st.page.rows"),
-            Some(i64::try_from(frame["items"].as_array().unwrap().len()).unwrap())
-        );
-        assert_eq!(
-            int_attribute(&first, "st.page.bytes"),
-            Some(i64::try_from(bytes).unwrap())
-        );
+        assert!(string_attribute(&first, "span.label").is_some_and(|label| !label.is_empty()), "{first}");
+        assert_eq!(int_attribute(&first, "st.page.rows"),
+            Some(i64::try_from(frame["items"].as_array().unwrap().len()).unwrap()));
+        assert_eq!(int_attribute(&first, "st.page.bytes"), Some(i64::try_from(bytes).unwrap()));
         if collection == "agents" {
-            assert!(
-                first["attributes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|attribute| {
-                        matches!(
-                            attribute["key"].as_str(),
-                            Some(
-                                "st.projection.hit"
-                                    | "st.projection.cold"
-                                    | "st.projection.incremental"
-                                    | "st.projection.shared"
-                            )
-                        ) && attribute["value"]["boolValue"] == true
-                    }),
-                "{first}"
-            );
+            assert!(first["attributes"].as_array().unwrap().iter().any(|attribute| {
+                matches!(attribute["key"].as_str(),
+                    Some("st.projection.hit" | "st.projection.cold" | "st.projection.incremental" | "st.projection.shared"))
+                    && attribute["value"]["boolValue"] == true
+            }), "{first}");
         }
     }
     // Each acknowledged mutation is observed through an actual change frame: no sleep is
@@ -2674,49 +2028,21 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
         let (frame, _) = next_json_frame(&mut socket).await;
         assert_eq!(frame["kind"], "changes", "{frame}");
         assert_eq!(frame["id"], "glasses");
-        assert!(
-            frame["upserts"]
-                .as_array()
-                .is_some_and(|items| !items.is_empty()),
-            "{frame}"
-        );
+        assert!(frame["upserts"].as_array().is_some_and(|items| !items.is_empty()), "{frame}");
     }
     socket.close(None).await.unwrap();
     // The captured server marker closes the exporter FIFO after all observed frames.
     daemon.health(Some(BARRIER));
-    daemon.await_span(root.path(), |span| {
-        span["traceId"] == "51af7651916cd43dd8448eb211c80319" && span["name"] == "GET /v1/health"
-    });
+    daemon.await_span(root.path(), |span| span["traceId"] == "51af7651916cd43dd8448eb211c80319"
+        && span["name"] == "GET /v1/health");
     let spans = daemon.captured_spans(root.path());
-    let first: Vec<_> = spans
-        .iter()
-        .filter(|span| span["name"] == "st.subscription.first_frame")
-        .collect();
-    assert_eq!(
-        first.len(),
-        6,
-        "changes must not start more first-frame spans: {first:?}"
-    );
-    for collection in [
-        "missions",
-        "attention",
-        "agents",
-        "work",
-        "glasses",
-        "arrangements",
-    ] {
-        assert_eq!(
-            first
-                .iter()
-                .filter(|span| string_attribute(span, "st.subscription.id") == Some(collection))
-                .count(),
-            1
-        );
+    let first: Vec<_> = spans.iter().filter(|span| span["name"] == "st.subscription.first_frame").collect();
+    assert_eq!(first.len(), 6, "changes must not start more first-frame spans: {first:?}");
+    for collection in ["missions", "attention", "agents", "work", "glasses", "arrangements"] {
+        assert_eq!(first.iter().filter(|span| string_attribute(span, "st.subscription.id") == Some(collection)).count(), 1);
     }
-    assert!(spans.iter().all(|span| !matches!(
-        span["name"].as_str(),
-        Some("st.subscription.reread" | "st.subscription.change" | "st.subscription.frame")
-    )));
+    assert!(spans.iter().all(|span| !matches!(span["name"].as_str(),
+        Some("st.subscription.reread" | "st.subscription.change" | "st.subscription.frame"))));
 }
 
 #[cfg(target_os = "linux")]
@@ -2724,75 +2050,40 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
 async fn conversation_first_frames_link_collection_and_dedicated_upgrades() {
     use futures_util::SinkExt as _;
     use tokio_tungstenite::tungstenite::Message;
-    let Some(collector) =
-        otelite("conversation_first_frames_link_collection_and_dedicated_upgrades")
-    else {
-        return;
-    };
+    let Some(collector) = otelite("conversation_first_frames_link_collection_and_dedicated_upgrades") else { return };
     let root = tempfile::tempdir().unwrap();
     seed_roster(root.path(), "agent/otel-test.observed");
     let mut daemon = ExportDaemon::start(&collector, root.path());
     for (path, protocol, traceparent, trace, id) in [
-        (
-            "/v1/client/collections/stream",
-            "st3.client.collections.v0",
+        ("/v1/client/collections/stream", "st3.client.collections.v0",
             "00-61af7651916cd43dd8448eb211c80319-b7ad6b7169203334-01",
-            "61af7651916cd43dd8448eb211c80319",
-            "conversation-held",
-        ),
-        (
-            "/v1/client/conversations/agent%2Fotel-test.observed/stream",
-            "st3.client.conversation.v0",
+            "61af7651916cd43dd8448eb211c80319", "conversation-held"),
+        ("/v1/client/conversations/agent%2Fotel-test.observed/stream", "st3.client.conversation.v0",
             "00-71af7651916cd43dd8448eb211c80319-b7ad6b7169203335-01",
-            "71af7651916cd43dd8448eb211c80319",
-            "conversation",
-        ),
+            "71af7651916cd43dd8448eb211c80319", "conversation"),
     ] {
         let mut socket = daemon.websocket(path, protocol, traceparent).await;
         if protocol == "st3.client.collections.v0" {
-            socket
-                .send(Message::Text(
-                    serde_json::json!({
-                        "kind":"subscribe", "id":id, "collection":"conversation",
-                        "conversation":"agent/otel-test.observed"
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .unwrap();
+            socket.send(Message::Text(serde_json::json!({
+                "kind":"subscribe", "id":id, "collection":"conversation",
+                "conversation":"agent/otel-test.observed"
+            }).to_string().into())).await.unwrap();
         }
         let (frame, bytes) = next_json_frame(&mut socket).await;
         let page = frame.get("value").unwrap_or(&frame);
-        let rows = page["items"]
-            .as_array()
-            .unwrap_or_else(|| panic!("conversation first page: {frame}"))
-            .len();
+        let rows = page["items"].as_array().unwrap_or_else(|| panic!("conversation first page: {frame}")).len();
         let upgrade = daemon.await_span(root.path(), |span| {
-            span["traceId"] == trace
-                && int_attribute(span, "http.response.status_code") == Some(101)
+            span["traceId"] == trace && int_attribute(span, "http.response.status_code") == Some(101)
         });
         let first = daemon.await_span(root.path(), |span| {
             span["name"] == "st.subscription.first_frame"
                 && string_attribute(span, "st.subscription.id") == Some(id)
         });
         assert_upgrade_link(&first, &upgrade);
-        assert_eq!(
-            string_attribute(&first, "st.collection"),
-            Some("conversation")
-        );
-        assert!(
-            string_attribute(&first, "span.label").is_some_and(|label| !label.is_empty()),
-            "{first}"
-        );
-        assert_eq!(
-            int_attribute(&first, "st.page.rows"),
-            Some(i64::try_from(rows).unwrap())
-        );
-        assert_eq!(
-            int_attribute(&first, "st.page.bytes"),
-            Some(i64::try_from(bytes).unwrap())
-        );
+        assert_eq!(string_attribute(&first, "st.collection"), Some("conversation"));
+        assert!(string_attribute(&first, "span.label").is_some_and(|label| !label.is_empty()), "{first}");
+        assert_eq!(int_attribute(&first, "st.page.rows"), Some(i64::try_from(rows).unwrap()));
+        assert_eq!(int_attribute(&first, "st.page.bytes"), Some(i64::try_from(bytes).unwrap()));
         socket.close(None).await.unwrap();
     }
 }
@@ -2806,39 +2097,26 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     const DUPLICATE: &str = "00-91af7651916cd43dd8448eb211c80319-b7ad6b7169203337-01";
     const HEARTBEAT: &str = "00-a1af7651916cd43dd8448eb211c80319-b7ad6b7169203338-01";
     const SETTLE: &str = "00-b1af7651916cd43dd8448eb211c80319-b7ad6b7169203339-01";
-    let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else {
-        return;
-    };
+    let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else { return };
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
     std::fs::create_dir_all(&state).unwrap();
-    let target =
-        fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
+    let target = fractal_daemon::store::Store::open(&state.join("claims.sqlite3"), "otel-test").unwrap();
     target.bind_fleet(FLEET).unwrap();
     target.project_replication_backlog().unwrap();
     let source = fractal_daemon::store::Store::open_memory("otel-source").unwrap();
     source.bind_fleet(FLEET).unwrap();
-    source
-        .append_claim(&fractal_daemon::model::ClaimInput {
-            subject: "resource/otel-stage-projection".into(),
-            kind: "resource.observed".into(),
-            actor: None,
-            fields: serde_json::from_value(serde_json::json!({
-                "kind":"vcs.pull-request", "facts":{"state":"open"}
-            }))
-            .unwrap(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        })
-        .unwrap();
-    let exchange = source
-        .export_replication_exchange(FLEET, &target.replication_inventory().unwrap())
-        .unwrap();
-    assert!(
-        !exchange.envelopes.is_empty(),
-        "the real exchange must carry new data"
-    );
+    source.append_claim(&fractal_daemon::model::ClaimInput {
+        subject: "resource/otel-stage-projection".into(),
+        kind: "resource.observed".into(),
+        actor: None,
+        fields: serde_json::from_value(serde_json::json!({
+            "kind":"vcs.pull-request", "facts":{"state":"open"}
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let exchange = source.export_replication_exchange(FLEET, &target.replication_inventory().unwrap()).unwrap();
+    assert!(!exchange.envelopes.is_empty(), "the real exchange must carry new data");
     let heartbeat = source.export_replication_summary(FLEET).unwrap();
     assert!(heartbeat.envelopes.is_empty());
     drop(target);
@@ -2849,113 +2127,55 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     // its own. Wait for the seal, so that the receives meet a store nothing else is writing to.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let (page, _) = daemon
-            .request(
-                "GET",
-                "/v1/claims?after_index=0&limit=500",
-                None,
-                SETTLE,
-                None,
-            )
-            .await;
+        let (page, _) = daemon.request("GET", "/v1/claims?after_index=0&limit=500", None, SETTLE, None).await;
         if page["value"]["claims"].as_array().is_some_and(|claims| {
-            claims
-                .iter()
-                .any(|claim| claim["kind"] == "checkpoint.sealed")
+            claims.iter().any(|claim| claim["kind"] == "checkpoint.sealed")
         }) {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the first checkpoint was never sealed: {page}"
-        );
+        assert!(Instant::now() < deadline, "the first checkpoint was never sealed: {page}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let payload = serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":exchange});
-    let (received, _) = daemon
-        .request(
-            "POST",
-            "/v1/internal/replication/receive",
-            Some(payload.clone()),
-            NEW,
-            None,
-        )
-        .await;
-    assert!(
-        received["value"]["receipt"]["received"]
-            .as_u64()
-            .is_some_and(|count| count > 0),
-        "{received}"
-    );
+    let (received, _) = daemon.request("POST", "/v1/internal/replication/receive",
+        Some(payload.clone()), NEW, None).await;
+    assert!(received["value"]["receipt"]["received"].as_u64().is_some_and(|count| count > 0), "{received}");
     let receive = daemon.await_span(root.path(), |span| {
         span["traceId"] == TRACE && span["name"] == "POST /v1/internal/replication/receive"
     });
-    let projection = daemon.await_span(root.path(), |span| {
-        span["name"] == "st.replication.projection"
-    });
+    let projection = daemon.await_span(root.path(), |span| span["name"] == "st.replication.projection");
     assert_upgrade_link(&projection, &receive);
-    assert_eq!(
-        string_attribute(&projection, "st.replication.peer"),
-        Some("otel-source")
-    );
-    assert!(
-        int_attribute(&projection, "st.replication.moved_envelopes").is_some_and(|count| count > 0),
-        "{projection}"
-    );
+    assert_eq!(string_attribute(&projection, "st.replication.peer"), Some("otel-source"));
+    assert!(int_attribute(&projection, "st.replication.moved_envelopes").is_some_and(|count| count > 0), "{projection}");
     // Receive has no read budget: its mutation-dispatch polls must retain the route origin
     // for both queue waits and loan holds, including nested blocking store work.
     daemon.await_export(&root.path().join("capture/metrics.ndjson"), |request| {
-        ["st.db.writer.hold", "st.db.writer.queue.duration"]
-            .into_iter()
-            .all(|metric| {
-                metric_points(request, metric).into_iter().any(|point| {
-                    string_attribute(point, "st.db.writer.origin")
-                        == Some("POST /v1/internal/replication/receive")
-                        && point["count"]
-                            .as_u64()
-                            .or_else(|| {
-                                point["count"]
-                                    .as_str()
-                                    .and_then(|value| value.parse::<u64>().ok())
-                            })
-                            .is_some_and(|count| count > 0)
-                        && point["sum"].as_f64().is_some_and(|seconds| seconds > 0.)
-                })
+        ["st.db.writer.hold", "st.db.writer.queue.duration"].into_iter().all(|metric| {
+            metric_points(request, metric).into_iter().any(|point| {
+                string_attribute(point, "st.db.writer.origin")
+                    == Some("POST /v1/internal/replication/receive")
+                    && point["count"].as_u64().or_else(|| {
+                        point["count"].as_str().and_then(|value| value.parse::<u64>().ok())
+                    }).is_some_and(|count| count > 0)
+                    && point["sum"].as_f64().is_some_and(|seconds| seconds > 0.)
             })
+        })
     });
     for (body, traceparent, trace) in [
         (payload, DUPLICATE, "91af7651916cd43dd8448eb211c80319"),
-        (
-            serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":heartbeat}),
-            HEARTBEAT,
-            "a1af7651916cd43dd8448eb211c80319",
-        ),
+        (serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":heartbeat}),
+            HEARTBEAT, "a1af7651916cd43dd8448eb211c80319"),
     ] {
-        let (response, _) = daemon
-            .request(
-                "POST",
-                "/v1/internal/replication/receive",
-                Some(body),
-                traceparent,
-                None,
-            )
-            .await;
+        let (response, _) = daemon.request("POST", "/v1/internal/replication/receive",
+            Some(body), traceparent, None).await;
         assert_eq!(response["value"]["receipt"]["received"], 0, "{response}");
         assert_eq!(response["value"]["receipt"]["signatures"], 0, "{response}");
-        daemon.await_span(root.path(), |span| {
-            span["traceId"] == trace && span["name"] == "POST /v1/internal/replication/receive"
-        });
+        daemon.await_span(root.path(), |span| span["traceId"] == trace
+            && span["name"] == "POST /v1/internal/replication/receive");
     }
     let spans = daemon.captured_spans(root.path());
-    let projections: Vec<_> = spans
-        .iter()
-        .filter(|span| span["name"] == "st.replication.projection")
-        .collect();
-    assert_eq!(
-        projections.len(),
-        1,
-        "no projection root for duplicate/heartbeat: {projections:?}"
-    );
+    let projections: Vec<_> = spans.iter().filter(|span| span["name"] == "st.replication.projection").collect();
+    assert_eq!(projections.len(), 1, "no projection root for duplicate/heartbeat: {projections:?}");
     assert_upgrade_link(projections[0], &receive);
 }
 
@@ -2964,19 +2184,16 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
 /// Export is scoped to this thread's subscriber and in-memory provider, never global.
 #[test]
 fn roster_admission_waiter_links_its_holder() {
-    use futures_util::FutureExt as _;
     use opentelemetry::trace::TracerProvider as _;
     use tracing::Instrument as _;
     use tracing_subscriber::layer::SubscriberExt as _;
+    use futures_util::FutureExt as _;
 
     fn attribute<'a>(
         span: &'a opentelemetry_sdk::trace::SpanData,
         key: &str,
     ) -> Option<&'a opentelemetry::Value> {
-        span.attributes
-            .iter()
-            .find(|kv| kv.key.as_str() == key)
-            .map(|kv| &kv.value)
+        span.attributes.iter().find(|kv| kv.key.as_str() == key).map(|kv| &kv.value)
     }
     fn int(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<i64> {
         match attribute(span, key)? {
@@ -3006,10 +2223,7 @@ fn roster_admission_waiter_links_its_holder() {
     let _subscriber = tracing::subscriber::set_default(subscriber);
     let _export = fractal_daemon::test_support::roster_export_scope();
     let store = fractal_daemon::store::Store::open_memory("otel-admission").unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let holder = fractal_daemon::test_support::admit_fixture_roster(&store, "refresher")
             .instrument(tracing::info_span!("admission.holder"))
@@ -3064,13 +2278,9 @@ fn roster_admission_waiter_links_its_holder() {
                         .now_or_never()
                         .expect("B must acquire the admission just released by A"),
                 ));
-            })
-            .instrument(tracing::info_span!("admission.handoff_waiter"))
+            }).instrument(tracing::info_span!("admission.handoff_waiter"))
         );
-        assert!(
-            futures_util::poll!(waiter.as_mut()).is_pending(),
-            "W must wait behind B"
-        );
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending(), "W must wait behind B");
         drop(successor.borrow_mut().take());
         drop(waiter.await);
 
@@ -3082,152 +2292,84 @@ fn roster_admission_waiter_links_its_holder() {
             .await;
         let mut successor = Box::pin(
             fractal_daemon::test_support::admit_fixture_roster(&store, "http")
-                .instrument(tracing::info_span!("admission.reserved_b")),
+                .instrument(tracing::info_span!("admission.reserved_b"))
         );
         assert!(futures_util::poll!(successor.as_mut()).is_pending());
         let mut canceled = Box::pin(
             fractal_daemon::test_support::admit_fixture_roster(&store, "other")
-                .instrument(tracing::info_span!("admission.canceled")),
+                .instrument(tracing::info_span!("admission.canceled"))
         );
         assert!(futures_util::poll!(canceled.as_mut()).is_pending());
         drop(canceled);
         drop(holder);
         let mut waiter = Box::pin(
             fractal_daemon::test_support::admit_fixture_roster(&store, "ws")
-                .instrument(tracing::info_span!("admission.unknown_waiter")),
+                .instrument(tracing::info_span!("admission.unknown_waiter"))
         );
         assert!(futures_util::poll!(waiter.as_mut()).is_pending());
         let mut tail = Box::pin(
             fractal_daemon::test_support::admit_fixture_roster(&store, "other")
-                .instrument(tracing::info_span!("admission.unknown_tail")),
+                .instrument(tracing::info_span!("admission.unknown_tail"))
         );
         assert!(futures_util::poll!(tail.as_mut()).is_pending());
         drop(successor);
         let holder = waiter.await;
-        assert!(
-            futures_util::poll!(tail.as_mut()).is_pending(),
-            "C cannot bypass W"
-        );
+        assert!(futures_util::poll!(tail.as_mut()).is_pending(), "C cannot bypass W");
         drop(holder);
         drop(tail.await);
     });
     provider.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let named = |name: &str| {
-        spans
-            .iter()
-            .find(|span| span.name == name)
+        spans.iter().find(|span| span.name == name)
             .unwrap_or_else(|| panic!("missing {name}: {spans:?}"))
     };
     let holder = named("admission.holder");
     let waiter = named("admission.waiter");
 
     let holder_id = int(holder, "st.roster.admission.id").expect("holder admission id");
-    assert!(
-        double(holder, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0),
-        "{holder:?}"
-    );
+    assert!(double(holder, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0), "{holder:?}");
     // Every acquisition begins as a waiter, so its own class is `waiter_class`;
     // `holder_class` names only a blocking holder and is absent when uncontended.
-    assert_eq!(
-        string(holder, "st.roster.admission.waiter_class").as_deref(),
-        Some("refresher"),
-        "{holder:?}"
-    );
-    assert_eq!(
-        string(holder, "st.roster.admission.holder_class"),
-        None,
-        "{holder:?}"
-    );
-    assert_eq!(
-        int(holder, "st.roster.admission.holder_id"),
-        None,
-        "uncontended holder: {holder:?}"
-    );
-    assert!(
-        holder.links.iter().next().is_none(),
-        "uncontended holder has no link: {holder:?}"
-    );
+    assert_eq!(string(holder, "st.roster.admission.waiter_class").as_deref(), Some("refresher"), "{holder:?}");
+    assert_eq!(string(holder, "st.roster.admission.holder_class"), None, "{holder:?}");
+    assert_eq!(int(holder, "st.roster.admission.holder_id"), None, "uncontended holder: {holder:?}");
+    assert!(holder.links.iter().next().is_none(), "uncontended holder has no link: {holder:?}");
 
     let waiter_id = int(waiter, "st.roster.admission.id").expect("waiter admission id");
     assert_ne!(waiter_id, holder_id, "each acquisition has its own id");
-    assert_eq!(
-        int(waiter, "st.roster.admission.holder_id"),
-        Some(holder_id),
-        "{waiter:?}"
-    );
-    assert_eq!(
-        string(waiter, "st.roster.admission.waiter_class").as_deref(),
-        Some("http"),
-        "{waiter:?}"
-    );
-    assert_eq!(
-        string(waiter, "st.roster.admission.holder_class").as_deref(),
-        Some("refresher"),
-        "{waiter:?}"
-    );
-    assert!(
-        double(waiter, "st.roster.admission.wait_ms").is_some_and(|ms| ms >= 0.0),
-        "{waiter:?}"
-    );
-    assert!(
-        double(waiter, "st.roster.admission.holder_age_ms").is_some_and(|ms| ms >= 0.0),
-        "{waiter:?}"
-    );
-    assert!(
-        double(waiter, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0),
-        "{waiter:?}"
-    );
+    assert_eq!(int(waiter, "st.roster.admission.holder_id"), Some(holder_id), "{waiter:?}");
+    assert_eq!(string(waiter, "st.roster.admission.waiter_class").as_deref(), Some("http"), "{waiter:?}");
+    assert_eq!(string(waiter, "st.roster.admission.holder_class").as_deref(), Some("refresher"), "{waiter:?}");
+    assert!(double(waiter, "st.roster.admission.wait_ms").is_some_and(|ms| ms >= 0.0), "{waiter:?}");
+    assert!(double(waiter, "st.roster.admission.holder_age_ms").is_some_and(|ms| ms >= 0.0), "{waiter:?}");
+    assert!(double(waiter, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0), "{waiter:?}");
 
     let links: Vec<_> = waiter.links.iter().collect();
     assert_eq!(links.len(), 1, "one link from waiter to holder: {waiter:?}");
-    assert_eq!(
-        links[0].span_context, holder.span_context,
-        "link targets the holder span"
-    );
+    assert_eq!(links[0].span_context, holder.span_context, "link targets the holder span");
     assert!(
-        links[0]
-            .attributes
-            .iter()
-            .any(|kv| kv.key.as_str() == "st.roster.admission.holder_id"
-                && kv.value == opentelemetry::Value::I64(holder_id)),
+        links[0].attributes.iter().any(|kv| kv.key.as_str() == "st.roster.admission.holder_id"
+            && kv.value == opentelemetry::Value::I64(holder_id)),
         "link carries the holder id: {:?}",
         links[0]
     );
     let unlinked = named("admission.unlinked_waiter");
-    assert_eq!(
-        string(unlinked, "st.roster.admission.waiter_class").as_deref(),
-        Some("ws")
-    );
-    assert_eq!(
-        string(unlinked, "st.roster.admission.holder_class").as_deref(),
-        Some("refresher")
-    );
+    assert_eq!(string(unlinked, "st.roster.admission.waiter_class").as_deref(), Some("ws"));
+    assert_eq!(string(unlinked, "st.roster.admission.holder_class").as_deref(), Some("refresher"));
     assert!(int(unlinked, "st.roster.admission.holder_id").is_some());
     assert!(double(unlinked, "st.roster.admission.wait_ms").is_some_and(|ms| ms >= 0.0));
     assert!(double(unlinked, "st.roster.admission.holder_age_ms").is_some_and(|ms| ms >= 0.0));
-    assert!(
-        unlinked.links.iter().next().is_none(),
-        "no synthetic span or invalid link: {unlinked:?}"
-    );
+    assert!(unlinked.links.iter().next().is_none(), "no synthetic span or invalid link: {unlinked:?}");
 
     let try_holder = named("admission.try_holder");
     let try_waiter = named("admission.try_waiter");
     let try_id = int(try_holder, "st.roster.admission.id").expect("try-admit holder id");
-    assert_eq!(
-        string(try_holder, "st.roster.admission.waiter_class").as_deref(),
-        Some("ws")
-    );
+    assert_eq!(string(try_holder, "st.roster.admission.waiter_class").as_deref(), Some("ws"));
     assert_eq!(double(try_holder, "st.roster.admission.wait_ms"), Some(0.0));
     assert!(double(try_holder, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0));
-    assert_eq!(
-        int(try_waiter, "st.roster.admission.holder_id"),
-        Some(try_id)
-    );
-    assert_eq!(
-        string(try_waiter, "st.roster.admission.holder_class").as_deref(),
-        Some("ws")
-    );
+    assert_eq!(int(try_waiter, "st.roster.admission.holder_id"), Some(try_id));
+    assert_eq!(string(try_waiter, "st.roster.admission.holder_class").as_deref(), Some("ws"));
     assert!(double(try_waiter, "st.roster.admission.holder_age_ms").is_some_and(|ms| ms >= 0.0));
     let links: Vec<_> = try_waiter.links.iter().collect();
     assert_eq!(links.len(), 1);
@@ -3239,113 +2381,38 @@ fn roster_admission_waiter_links_its_holder() {
     let handoff_a_id = int(handoff_a, "st.roster.admission.id").expect("A admission id");
     let handoff_b_id = int(handoff_b, "st.roster.admission.id").expect("B admission id");
     assert_ne!(handoff_a_id, handoff_b_id);
-    assert_eq!(
-        int(handoff_waiter, "st.roster.admission.holder_id"),
-        Some(handoff_b_id)
-    );
-    assert_ne!(
-        int(handoff_waiter, "st.roster.admission.holder_id"),
-        Some(handoff_a_id)
-    );
-    assert_eq!(
-        string(handoff_waiter, "st.roster.admission.holder_class").as_deref(),
-        Some("http")
-    );
-    assert_eq!(
-        string(handoff_waiter, "st.roster.admission.waiter_class").as_deref(),
-        Some("ws")
-    );
-    assert!(
-        double(handoff_waiter, "st.roster.admission.holder_age_ms").is_some_and(|ms| ms >= 0.0)
-    );
+    assert_eq!(int(handoff_waiter, "st.roster.admission.holder_id"), Some(handoff_b_id));
+    assert_ne!(int(handoff_waiter, "st.roster.admission.holder_id"), Some(handoff_a_id));
+    assert_eq!(string(handoff_waiter, "st.roster.admission.holder_class").as_deref(), Some("http"));
+    assert_eq!(string(handoff_waiter, "st.roster.admission.waiter_class").as_deref(), Some("ws"));
+    assert!(double(handoff_waiter, "st.roster.admission.holder_age_ms").is_some_and(|ms| ms >= 0.0));
     let links: Vec<_> = handoff_waiter.links.iter().collect();
-    assert_eq!(
-        links.len(),
-        1,
-        "handoff waiter has exactly one blocker link"
-    );
-    assert_eq!(
-        links[0].span_context, handoff_b.span_context,
-        "W links B, not stale A"
-    );
+    assert_eq!(links.len(), 1, "handoff waiter has exactly one blocker link");
+    assert_eq!(links[0].span_context, handoff_b.span_context, "W links B, not stale A");
     assert_ne!(links[0].span_context, handoff_a.span_context);
-    assert!(
-        links[0]
-            .attributes
-            .iter()
-            .any(|kv| kv.key.as_str() == "st.roster.admission.holder_id"
-                && kv.value == opentelemetry::Value::I64(handoff_b_id))
-    );
-    for event in handoff_waiter
-        .events
-        .iter()
-        .filter(|event| event.name == "st.roster.admission.wait")
-    {
-        assert!(
-            event
-                .attributes
-                .iter()
-                .any(|kv| kv.key.as_str() == "st.roster.admission.holder_id"
-                    && kv.value == opentelemetry::Value::I64(handoff_b_id)),
-            "{event:?}"
-        );
-        assert!(
-            event
-                .attributes
-                .iter()
-                .any(|kv| kv.key.as_str() == "st.roster.admission.holder_class"
-                    && kv.value == opentelemetry::Value::String("http".into())),
-            "{event:?}"
-        );
+    assert!(links[0].attributes.iter().any(|kv| kv.key.as_str() == "st.roster.admission.holder_id"
+        && kv.value == opentelemetry::Value::I64(handoff_b_id)));
+    for event in handoff_waiter.events.iter().filter(|event| event.name == "st.roster.admission.wait") {
+        assert!(event.attributes.iter().any(|kv| kv.key.as_str() == "st.roster.admission.holder_id"
+            && kv.value == opentelemetry::Value::I64(handoff_b_id)), "{event:?}");
+        assert!(event.attributes.iter().any(|kv| kv.key.as_str() == "st.roster.admission.holder_class"
+            && kv.value == opentelemetry::Value::String("http".into())), "{event:?}");
     }
     let unknown = named("admission.unknown_waiter");
     let unknown_tail = named("admission.unknown_tail");
     for span in [unknown, unknown_tail] {
-        assert_eq!(
-            string(span, "st.roster.admission.holder_class").as_deref(),
-            Some("unknown")
-        );
-        assert_eq!(
-            int(span, "st.roster.admission.holder_id"),
-            None,
-            "no invented blocker id"
-        );
-        assert_eq!(
-            double(span, "st.roster.admission.holder_age_ms"),
-            None,
-            "no invented blocker age"
-        );
-        assert!(
-            span.links.iter().next().is_none(),
-            "no guessed blocker context: {span:?}"
-        );
+        assert_eq!(string(span, "st.roster.admission.holder_class").as_deref(), Some("unknown"));
+        assert_eq!(int(span, "st.roster.admission.holder_id"), None, "no invented blocker id");
+        assert_eq!(double(span, "st.roster.admission.holder_age_ms"), None, "no invented blocker age");
+        assert!(span.links.iter().next().is_none(), "no guessed blocker context: {span:?}");
         assert!(double(span, "st.roster.admission.wait_ms").is_some_and(|ms| ms >= 0.0));
         assert!(double(span, "st.roster.admission.hold_ms").is_some_and(|ms| ms >= 0.0));
     }
-    assert_eq!(
-        string(unknown, "st.roster.admission.waiter_class").as_deref(),
-        Some("ws")
-    );
-    assert_eq!(
-        string(unknown_tail, "st.roster.admission.waiter_class").as_deref(),
-        Some("other")
-    );
+    assert_eq!(string(unknown, "st.roster.admission.waiter_class").as_deref(), Some("ws"));
+    assert_eq!(string(unknown_tail, "st.roster.admission.waiter_class").as_deref(), Some("other"));
     // Correlation uses process-local numbers and closed classes only.
-    for span in [
-        holder,
-        waiter,
-        unlinked,
-        handoff_a,
-        handoff_b,
-        handoff_waiter,
-        unknown,
-        unknown_tail,
-    ] {
-        for kv in span
-            .attributes
-            .iter()
-            .filter(|kv| kv.key.as_str().starts_with("st.roster."))
-        {
+    for span in [holder, waiter, unlinked, handoff_a, handoff_b, handoff_waiter, unknown, unknown_tail] {
+        for kv in span.attributes.iter().filter(|kv| kv.key.as_str().starts_with("st.roster.")) {
             assert!(
                 !matches!(&kv.value, opentelemetry::Value::String(value)
                     if !matches!(value.as_str(), "http" | "ws" | "refresher" | "other" | "unknown")),
@@ -3390,9 +2457,9 @@ fn replication_exports_ready(traces: &[Value], metrics: &[Value]) -> bool {
         .collect();
     // Prove both movement and a subsequent idle exchange, not just worker startup.
     ["moved", "in_sync"].into_iter().all(|outcome| {
-        rounds
-            .iter()
-            .any(|span| string_attribute(span, "st.replication.outcome") == Some(outcome))
+        rounds.iter().any(|span| {
+            string_attribute(span, "st.replication.outcome") == Some(outcome)
+        })
     }) && ["st.replication.rounds", "st.replication.round.duration"]
         .into_iter()
         .all(|name| {
@@ -3494,8 +2561,7 @@ async fn replication_export_scenario() {
 #[cfg(target_os = "linux")]
 #[test]
 fn replication_worker_exports_rounds_after_graph_convergence() {
-    let Some(collector) = otelite("replication_worker_exports_rounds_after_graph_convergence")
-    else {
+    let Some(collector) = otelite("replication_worker_exports_rounds_after_graph_convergence") else {
         return;
     };
     if fractal_daemon::test_support::supervise_test() {
@@ -3583,13 +2649,8 @@ fn replication_worker_exports_rounds_after_graph_convergence() {
                 "bounded invented peers: {point}"
             );
             assert!(
-                string_attribute(point, "outcome").is_some_and(|outcome| [
-                    "moved",
-                    "in_sync",
-                    "failed",
-                    "cancelled"
-                ]
-                .contains(&outcome)),
+                string_attribute(point, "outcome")
+                    .is_some_and(|outcome| ["moved", "in_sync", "failed", "cancelled"].contains(&outcome)),
                 "closed metric outcomes: {point}"
             );
             assert!(
@@ -3608,11 +2669,7 @@ fn replication_worker_exports_rounds_after_graph_convergence() {
         .flat_map(|scope| scope["metrics"].as_array().into_iter().flatten())
         .filter(|metric| metric["name"].as_str() == Some("st.replication.round.duration"))
     {
-        assert_eq!(
-            metric["unit"].as_str(),
-            Some("s"),
-            "duration unit: {metric}"
-        );
+        assert_eq!(metric["unit"].as_str(), Some("s"), "duration unit: {metric}");
     }
 }
 
@@ -3620,16 +2677,16 @@ fn replication_worker_exports_rounds_after_graph_convergence() {
 /// depending on a running daemon, global providers, collector binaries or timers.
 #[test]
 fn mailbox_gauges_export_local_managed_agents_states_ages_and_bootstrap_exception() {
-    use fractal_daemon::api::mailbox_metrics;
-    use fractal_daemon::model::ClaimInput;
-    use fractal_daemon::{CoordinationStore as _, SeatsStoreCore as _};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, RwLock};
     use opentelemetry::metrics::MeterProvider as _;
     use opentelemetry_sdk::metrics::{
         InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
         data::{AggregatedMetrics, MetricData},
     };
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::{Arc, RwLock};
+    use fractal_daemon::api::mailbox_metrics;
+    use fractal_daemon::model::ClaimInput;
+    use fractal_daemon::{CoordinationStore as _, SeatsStoreCore as _};
 
     const BUSY: &str = "agent/example.owner/busy";
     const EMPTY: &str = "agent/example.owner/empty";
@@ -3644,32 +2701,20 @@ agent "example.owner/empty" { workspace "/tmp"; harness "claude" {} }
 agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
 "#,
         "example",
-    )
-    .unwrap();
-    intent
-        .subjects
-        .get_mut(REMOTE)
-        .unwrap()
-        .member
-        .as_mut()
-        .unwrap()
-        .host = "elsewhere".into();
+    ).unwrap();
+    intent.subjects.get_mut(REMOTE).unwrap().member.as_mut().unwrap().host = "elsewhere".into();
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
     let append = |subject: &str, kind: &str, fields: Value| {
-        store
-            .append_claim(&ClaimInput {
-                subject: subject.into(),
-                kind: kind.into(),
-                actor: Some("agent/example.sender".into()),
-                fields: serde_json::from_value(fields).unwrap(),
-                evidence: vec![],
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some("agent/example.sender".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
     };
     // Deliberately old read/closed mail must affect neither count nor oldest age.
     let mut transitions = Vec::new();
@@ -3687,15 +2732,11 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     ] {
         store.set_write_clock_at(now - seconds * 1000).unwrap();
         let subject = format!("message/mailbox-export-{id}");
-        append(
-            &subject,
-            "message.sent",
-            serde_json::json!({
-                "status": "sent", "from": "agent/example.sender", "to": recipient,
-                "content": "Mailbox export fixture",
-                "tags": if silent { vec!["st3-silent"] } else { vec![] },
-            }),
-        );
+        append(&subject, "message.sent", serde_json::json!({
+            "status": "sent", "from": "agent/example.sender", "to": recipient,
+            "content": "Mailbox export fixture",
+            "tags": if silent { vec!["st3-silent"] } else { vec![] },
+        }));
         transitions.push((subject, lifecycle));
     }
     store.set_write_clock_at(now).unwrap();
@@ -3704,47 +2745,30 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
             if lifecycle == "sent" {
                 break;
             }
-            append(
-                &subject,
-                &format!("message.{next}"),
-                serde_json::json!({"status": next}),
-            );
+            append(&subject, &format!("message.{next}"), serde_json::json!({"status": next}));
             if lifecycle == next {
                 break;
             }
         }
     }
-    store
-        .apply_internal(&intent, "mailbox-export-fixture")
-        .unwrap();
+    store.apply_internal(&intent, "mailbox-export-fixture").unwrap();
     assert_eq!(
-        mailbox_metrics::managed_agents_owned_by_local_host(&store)
-            .unwrap()
-            .into_iter()
-            .collect::<BTreeSet<_>>(),
+        mailbox_metrics::managed_agents_owned_by_local_host(&store).unwrap()
+            .into_iter().collect::<BTreeSet<_>>(),
         BTreeSet::from([BUSY.to_owned(), EMPTY.to_owned()]),
     );
     let connection = rusqlite::Connection::open(&database).unwrap();
-    connection
-        .execute(
-            "UPDATE local_coordination_backfill SET complete=1 WHERE singleton=1",
-            [],
-        )
-        .unwrap();
+    connection.execute(
+        "UPDATE local_coordination_backfill SET complete=1 WHERE singleton=1", [],
+    ).unwrap();
     assert!(store.coordination_backfill_status().unwrap().2);
     let cache = Arc::new(RwLock::new(mailbox_metrics::summarize(&store).unwrap()));
     let exporter = InMemoryMetricExporter::default();
     let provider = SdkMeterProvider::builder()
-        .with_resource(
-            opentelemetry_sdk::Resource::builder_empty()
-                .with_attribute(opentelemetry::KeyValue::new("host.name", "example-host"))
-                .build(),
-        )
-        .with_reader(
-            PeriodicReader::builder(exporter.clone())
-                .with_interval(Duration::from_secs(3600))
-                .build(),
-        )
+        .with_resource(opentelemetry_sdk::Resource::builder_empty()
+            .with_attribute(opentelemetry::KeyValue::new("host.name", "example-host")).build())
+        .with_reader(PeriodicReader::builder(exporter.clone())
+            .with_interval(Duration::from_secs(3600)).build())
         .build();
     mailbox_metrics::register_metrics(&provider.meter("st3"), cache.clone());
     let collect = || {
@@ -3752,9 +2776,7 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
         let batches = exporter.get_finished_metrics().unwrap();
         let batch = batches.last().expect("SDK exported mailbox metrics");
         assert_eq!(
-            batch
-                .resource()
-                .get(&opentelemetry::Key::from_static_str("host.name")),
+            batch.resource().get(&opentelemetry::Key::from_static_str("host.name")),
             Some(opentelemetry::Value::from("example-host")),
         );
         let mut counts = BTreeMap::new();
@@ -3763,18 +2785,12 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
             assert_eq!(scope.scope().name(), "st3");
             for metric in scope.metrics() {
                 let attributes = |attributes: Vec<_>| {
-                    let attributes = attributes
-                        .into_iter()
+                    let attributes = attributes.into_iter()
                         .map(|kv: &opentelemetry::KeyValue| (kv.key.as_str(), kv.value.to_string()))
                         .collect::<BTreeMap<_, _>>();
-                    assert_eq!(
-                        attributes.keys().copied().collect::<BTreeSet<_>>(),
-                        BTreeSet::from(["st.agent", "st.mailbox.state"])
-                    );
-                    (
-                        attributes["st.agent"].clone(),
-                        attributes["st.mailbox.state"].clone(),
-                    )
+                    assert_eq!(attributes.keys().copied().collect::<BTreeSet<_>>(),
+                        BTreeSet::from(["st.agent", "st.mailbox.state"]));
+                    (attributes["st.agent"].clone(), attributes["st.mailbox.state"].clone())
                 };
                 match metric.name() {
                     "st.mailbox.unread" => {
@@ -3782,30 +2798,16 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
                             panic!("unread must export as u64 gauge");
                         };
                         for point in gauge.data_points() {
-                            assert!(
-                                counts
-                                    .insert(attributes(point.attributes().collect()), point.value())
-                                    .is_none()
-                            );
+                            assert!(counts.insert(attributes(point.attributes().collect()), point.value()).is_none());
                         }
                     }
                     "st.mailbox.oldest_unread_age" => {
-                        assert_eq!(
-                            metric.unit(),
-                            "s",
-                            "same seconds unit as st.fifo.oldest_age"
-                        );
+                        assert_eq!(metric.unit(), "s", "same seconds unit as st.fifo.oldest_age");
                         let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = metric.data() else {
                             panic!("oldest unread age must export as f64 gauge");
                         };
                         for point in gauge.data_points() {
-                            assert!(
-                                ages.insert(
-                                    attributes(point.attributes().collect()),
-                                    point.value()
-                                )
-                                .is_none()
-                            );
+                            assert!(ages.insert(attributes(point.attributes().collect()), point.value()).is_none());
                         }
                     }
                     name => panic!("unexpected private-provider metric: {name}"),
@@ -3823,20 +2825,11 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
         ((EMPTY.to_owned(), "delivered".into()), 0),
         ((EMPTY.to_owned(), "held".into()), 0),
     ]);
-    assert_eq!(
-        counts, expected,
-        "exact agent set and mandatory zero states"
-    );
-    assert_eq!(
-        ages.keys().collect::<Vec<_>>(),
-        expected.keys().collect::<Vec<_>>()
-    );
+    assert_eq!(counts, expected, "exact agent set and mandatory zero states");
+    assert_eq!(ages.keys().collect::<Vec<_>>(), expected.keys().collect::<Vec<_>>());
     let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-        .saturating_sub(now) as f64
-        / 1000.0;
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        .saturating_sub(now) as f64 / 1000.0;
     for ((agent, state), age) in &ages {
         if agent == EMPTY {
             assert_eq!(*age, 0.0);
@@ -3847,18 +2840,13 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
                 "held" => 60.0,
                 _ => unreachable!(),
             };
-            assert!(
-                *age >= oldest && *age <= oldest + elapsed + 1.0,
-                "age must use oldest accepted sent timestamp: {state}={age}"
-            );
+            assert!(*age >= oldest && *age <= oldest + elapsed + 1.0,
+                "age must use oldest accepted sent timestamp: {state}={age}");
         }
     }
-    connection
-        .execute(
-            "UPDATE local_coordination_backfill SET complete=0 WHERE singleton=1",
-            [],
-        )
-        .unwrap();
+    connection.execute(
+        "UPDATE local_coordination_backfill SET complete=0 WHERE singleton=1", [],
+    ).unwrap();
     assert!(!store.coordination_backfill_status().unwrap().2);
     // Scraping does not consult the store: the completed snapshot stays visible
     // until the background worker publishes its next summary.
@@ -3871,21 +2859,12 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
         (EMPTY.to_owned(), "pending".to_owned()),
         (EMPTY.to_owned(), "delivered".to_owned()),
     ]);
-    assert_eq!(
-        partial_counts.keys().cloned().collect::<BTreeSet<_>>(),
-        partial_keys
-    );
-    assert_eq!(
-        partial_ages.keys().cloned().collect::<BTreeSet<_>>(),
-        partial_keys
-    );
+    assert_eq!(partial_counts.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
+    assert_eq!(partial_ages.keys().cloned().collect::<BTreeSet<_>>(), partial_keys);
     assert!(partial_counts[&(BUSY.into(), "pending".into())] >= 2);
     assert!(partial_counts[&(BUSY.into(), "delivered".into())] >= 2);
-    assert_eq!(
-        partial_counts.values().sum::<u64>(),
-        5,
-        "incomplete held classification must not discard unread mail"
-    );
+    assert_eq!(partial_counts.values().sum::<u64>(), 5,
+        "incomplete held classification must not discard unread mail");
     assert_eq!(partial_counts[&(EMPTY.into(), "pending".into())], 0);
     assert_eq!(partial_counts[&(EMPTY.into(), "delivered".into())], 0);
     assert_eq!(partial_ages[&(EMPTY.into(), "pending".into())], 0.0);

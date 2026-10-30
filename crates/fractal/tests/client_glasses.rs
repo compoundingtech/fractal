@@ -2,33 +2,29 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use serde_json::{Value, json};
+use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
 use fractal_client::{
     Client, CollectionEvent, GlassBody, GlassDelete, GlassLayout, GlassPut, GlassTab,
 };
-use fractal_daemon::{api::AppState, model::ClaimInput, store::Store};
-use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
 fn state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("glasses-test").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "glasses-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("glasses-test").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "glasses-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 async fn request(
     app: axum::Router,
@@ -394,9 +390,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     let app = fractal_daemon::api::router(state.clone());
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app)
-            .await
-            .unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -501,41 +495,31 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         .unwrap();
     assert!(matches!(change,CollectionEvent::Changes{removes,..} if removes.len()==1));
     stream.close().await;
-    let challenge = client
-        .pairing_begin_person(&fractal_client::PersonPairingBegin {
-            api_version: "st3.client.v0".into(),
-            device_name: "Fixture phone".into(),
-            person_id: "person/ada".into(),
-            full_control: None,
-            scopes: None,
-            fabric_gateway: None,
-        })
+    let challenge = client.pairing_begin_person(&fractal_client::PersonPairingBegin { api_version: "st3.client.v0".into(),
+    device_name: "Fixture phone".into(),
+    person_id: "person/ada".into(),
+    full_control: None,
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
-    let paired = client
-        .pairing_complete_person(
-            &challenge.pairing_id,
-            &fractal_client::PairingComplete {
-                api_version: "st3.client.v0".into(),
-                code: challenge.code,
-                device_public_key: "a".repeat(64),
-                key_storage: None,
-                fabric_node_id: None,
-            },
-        )
+    let paired = client.pairing_complete_person(&challenge.pairing_id,
+    &fractal_client::PairingComplete {
+        api_version: "st3.client.v0".into(),
+        code: challenge.code,
+        device_public_key: "a".repeat(64),
+        key_storage: None,
+        fabric_node_id: None,
+    },)
         .await
         .unwrap()
         .value;
     let gateway_socket = root.path().join("gateway.sock");
     let gateway_server_socket = gateway_socket.clone();
     let gateway = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(
-            &gateway_server_socket,
-            fractal_daemon::api::fabric_router(state),
-        )
-        .await
-        .unwrap();
+        fractal_daemon::api::serve_unix(&gateway_server_socket, fractal_daemon::api::fabric_router(state))
+            .await
+            .unwrap();
     });
     for _ in 0..100 {
         if gateway_socket.exists() {

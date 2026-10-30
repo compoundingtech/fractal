@@ -59,10 +59,7 @@ pub fn load_average() -> f64 {
 pub fn cores() -> usize {
     // SAFETY: sysconf has no preconditions.
     let online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    usize::try_from(online)
-        .ok()
-        .filter(|cores| *cores > 0)
-        .unwrap_or(1)
+    usize::try_from(online).ok().filter(|cores| *cores > 0).unwrap_or(1)
 }
 
 /// How many processes of each kind to start.
@@ -76,10 +73,7 @@ impl Shape {
     /// Twice the cores in CPU burners, so the run queue stays past the core count whatever else
     /// the host runs, and two disk writers.
     pub fn for_host() -> Self {
-        Self {
-            cpu: cores() * 2,
-            disk: 2,
-        }
+        Self { cpu: cores() * 2, disk: 2 }
     }
 }
 
@@ -95,12 +89,7 @@ impl Hog {
     pub fn start(dir: PathBuf, shape: Shape) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let nice = hog_nice(own_nice());
-        let mut hog = Self {
-            children: Vec::new(),
-            dir,
-            nice,
-            shape,
-        };
+        let mut hog = Self { children: Vec::new(), dir, nice, shape };
         for _ in 0..shape.cpu {
             let child = hog.spawn("while :; do :; done", &[])?;
             hog.children.push(child);
@@ -123,11 +112,7 @@ impl Hog {
             command.args(["-c", script, "hog"]);
             command
         };
-        command
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         // Its own process group, so one signal ends the loop and the `dd` it is running.
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let nice = self.nice;
@@ -150,11 +135,7 @@ impl Hog {
 
     /// The processes still running.
     pub fn running(&mut self) -> usize {
-        self.children
-            .iter_mut()
-            .map(Child::try_wait)
-            .filter(|state| matches!(state, Ok(None)))
-            .count()
+        self.children.iter_mut().map(Child::try_wait).filter(|state| matches!(state, Ok(None))).count()
     }
 
     /// Wait until the 1-minute load average is past the core count, and return it.
@@ -222,11 +203,7 @@ fn the_hog_runs_at_seat_priority_and_stops_with_its_drop() {
         // macOS runs the hog under `taskpolicy -b`, whose background state can read back as a
         // nice above the one set (its limit is 20, not 19) when the test itself runs niced.
         if cfg!(target_os = "macos") {
-            assert!(
-                nice >= hog.nice,
-                "pid {pid} should run at or below the hog's nice {}",
-                hog.nice
-            );
+            assert!(nice >= hog.nice, "pid {pid} should run at or below the hog's nice {}", hog.nice);
         } else {
             assert_eq!(nice, hog.nice, "pid {pid} should run at the hog's nice");
         }
@@ -235,22 +212,14 @@ fn the_hog_runs_at_seat_priority_and_stops_with_its_drop() {
             // SAFETY: ioprio_get reads another process's IO priority.
             let io = unsafe { libc::syscall(libc::SYS_ioprio_get, 1, pid) };
             assert_eq!(io >> 13, 2, "pid {pid} should be best-effort");
-            assert_eq!(
-                io & 0x1fff,
-                SEAT_IO_LEVEL as i64,
-                "pid {pid} should be at the lowest level"
-            );
+            assert_eq!(io & 0x1fff, SEAT_IO_LEVEL as i64, "pid {pid} should be at the lowest level");
         }
     }
     let pids = hog.pids();
     drop(hog);
     for pid in pids {
         // SAFETY: signal 0 only checks the process exists; a reaped child has gone.
-        assert_ne!(
-            unsafe { libc::kill(pid as i32, 0) },
-            0,
-            "pid {pid} should have ended"
-        );
+        assert_ne!(unsafe { libc::kill(pid as i32, 0) }, 0, "pid {pid} should have ended");
     }
     assert!(!dir.path().join("hog").exists());
 }

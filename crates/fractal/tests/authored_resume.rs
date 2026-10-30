@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{ClaimInput, IntentInput, PlannerSpec};
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 use tokio::sync::{Notify, watch};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -103,23 +103,19 @@ agent "garden/worker" {{
         })
         .unwrap();
     let socket = root.path().join("api.sock");
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "resume-link-test".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "resume-link-test".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let listener_socket = socket.clone();
     let state_socket = root.path().join("state.sock");
     let bound_store = state.store.clone();
@@ -132,8 +128,7 @@ agent "garden/worker" {{
             &state_socket,
             fractal_daemon::test_support::admitted_mailbox_protocol_router(state),
             bound_store,
-        )
-        .await
+        ).await
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -142,8 +137,7 @@ agent "garden/worker" {{
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let hooks = fractal_daemon::hooks::ensure_installed(&root.path().join("hooks")).unwrap();
-    let mut command =
-        fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     let stop = root.path().join("provider-stop");
     command
         .env_clear()
@@ -236,28 +230,15 @@ agent "garden/worker" {{
     let metadata = std::fs::symlink_metadata(&managed).unwrap();
     assert!(metadata.is_dir());
     assert!(!metadata.file_type().is_symlink());
-    assert_ne!(
-        std::fs::canonicalize(&managed).unwrap(),
-        std::fs::canonicalize(&legacy).unwrap()
-    );
+    assert_ne!(std::fs::canonicalize(&managed).unwrap(), std::fs::canonicalize(&legacy).unwrap());
     assert_eq!(std::fs::read_dir(&managed).unwrap().count(), 2);
     let managed_transcript = managed.join(transcript.file_name().unwrap());
     assert_eq!(std::fs::read_link(&managed_transcript).unwrap(), transcript);
-    assert_eq!(
-        std::fs::read(&managed_transcript).unwrap(),
-        std::fs::read(&transcript).unwrap()
-    );
+    assert_eq!(std::fs::read(&managed_transcript).unwrap(), std::fs::read(&transcript).unwrap());
     let managed_artifacts = managed.join(transcript.file_stem().unwrap());
-    assert_eq!(
-        std::fs::read_link(&managed_artifacts).unwrap(),
-        transcript.with_extension("")
-    );
+    assert_eq!(std::fs::read_link(&managed_artifacts).unwrap(), transcript.with_extension(""));
     assert!(managed_artifacts.is_dir());
-    assert!(
-        !managed
-            .join(format!("2026-10-05_{sibling_id}.jsonl"))
-            .exists()
-    );
+    assert!(!managed.join(format!("2026-10-05_{sibling_id}.jsonl")).exists());
     // This fixture has no PTY/reconciler. Releasing its provider can fence the delivery
     // subscription during teardown; the contract under test is the binding while it is live.
     let binding = binding.unwrap_or_else(|| panic!("native binding was not published: {output:?}"));

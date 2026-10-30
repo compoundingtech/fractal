@@ -378,10 +378,7 @@ pub(super) async fn run_launch(
 /// The `quiet_after_ms` query a `--quiet` duration asks for, or none for the daemon's default.
 fn quiet_query(quiet: Option<&str>) -> Result<String> {
     Ok(match quiet {
-        Some(quiet) => format!(
-            "?quiet_after_ms={}",
-            fractal_daemon::graph::parse_duration(quiet, true)?
-        ),
+        Some(quiet) => format!("?quiet_after_ms={}", fractal_daemon::graph::parse_duration(quiet, true)?),
         None => String::new(),
     })
 }
@@ -478,10 +475,7 @@ pub(super) async fn run_mission_view(
         }
         MissionViewCommand::Show(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());
-            anyhow::ensure!(
-                (1..=50).contains(&args.limit),
-                "mission tree limit must be 1 through 50"
-            );
+            anyhow::ensure!((1..=50).contains(&args.limit), "mission tree limit must be 1 through 50");
             anyhow::ensure!(
                 !json_output || args.cursor.is_none(),
                 "--cursor continues the human tree; omit --json"
@@ -528,8 +522,7 @@ pub(super) async fn run_mission_view(
             if json_output {
                 return print_value(&run, true);
             }
-            let page =
-                load_mission_run_tree(client, &run, args.cursor.as_deref(), args.limit).await?;
+            let page = load_mission_run_tree(client, &run, args.cursor.as_deref(), args.limit).await?;
             let now = current_unix_ms()?;
             print!(
                 "{}",
@@ -550,12 +543,7 @@ pub(super) async fn run_mission_view(
         }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         MissionViewCommand::Publish(args) => {
-            crate::stderr_message(
-                "st",
-                format_args!(
-                    "missions publish is legacy; use fractal apply FILE with the same options"
-                ),
-            );
+            crate::stderr_message("st", format_args!("missions publish is legacy; use fractal apply FILE with the same options"));
             publish_mission_file(client, args, json_output).await
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
@@ -717,10 +705,7 @@ async fn set_mission_run_report(
     let nonce = uuid::Uuid::now_v7().simple().to_string();
     let report: MissionRunReportView = client
         .post(
-            &format!(
-                "/v1/mission-runs/{}/report-to",
-                urlencoding::encode(&subject)
-            ),
+            &format!("/v1/mission-runs/{}/report-to", urlencoding::encode(&subject)),
             &MissionRunReportRequest {
                 actor: args.actor,
                 report_to: args.agent,

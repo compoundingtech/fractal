@@ -33,10 +33,7 @@ async fn run_handoff(
             );
             let hash = hex::encode(Sha256::digest(&bytes));
             let versions: DocumentListResponse = client
-                .get(&format!(
-                    "/v1/documents?name={}",
-                    urlencoding::encode(&name)
-                ))
+                .get(&format!("/v1/documents?name={}", urlencoding::encode(&name)))
                 .await?;
             let selected = versions.items.iter().find(|version| version.latest);
             let response: DocumentVersion = client
@@ -67,16 +64,10 @@ async fn run_handoff(
                         subject: fractal_daemon::handoff::ready_subject(&agent),
                         kind: fractal_daemon::handoff::READY_KIND.into(),
                         actor: Some(agent.clone()),
-                        fields: std::collections::BTreeMap::from([(
-                            "agent".into(),
-                            agent.clone().into(),
-                        )]),
+                        fields: std::collections::BTreeMap::from([("agent".into(), agent.clone().into())]),
                         evidence: vec![],
                         expected_subject: None,
-                        idempotency_key: Some(format!(
-                            "restart-ready:{agent}:{}",
-                            uuid::Uuid::now_v7()
-                        )),
+                        idempotency_key: Some(format!("restart-ready:{agent}:{}", uuid::Uuid::now_v7())),
                     },
                 )
                 .await?;
@@ -137,11 +128,9 @@ pub(super) async fn run_persons(
 ) -> Result<()> {
     match command {
         PersonsCommand::Rename(args) => {
-            let actor = args
-                .actor
-                .as_deref()
-                .or(configured_person)
-                .context("fractal persons rename needs --as ACTOR or a configured person")?;
+            let actor = args.actor.as_deref().or(configured_person).context(
+                "fractal persons rename needs --as ACTOR or a configured person",
+            )?;
             let response: Value = cli_client(endpoint)
                 .post(
                     "/v1/persons/rename",
@@ -167,16 +156,11 @@ pub(super) async fn run_agents(
 ) -> Result<()> {
     match command {
         AgentsCommand::AcknowledgeSeed(args) => {
-            let actor = args.actor.as_deref().or(configured_person).context(
-                "fractal agents acknowledge-seed needs --as ACTOR or a configured person",
-            )?;
+            let actor = args.actor.as_deref().or(configured_person)
+                .context("fractal agents acknowledge-seed needs --as ACTOR or a configured person")?;
             let claim = fractal_daemon::native_seed::acknowledge(
-                &cli_client(endpoint),
-                &normalize_agent_subject(&args.subject),
-                actor,
-                &args.reason,
-            )
-            .await?;
+                &cli_client(endpoint), &normalize_agent_subject(&args.subject), actor, &args.reason,
+            ).await?;
             print_value(&claim, json_output)
         }
         AgentsCommand::Hold(args) => {
@@ -257,22 +241,18 @@ pub(super) async fn run_agents(
             Ok(())
         }
         AgentsCommand::Rename(args) => {
-            let actor = args
-                .actor
-                .as_deref()
-                .or(configured_person)
-                .context("fractal agents rename needs --as ACTOR or a configured person")?;
-            let response: Value = cli_client(endpoint)
-                .post(
-                    "/v1/agents/rename",
-                    &json!({
-                        "subject": normalize_agent_subject(&args.subject),
-                        "name": args.label,
-                        "actor": actor,
-                        "idempotency_key": uuid::Uuid::now_v7().to_string(),
-                    }),
-                )
-                .await?;
+            let actor = args.actor.as_deref().or(configured_person).context(
+                "fractal agents rename needs --as ACTOR or a configured person",
+            )?;
+            let response: Value = cli_client(endpoint).post(
+                "/v1/agents/rename",
+                &json!({
+                    "subject": normalize_agent_subject(&args.subject),
+                    "name": args.label,
+                    "actor": actor,
+                    "idempotency_key": uuid::Uuid::now_v7().to_string(),
+                }),
+            ).await?;
             print_value(&response, json_output)
         }
         AgentsCommand::RenameId(args) => {
@@ -298,13 +278,7 @@ pub(super) async fn run_agents(
             Ok(())
         }
         AgentsCommand::Handoff { command } => {
-            run_handoff(
-                &cli_client(endpoint),
-                configured_person,
-                command,
-                json_output,
-            )
-            .await
+            run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
         AgentsCommand::Workspace { subject } => {
             let response = generated_client(endpoint, None)?
@@ -318,12 +292,7 @@ pub(super) async fn run_agents(
         }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         AgentsCommand::Apply(args) => {
-            crate::stderr_message(
-                "st",
-                format_args!(
-                    "agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"
-                ),
-            );
+            crate::stderr_message("st", format_args!("agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"));
             let client = cli_client(endpoint);
             if !args.dry_run {
                 let (kdl, source_name) = read_intent(Some(&args.file))?;
@@ -357,10 +326,8 @@ pub(super) async fn run_agents(
             let client = cli_client(endpoint);
             let (subject, tokens, existing, mission) =
                 agent_start_declaration(endpoint, &client, &args).await?;
-            anyhow::ensure!(
-                !args.source_offline || existing.is_some(),
-                "--source-offline needs an existing seat with a pending placement handoff"
-            );
+            anyhow::ensure!(!args.source_offline || existing.is_some(),
+                "--source-offline needs an existing seat with a pending placement handoff");
             let response = if let Some(mission) = mission {
                 anyhow::ensure!(
                     args.harness.is_none()
@@ -376,9 +343,7 @@ pub(super) async fn run_agents(
                 if let MissionSeatStart::Declared(run) = mission {
                     if args.source_offline {
                         let agent = agent_start_status(endpoint, &client, &subject, &args).await?;
-                        if json_output {
-                            return print_value(&agent, true);
-                        }
+                        if json_output { return print_value(&agent, true); }
                         print!("{}", render_client_agent(&agent, &[], current_unix_ms()?));
                         return Ok(());
                     }
@@ -598,9 +563,7 @@ pub(super) async fn run_agents(
                 return if json_output {
                     print_value(&request, true)
                 } else {
-                    println!(
-                        "Restart pending for {subject}: waiting for the turn to end and the harness to be idle and quiescent"
-                    );
+                    println!("Restart pending for {subject}: waiting for the turn to end and the harness to be idle and quiescent");
                     Ok(())
                 };
             }
@@ -653,9 +616,7 @@ pub(super) async fn run_agents(
                         // The old incarnation's fault is often why this restart was
                         // requested. It cannot fail the accepted replacement operation.
                         if let Some(fault) = agent.fault.as_deref().filter(|_| {
-                            agent
-                                .incarnation_id
-                                .as_deref()
+                            agent.incarnation_id.as_deref()
                                 .is_some_and(|incarnation| incarnation != previous)
                         }) {
                             anyhow::bail!("`{subject}` could not restart: {fault}");
@@ -688,9 +649,7 @@ pub(super) async fn run_agents(
                         if event.kind == "runtime.action.failed"
                             && fields["action"] == "restart"
                             && event.body["evidence"].as_array().is_some_and(|evidence| {
-                                evidence
-                                    .iter()
-                                    .any(|id| id.as_str() == Some(request.id.as_str()))
+                                evidence.iter().any(|id| id.as_str() == Some(request.id.as_str()))
                             })
                         {
                             anyhow::bail!(
@@ -762,23 +721,16 @@ async fn agent_start_status(
         anyhow::bail!("`{subject}` is not an agent");
     };
     if args.source_offline {
-        let handoff = agent
-            .handoff
-            .as_ref()
+        let handoff = agent.handoff.as_ref()
             .context("--source-offline needs a placement handoff with former source hosts")?;
         if !handoff.pending_sources.is_empty() {
-            client
-                .post::<_, fractal_daemon::model::ClaimRecord>(
-                    "/v1/agents/source-offline",
-                    &json!({
-                        "subject": subject,
-                        "actor": args.actor,
-                        "desired_token": handoff.desired_token,
-                        "sources": handoff.pending_sources,
-                        "idempotency_key": format!("source-offline:{}", uuid::Uuid::now_v7()),
-                    }),
-                )
-                .await?;
+            client.post::<_, fractal_daemon::model::ClaimRecord>("/v1/agents/source-offline", &json!({
+                "subject": subject,
+                "actor": args.actor,
+                "desired_token": handoff.desired_token,
+                "sources": handoff.pending_sources,
+                "idempotency_key": format!("source-offline:{}", uuid::Uuid::now_v7()),
+            })).await?;
             let ClientResource::Agent(updated) = generated.agents_get(subject).await?.value else {
                 anyhow::bail!("`{subject}` is not an agent");
             };
@@ -834,24 +786,11 @@ async fn agent_start_declaration(
         let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
         if desired.kind == "agent" {
             // A prior declaration reconstructed through a stop is not a currently held seat.
-            if current.kind.as_deref() == Some("agent")
-                && claim.id == *token
-                && !args.print_kdl
-                && let ClientResource::Agent(agent) = generated_client(endpoint, None)?
-                    .agents_get(&subject)
-                    .await?
-                    .value
+            if current.kind.as_deref() == Some("agent") && claim.id == *token && !args.print_kdl
+                && let ClientResource::Agent(agent) = generated_client(endpoint, None)?.agents_get(&subject).await?.value
                 && let Some(suspension) = agent.suspension
-                && matches!(
-                    suspension.phase.as_str(),
-                    "quiescing"
-                        | "snapshotting"
-                        | "suspended"
-                        | "fencing-source"
-                        | "transferring"
-                        | "restoring"
-                        | "verifying"
-                )
+                && matches!(suspension.phase.as_str(),
+                    "quiescing" | "snapshotting" | "suspended" | "fencing-source" | "transferring" | "restoring" | "verifying")
             {
                 return Err(fractal_daemon::St3Error::new(
                     "start-suspended",
@@ -944,16 +883,9 @@ async fn run_agent_new(
             ),
             // An install does not restart the daemon, so a new st can meet an older daemon.
             Err(error)
-                if fractal_daemon::client::is_missing_route(&error)
-                    || fractal_daemon::client::is_not_found(&error) =>
+                if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
-                crate::stderr_message(
-                    "st",
-                    format_args!(
-                        "the daemon is older than this {} and cannot check which providers are installed; creating the seat anyway",
-                        ClientMessage::for_output(false).product_name()
-                    ),
-                );
+                crate::stderr_message("st", format_args!("the daemon is older than this {} and cannot check which providers are installed; creating the seat anyway", ClientMessage::for_output(false).product_name()));
             }
             Err(error) => return Err(error),
         }

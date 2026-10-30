@@ -19,12 +19,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use fractal_daemon::model::{
-    ClaimInput, IntentInput, MemberSpec, MissionRunRequest, MissionRunView,
-};
+use serde_json::Value;
+use fractal_daemon::model::{ClaimInput, IntentInput, MemberSpec, MissionRunRequest, MissionRunView};
 use fractal_daemon::reconcile::{FaultInjection, Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
-use serde_json::Value;
 use tokio::sync::Notify;
 
 const HOST: &str = "node";

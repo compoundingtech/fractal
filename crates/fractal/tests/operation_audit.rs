@@ -11,11 +11,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use fractal_daemon::model::ClaimInput;
-use fractal_daemon::store::Store;
 use rusqlite::{Connection, Transaction, params};
 use serde_json::{Value, json};
 use smallclaims::store::{append_claim_record_tx, claim_from_row, operation_parts};
+use fractal_daemon::model::ClaimInput;
+use fractal_daemon::store::Store;
 
 pub(crate) const NODE: &str = "audit-node";
 
@@ -119,10 +119,7 @@ pub(crate) fn old_operation_projection_drift(
     )?;
     let actual = statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                (row.get(1)?, row.get(2)?, row.get(3)?),
-            ))
+            Ok((row.get::<_, String>(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))
         })?
         .collect::<rusqlite::Result<OperationRows>>()?;
     drop(statement);
@@ -150,11 +147,7 @@ pub(crate) struct OperationClaim {
     pub label: String,
 }
 
-pub(crate) fn claim(
-    operation: impl Into<Value>,
-    digest: impl Into<Value>,
-    label: &str,
-) -> OperationClaim {
+pub(crate) fn claim(operation: impl Into<Value>, digest: impl Into<Value>, label: &str) -> OperationClaim {
     OperationClaim {
         operation: operation.into(),
         digest: digest.into(),
@@ -276,12 +269,7 @@ pub(crate) fn operation_row(store: &Store, id: &str) -> Option<(String, String, 
 }
 
 fn execute(store: &Store, sql: &str, parameters: impl rusqlite::Params) {
-    store
-        .connection
-        .lock()
-        .unwrap()
-        .execute(sql, parameters)
-        .unwrap();
+    store.connection.lock().unwrap().execute(sql, parameters).unwrap();
 }
 
 /// Rows past one page of 128, for the claim, tombstone and operation walks.
@@ -343,17 +331,9 @@ fn edge_store(path: &Path) -> EdgeStore {
         tombstone("claim/dropped/min", Some("op/dropped-min"), Some("d/1")),
         tombstone("claim/dropped/same", Some("op/dropped-same"), Some("d/1")),
         // A tombstone for a claim still stored counts once, as that claim.
-        tombstone(
-            &tombstone_of_stored,
-            Some("op/tombstone-of-stored"),
-            Some("d/0"),
-        ),
+        tombstone(&tombstone_of_stored, Some("op/tombstone-of-stored"), Some("d/0")),
         tombstone("claim/dropped/only", Some("op/dropped-only"), Some("d/1")),
-        tombstone(
-            "claim/dropped/repaired",
-            Some("op/repaired-tombstone"),
-            Some("d/0"),
-        ),
+        tombstone("claim/dropped/repaired", Some("op/repaired-tombstone"), Some("d/0")),
         // The stored claim's digest is not text, so its tombstone is a dropped claim.
         tombstone(&malformed_digest, Some("op/malformed-mixed"), Some("d/0")),
         tombstone("claim/dropped/no-operation", None, Some("d/0")),
@@ -412,27 +392,13 @@ fn the_fixture_covers_each_edge_by_the_reference() {
 fn the_bounded_audit_matches_the_hydrated_audit_on_every_edge() {
     let directory = tempfile::tempdir().unwrap();
     let EdgeStore { store, duplicate } = edge_store(&directory.path().join("state.sqlite3"));
-    assert_eq!(
-        store.operation_projection_drift().unwrap(),
-        Vec::<String>::new()
-    );
+    assert_eq!(store.operation_projection_drift().unwrap(), Vec::<String>::new());
 
     let existing = operation_row(&store, "op/active").unwrap().1;
     let duplicate_canonical = operation_row(&store, "op/duplicate").unwrap().1;
-    let noncanonical_duplicate = duplicate
-        .iter()
-        .find(|id| *id != &duplicate_canonical)
-        .unwrap();
-    execute(
-        &store,
-        "UPDATE operations SET state='active' WHERE id='op/conflict'",
-        [],
-    );
-    execute(
-        &store,
-        "UPDATE operations SET request_digest='d/1' WHERE id='op/empty-digest'",
-        [],
-    );
+    let noncanonical_duplicate = duplicate.iter().find(|id| *id != &duplicate_canonical).unwrap();
+    execute(&store, "UPDATE operations SET state='active' WHERE id='op/conflict'", []);
+    execute(&store, "UPDATE operations SET request_digest='d/1' WHERE id='op/empty-digest'", []);
     execute(
         &store,
         "UPDATE operations SET canonical_claim_id=?1 WHERE id='op/duplicate'",
@@ -440,12 +406,7 @@ fn the_bounded_audit_matches_the_hydrated_audit_on_every_edge() {
     );
     execute(&store, "DELETE FROM operations WHERE id='op/huge'", []);
     execute(&store, "DELETE FROM operations WHERE id=''", []);
-    for stray in [
-        "op/dropped-only",
-        "op/repaired-only",
-        "op/malformed",
-        "op/zz-stray",
-    ] {
+    for stray in ["op/dropped-only", "op/repaired-only", "op/malformed", "op/zz-stray"] {
         execute(
             &store,
             "INSERT INTO operations(id, request_digest, canonical_claim_id, state)
@@ -484,7 +445,9 @@ fn the_audit_reads_in_pages_and_releases_each_snapshot() {
     let path = directory.path().join("state.sqlite3");
     let EdgeStore { store, .. } = edge_store(&path);
     // Leave frames in the WAL, so a checkpoint has something a held snapshot would pin.
-    store.append_claim(&note("before-audit")).unwrap();
+    store
+        .append_claim(&note("before-audit"))
+        .unwrap();
     let outside = Connection::open(&path).unwrap();
     outside.busy_timeout(Duration::ZERO).unwrap();
     let mut observations = 0;
@@ -508,10 +471,7 @@ fn the_audit_reads_in_pages_and_releases_each_snapshot() {
     // At least the claim pages over op/huge and op/many, a tombstone page beyond the first,
     // and two operation pages.
     let pages = (2 * PAGES).div_ceil(128) + PAGES.div_ceil(128) + PAGES.div_ceil(128);
-    assert!(
-        observations >= pages,
-        "{observations} observations, {pages} pages"
-    );
+    assert!(observations >= pages, "{observations} observations, {pages} pages");
 }
 
 fn note(label: &str) -> ClaimInput {
@@ -556,11 +516,7 @@ fn the_audit_completes_while_new_operations_are_appended_after_every_page() {
 
 #[test]
 fn the_audit_completes_with_a_continuously_appending_writer() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    };
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
     let directory = tempfile::tempdir().unwrap();
     let EdgeStore { store, .. } = edge_store(&directory.path().join("state.sqlite3"));
     let store = Arc::new(store);
@@ -573,9 +529,7 @@ fn the_audit_completes_with_a_continuously_appending_writer() {
         started.recv().unwrap();
         let mut appended = 0;
         while writer_running.load(Ordering::Acquire) {
-            writer_store
-                .append_claim(&operation_note(&format!("concurrent-{appended}")))
-                .unwrap();
+            writer_store.append_claim(&operation_note(&format!("concurrent-{appended}"))).unwrap();
             appended += 1;
             written.send(appended).unwrap();
         }
@@ -583,9 +537,7 @@ fn the_audit_completes_with_a_continuously_appending_writer() {
     });
     let mut pages = 0;
     let result = store.operation_projection_drift_with_observer(&mut |_| {
-        if pages == 0 {
-            start.send(()).unwrap();
-        }
+        if pages == 0 { start.send(()).unwrap(); }
         // A separate writer remains active throughout the scan, including inside page
         // snapshots; these acknowledgements also prove progress without timing sleeps.
         writes.recv().unwrap();
@@ -594,10 +546,7 @@ fn the_audit_completes_with_a_continuously_appending_writer() {
     running.store(false, Ordering::Release);
     let appended = writer.join().unwrap();
     assert!(result.unwrap().is_empty());
-    assert!(
-        pages > 1 && appended >= pages,
-        "{pages} pages, {appended} appends"
-    );
+    assert!(pages > 1 && appended >= pages, "{pages} pages, {appended} appends");
     assert!(store.operation_projection_drift().unwrap().is_empty());
 }
 
@@ -687,18 +636,9 @@ fn assert_caught_by_this_or_the_next_pass(operation: &str, mutate: &dyn Fn(&Stor
 #[test]
 fn projection_drift_written_during_the_audit_is_caught_by_the_next_pass() {
     for (operation, sql) in [
-        (
-            "op/active",
-            "UPDATE operations SET state='conflict' WHERE id='op/active'",
-        ),
-        (
-            "op/many/0000",
-            "DELETE FROM operations WHERE id='op/many/0000'",
-        ),
-        (
-            "op/huge",
-            "UPDATE operations SET request_digest='d/9' WHERE id='op/huge'",
-        ),
+        ("op/active", "UPDATE operations SET state='conflict' WHERE id='op/active'"),
+        ("op/many/0000", "DELETE FROM operations WHERE id='op/many/0000'"),
+        ("op/huge", "UPDATE operations SET request_digest='d/9' WHERE id='op/huge'"),
     ] {
         assert_caught_by_this_or_the_next_pass(operation, &|store, _| execute(store, sql, []));
     }
@@ -725,16 +665,8 @@ fn a_consistent_conflict_written_during_the_audit_is_never_reported() {
         let directory = tempfile::tempdir().unwrap();
         let EdgeStore { store, .. } = edge_store_in(&directory);
         let drift = audit_with_mutation_at(&store, at, &|store| {
-            write_claims(
-                store,
-                vec![claim("op/many/0001", "d/9", "late-conflict")],
-                64,
-            );
-            execute(
-                store,
-                "UPDATE operations SET state='conflict' WHERE id='op/many/0001'",
-                [],
-            );
+            write_claims(store, vec![claim("op/many/0001", "d/9", "late-conflict")], 64);
+            execute(store, "UPDATE operations SET state='conflict' WHERE id='op/many/0001'", []);
         });
         assert!(drift.is_empty(), "after {at:?}: {drift:?}");
         assert_eq!(operation_row(&store, "op/many/0001").unwrap().2, "conflict");
@@ -750,17 +682,9 @@ fn drift_repaired_during_the_audit_is_gone_from_the_next_pass() {
     for at in mutation_points() {
         let directory = tempfile::tempdir().unwrap();
         let EdgeStore { store, .. } = edge_store_in(&directory);
-        execute(
-            &store,
-            "UPDATE operations SET state='conflict' WHERE id='op/active'",
-            [],
-        );
+        execute(&store, "UPDATE operations SET state='conflict' WHERE id='op/active'", []);
         let drift = audit_with_mutation_at(&store, at, &|store| {
-            execute(
-                store,
-                "UPDATE operations SET state='active' WHERE id='op/active'",
-                [],
-            );
+            execute(store, "UPDATE operations SET state='active' WHERE id='op/active'", []);
         });
         assert!(
             drift.is_empty() || drift == ["op/active"],
@@ -776,8 +700,7 @@ fn a_cancelled_parent_budget_cannot_turn_an_empty_audit_into_a_clean_report() {
     let store = Store::open_memory(NODE).unwrap();
     // Cover the ordinary idle-reader path without opening a new pool connection.
     assert!(store.operation_projection_drift().unwrap().is_empty());
-    let budget =
-        smallclaims::read_budget::ReadBudget::new("/operation-audit", Duration::from_secs(1));
+    let budget = smallclaims::read_budget::ReadBudget::new("/operation-audit", Duration::from_secs(1));
     budget.cancel();
     let mut snapshots = 0;
     let result = smallclaims::read_budget::with(Some(budget), || {
@@ -790,8 +713,7 @@ fn a_cancelled_parent_budget_cannot_turn_an_empty_audit_into_a_clean_report() {
 #[test]
 fn cancellation_between_units_stops_an_empty_audit() {
     let store = Store::open_memory(NODE).unwrap();
-    let budget =
-        smallclaims::read_budget::ReadBudget::new("/operation-audit", Duration::from_secs(1));
+    let budget = smallclaims::read_budget::ReadBudget::new("/operation-audit", Duration::from_secs(1));
     let mut snapshots = 0;
     let result = smallclaims::read_budget::with(Some(budget.clone()), || {
         store.operation_projection_drift_with_observer(&mut |_| {
@@ -800,42 +722,25 @@ fn cancellation_between_units_stops_an_empty_audit() {
         })
     });
     assert!(result.is_err());
-    assert_eq!(
-        snapshots, 1,
-        "cancellation must stop the next unit before its snapshot"
-    );
+    assert_eq!(snapshots, 1, "cancellation must stop the next unit before its snapshot");
 }
 
 #[test]
 fn operation_audit_repair_commits_at_most_sixteen_keys_per_writer_transaction() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
     let directory = tempfile::tempdir().unwrap();
     let EdgeStore { store, .. } = edge_store_in(&directory);
-    execute(
-        &store,
-        "UPDATE operations SET request_digest='d/corrupt'",
-        [],
-    );
+    execute(&store, "UPDATE operations SET request_digest='d/corrupt'", []);
     let drift = store.operation_projection_drift().unwrap();
-    assert!(
-        drift.len() > 32,
-        "the fixture must need several repair batches"
-    );
+    assert!(drift.len() > 32, "the fixture must need several repair batches");
     let commits = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&commits);
     store.connection.write().commit_hook(Some(move || {
         observed.fetch_add(1, Ordering::Relaxed);
         false
     }));
-    assert!(
-        store
-            .repair_operation_projection_drift_from_audit(&drift)
-            .unwrap()
-    );
+    assert!(store.repair_operation_projection_drift_from_audit(&drift).unwrap());
     store.connection.write().commit_hook(None::<fn() -> bool>);
     assert_eq!(commits.load(Ordering::Relaxed), drift.len().div_ceil(16));
     assert!(old_drift(&store).is_empty());

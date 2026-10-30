@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use fractal_daemon::store::Store;
 use serde_json::{Value, json};
+use fractal_daemon::store::Store;
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);

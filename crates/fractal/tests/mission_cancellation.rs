@@ -53,7 +53,7 @@ impl Daemon {
             fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
                 .env_clear()
                 .env("HOME", &self.root)
-                .env(
+                    .env(
                     "PATH",
                     format!(
                         "{}:{}",
@@ -426,14 +426,11 @@ mission "orchid/cancellation" state="ready" {
 "#;
     let file = root.path().join("mission.kdl");
     std::fs::write(&file, source).unwrap();
-    daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        // Its gates hold a lock and wait for the test; running them at publish would block.
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    // Its gates hold a lock and wait for the test; running them at publish would block.
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -604,13 +601,10 @@ mission "orchid/processless" state="ready" {
         );
     }
     std::fs::write(&file, source).unwrap();
-    daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",
@@ -630,11 +624,9 @@ mission "orchid/processless" state="ready" {
     wait_for("processless work before cancellation", || {
         let run = daemon.run();
         run["phase"] == phase
-            && run["steps"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|step| step["step"] == working_step && step["status"] == "working")
+            && run["steps"].as_array().unwrap().iter().any(|step| {
+                step["step"] == working_step && step["status"] == "working"
+            })
             && (!with_exited_exec || root.path().join("collected").exists())
     });
     let cancelled_at = Instant::now();
@@ -727,13 +719,10 @@ mission "orchid/child" state="ready" {
 "#,
     )
     .unwrap();
-    let published = daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        "--no-gate-check",
-    ]);
+    let published = daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    "--no-gate-check",]);
     let revision = published["published_missions"][0]["revision"]
         .as_str()
         .unwrap();
@@ -751,13 +740,10 @@ mission "orchid/parent" state="ready" {{
         ),
     )
     .unwrap();
-    daemon.command(&[
-        "apply",
-        file.to_str().unwrap(),
-        "--as",
-        "person/operator",
-        "--no-gate-check",
-    ]);
+    daemon.command(&["apply", file.to_str().unwrap(),
+    "--as",
+    "person/operator",
+    "--no-gate-check",]);
     daemon.command(&[
         "missions",
         "start",

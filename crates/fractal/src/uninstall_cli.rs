@@ -17,11 +17,7 @@ fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Resu
     }
 }
 
-pub(super) async fn run_uninstall(
-    endpoint: &Endpoint,
-    args: UninstallArgs,
-    json_output: bool,
-) -> Result<()> {
+pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json_output: bool) -> Result<()> {
     fractal_daemon::service::preflight(!args.no_service)?;
     let config = Config::load_unvalidated(None)?;
     let client = Client::new(endpoint.clone());
@@ -76,9 +72,7 @@ pub(super) async fn run_uninstall(
     ];
     paths.extend(fractal_daemon::startup::paths(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
-    paths.push(fractal_daemon::api::unix_reservation_path(
-        &config.client_gateway_socket,
-    ));
+    paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }
@@ -102,10 +96,7 @@ pub(super) async fn run_uninstall(
             paths.iter().all(|path| path.starts_with(&root)),
             "the instance would remove a path outside {}: {:?}",
             root.display(),
-            paths
-                .iter()
-                .filter(|path| !path.starts_with(&root))
-                .collect::<Vec<_>>()
+            paths.iter().filter(|path| !path.starts_with(&root)).collect::<Vec<_>>()
         );
         let work = work_root.clone().unwrap_or_else(|| instance.work_dir());
         paths = instance_removals(&root, &work);
@@ -176,10 +167,7 @@ pub(super) async fn run_uninstall(
         // is stopped; the default install's daemon is still left for its owner to stop.
         let stopped = instance.is_some() && {
             fractal_daemon::service::stop_owned_runtimes(&config)?;
-            fractal_daemon::service::stop_daemon_at(
-                &config.socket,
-                std::time::Duration::from_secs(20),
-            )?
+            fractal_daemon::service::stop_daemon_at(&config.socket, std::time::Duration::from_secs(20))?
         };
         anyhow::ensure!(
             stopped,
@@ -262,10 +250,7 @@ mod instance_uninstall_tests {
         }
         fs::write(root.path().join("work/agents/site/notes.txt"), "mine").unwrap();
         let work = root.path().join("work");
-        assert_eq!(
-            names(instance_removals(root.path(), &work)),
-            ["bin", "state"]
-        );
+        assert_eq!(names(instance_removals(root.path(), &work)), ["bin", "state"]);
     }
 
     #[test]
@@ -275,10 +260,7 @@ mod instance_uninstall_tests {
             fs::create_dir_all(root.path().join(entry)).unwrap();
         }
         let work = root.path().join("data/projects");
-        assert_eq!(
-            names(instance_removals(root.path(), &work)),
-            ["bin", "state"]
-        );
+        assert_eq!(names(instance_removals(root.path(), &work)), ["bin", "state"]);
     }
 
     #[test]
@@ -303,10 +285,7 @@ mod instance_uninstall_tests {
         let alias = bin.join("fractal");
         std::os::unix::fs::symlink("st3", &alias).unwrap();
         let work = root.path().join("work");
-        assert_eq!(
-            names(instance_removals(root.path(), &work)),
-            ["fractal", "st3"]
-        );
+        assert_eq!(names(instance_removals(root.path(), &work)), ["fractal", "st3"]);
         fs::remove_file(&alias).unwrap();
         fs::write(&alias, "foreign").unwrap();
         assert_eq!(names(instance_removals(root.path(), &work)), ["st3"]);
@@ -346,9 +325,7 @@ fn uninstall_policy_hint(json_output: bool) -> &'static str {
 
 #[test]
 fn uninstall_policy_advice_preserves_json_stdout() {
-    assert_eq!(
-        uninstall_policy_hint(true),
-        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy"
-    );
+    assert_eq!(uninstall_policy_hint(true),
+        "Nothing else to remove needs this user. If you installed the Claude Code policy, remove it as root: st3 claude-channel uninstall-policy");
     assert!(uninstall_policy_hint(false).ends_with("fractal claude-channel uninstall-policy"));
 }

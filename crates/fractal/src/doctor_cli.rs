@@ -57,11 +57,9 @@ fn outage_message_for_program(error: &anyhow::Error, program: &str) -> Option<St
     // Keep native drivers and seats on their existing retry/recovery messages.
     if ["ST_AGENT", "ST_MISSION_RUN", "ST3_INCARNATION"]
         .iter()
-        .any(|name| {
-            std::env::var_os(name).is_some()
-                || fractal_drivers::contracts::fractal_env_name(name)
-                    .is_some_and(|new| std::env::var_os(new).is_some())
-        })
+        .any(|name| std::env::var_os(name).is_some()
+            || fractal_drivers::contracts::fractal_env_name(name)
+                .is_some_and(|new| std::env::var_os(new).is_some()))
     {
         return None;
     }

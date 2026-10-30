@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::json;
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{ClaimInput, PlannerSpec};
 use fractal_daemon::store::Store;
-use serde_json::json;
 use tokio::sync::{Notify, watch};
 
 async fn provider_incarnation(
@@ -34,23 +34,19 @@ async fn provider_incarnation(
             idempotency_key: None,
         })
         .unwrap();
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let listener_socket = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&listener_socket, fractal_daemon::api::router(state)).await
@@ -75,8 +71,7 @@ async fn provider_incarnation(
     let socket_arg = socket.clone();
     let home = root.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        let mut command =
-            fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
         command
             .env_clear()
             .env("PTY_ROOT", home.join("pty"))

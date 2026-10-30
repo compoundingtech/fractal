@@ -25,8 +25,8 @@ pub(super) fn run_validate(args: &ValidateArgs, json_output: bool) -> Result<()>
     let mut subjects = Vec::new();
     let mut missions = Vec::new();
     for path in &args.files {
-        let source =
-            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let source = std::fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))?;
         let intent = fractal_store::graph::parse_intent(&source, "local")
             .with_context(|| format!("validate {}", path.display()))?;
         for (id, subject) in intent.subjects {

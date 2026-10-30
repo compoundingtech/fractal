@@ -130,15 +130,8 @@ pub(super) async fn run_work(
                 .transpose()?;
             if let Some(request) = request.as_mut().filter(|_| !args.attach.is_empty()) {
                 let uploaded = upload_attachments(endpoint, &args.actor, &args.attach).await?;
-                let mut attachments = request["attachments"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                attachments.extend(
-                    uploaded
-                        .iter()
-                        .map(|attachment| serde_json::json!(attachment)),
-                );
+                let mut attachments = request["attachments"].as_array().cloned().unwrap_or_default();
+                attachments.extend(uploaded.iter().map(|attachment| serde_json::json!(attachment)));
                 request["attachments"] = serde_json::Value::Array(attachments);
             }
             let reason = match (args.reason, &request) {
@@ -308,10 +301,7 @@ pub(super) async fn run_work(
             }
             print_product_page("WORK", &response, json_output, &command)
         }
-        WorkCommand::Show {
-            subject,
-            ignored_actor,
-        } => {
+        WorkCommand::Show { subject, ignored_actor } => {
             notice_ignored_read_actor(ignored_actor.as_deref());
             let normalized = if subject.starts_with("step-run/") {
                 subject
@@ -327,12 +317,7 @@ pub(super) async fn run_work(
                 let ClientResource::Work(work) = &response.value else {
                     anyhow::bail!("`{normalized}` is not a work resource");
                 };
-                let driver_held = claim_has_driver(
-                    client,
-                    work.claimant.as_deref(),
-                    work.claim_incarnation.as_deref(),
-                )
-                .await;
+                let driver_held = claim_has_driver(client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
                 print!("{}", render_client_work_detail(work, driver_held));
                 Ok(())
             }
@@ -344,10 +329,7 @@ pub(super) async fn run_work(
                 args.action.summary = Some(fractal_store::work_eta::summary(
                     args.action.summary.as_deref(),
                     &eta,
-                    args.action
-                        .actor
-                        .as_deref()
-                        .context("a work action needs explicit --as")?,
+                    args.action.actor.as_deref().context("a work action needs explicit --as")?,
                     current_unix_ms()?,
                 )?);
             }
@@ -671,11 +653,8 @@ async fn post_work(
 ) -> Result<()> {
     let actor = args.actor.context("a work action needs explicit --as")?;
     reject_foreign_agent_actor(&actor)?;
-    let subject = if args.subject.starts_with("step-run/") {
-        args.subject.clone()
-    } else {
-        format!("step-run/{}", args.subject)
-    };
+    let subject = if args.subject.starts_with("step-run/") { args.subject.clone() }
+        else { format!("step-run/{}", args.subject) };
     let started_at_unix_ms = fractal_drivers::message::now_ms();
     let response: Result<StepRunView> = async {
         let incarnation = match args.incarnation {
@@ -697,27 +676,19 @@ async fn post_work(
                 },
             )
             .await
-    }
-    .await;
+    }.await;
     let response = response.inspect_err(|error| {
-        if action == "claim"
-            && let Some(outage) = fractal_daemon::client::daemon_unreachable(error)
+        if action == "claim" && let Some(outage) = fractal_daemon::client::daemon_unreachable(error)
             && let Some(os_error) = outage.socket_os_error()
         {
             let receipt = fractal_drivers::work_claim_failure::Receipt {
-                actor: actor.clone(),
-                step_run: subject.clone(),
-                socket: outage.endpoint().into(),
-                os_error,
-                started_at_unix_ms,
+                actor: actor.clone(), step_run: subject.clone(),
+                socket: outage.endpoint().into(), os_error, started_at_unix_ms,
                 observed_at_unix_ms: fractal_drivers::message::now_ms(),
             };
             if receipt.valid() {
-                eprintln!(
-                    "{}{}",
-                    fractal_drivers::work_claim_failure::PREFIX,
-                    serde_json::to_string(&receipt).expect("socket receipt serializes")
-                );
+                eprintln!("{}{}", fractal_drivers::work_claim_failure::PREFIX,
+                    serde_json::to_string(&receipt).expect("socket receipt serializes"));
             }
         }
     })?;
@@ -725,20 +696,10 @@ async fn post_work(
         print_value(&response, true)
     } else {
         if action == "claim" {
-            let driver_held = claim_has_driver(
-                client,
-                response.claimant.as_deref(),
-                response.claim_incarnation.as_deref(),
-            )
-            .await;
+            let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
             print!(
                 "{}",
-                render_step_run(
-                    &response,
-                    OutputStyle::stdout(),
-                    current_unix_ms()?,
-                    driver_held
-                )
+                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held)
             );
             if let Some((node, documents)) = host_facts(client).await {
                 print!(

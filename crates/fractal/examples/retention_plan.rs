@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use fractal_daemon::store::Store;
 use serde_json::json;
 use smallclaims::store::checkpoint::{CheckpointProof, DropPlan, checkpoint_cut};
+use fractal_daemon::store::Store;
 
 // Keep the proof attached to the immutable plan actually submitted to the prover. A bare
 // CheckpointProof contains no cut or drop identities, so its `passed` alone cannot authorize trim.
@@ -27,10 +27,7 @@ struct ProvedPlan<'a> {
 
 fn require_trim_proof(proof: Option<&ProvedPlan<'_>>, cut: u128, plan: &DropPlan) -> Result<()> {
     let proof = proof.context("--trim requires a proof produced in this run; supply SCRATCH")?;
-    ensure!(
-        proof.proof.passed,
-        "--trim refused: checkpoint proof failed"
-    );
+    ensure!(proof.proof.passed, "--trim refused: checkpoint proof failed");
     ensure!(
         proof.plan.cut_unix_ms == cut && proof.plan == plan,
         "--trim refused: checkpoint proof does not cover this exact cut and drop plan"
@@ -50,10 +47,7 @@ fn main() -> Result<()> {
         .into_string()
         .map_err(|_| anyhow::anyhow!("the day must be UTF-8"))?;
     let scratch = args.next().map(PathBuf::from);
-    ensure!(
-        args.next().is_none(),
-        "expected CLONE DAY [SCRATCH] [--trim]"
-    );
+    ensure!(args.next().is_none(), "expected CLONE DAY [SCRATCH] [--trim]");
     ensure!(!path.is_symlink(), "clone must not be a symlink");
     ensure!(
         path.metadata()?.permissions().mode() & 0o777 == 0o600,
@@ -71,11 +65,7 @@ fn main() -> Result<()> {
         Some(scratch) => {
             let proved = Instant::now();
             let proof = store.prove_checkpoint_plan(&sealed, &plan, scratch)?;
-            Some(ProvedPlan {
-                plan: &plan,
-                proof,
-                elapsed_ms: proved.elapsed().as_millis(),
-            })
+            Some(ProvedPlan { plan: &plan, proof, elapsed_ms: proved.elapsed().as_millis() })
         }
         None => None,
     };
@@ -121,12 +111,7 @@ fn main() -> Result<()> {
     let by_kind = plan
         .by_kind
         .iter()
-        .map(|(kind, count)| {
-            (
-                kind.clone(),
-                json!({"sealed": count.sealed, "dropped": count.dropped}),
-            )
-        })
+        .map(|(kind, count)| (kind.clone(), json!({"sealed": count.sealed, "dropped": count.dropped})))
         .collect::<BTreeMap<_, _>>();
     let result = json!({
         "checkpoint": day,
@@ -208,9 +193,7 @@ mod tests {
     #[test]
     fn trim_refuses_proof_for_different_cut() {
         let plan = plan();
-        assert!(
-            require_trim_proof(Some(&proved(&plan, true)), plan.cut_unix_ms + 1, &plan).is_err()
-        );
+        assert!(require_trim_proof(Some(&proved(&plan, true)), plan.cut_unix_ms + 1, &plan).is_err());
     }
 
     #[test]
@@ -219,14 +202,7 @@ mod tests {
         let mut different = original.clone();
         different.envelopes.clear();
         // Even a reused digest must not authorize a different set of tombstones.
-        assert!(
-            require_trim_proof(
-                Some(&proved(&original, true)),
-                original.cut_unix_ms,
-                &different
-            )
-            .is_err()
-        );
+        assert!(require_trim_proof(Some(&proved(&original, true)), original.cut_unix_ms, &different).is_err());
     }
 
     #[test]

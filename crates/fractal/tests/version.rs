@@ -76,10 +76,7 @@ fn version_is_baked_and_available_without_a_daemon() {
         human.trim(),
         format!("fractal {}", fractal_drivers::version::display_version())
     );
-    assert_ne!(
-        human.trim(),
-        format!("fractal {}", env!("CARGO_PKG_VERSION"))
-    );
+    assert_ne!(human.trim(), format!("fractal {}", env!("CARGO_PKG_VERSION")));
     assert!(!human.contains("decaf00"));
     assert_eq!(human.lines().count(), 1);
     assert_eq!(version(root.path(), &["-V"]), human);
@@ -91,13 +88,9 @@ fn human_version_keeps_the_embedded_package_version_and_source_revision() {
     let value: serde_json::Value =
         serde_json::from_str(&version(root.path(), &["--version", "--json"])).unwrap();
     let machine = value["machine_version"].as_str().unwrap();
-    let (base, revision) = machine
-        .split_once('+')
-        .expect("build identity includes a revision");
+    let (base, revision) = machine.split_once('+').expect("build identity includes a revision");
     let revision = revision.strip_prefix("local.").unwrap_or(revision);
-    let revision = revision
-        .trim_end_matches(".dirty")
-        .trim_end_matches("-dirty");
+    let revision = revision.trim_end_matches(".dirty").trim_end_matches("-dirty");
     let human = version(root.path(), &["--version"]);
     assert!(human.starts_with(&format!("fractal {base}")), "{human}");
     assert!(human.contains(revision), "{human}");

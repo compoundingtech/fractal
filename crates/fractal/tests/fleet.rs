@@ -12,9 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use serde_json::{Value, json};
 use fractal_daemon::client::Client;
 use fractal_daemon::model::ClaimInput;
-use serde_json::{Value, json};
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
@@ -212,14 +212,9 @@ impl Node {
         }
         if let Some(root) = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS") {
             command.env("RUST_LOG", "st3=trace,smallclaims=trace");
-            fs::write(
-                Path::new(&root).join("command.json"),
-                serde_json::to_vec(&json!({
-                    "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+            fs::write(Path::new(&root).join("command.json"), serde_json::to_vec(&json!({
+                "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
+            })).unwrap()).unwrap();
         }
         for (key, value) in &self.env {
             command.env(key, value);
@@ -279,13 +274,7 @@ impl Node {
         // listens there (a developer's web server) made the previous release exit at once with
         // "Address already in use". Both releases accept `--web-listen off`.
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
-            vec![
-                "up",
-                "--pty-binary",
-                pty.to_str().unwrap(),
-                "--web-listen",
-                "off",
-            ]
+            vec!["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]
         } else {
             vec!["up", "--web-listen", "off"]
         };
@@ -622,10 +611,7 @@ const DIVERGENCE_CHECK: &[(&str, &str)] = &[("ST3_DIVERGENCE_CHECK_INTERVAL_MS",
 
 async fn anchor_with(root: &Path, name: &str, env: &[(&str, &str)]) -> Node {
     let mut node = Node::new(root, name);
-    node.env.extend(
-        env.iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
-    );
+    node.env.extend(env.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())));
     node.create();
     node.start().await;
     node.wait_listening().await;
@@ -645,10 +631,7 @@ async fn joined_with(
     env: &[(&str, &str)],
 ) -> Node {
     let mut node = Node::new(root, name);
-    node.env.extend(
-        env.iter()
-            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
-    );
+    node.env.extend(env.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())));
     let code = sponsor.invite(name, &[]);
     let output = node.join(&code, extra);
     assert!(
@@ -683,14 +666,14 @@ mission "harvest" state="ready" {{
 }}"#
         );
         revisions.push(
-            fractal_daemon::parse_intent(&source, "orchard")
-                .unwrap()
-                .missions["harvest"]
+            fractal_daemon::parse_intent(&source, "orchard").unwrap().missions["harvest"]
                 .revision
                 .clone(),
         );
         fs::write(&child_file, source).unwrap();
-        node.st_ok(&["apply", child_file.to_str().unwrap(), "--as", PERSON]);
+        node.st_ok(&["apply", child_file.to_str().unwrap(),
+        "--as",
+        PERSON,]);
     }
     let next = chrono::Utc::now() + chrono::Duration::seconds(30);
     let anchor =
@@ -717,7 +700,9 @@ mission "orchard/weekly" state="ready" {{
         )
     };
     fs::write(&parent_file, parent(&revisions[0])).unwrap();
-    node.st_ok(&["apply", parent_file.to_str().unwrap(), "--as", PERSON]);
+    node.st_ok(&["apply", parent_file.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     node.st_ok(&[
         "missions",
         "start",
@@ -738,7 +723,9 @@ mission "orchard/weekly" state="ready" {{
 
     for index in 0..4 {
         fs::write(&parent_file, parent(&revisions[index % 2])).unwrap();
-        node.st_ok(&["apply", parent_file.to_str().unwrap(), "--as", PERSON]);
+        node.st_ok(&["apply", parent_file.to_str().unwrap(),
+        "--as",
+        PERSON,]);
         if index > 0 {
             node.st_ok(&[
                 "work",
@@ -857,13 +844,7 @@ agent "move/worker" {
 "#,
     )
     .unwrap();
-    a.st_ok(&[
-        "apply",
-        "--no-gate-check",
-        source.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    a.st_ok(&["apply", "--no-gate-check", source.to_str().unwrap(), "--as", PERSON]);
     let status =
         |node: &Node| node.st_json(&["subject", "show", SUBJECT])["status"]["subjects"][0].clone();
     wait_until("amber runs the seat on both replicas", 30, || async {
@@ -1166,8 +1147,7 @@ async fn invalid_admission_preserves_running_daemon_and_never_stops_services() {
     let manager = node.root.join("bin/systemctl");
     fs::write(
         &manager,
-        format!(
-            r#"#!/bin/sh
+        format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{}'
 if [ "$2" != show ]; then exit 9; fi
 if [ "$3" = st3.service ]; then
@@ -1175,11 +1155,8 @@ if [ "$3" = st3.service ]; then
 else
     printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
 fi
-"#,
-            log.display()
-        ),
-    )
-    .unwrap();
+"#, log.display()),
+    ).unwrap();
     fs::set_permissions(manager, fs::Permissions::from_mode(0o700)).unwrap();
     node.env.push((
         "PATH".into(),
@@ -1494,7 +1471,9 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence(
          step \"only\" { agentless }\n}\n",
     )
     .unwrap();
-    a.st_ok(&["apply", mission.to_str().unwrap(), "--as", PERSON]);
+    a.st_ok(&["apply", mission.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     wait_until(
         "both members hold the mission and call the pair in sync",
         90,
@@ -1589,10 +1568,7 @@ async fn members_with_the_same_envelopes_but_different_claims_report_divergence(
                 .contains("divergence-probe")
         })
         .count();
-    assert_eq!(
-        lost, 0,
-        "sync does not admit the lost claims' envelopes again"
-    );
+    assert_eq!(lost, 0, "sync does not admit the lost claims' envelopes again");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2269,9 +2245,7 @@ async fn a_frozen_member_is_not_reported_up() {
     // for a member reported up.
     let unsent = |peer: &Value| {
         peer["sync"]["local_only_envelopes"].as_u64().unwrap_or(0)
-            + peer["sync"]["added_since_measured_envelopes"]
-                .as_u64()
-                .unwrap_or(0)
+            + peer["sync"]["added_since_measured_envelopes"].as_u64().unwrap_or(0)
     };
     wait_until("a measures b in sync", 60, || async {
         let peer = peer_status(&a, "b");
@@ -2477,8 +2451,7 @@ async fn leave_drains_everything_before_it_leaves() {
     }
     let temporary_root = tempfile::tempdir().unwrap();
     let root = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| temporary_root.path().to_owned());
+        .map(PathBuf::from).unwrap_or_else(|| temporary_root.path().to_owned());
     let phase = |stage: &str| fs::write(root.join("phase.txt"), stage).unwrap();
     phase("create and start anchor a");
     let mut a = anchor(&root, "a").await;
@@ -2553,22 +2526,13 @@ fn supervise_leave_with_diagnostics() -> bool {
             .arg(root.path())
             .arg("--")
             .arg(std::env::current_exe().unwrap())
-            .args(["--exact", name, "--nocapture", "--include-ignored"])
-            .env_remove("ST_AGENT")
-            .env_remove("FRACTAL_AGENT")
-            .env_remove("ST3_SUBJECT")
-            .env_remove("FRACTAL_SUBJECT")
+            .args(["--exact", name, "--nocapture", "--include-ignored"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
             .env("FRACTAL_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            .output()
-            .expect("launch bounded fleet leave guardian");
+            .output().expect("launch bounded fleet leave guardian");
         std::io::stdout().write_all(&output.stdout).unwrap();
         std::io::stderr().write_all(&output.stderr).unwrap();
-        assert!(
-            output.status.success(),
-            "bounded fleet leave: {}",
-            output.status
-        );
+        assert!(output.status.success(), "bounded fleet leave: {}", output.status);
         true
     }
     #[cfg(not(target_os = "linux"))]
@@ -3697,11 +3661,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
     }
     let root = tempfile::tempdir().unwrap();
     for prefer_on_add in [false, true] {
-        let name = if prefer_on_add {
-            "preferred"
-        } else {
-            "appended"
-        };
+        let name = if prefer_on_add { "preferred" } else { "appended" };
         let mut node = anchor(root.path(), name).await;
         node.stop_worker();
         let mut file = configured_file(&node);
@@ -3731,9 +3691,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
         let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
         // Preference is local: it must not expose again or accept a new protocol.
         fs::write(
-            root.path()
-                .join("fabric-registry")
-                .join(format!("fail-expose-{name}-fabric-id")),
+            root.path().join("fabric-registry").join(format!("fail-expose-{name}-fabric-id")),
             "refuse",
         )
         .unwrap();
@@ -3823,17 +3781,11 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
     assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
     assert_ne!(fs::metadata(&path).unwrap().ino(), old_inode);
-    assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     use std::io::Read as _;
     let mut retained_bytes = Vec::new();
     (&old_file).read_to_end(&mut retained_bytes).unwrap();
-    assert_eq!(
-        retained_bytes, old_bytes,
-        "atomic save must replace, not truncate"
-    );
+    assert_eq!(retained_bytes, old_bytes, "atomic save must replace, not truncate");
 
     let inode = fs::metadata(&path).unwrap().ino();
     let bytes = fs::read(&path).unwrap();
@@ -3843,14 +3795,8 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
     assert_eq!(fs::read(&path).unwrap(), bytes);
     node.st_ok(&["fleet", "transports", "prefer", "tailscale", "--no-service"]);
-    assert_eq!(
-        configured_file(&node).transports,
-        ["tailscale", "fabric", "loopback"]
-    );
-    assert_eq!(
-        configured_file(&node).fabric_protocol,
-        before.fabric_protocol
-    );
+    assert_eq!(configured_file(&node).transports, ["tailscale", "fabric", "loopback"]);
+    assert_eq!(configured_file(&node).fabric_protocol, before.fabric_protocol);
     assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
     assert_eq!(fs::read(registry.join("calls")).unwrap(), calls);
 }
@@ -4259,11 +4205,7 @@ async fn send_fabric_delivers_to_a_trusted_fabric_peer_without_pairing() {
     let registry = root.path().join("fabric-registry");
     let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
     // Fabric already trusts b, though it grants b no services.
-    fs::write(
-        registry.join("peers-a-fabric-id"),
-        "b-fabric-id\tb\tno services\n",
-    )
-    .unwrap();
+    fs::write(registry.join("peers-a-fabric-id"), "b-fabric-id\tb\tno services\n").unwrap();
 
     let sent = a.st_ok(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
     assert!(sent.contains("to b's Fabric inbox"), "{sent}");
@@ -4275,10 +4217,7 @@ async fn send_fabric_delivers_to_a_trusted_fabric_peer_without_pairing() {
     assert!(decoded.pairing.is_none());
     assert!(
         decoded.endpoints.iter().all(|endpoint| {
-            !matches!(
-                endpoint,
-                fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. }
-            )
+            !matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
         }),
         "without pairing, auto must not route the new machine through Fabric"
     );
@@ -4302,10 +4241,7 @@ async fn send_fabric_delivers_to_a_trusted_fabric_peer_without_pairing() {
         "loopback",
         "--advertise-loopback",
     ]);
-    assert!(
-        inbox_codes(&registry, "home-b").is_empty(),
-        "join removes the code"
-    );
+    assert!(inbox_codes(&registry, "home-b").is_empty(), "join removes the code");
     assert_eq!(invite_states(&a), ["redeemed"]);
 }
 
@@ -4322,18 +4258,11 @@ async fn send_fabric_fails_loudly_when_fabric_does_not_deliver() {
     let untrusted = a.st(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
     assert!(!untrusted.status.success());
     let stderr = String::from_utf8_lossy(&untrusted.stderr);
-    assert!(
-        stderr.contains("b is not a trusted Fabric peer"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("b is not a trusted Fabric peer"), "{stderr}");
     assert!(invite_states(&a).is_empty());
 
     // A transfer Fabric does not confirm revokes the invite it would have carried.
-    fs::write(
-        registry.join("peers-a-fabric-id"),
-        "b-fabric-id\tb\tsend-file\n",
-    )
-    .unwrap();
+    fs::write(registry.join("peers-a-fabric-id"), "b-fabric-id\tb\tsend-file\n").unwrap();
     fs::write(registry.join("fail-send-a-fabric-id"), "").unwrap();
     let refused = a.st(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
     assert!(!refused.status.success());
@@ -4373,10 +4302,7 @@ async fn code_file_writes_a_private_file_without_fabric_pairing() {
     let code = fs::read_to_string(&path).expect("the code file exists");
     assert!(fractal_daemon::fleet::code::JoinCode::decode(code.trim()).is_ok());
     assert!(!printed.contains(code.trim()), "the code reached stdout");
-    assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(
         fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
         0o755,
@@ -4401,8 +4327,7 @@ async fn auto_invites_over_another_endpoint_when_fabric_pairing_fails() {
     .unwrap();
     fs::set_permissions(&adapter, fs::Permissions::from_mode(0o755)).unwrap();
     a.env.retain(|(key, _)| key != "ST_FABRIC_ADAPTER");
-    a.env
-        .push(("ST_FABRIC_ADAPTER".into(), adapter.display().to_string()));
+    a.env.push(("ST_FABRIC_ADAPTER".into(), adapter.display().to_string()));
     let path = root.path().join("invite-b.code");
 
     let output = a.st(&[
@@ -4416,18 +4341,12 @@ async fn auto_invites_over_another_endpoint_when_fabric_pairing_fails() {
     ]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("inviting over loopback instead"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("inviting over loopback instead"), "{stderr}");
     let code = fs::read_to_string(&path).unwrap();
     let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
     assert!(decoded.pairing.is_none());
     assert!(decoded.endpoints.iter().all(|endpoint| {
-        matches!(
-            endpoint,
-            fractal_daemon::fleet::code::CodeEndpoint::Loopback(_)
-        )
+        matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Loopback(_))
     }));
     let mut states = invite_states(&a);
     states.sort();
@@ -4456,10 +4375,7 @@ async fn an_invitation_only_fabric_could_carry_fails_before_it_exists() {
         assert!(output.stdout.is_empty(), "{delivery:?} printed a code");
     }
     assert!(!Path::new(path).exists());
-    assert!(
-        invite_states(&a).is_empty(),
-        "a refused invitation left an invite open"
-    );
+    assert!(invite_states(&a).is_empty(), "a refused invitation left an invite open");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4495,35 +4411,29 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
     // This fixture isolates already-trusted worker tunnels and inbox delivery.
     // Issue the legacy transport invitation through the daemon authority, not
     // the CLI's separate restricted-pairing bootstrap (covered by pairing tests).
-    let invitation: fractal_daemon::api::FleetInviteCreated = a
-        .client()
-        .post(
-            "/v1/internal/fleet/invites",
-            &fractal_daemon::api::FleetInviteRequest {
-                name: Some("b".into()),
-                expires_seconds: 600,
-                via: Some("fabric".into()),
-                migrate: false,
-                person: PERSON.into(),
-            },
-        )
-        .await
-        .unwrap();
+    let invitation: fractal_daemon::api::FleetInviteCreated = a.client().post(
+        "/v1/internal/fleet/invites",
+        &fractal_daemon::api::FleetInviteRequest {
+            name: Some("b".into()),
+            expires_seconds: 600,
+            via: Some("fabric".into()),
+            migrate: false,
+            person: PERSON.into(),
+        },
+    ).await.unwrap();
     let code_file = root.path().join("worker-transport.code");
     fractal_daemon::fleet::join::write_private(&code_file, invitation.code.as_bytes()).unwrap();
     let delivered_name = format!(
         "st-fleet-join-{}.code",
         invitation.invite.trim_start_matches("fleet-invite/")
     );
-    assert!(
-        Command::new(&shim_a)
-            .args(["send-file", "b"])
-            .arg(&code_file)
-            .args(["--as", &delivered_name])
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new(&shim_a)
+        .args(["send-file", "b"])
+        .arg(&code_file)
+        .args(["--as", &delivered_name])
+        .status()
+        .unwrap()
+        .success());
     fs::remove_file(code_file).unwrap();
     let mut b = Node::new(root.path(), "b");
     b.env.push((
@@ -5158,13 +5068,7 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     node.start().await;
     let file = node.root.join("seat.kdl");
     fs::write(&file, format!("version 2\nagent \"example/watch\" {{ host \"fixture-watch\"; workspace {:?}; command \"true\"; restart \"never\" }}\n", node.root)).unwrap();
-    node.st_ok(&[
-        "apply",
-        "--no-gate-check",
-        file.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
     let cli = |args: &[&str]| -> Value {
         let output = node
             .command(args)
@@ -5328,11 +5232,8 @@ async fn action_coverage_github_watch_cli_uses_private_http_and_survives_restart
     );
     // Store::open also initializes projections, so inspect without the daemon's writer.
     node.stop();
-    let store = fractal_daemon::store::Store::open(
-        &node.state_dir().join("claims.sqlite3"),
-        "fixture-watch",
-    )
-    .unwrap();
+    let store =
+        fractal_daemon::store::Store::open(&node.state_dir().join("claims.sqlite3"), "fixture-watch").unwrap();
     for (kind, id) in [("comment", 801), ("review", 802)] {
         let subject = fractal_daemon::github_watch::github_post_subject("fixture/app", kind, id);
         assert_eq!(
@@ -5433,8 +5334,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     }
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let pty = fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
-    let node_program =
-        fractal_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
+    let node_program = fractal_runtime::resolve_executable("node", &std::env::vars().collect()).unwrap();
     let mut cleanup = SeatCleanup {
         pty: pty.clone(),
         roots: Vec::new(),
@@ -5493,13 +5393,9 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     let seat = "agent/canary/portable";
     let declaration = root.path().join("seat.kdl");
     fs::write(&declaration, format!("version 2\nagent \"canary/portable\" {{ host \"fixture-move-amber\"; workspace \"{}\"; harness \"omp\" {{}} }}", workspace.display())).unwrap();
-    amber.st_ok(&[
-        "apply",
-        "--no-gate-check",
-        declaration.to_str().unwrap(),
-        "--as",
-        PERSON,
-    ]);
+    amber.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(),
+    "--as",
+    PERSON,]);
     let receipts = workspace.join("receipts-agent-canary-portable.jsonl");
     wait_until("source native session becomes idle", 90, || async {
         amber.st_json(&["agents", "show", seat])["value"]["harness_state"] == "idle"
@@ -5537,8 +5433,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
         .to_owned();
     let source_sessions =
         fractal_daemon::seat_snapshot::sessions(&amber.state_dir().join("drivers"), seat, "omp");
-    let transcript =
-        fractal_daemon::native_resume::pi_family_transcript(&source_sessions, &native).unwrap();
+    let transcript = fractal_daemon::native_resume::pi_family_transcript(&source_sessions, &native).unwrap();
     let before = fs::read(&transcript).unwrap();
     assert!(String::from_utf8_lossy(&before).contains("Remember the copper orchard"));
     wait_until("suspension replicates to target", 60, || async {
@@ -5636,24 +5531,14 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
     // The transcript shows the mail before the resumed driver reports the turn's end. Suspend
     // reads the driver's latest report for the running incarnation, so wait for that report.
     wait_until("resumed seat reports quiet on target", 60, || async {
-        let incarnation =
-            jade.st_json(&["agents", "show", seat])["value"]["incarnation_id"].clone();
-        let page: Value = jade
-            .client()
-            .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100"))
-            .await
-            .unwrap();
-        page["claims"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        let incarnation = jade.st_json(&["agents", "show", seat])["value"]["incarnation_id"].clone();
+        let page: Value = jade.client()
+            .get(&format!("/v1/claims?subject={seat}&order=desc&limit=100")).await.unwrap();
+        page["claims"].as_array().into_iter().flatten()
             .find(|claim| claim["kind"] == "harness.observed")
             .map(|claim| claim["body"].get("fields").unwrap_or(&claim["body"]))
-            .is_some_and(|fields| {
-                incarnation.is_string()
-                    && fields["incarnation_id"] == incarnation
-                    && fields["quiescent"] == true
-            })
+            .is_some_and(|fields| incarnation.is_string() && fields["incarnation_id"] == incarnation
+                && fields["quiescent"] == true)
     })
     .await;
     jade.st_ok(&[

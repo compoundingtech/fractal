@@ -68,17 +68,12 @@ async fn quiet_node_recovers_automatically_after_busy_writer_releases() {
     let store = Arc::new(Store::open(&path, "node").unwrap());
     store.bind_fleet(FLEET).unwrap();
     store.project_replication_backlog().unwrap();
-    let frontier = || {
-        store
-            .readers
-            .get()
-            .query_row(
-                "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
-                [],
-                |row| row.get::<_, u64>(0),
-            )
-            .unwrap()
-    };
+    let frontier =
+        || {
+            store.readers.get().query_row(
+        "SELECT last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| row.get::<_, u64>(0)).unwrap()
+        };
     let before = frontier();
     let inventory = store.export_replication_summary(FLEET).unwrap().inventory;
     let exchange = source
@@ -117,19 +112,11 @@ async fn quiet_node_recovers_automatically_after_busy_writer_releases() {
         Arc::new(Notify::new()),
         events,
         dir.path().to_owned(),
-        move |backoff| {
-            polls.send_replace(backoff);
-        },
+        move |backoff| { polls.send_replace(backoff); },
     );
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
-    loop {
-        let backoff = *polled.borrow_and_update();
-        if backoff {
-            break;
-        }
-        polled.changed().await.unwrap();
-    }
+    loop { let backoff = *polled.borrow_and_update(); if backoff { break; } polled.changed().await.unwrap(); }
     tokio::time::advance(Duration::from_secs(30)).await;
     let observed = store.clone();
     let recovered = tokio::task::spawn_blocking(move || {
@@ -175,19 +162,11 @@ async fn retry_worker_does_not_keep_store_alive_during_scheduled_backoff() {
         Arc::new(Notify::new()),
         events,
         dir.path().to_owned(),
-        move |backoff| {
-            polls.send_replace(backoff);
-        },
+        move |backoff| { polls.send_replace(backoff); },
     );
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(1)).await;
-    loop {
-        let backoff = *polled.borrow_and_update();
-        if backoff {
-            break;
-        }
-        polled.changed().await.unwrap();
-    }
+    loop { let backoff = *polled.borrow_and_update(); if backoff { break; } polled.changed().await.unwrap(); }
     // The worker has observed contention and waits for its first 30s deadline.
     assert_eq!(weak.strong_count(), 1);
     drop(store);

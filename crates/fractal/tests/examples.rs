@@ -228,8 +228,7 @@ fn walkthrough_work_warns_before_the_worker_seat_exists() {
         .join("../..")
         .join("examples/fractal/walkthrough-work.kdl");
     let source = fs::read_to_string(&file).expect("read walkthrough work mission");
-    let intent =
-        fractal_daemon::parse_intent(&source, "local").expect("parse walkthrough work mission");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse walkthrough work mission");
     let store = fractal_daemon::store::Store::open_memory("local").unwrap();
     let preview = store
         .mission(
@@ -853,14 +852,12 @@ fn selected_eval_harness_counts_match_the_inventory() {
     let mut model_gates = Vec::new();
 
     for (name, st3_expected) in expected {
-        let st3_source =
-            fs::read_to_string(root.join("fractal").join(name).join("eval.kdl")).unwrap();
+        let st3_source = fs::read_to_string(root.join("fractal").join(name).join("eval.kdl")).unwrap();
         let st3_counts = authored_harness_counts(&st3_source, &format!("st3 {name}"));
         assert_eq!(st3_counts, st3_expected, "st3 {name}");
         model_gates.extend(authored_model_gates(&st3_source));
     }
-    let mission_lift =
-        fs::read_to_string(root.join("fractal/mission-document-lift/eval.kdl")).unwrap();
+    let mission_lift = fs::read_to_string(root.join("fractal/mission-document-lift/eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&mission_lift, "st3 mission-document-lift"),
         (0, 1)
@@ -1064,9 +1061,7 @@ fn signal_rename_keeps_work_structure_in_the_mission_graph() {
             .dependencies
             .iter()
             .filter_map(|dependency| match dependency {
-                fractal_daemon::model::DependencySpec::Step { step, state }
-                    if state == "completed" =>
-                {
+                fractal_daemon::model::DependencySpec::Step { step, state } if state == "completed" => {
                     Some(step.as_str())
                 }
                 _ => None,
@@ -1144,8 +1139,7 @@ fn restart_continuity_keeps_recovery_state_in_the_mission_graph() {
     let source = fs::read_to_string(&file).expect("read Restart continuity eval");
     assert!(!source.contains("message \"kickoff"));
 
-    let intent =
-        fractal_daemon::parse_intent(&source, "local").expect("parse Restart continuity eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Restart continuity eval");
     let mission = &intent.missions["eval/restart-continuity"];
     assert_eq!(
         mission.display_order,
@@ -1173,9 +1167,7 @@ fn restart_continuity_keeps_recovery_state_in_the_mission_graph() {
             .dependencies
             .iter()
             .filter_map(|dependency| match dependency {
-                fractal_daemon::model::DependencySpec::Step { step, state }
-                    if state == "completed" =>
-                {
+                fractal_daemon::model::DependencySpec::Step { step, state } if state == "completed" => {
                     Some(step.as_str())
                 }
                 _ => None,
@@ -1228,8 +1220,7 @@ fn fork_in_the_road_keeps_parallel_debate_in_the_mission_graph() {
     let source = fs::read_to_string(&file).expect("read Fork in the road eval");
     assert!(!source.contains("message \"kickoff"));
 
-    let intent =
-        fractal_daemon::parse_intent(&source, "local").expect("parse Fork in the road eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Fork in the road eval");
     let mission = &intent.missions["eval/fork-in-the-road"];
     let team = mission.steps["start-team"]
         .declarations_kdl
@@ -1310,9 +1301,7 @@ fn fork_in_the_road_keeps_parallel_debate_in_the_mission_graph() {
             .dependencies
             .iter()
             .filter_map(|dependency| match dependency {
-                fractal_daemon::model::DependencySpec::Step { step, state }
-                    if state == "completed" =>
-                {
+                fractal_daemon::model::DependencySpec::Step { step, state } if state == "completed" => {
                     Some(step.as_str())
                 }
                 _ => None,
@@ -1368,8 +1357,7 @@ fn poisoned_pr_keeps_review_state_in_the_mission_graph() {
     let source = fs::read_to_string(&file).expect("read Poisoned pull request eval");
     assert!(!source.contains("message \"kickoff"));
 
-    let intent =
-        fractal_daemon::parse_intent(&source, "local").expect("parse Poisoned pull request eval");
+    let intent = fractal_daemon::parse_intent(&source, "local").expect("parse Poisoned pull request eval");
     let mission = &intent.missions["eval/poisoned-pr"];
     assert_eq!(
         mission.display_order,

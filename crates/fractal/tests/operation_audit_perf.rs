@@ -23,8 +23,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use fractal_daemon::store::Store;
 use serde_json::{Value, json};
+use fractal_daemon::store::Store;
 
 use crate::operation_audit::{
     NODE, claim, mark_repaired, old_drift, old_operation_projection_drift, settle_operations,
@@ -53,13 +53,7 @@ fn generate(path: &Path, shape: Shape) {
     let mut ids = Vec::with_capacity(shape.operations + shape.huge_claims);
     for start in (0..shape.operations).step_by(CHUNK) {
         let claims = (start..(start + CHUNK).min(shape.operations))
-            .map(|index| {
-                claim(
-                    format!("op/bench/{index:08}"),
-                    "d/1",
-                    &format!("bench-{index:08}"),
-                )
-            })
+            .map(|index| claim(format!("op/bench/{index:08}"), "d/1", &format!("bench-{index:08}")))
             .collect();
         ids.extend(write_claims(&store, claims, shape.body_bytes));
     }
@@ -137,11 +131,7 @@ fn audit_child() {
     let total = started.elapsed();
     let peak = status_kib("VmHWM:");
     let counts = |sql: &str| -> i64 {
-        store
-            .readers
-            .get()
-            .query_row(sql, [], |row| row.get(0))
-            .unwrap()
+        store.readers.get().query_row(sql, [], |row| row.get(0)).unwrap()
     };
     println!(
         "{RESULT}{}",
@@ -204,10 +194,7 @@ fn compare(directory: &Path, shape: Shape) -> (Value, Value) {
     let old = measure(&path, "old");
     let new = measure(&path, "new");
     for field in ["claims", "tombstones", "operations"] {
-        assert_eq!(
-            old[field], new[field],
-            "{field}: both audits read one store"
-        );
+        assert_eq!(old[field], new[field], "{field}: both audits read one store");
     }
     assert_eq!(old["drift"], 0, "{old}");
     assert_eq!(new["drift"], 0, "{new}");
@@ -250,10 +237,7 @@ fn the_bounded_audit_holds_shorter_transactions_and_less_memory_than_the_hydrate
     // The hydrated audit keeps nearly 64 MiB of parsed payloads at once; one in 97 claims is
     // repaired and skipped.
     let hydrated = ((shape.operations + shape.huge_claims) * shape.body_bytes / 1024) as f64;
-    assert!(
-        number(&old, "peak_over_baseline_kib") >= 0.9 * hydrated,
-        "{old}"
-    );
+    assert!(number(&old, "peak_over_baseline_kib") >= 0.9 * hydrated, "{old}");
     assert!(
         number(&new, "peak_over_baseline_kib") * 4.0 < number(&old, "peak_over_baseline_kib"),
         "old {old}\nnew {new}"
@@ -262,9 +246,7 @@ fn the_bounded_audit_holds_shorter_transactions_and_less_memory_than_the_hydrate
 
 fn env_count(name: &str, default: usize) -> usize {
     std::env::var(name).map_or(default, |value| {
-        value
-            .parse()
-            .unwrap_or_else(|_| panic!("{name} must be a count"))
+        value.parse().unwrap_or_else(|_| panic!("{name} must be a count"))
     })
 }
 
@@ -282,9 +264,6 @@ fn operation_audit_benchmark() {
         .map_or_else(|| temporary.path().to_path_buf(), Into::into);
     std::fs::create_dir_all(&directory).unwrap();
     let (old, new) = compare(&directory, shape);
-    assert!(
-        new["longest_transaction_ms"].as_f64().unwrap() < 100.0,
-        "{new}"
-    );
+    assert!(new["longest_transaction_ms"].as_f64().unwrap() < 100.0, "{new}");
     println!("old {old}\nnew {new}");
 }

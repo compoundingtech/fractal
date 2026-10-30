@@ -26,11 +26,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
 use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::Store;
-use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 const NODE: &str = "idle-node";
@@ -399,23 +399,19 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_601))
         .unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: NODE.into(),
-        state_dir,
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: NODE.into(),
+    state_dir,
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let ingesting = tokio::spawn(fractal_daemon::recorder_receipts::run(
         store.clone(),
         receipts.clone(),
@@ -438,11 +434,9 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         )
         .skipping_unneeded(true),
     );
-    let initial_passes = counts(
-        &fractal_daemon::performance::snapshot(),
-        "requests",
-        |row| row["kind"].as_str().unwrap_or("?").to_owned(),
-    )
+    let initial_passes = counts(&fractal_daemon::performance::snapshot(), "requests", |row| {
+        row["kind"].as_str().unwrap_or("?").to_owned()
+    })
     .get("task reconcile-pass")
     .copied()
     .unwrap_or_default();
@@ -461,11 +455,9 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
             stable_index = index;
             stable_since = Instant::now();
         }
-        let passes = counts(
-            &fractal_daemon::performance::snapshot(),
-            "requests",
-            |row| row["kind"].as_str().unwrap_or("?").to_owned(),
-        )
+        let passes = counts(&fractal_daemon::performance::snapshot(), "requests", |row| {
+            row["kind"].as_str().unwrap_or("?").to_owned()
+        })
         .get("task reconcile-pass")
         .copied()
         .unwrap_or_default();
@@ -589,23 +581,19 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
 
     let notify = Arc::new(Notify::new());
     let event_notify = watch::channel(0_u64).0;
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: NODE.into(),
-        state_dir: root.join("daemon"),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: NODE.into(),
+    state_dir: root.join("daemon"),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     std::fs::create_dir_all(root.join("daemon")).unwrap();
     // The receipt consumer is part of the daemon's idle cost. Its own scans must
     // not keep waking its filesystem watcher.
@@ -620,8 +608,7 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     let socket = root.join("st3.sock");
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
-            .await;
+        let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await;
     });
     let reconciler = Arc::new(Reconciler::new(
         store.clone(),
