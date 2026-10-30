@@ -62,6 +62,7 @@ pub struct ExecRuntime {
     state_dir: PathBuf,
     log_dir: PathBuf,
     owned_children: Arc<Mutex<BTreeMap<u32, Child>>>,
+    unlaned_seat: Option<crate::UnlanedSeatPlacement>,
 }
 
 impl ExecRuntime {
@@ -71,7 +72,14 @@ impl ExecRuntime {
             state_dir,
             log_dir,
             owned_children: Arc::new(Mutex::new(BTreeMap::new())),
+            unlaned_seat: None,
         }
+    }
+
+    /// Set only by the daemon's seat runtime, never inferred from ambient environment.
+    pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
+        self.unlaned_seat = policy;
+        self
     }
 
     pub fn spawn(
@@ -186,6 +194,7 @@ impl ExecRuntime {
             &argument_refs,
             Some(&env),
             lane.as_ref(),
+            self.unlaned_seat.as_ref(),
         );
         command
             .current_dir(cwd)
@@ -732,6 +741,15 @@ fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_exec_runtime_has_no_unlaned_seat_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert!(runtime.unlaned_seat.is_none());
+        let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
+        assert!(configured.unlaned_seat.is_some());
+    }
     use std::thread;
     use std::time::Duration;
 
