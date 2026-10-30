@@ -328,7 +328,9 @@ The push is reactive:
   nothing changes.
 
 The receiver records a seat only when its declaration places the seat on the member that pushed
-it, and keeps the newest time per seat and incarnation, in memory. An agent card's freshness and a
+it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
+recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed and
+goes out in the host's next round. An agent card's freshness and a
 mail hold read the latest of the replicated report, the local log, and that time. The card's
 90-second rule ages it, so a host that stops pushing reads stale.
 
