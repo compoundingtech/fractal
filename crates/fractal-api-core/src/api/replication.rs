@@ -142,11 +142,7 @@ pub async fn checkpoint_resume(
     Json(request): Json<crate::store::CheckpointResumeRequest>,
 ) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
     let store = state.store.clone();
-    blocking_action(move || {
-        store.resume_checkpoints(&request.actor, &request.reason)?;
-        store.recover_local_trim_stops(&request.actor, &request.reason)
-    })
-    .await?;
+    blocking_action(move || store.resume_stopped_trims(&request.actor, &request.reason)).await?;
     signal_changed(&state);
     let store = state.store.clone();
     let peers = state.configured_peers.clone();
