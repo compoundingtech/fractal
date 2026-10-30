@@ -61,6 +61,92 @@ fn claimed_step(history: usize) -> Renewal {
     }
 }
 
+fn renewal_wal_frames(renewal: &Renewal, page_size: u64) -> u64 {
+    let bytes = std::fs::metadata(renewal._directory.path().join("renew.sqlite3-wal"))
+        .unwrap()
+        .len();
+    bytes.saturating_sub(32) / (page_size + 24)
+}
+
+fn reset_renewal_wal(renewal: &Renewal) -> u64 {
+    let connection = renewal.store.connection.write();
+    connection.execute_batch(
+        "PRAGMA wal_autocheckpoint=0; PRAGMA wal_checkpoint(TRUNCATE);",
+    ).unwrap();
+    connection.pragma_query_value(None, "page_size", |row| row.get(0)).unwrap()
+}
+
+#[test]
+fn quiet_renewal_updates_only_lease_columns_with_bounded_wal_pages() {
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    let _clock = ResetClock;
+    let renewal = claimed_step(0);
+    let before = renewal.store.step_run(&renewal.subject).unwrap().unwrap();
+    let start = now_ms();
+    renewal.store.connection.write().execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hca69050f62ee owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER quiet_renewal_state_guard
+         AFTER UPDATE OF status,worker_reported,lease_owner,lease_incarnation,
+                         blocked_reason,readiness_epoch ON main.step_runs
+         BEGIN SELECT RAISE(ABORT,'quiet renewal rewrote state columns'); END;",
+    ).unwrap();
+    let page_size = reset_renewal_wal(&renewal);
+    let mut previous = 0;
+    for tick in 1..=20 {
+        smallclaims::store::set_thread_clock(Some(start + tick * 1_000));
+        let view = renewal.store.work_action(
+            &renewal.subject, "renew", &request(&format!("quiet-page-bound-{tick}"), None),
+        ).unwrap();
+        assert_eq!(view.status, before.status);
+        assert_eq!(view.worker_reported, before.worker_reported);
+        assert_eq!(view.claimant, before.claimant);
+        assert_eq!(view.claim_incarnation, before.claim_incarnation);
+        assert_eq!(view.blocked_reason, before.blocked_reason);
+        assert_eq!(view.readiness_epoch, before.readiness_epoch);
+        assert_eq!(view.claim_expires_at_unix_ms, Some(start + tick * 1_000 + 600_000));
+        let frames = renewal_wal_frames(&renewal, page_size);
+        assert!(frames - previous <= 20, "quiet renewal {tick} wrote {} pages", frames - previous);
+        previous = frames;
+    }
+    assert!(renewal.store.claims_for(&renewal.subject, Some("work.renewed")).unwrap().is_empty());
+    eprintln!("quiet renewal: 20 ticks, {previous} WAL pages, {} bytes", previous * (page_size + 24));
+}
+
+#[test]
+fn lease_only_update_dirties_fewer_pages_than_rewriting_unchanged_indexed_state() {
+    let mut pages = Vec::new();
+    for broad in [false, true] {
+        let renewal = claimed_step(0);
+        let page_size = reset_renewal_wal(&renewal);
+        let connection = renewal.store.connection.write();
+        let expiry = (now_ms() + 601_000).to_string();
+        let updated = (now_ms() + 1_000).to_string();
+        if broad {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h574254113134 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=status,worker_reported=worker_reported,
+                 lease_owner=lease_owner,lease_incarnation=lease_incarnation,
+                 blocked_reason=blocked_reason,readiness_epoch=readiness_epoch,
+                 lease_expires_at_unix_ms=?2,updated_at_unix_ms=?3 WHERE subject=?1",
+                params![renewal.subject, expiry, updated],
+            ).unwrap();
+        } else {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-haebfd1e4985b owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
+                 updated_at_unix_ms=?3 WHERE subject=?1",
+                params![renewal.subject, expiry, updated],
+            ).unwrap();
+        }
+        drop(connection);
+        pages.push(renewal_wal_frames(&renewal, page_size));
+    }
+    eprintln!("lease UPDATE WAL pages: narrow={}, broad={}", pages[0], pages[1]);
+    assert!(pages[0] < pages[1], "naming unchanged state columns must cost extra index pages: {pages:?}");
+}
+
 #[test]
 fn a_steps_timing_events_are_read_again_only_when_its_claims_change() {
     let renewal = claimed_step(5);

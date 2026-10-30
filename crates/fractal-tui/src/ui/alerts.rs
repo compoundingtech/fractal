@@ -1778,6 +1778,36 @@ mod tests {
         assert!(options(&shown).is_empty());
     }
 
+    /// A call auto mode denied is allowed once or for its kind, or dismissed: each its own option,
+    /// and each click sends exactly that answer.
+    #[test]
+    fn a_denied_call_is_allowed_once_or_for_its_kind_or_dismissed() {
+        let offered = ["approve-once", "approve-kind", "dismiss"];
+        for answer in offered {
+            let mut world = bash_world();
+            world.attention = Load::Ready(vec![prompt("attention/one", &offered, "")]);
+            let mut ui = in_conversation(world);
+            ui.live = true;
+            ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
+            let shown = render(&ui, 120, 40);
+            let labels: Vec<String> = options(&shown).into_iter().map(|(_, _, label)| label).collect();
+            let expected = ["Yes, allow it once", "Yes, and allow calls of its kind for this seat", "No, leave it denied"];
+            assert!(
+                labels.len() == expected.len() && labels.iter().zip(expected).all(|(label, words)| label.starts_with(words)),
+                "{labels:?}\n{shown}"
+            );
+            ui.click(Hit::Alert("attention/one".into(), AlertTap::Answer(answer.into())));
+            assert!(
+                matches!(
+                    ui.effects.as_slice(),
+                    [Effect::Attention { action, answer: Some(sent), .. }] if action == "prompt.respond" && sent == answer
+                ),
+                "{answer}: {:?}",
+                ui.effects
+            );
+        }
+    }
+
     /// The band keeps a card between frames only while nothing it was drawn from changed.
     #[test]
     fn a_kept_band_card_follows_its_call_its_mark_and_its_age() {
