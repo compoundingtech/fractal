@@ -53,6 +53,8 @@ pub enum TrimFault {
     AfterTombstones,
     /// This many chunks are deleted.
     AfterChunk(usize),
+    /// This many pages of a local cut's citation catch-up are committed.
+    AfterCitationPages(usize),
     /// Every row is deleted and the checkpoint is not yet marked trimmed.
     BeforeFinish,
     /// The first deletion chunk starts with its time budget already spent.
@@ -445,7 +447,8 @@ impl Store {
             self.forget_recording_tombstones(&checkpoint)?;
         }
         let _completion = super::checkpoint_completion::Completion::outer();
-        let staged = self.checkpoint_staged_set(cut, None, &context.scratch)?;
+        // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
+        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
         #[cfg(any(test, feature = "test-support"))]

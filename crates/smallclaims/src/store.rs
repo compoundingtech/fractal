@@ -98,6 +98,7 @@ pub mod projection_digest;
 pub mod repair_ledger;
 pub mod retired;
 pub mod retired_facts;
+pub mod local_trim_citations;
 pub mod runtime;
 mod signature_backfill;
 pub mod transport_observation_index;
@@ -123,7 +124,7 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{CheckpointManifestNeed, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]
@@ -1141,6 +1142,9 @@ impl Store {
         })?;
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
+        })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb1035261bc59 owner=smallclaims::store TODO=trace-statement-and-value-representation */ local_trim_citations::SCHEMA).map_err(Into::into)
         })?;
         initialize_fleet_generation(connection)?;
         install_schema_batch(connection, fresh, idempotency::initialize)?;
@@ -8631,7 +8635,9 @@ impl Store {
                     params![peer, error, now_ms().to_string()],
                 )
             }).map_err(anyhow::Error::msg)??;
-            return Ok(true);
+            // A refused route is local route state: while the peer still exchanges with us in
+            // either direction it is no more stale than after a missed exchange.
+            return Ok(!self.peer_recently_up(peer)?);
         }
         // Keep the existing storage and claim vocabulary for mixed-version fleets.
         // Unknown reachability projects as last-seen in current product views.
@@ -8649,29 +8655,7 @@ impl Store {
                 )
             })
             .map_err(anyhow::Error::msg)??;
-        // An inbound exchange is just as good evidence of reachability as an outbound one.
-        // Keep the last success during a short missed-exchange window, so a failed dial on
-        // one side cannot flap a peer that is still exchanging in the other direction.
-        let last_success = self.replication_peer_last_success(peer)?;
-        let recent_exchange =
-            last_success.is_some_and(|last| now_ms().saturating_sub(last) < PEER_UP_MS);
-        if recent_exchange {
-            return Ok(false);
-        }
-        // A peer may also have a fresh up observation without a matching peer-row success
-        // (for example, after a worker restart). Its published status must get the same
-        // missed-exchange grace period or one outbound timeout reverses it immediately. A row
-        // success, once recorded, is the newer evidence: every exchange updates it, while the
-        // observation changes only with the status.
-        let recent_observation = last_success.is_none()
-            && self
-                .latest_claim(&format!("host/{peer}"), Some("transport.observed"))?
-                .filter(|claim| {
-                    claim.origin == self.origin && claim.body["fields"]["status"] == "up"
-                })
-                .and_then(|claim| claim.body["fields"]["last_success_at"].as_u64())
-                .is_some_and(|last| now_ms().saturating_sub(u128::from(last)) < PEER_UP_MS);
-        if recent_observation {
+        if self.peer_recently_up(peer)? {
             return Ok(false);
         }
         if self
@@ -8697,6 +8681,34 @@ impl Store {
             })
             .map_err(anyhow::Error::msg)??;
         Ok(true)
+    }
+
+    /// Whether `peer` exchanged with this member, in either direction, within the missed-exchange
+    /// window, or this member's own up observation of it is that recent.
+    fn peer_recently_up(&self, peer: &str) -> Result<bool> {
+        // An inbound exchange is just as good evidence of reachability as an outbound one.
+        // Keep the last success during a short missed-exchange window, so a failed dial on
+        // one side cannot flap a peer that is still exchanging in the other direction.
+        let last_success = self.replication_peer_last_success(peer)?;
+        let recent_exchange =
+            last_success.is_some_and(|last| now_ms().saturating_sub(last) < PEER_UP_MS);
+        if recent_exchange {
+            return Ok(true);
+        }
+        // A peer may also have a fresh up observation without a matching peer-row success
+        // (for example, after a worker restart). Its published status must get the same
+        // missed-exchange grace period or one outbound timeout reverses it immediately. A row
+        // success, once recorded, is the newer evidence: every exchange updates it, while the
+        // observation changes only with the status.
+        let recent_observation = last_success.is_none()
+            && self
+                .latest_claim(&format!("host/{peer}"), Some("transport.observed"))?
+                .filter(|claim| {
+                    claim.origin == self.origin && claim.body["fields"]["status"] == "up"
+                })
+                .and_then(|claim| claim.body["fields"]["last_success_at"].as_u64())
+                .is_some_and(|last| now_ms().saturating_sub(u128::from(last)) < PEER_UP_MS);
+        Ok(recent_observation)
     }
 
     /// The transport links the fleet currently observes as up, as `(observer, observed)` node
