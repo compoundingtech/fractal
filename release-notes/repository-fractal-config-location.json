@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Do not ready or merge this Q27 PR3 move before 2026-11-01. Retain the legacy fallback until Q27 PR4, at least seven days after the move and no earlier than 2026-11-08."
+    "detail": "Readiness requires verification of all production configuration readers and accepted bases. Retain the absence-only legacy fallback until consumer adoption is evidenced by the required peer receipts and the owner approves its removal. Nathan Factory sign-off, risk classification, the assigned protected window and owner admission remain required."
   },
   "recovery": {
     "status": "changed",
