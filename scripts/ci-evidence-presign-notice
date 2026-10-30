@@ -31,10 +31,17 @@ def fields_of(text):
     return dict(part.split('=', 1) for part in text.split(' ') if '=' in part)
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — this script is extracted individually in CI.
 def lanes_at(base, runner=subprocess.run):
-    done = runner(['git', 'show', f'{base}:.st/required-lanes.json'], capture_output=True, text=True, check=False)
+    path = '.fractal/required-lanes.json'
+    probe = runner(['git', 'ls-tree', '--full-tree', '-z', base, '--', path], capture_output=True, text=True, check=False)
+    if probe.returncode != 0:
+        raise RuntimeError(f'cannot inspect lane definition at {base[:12]}')
+    if not probe.stdout:
+        path = '.st/required-lanes.json'
+    done = runner(['git', 'show', f'{base}:{path}'], capture_output=True, text=True, check=False)
     if done.returncode != 0:
-        raise RuntimeError(f'no .st/required-lanes.json at {base[:12]}')
+        raise RuntimeError(f'cannot read {path} at {base[:12]}')
     return {name: lane.get('definition_paths') or [] for name, lane in json.loads(done.stdout)['lanes'].items()}
 
 
