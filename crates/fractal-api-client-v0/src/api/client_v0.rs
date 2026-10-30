@@ -1425,6 +1425,33 @@ async fn open_conversation_subscription(
     .map_err(ApiError::internal)?
 }
 
+/// Whether `call` waits in `seat`'s conversation: among its newest page, read here or relayed
+/// from the host that owns its session, made with no result. A host that cannot be reached is
+/// `remote-unavailable`.
+async fn prompt_call_waits(
+    state: &AppState,
+    session: &ClientSession,
+    seat: &str,
+    call: &str,
+) -> Result<bool, ApiError> {
+    let (reader, target, asking) = (state.clone(), seat.to_owned(), session.clone());
+    let (session_id, remote) = super::read_deadline::store_read(&state.store, move || {
+        let (session_id, resolved) = resolve_conversation(&reader, &target)?;
+        let remote = conversation_owner_host(&reader, &asking, resolved.routing_owner.as_ref())?;
+        Ok::<_, ApiError>((session_id, remote))
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    // The entries as the conversation keeps them, whatever this session's own reads negotiate.
+    let mut entries = session.clone();
+    entries.conversation_blocks = false;
+    let page = conversation_page(state, &entries, &session_id, remote.as_deref(), CLIENT_MAX_PAGE_ITEMS).await?;
+    Ok(crate::api::prompt_card::call_waits_among(
+        page["items"].as_array().map_or(&[][..], Vec::as_slice),
+        call,
+    ))
+}
+
 /// A conversation's newest page, read here or relayed from its owner. The limit is the
 /// caller's frame size, so a relayed open asks its owner for exactly what it will show.
 async fn conversation_page(
@@ -7864,24 +7891,21 @@ async fn dispatch_action(
                 parameter_string(p, "answer")?,
             );
             // A card may have offered allow from a read before its call's result. Whatever lets
-            // the named call through goes on only while Fractal sees it waiting in the seat's
-            // conversation on this node, as a card that offers allow does: not once it has its
-            // result, and not when the conversation cannot be read here. Only the seat's person
-            // is told: anyone else is refused by the store as before.
+            // the named call through goes on only while the seat's conversation, read here or
+            // relayed from the host that runs it, shows that call waiting: not once it has its
+            // result, and not when the conversation cannot be read (a host that cannot be reached
+            // says so). The answer is then recorded here, as before, and reaches the seat's hook
+            // as its claim replicates. Only the seat's person is told: anyone else is refused by
+            // the store as before.
             let person = state.store.agent_person(&seat).map_err(ApiError::internal)?;
             if delegation.is_none() && answer != "deny" && person.as_deref() == Some(authority_actor.as_str()) {
                 let call = state.store.native_prompt_call(&seat, &episode).map_err(ApiError::internal)?;
                 if let Some(call) = call {
-                    let (reader, target) = (state.clone(), seat.clone());
-                    let waits = crate::api::read_deadline::spawn_blocking(move || {
-                        crate::api::prompt_card::call_waits(&reader, &target, &call)
-                    })
-                    .await
-                    .map_err(ApiError::internal)?;
-                    let refused = match waits {
+                    let refused = match prompt_call_waits(state, session, &seat, &call).await {
                         Ok(true) => None,
                         Ok(false) => Some("is no longer waiting: the call it asks about already has a result, or Fractal does not see it waiting in the seat's conversation".to_owned()),
-                        Err(why) => Some(format!("can only be answered in the seat's terminal: {why}")),
+                        Err(error) if error.code == "remote-unavailable" => return Err(error),
+                        Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
                     };
                     if let Some(refused) = refused {
                         return Err(ApiError::bad(St3Error::new(

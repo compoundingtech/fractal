@@ -15,11 +15,11 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "prompt.respond refuses an answer other than deny to a prompt that names its call with stale-fence unless the call waits in the seat's conversation on this node: once it has a result (\"that prompt is no longer waiting: ...\"), or when the conversation cannot be read here (\"that prompt can only be answered in the seat's terminal: ...\"). A client on another node allows such a prompt from the seat's own node or its terminal. Clients already show stale-fence prompt refusals."
+    "detail": "prompt.respond refuses an answer other than deny to a prompt that names its call unless the call waits in the seat's conversation, read on the member that receives the answer or relayed from the host that runs the seat: with stale-fence once it has a result (\"that prompt is no longer waiting: ...\") or when the conversation cannot be read (\"that prompt can only be answered in the seat's terminal: ...\"), and with remote-unavailable when that host cannot be reached. The answer is recorded where it lands, as before. Prompt cards read the newest 200 entries, a page, instead of 256. Clients already show stale-fence prompt refusals."
   },
   "downtime": {
     "status": "none",
-    "detail": "No startup work. A watched directory removed or renamed, an overflow, or an event naming no path makes the attention refresher rebuild its watcher and subscribe each prompt card again; a change to what it watches counts as a change, so FSEvents' stream restart loses nothing. An allowing answer reads the newest 256 entries of the seat's conversation once."
+    "detail": "No startup work. A watched directory removed or renamed, an overflow, or an event naming no path makes the attention refresher rebuild its watcher and subscribe each prompt card again; a change to what it watches counts as a change, so FSEvents' stream restart loses nothing. An allowing answer reads the newest 200 entries of the seat's conversation once."
   },
   "manual": {
     "status": "none",

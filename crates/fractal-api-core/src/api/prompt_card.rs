@@ -14,9 +14,10 @@ use notify::Watcher as _;
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
 
-/// How far back st looks for a call without a result: the conversation's newest entries. A
-/// harness waits on the calls it made last, so an older one without a result was abandoned.
-const TAIL: usize = 256;
+/// How far back st looks for a call without a result: the conversation's newest entries, a page
+/// as a client or a peer reads it. A harness waits on the calls it made last, so an older one
+/// without a result was abandoned.
+const TAIL: usize = super::CLIENT_MAX_PAGE_ITEMS;
 
 /// Reads the tool calls without a result in a seat's conversation, oldest first, each
 /// `{call_id, name, arguments, complete}`, or says why st cannot.
@@ -136,14 +137,12 @@ fn tail(source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>
     Ok(slice.items)
 }
 
-/// Whether `call` waits in `seat`'s conversation on this node: among the newest entries a card
-/// reads, with no result. A card may have shown it as waiting from a read before its result, so
-/// an answer that lets it through checks again; a call that has its result, or that a card
-/// could not have shown, does not wait. `Err` says why st cannot read the conversation.
-pub fn call_waits(state: &AppState, seat: &str, call: &str) -> Result<bool, String> {
-    Ok(pending_calls(&tail(&seat_source(state, seat)?)?)
-        .iter()
-        .any(|pending| pending["call_id"] == call))
+/// Whether `call` waits among a conversation's newest entries `items` (a page, in either
+/// order): made, with no result. A card may have shown it as waiting from a read before its
+/// result, so an answer that lets it through checks again; a call that has its result, or that
+/// a card could not have shown, does not wait.
+pub fn call_waits_among(items: &[Value], call: &str) -> bool {
+    pending_calls(items).iter().any(|pending| pending["call_id"] == call)
 }
 
 /// The tool calls without a result in a conversation `source`, following it from before the
