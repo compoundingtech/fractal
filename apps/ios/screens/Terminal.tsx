@@ -48,6 +48,8 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   live.current = { screen, status, ctrl };
   const headerHeight = useHeaderHeight();
   const canType = canControlTerminal && status === 'online' && !issue;
+  // The keyboard field is mounted afresh, and empty, whenever terminal control comes back.
+  useEffect(() => { field.current = ''; }, [canControlTerminal]);
 
   // The store's actions change identity on every render; one queue serves the screen's life,
   // so keys stay in order.
