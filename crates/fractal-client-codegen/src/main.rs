@@ -5,6 +5,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod declarations;
 mod rich;
 
 const RUST_MODELS_TEMPLATE: &str = include_str!("../templates/generated.rs.in");
@@ -113,6 +114,11 @@ fn main() -> Result<()> {
     output(
         &root.join("clients/typescript/fractal-client/Client.generated.ts"),
         &typescript_client,
+        check,
+    )?;
+    output(
+        &root.join("clients/typescript/fractal-declarations/index.ts"),
+        &declarations::typescript(),
         check,
     )?;
     Ok(())
