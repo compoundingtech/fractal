@@ -230,7 +230,7 @@ async fn an_allow_for_a_call_that_already_has_a_result_is_refused() {
     assert!(state.store.index().unwrap() > before, "the answer was recorded");
 }
 
-/// Nathan answers prompts through one member for seats on every member. An allow for a seat
+/// A person answers prompts through one member for seats on every member. An allow for a seat
 /// another member runs is recorded where it lands, with no live read of that member, even one
 /// that cannot be reached; the seat's hook releases it only for the very prompt it published.
 /// Recorded for the current prompt it releases it once it replicates; recorded for a prompt the
@@ -249,8 +249,8 @@ async fn a_remote_allow_is_recorded_where_it_lands_and_released_only_for_its_pro
     };
     let (gateway_root, late_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
 
-    // The named call even has its result on the seat's host: the member cannot see that and
-    // reads nothing there, so it records the allow.
+    // The member reads nothing on the seat's host, even with no way to reach it, and records
+    // the allow.
     name_prompt_call(&owner, &seat, "call-waiting");
     let gateway = member("prompt-gateway", gateway_root.path());
     assert!(gateway.client_relay.is_none(), "this member reaches no other");
