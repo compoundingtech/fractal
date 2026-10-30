@@ -2,8 +2,7 @@ import { useMemo, useState } from 'react';
 import { Alert, Linking, Pressable, ScrollView, useWindowDimensions, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { TimelineEntry } from '../../../clients/typescript/fractal-client';
-import { ANSWERS, alertsIn, answerLabel, requestImages, cleanMessageText, isRequest, offeredAnswers, pendingCalls, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, spaced, yesNo, ago, type KeptAttention, type PendingCall } from '@fractal/views';
+import { ANSWERS, alertsIn, answerLabel, askDeadline, requestImages, cleanMessageText, isRequest, pendingQuestions, promptAlertKey, promptAnswers, promptCalls, questionAnswer, report, servedAnswers, servedPrompt, spaced, yesNo, ago, type KeptAttention } from '@fractal/views';
 import { agentName } from '../agentsView';
 import type { RootParams } from '../navigation';
 import { attentionKindLabel } from '../presentation';
@@ -17,12 +16,11 @@ import { MailImageView, useWindowViewport } from '../imageBox';
 // its answers; with one alert it starts open. An answer is the same action Home sends.
 
 /** The alerts of one agent's conversation. Nothing at all when it has none. */
-export function AlertsStrip({ agentId, entries }: { agentId: string; entries: ReadonlyArray<TimelineEntry> }) {
+export function AlertsStrip({ agentId }: { agentId: string }) {
   const { data, caps } = useStore();
   const { height } = useWindowDimensions();
   const alerts = useMemo(() => alertsIn(data.attention, agentId, caps?.session_actor), [data.attention, agentId, caps?.session_actor]);
   const [toggled, setToggled] = useState<ReadonlySet<string>>(new Set());
-  const calls = useMemo(() => pendingCalls(entries), [entries]);
   // One line until it is opened, as in the Fractal terminal UI: the cards take the conversation's room only when asked for.
   const [expanded, setExpanded] = useState(false);
   const { palette } = useTextAppearance();
@@ -36,34 +34,36 @@ export function AlertsStrip({ agentId, entries }: { agentId: string; entries: Re
       <T dim>{expanded ? '▾ hide' : '▸ show'}</T>
     </Pressable>
     {expanded ? <ScrollView style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ padding: 8, gap: 6 }}>
-      {alerts.map(item => <AlertCard key={item.id} item={item} agentId={agentId} open={isOpen(item.id)} onToggle={() => toggle(item.id)} calls={calls} />)}
+      {alerts.map(item => <AlertCard key={item.id} item={item} agentId={agentId} open={isOpen(item.id)} onToggle={() => toggle(item.id)} />)}
     </ScrollView> : null}
   </View>;
 }
 
-function AlertCard({ item, agentId, open, onToggle, calls }: { item: KeptAttention; agentId: string; open: boolean; onToggle: () => void; calls: PendingCall[] }) {
+function AlertCard({ item, agentId, open, onToggle }: { item: KeptAttention; agentId: string; open: boolean; onToggle: () => void }) {
   const { data } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const seats = (item.conversation_ids ?? []).filter(id => id !== agentId).map(id => { const seat = data.agents.find(candidate => candidate.id === id); return seat ? agentName(seat) : id.replace(/^agent\//, ''); });
   const from = (() => { const asker = data.agents.find(candidate => candidate.id === (item.requester_id ?? agentId)); return asker ? agentName(asker) : (item.requester_id ?? agentId).replace(/^agent\//, ''); })();
   const { palette } = useTextAppearance();
+  const deadline = askDeadline(item);
+  const meta = `${attentionKindLabel(item.attention_kind)} · waited ${ago(item.requested_at)}${deadline ? ` · ${deadline}` : ''}`;
   return <View style={{ borderLeftWidth: 3, borderLeftColor: palette.person, backgroundColor: palette.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
       <T numberOfLines={open ? undefined : 1}><T bold color={theme.person}>◆ alert  </T><T bold>{item.title}</T></T>
-      {open ? null : <T dim numberOfLines={1}>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>}
+      {open ? null : <T dim numberOfLines={1}>{meta}</T>}
     </Pressable>
     {open ? <View style={{ gap: 8 }}>
-      <T dim>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>
-      <AlertBody item={item} from={from} calls={calls} seats={seats} />
+      <T dim>{meta}</T>
+      <AlertBody item={item} from={from} seats={seats} />
       <Button label="details" color={theme.subtext0} onPress={() => navigation.navigate('Attention', { id: item.id })} />
     </View> : null}
   </View>;
 }
 
-export function AlertBody({ item, from, calls, seats }: { item: KeptAttention; from: string; calls: PendingCall[] | null; seats: string[] }) {
+export function AlertBody({ item, from, seats }: { item: KeptAttention; from: string; seats: string[] }) {
   const prompt = promptAnswers(item);
   // A new prompt or revision behind the same alert starts with nothing chosen.
-  if (prompt) return <PromptAnswerView key={promptAlertKey(item)} item={item} calls={calls} />;
+  if (prompt) return <PromptAnswerView key={promptAlertKey(item)} item={item} />;
   if (item.attention_kind === 'harness-prompt') return <View style={{ gap: 6 }}>
     {item.detail ? <Markdown text={spaced(cleanMessageText(item.detail))} color={theme.text} /> : null}
     <Note>This prompt is answered in the agent's terminal.</Note>
@@ -83,18 +83,19 @@ export function AlertBody({ item, from, calls, seats }: { item: KeptAttention; f
   </View>;
 }
 
-// A native prompt: what it would let through, in full, beside the answers it offers. `allow` and
-// `approve` are offered only beside the one call shown in full (the prompt names no call); a
-// question's options are chosen here and sent together; a screen prompt's own answers and deny are
-// one tap. `calls` is null where the conversation is not loaded: the call cannot be shown there.
-function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: PendingCall[] | null }) {
+// A native prompt: what it would let through, as st serves it beside the card
+// (`presentation.prompt`), beside the answers it offers. `allow` and `approve` are offered only
+// where st allows them, beside the one call shown; a question's options are chosen here and sent
+// together; a screen prompt's own answers and deny are one tap.
+function PromptAnswerView({ item }: { item: KeptAttention }) {
   const { busy, status, actions } = useStore();
   const appearance = useTextAppearance();
   const prompt = promptAnswers(item)!;
   const disabled = busy || status !== 'online';
+  const served = servedPrompt(item);
   // Only the exact call the prompt asks about, when the daemon names it.
-  const shown = promptCalls(prompt, calls ?? []);
-  const offered = offeredAnswers(prompt, shown);
+  const shown = served.calls === null ? [] : promptCalls(prompt, served.calls);
+  const offered = servedAnswers(prompt, served);
   const questions = pendingQuestions(shown);
   const [chosen, setChosen] = useState<number[][]>([]);
   const call = shown.length === 1 ? shown[0] : null;
@@ -129,9 +130,9 @@ function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: Pending
       <T bold color={theme.person}>{each.tool}</T>
       {each.lines.map((line, index) => <T key={index} selectable>{line}</T>)}
     </View>)}
-    {gated && calls === null ? <Note>Open the agent's conversation to see what it would {gated === 'answer' ? 'be asked' : 'let through'} and answer it there, or answer it in the terminal.</Note> : null}
-    {gated && calls !== null && shown.length === 0 ? <Note tone="warning">It is not in the conversation yet, so it cannot be {gated === 'answer' ? 'answered' : gated === 'approve' ? 'approved' : 'allowed'} here. Answer it in the terminal.</Note> : null}
-    {gated && shown.length > 1 ? <Note tone="warning">{shown.length} calls are waiting and the prompt does not say which one it is asking about. Answer it in the terminal, where the harness shows it.</Note> : null}
+    {gated && served.calls === null ? <Note tone="warning">{served.why} Answer it in the terminal.</Note> : null}
+    {gated && served.calls !== null && prompt.call_id == null ? <Note tone="warning">Fractal does not say which call this asks about, so it cannot be {gated === 'answer' ? 'answered' : gated === 'approve' ? 'approved' : 'allowed'} here. Answer it in the terminal, where the harness shows it.</Note> : null}
+    {gated && served.calls !== null && prompt.call_id != null && shown.length === 0 ? <Note tone="warning">It is not in the conversation yet, so it cannot be {gated === 'answer' ? 'answered' : gated === 'approve' ? 'approved' : 'allowed'} here. Answer it in the terminal.</Note> : null}
     {gated && shown.length === 1 && !offered.includes(gated) ? <Note tone="warning">It cannot be shown in full, so it is answered in the terminal.</Note> : null}
     <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
       {offered.map(answer => <Button key={answer} label={answer === 'deny' && gated === 'answer' ? 'Decline' : answerLabel(answer)}

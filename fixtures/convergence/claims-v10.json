@@ -5696,6 +5696,46 @@
     "projection": "operational",
     "wakes_reconciler": true
   },
+  "ordered-membership.edited": {
+    "kind": "ordered-membership.edited",
+    "subjects": [
+      "arrangement"
+    ],
+    "fields": {
+      "action_digest": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "action_id": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "operations": {
+        "value_type": "array",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "owner": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "person"
+        ]
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "ordinary-client",
+    "cardinality": "append",
+    "projection": "ordered-memberships",
+    "wakes_reconciler": false
+  },
   "owned-set.revised": {
     "kind": "owned-set.revised",
     "subjects": [

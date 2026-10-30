@@ -452,6 +452,41 @@ async fn a_pass_that_read_a_start_before_its_worker_finished_keeps_the_launch() 
 }
 
     #[tokio::test]
+async fn a_finished_start_sends_its_wake_before_its_waiters_go_on() {
+    use futures_util::FutureExt;
+    let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "start-wake-order",
+    );
+    assert!(launch(&reconciler, "agent/example/worker"));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // The wake for queueing the start is not the one this test waits for.
+    let _ = reconciler.notify.notified().now_or_never();
+    // Hold the set of running starts, as a waiter for this start sees it, while the worker
+    // finishes. The worker must mark the completion and send its wake before it leaves the set:
+    // otherwise a waiter goes on first, and the wake lands later as a stray one.
+    let live = reconciler.start_jobs.live.clone();
+    let held = live.0.lock().unwrap();
+    release.0.send(()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut woke = false;
+    while !woke && std::time::Instant::now() < deadline {
+        woke = reconciler.notify.notified().now_or_never().is_some();
+        if !woke {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    drop(held);
+    assert!(woke, "the worker left the running starts before sending its completion wake");
+    workers_done(&reconciler).await;
+}
+
+    #[tokio::test]
 async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, true);
     apply_source(

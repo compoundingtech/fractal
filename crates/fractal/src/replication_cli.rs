@@ -27,6 +27,11 @@ pub(super) async fn run_replication(
                 println!("table-digest\t{table}\t{digest}");
             }
             println!("envelopes\t{}", status.received_envelopes);
+            // Records count only admitted envelopes; held ones show only here.
+            println!(
+                "envelopes-waiting\tpending={} unsigned={} fenced={}",
+                status.pending_envelopes, status.unsigned_envelopes, status.fenced_envelopes
+            );
             println!(
                 "records\tvalid={} pending={} waiting={} invalid={} repaired={} checkpointed={}",
                 status.valid_records,
@@ -271,6 +276,23 @@ pub(super) async fn run_replication(
                 return print_value(&status, true);
             }
             print!("{}", render_checkpoint_status(&status));
+            Ok(())
+        }
+        ReplicationCommand::Signatures {
+            command: SignaturesCommand::Resume { reason, actor },
+        } => {
+            let actor = fleet_person(actor, config)?;
+            let request = smallclaims::store::principals::SignatureResumeRequest { reason, actor };
+            let resumed: Value = client.post("/v1/signatures/resume", &request).await?;
+            if json_output {
+                return print_value(&resumed, true);
+            }
+            match resumed.get("cleared").and_then(Value::as_str) {
+                Some(fault) => println!("cleared signature fault: {fault}"),
+                None => println!("no signature fault was persisted"),
+            }
+            let migration = &resumed["migration"];
+            println!("migration phase {}, fault {}", migration["phase"].as_str().unwrap_or("?"), migration["fault"].as_str().unwrap_or("none"));
             Ok(())
         }
     }

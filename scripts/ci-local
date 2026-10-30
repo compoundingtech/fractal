@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run Linux gate stages on this machine the way their CI jobs run them, for a note signed here (scripts/fractal-test, a lane in
-# .st/required-lanes.json). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
+# required-lanes.json, .fractal first, .st only if absent). Run inside the pinned dev shell: `nix develop -c bash scripts/ci-local STAGE...`.
 #
 #   scripts/ci-local mail-redelivery-canaries
 #   scripts/ci-local tests clippy fleet-compat mail-redelivery-canaries      (what a linux-gate skip covers)
@@ -271,29 +271,44 @@ run_stage() {
     > "$log_dir/.$n.row"
   if [ "$shown" = shown ]; then echo "ci-local: $stage exit $code"; fi
 }
-# clippy and fleet compatibility run alongside the tests stage, one after the other in a lane of their own, as their CI jobs run on runners
-# of their own: the tests stage builds first (cargo's lock on the build directory holds the lane's build until then) and then spends most
-# of its time running tests, which is when the lane compiles and runs. Their output is kept and printed once the foreground stages are
-# done, so the two never interleave. CI_LOCAL_SERIAL=1 runs every stage one after another, as before.
+# clippy runs alongside the tests stage in a lane of its own, as its CI job runs on a runner of its own: the tests stage builds first
+# (cargo's lock on the build directory holds the lane's build until then) and then spends most of its time running tests, which is when
+# the lane compiles and runs. Its output is kept and printed once the foreground stages are done, so the two never interleave.
+# Fleet compatibility stays in the foreground, after the tests stage: its `cargo test -p fractal` resolves features apart from the
+# workspace build, so it relinks the fractal binaries in the shared build directory, and a test exec'ing one mid-link fails with
+# ETXTBSY (#4128). clippy links only the client codegen tool, which no test runs. CI_LOCAL_SERIAL=1 runs every stage one after another, as before.
 stages=("$@")
 lane=()  # positions
 if [ "${CI_LOCAL_SERIAL:-}" != 1 ] && [[ " $* " == *" tests "* ]]; then
   for n in "${!stages[@]}"; do
-    case "${stages[$n]}" in clippy|fleet-compat) lane+=("$n") ;; esac
+    case "${stages[$n]}" in clippy) lane+=("$n") ;; esac
   done
 fi
 in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
-# A process and everything under it, children first (read from /proc: a parent's PPid line), so a stage the lane started does not
+# A process and everything under it (read from /proc: a parent's PPid line), so a stage the lane started does not
 # outlive it. What detaches on purpose (the test guardian's setsid) is not under it and is not reached, as before.
+# /proc is read by the shell itself, without a sed per process: that took over 20 s on a loaded host, and the stopped run waited that
+# long to exit. Each process found is frozen (SIGSTOP) at once, so it cannot start another, and /proc is read again until a pass
+# finds no one new: a stage that forks while the tree is read is caught on the next pass. Then every frozen process is sent
+# SIGTERM and let go, so it ends. A process that ended before it was read has no status left and is skipped.
 stop_tree() {
-  local pid=$1 status child
-  for status in /proc/[0-9]*/status; do
-    if [ "$(sed -n 's/^PPid:[[:space:]]*//p' "$status" 2>/dev/null)" = "$pid" ]; then
-      child=${status#/proc/}; child=${child%/status}
-      stop_tree "$child"
-    fi
+  local found=" $1 " grew=1 status key value child pid
+  kill -STOP "$1" 2>/dev/null || true
+  while [ "$grew" = 1 ]; do
+    grew=0
+    for status in /proc/[0-9]*/status; do
+      { while read -r key value; do
+          if [ "$key" != PPid: ]; then continue; fi
+          child=${status//[!0-9]/}
+          if [[ $found == *" $value "* && $found != *" $child "* ]]; then
+            found+="$child "; kill -STOP "$child" 2>/dev/null || true; grew=1
+          fi
+          break
+        done < "$status"; } 2>/dev/null || true
+    done
   done
-  kill "$pid" 2>/dev/null || true
+  for pid in $found; do kill "$pid" 2>/dev/null || true; done
+  for pid in $found; do kill -CONT "$pid" 2>/dev/null || true; done
 }
 lane_pid=
 if [ "${#lane[@]}" -gt 0 ]; then

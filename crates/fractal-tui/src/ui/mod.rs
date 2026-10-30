@@ -21,6 +21,7 @@ pub mod demo;
 mod demo_test_fixture;
 mod direct;
 pub mod doc;
+mod documents;
 pub mod checklist;
 mod edit;
 mod glass;
@@ -408,8 +409,8 @@ pub struct Ui {
     tick: u64,
     help: bool,
     resource_sidebar: resource_sidebar::Sidebar,
-    /// The documents open in a pane, by name: their text once st has sent it.
-    pub(crate) documents: std::collections::BTreeMap<String, Load<String>>,
+    /// Documents read so far, the list, and the documents missions name.
+    documents: documents::Documents,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -506,6 +507,14 @@ pub struct Ui {
     /// The options chosen so far on each harness question alert, by question, before sending: by
     /// the alert and its exact question call (`alerts::question_key`).
     question_choices: HashMap<String, std::collections::BTreeMap<usize, BTreeSet<usize>>>,
+    /// Where each prompt alert's form has its mark, once the person moved it.
+    prompt_marks: HashMap<String, usize>,
+    /// The prompt alert whose form has the keys (Ctrl+N in a conversation, `a` in Inbox).
+    prompt_keys: Option<String>,
+    /// The first digit typed on a form of ten or more rows, waiting for a second (or Enter).
+    prompt_digit: Option<(String, usize)>,
+    /// Each alert's band card from the last frame, with a hash of what it was drawn from.
+    band_cards: RefCell<HashMap<(String, usize, alerts::Place), alerts::KeptCard>>,
     /// The spaces: named layouts of tabs and split panes, the Ctrl+S sidebar, the palette, and
     /// Now and Usage floating over them. Fractal TUI has no other layout.
     pub(crate) glasses: glass::Glasses,
@@ -762,7 +771,6 @@ impl Ui {
         Self {
             tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
             world,
-            documents: std::collections::BTreeMap::new(),
             selected: [0; 6],
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
@@ -776,6 +784,7 @@ impl Ui {
             tick: 0,
             help: false,
             resource_sidebar,
+            documents: documents::Documents::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -825,6 +834,10 @@ impl Ui {
             drafts_backoff: None,
             alerts_open: HashSet::new(),
             question_choices: HashMap::new(),
+            prompt_marks: HashMap::new(),
+            prompt_keys: None,
+            prompt_digit: None,
+            band_cards: RefCell::new(HashMap::new()),
             // A space kept in memory only; the live loop and the demo open the device's own.
             glasses: glass::Glasses::open(None, None),
             build: false,
@@ -890,6 +903,10 @@ impl Ui {
                     None => "closed, x clears it".into(),
                 });
                 kept.actions.clear();
+                // A closed prompt waits for nothing: its form offers no answer.
+                if let AttentionKind::Prompt { answers, .. } = &mut kept.kind {
+                    answers.clear();
+                }
             }
             items.push(kept);
         }
@@ -959,6 +976,23 @@ impl Ui {
             && !id.starts_with("terminal/")
         {
             targets.push(id);
+        }
+        // A prompt's card in Inbox shows the call it asks about, which is in its seat's
+        // conversation: follow that one too, or Inbox could offer only what needs no reading.
+        if self.inbox_in_view()
+            && let Some(seat) = self.attention_focus().and_then(|id| {
+                self.world.attention.items().iter().find_map(|item| match &item.kind {
+                    AttentionKind::Prompt { seat_id, answers, .. }
+                        if item.id == id && !answers.is_empty() =>
+                    {
+                        Some(seat_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            && !targets.contains(&seat)
+        {
+            targets.push(seat);
         }
         for id in self.glasses.shown_agents() {
             if !targets.contains(&id) {
@@ -1344,6 +1378,29 @@ impl Ui {
                     }
                 }
                 from = start + token.len().max(1);
+            }
+            // Document references written out, `doc/NAME` or `doc/NAME@HASH`: in a message, a
+            // mission or a document, each opens that document.
+            for link in fractal_ui_model::documents::document_links(&text) {
+                let mut from = 0;
+                while let Some(offset) = text[from..].find(&link.reference) {
+                    let start = from + offset;
+                    from = start + link.reference.len();
+                    if documents::inside_word(&text[..start], &text[from..]) {
+                        continue;
+                    }
+                    if let Some((x, _)) = cells.get(text[..start].chars().count()) {
+                        self.hit(
+                            Rect {
+                                x: *x,
+                                y,
+                                width: link.reference.chars().count() as u16,
+                                height: 1,
+                            },
+                            Hit::Link(link.reference.clone()),
+                        );
+                    }
+                }
             }
             // Markdown links: underlined runs whose text names a link.
             let mut index = 0;
@@ -2367,6 +2424,8 @@ impl Ui {
                 })
             }),
             chat,
+            // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
+            form: self.form_state(key),
         }
     }
 
@@ -2427,14 +2486,18 @@ impl Ui {
                             self.content.expand_requests(&mut doc, width);
                             doc
                         });
-                screens::mission_detail(
+                let mut doc = screens::mission_detail(
                     &self.world,
                     id.as_deref(),
                     width,
                     self.spinner(),
                     decision,
                     &self.conversation_state.expanded,
-                )
+                );
+                if let Some(id) = id.as_deref() {
+                    self.documents.mission_section(&mut doc, &self.document_subjects(id), width);
+                }
+                doc
             }
             Pane::Machine(id) => {
                 let name = id
@@ -2446,10 +2509,30 @@ impl Ui {
                 screens::worktree_detail(&self.world, id.as_deref(), width, self.spinner())
             }
             Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
-            Pane::Document(name) => document_detail(name, self.documents.get(name), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
+            Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
+            Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
         };
         self.pane(buf, &pane.key(), area, doc, false);
+    }
+
+    /// A document in a split of a glass, with the way back along what that split followed.
+    fn draw_document(&self, buf: &mut Buffer, area: Rect, reference: &str, split: &str) {
+        let width = area.width.saturating_sub(1) as usize;
+        let back = self.documents.previous(split, reference);
+        let doc = self.documents.page(reference, back, width, documents::now_ms());
+        self.pane(buf, &Pane::Document(reference.to_owned()).key(), area, doc, false);
+    }
+
+    /// The subjects whose documents a mission's card lists: the mission and its steps.
+    fn document_subjects(&self, mission: &str) -> Vec<(String, Option<String>)> {
+        let mut subjects = vec![(mission.to_owned(), None)];
+        if let Some(mission) = self.world.missions.items().iter().find(|candidate| candidate.id == mission) {
+            subjects.extend(
+                mission.steps.iter().filter(|step| step.id.starts_with("step-run/")).take(documents::STEPS).map(|step| (step.id.clone(), Some(step.name.clone()))),
+            );
+        }
+        subjects
     }
 
     fn conversation_failure(reason: &str, width: usize) -> Doc {
@@ -2743,15 +2826,16 @@ impl Ui {
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
         // rows from the conversation and never more than three fifths of the pane.
+        let room = (area
+            .height
+            .saturating_sub(header_height + composer_height + 4) as usize)
+            .min((area.height as usize * 3 / 5).max(1));
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
-            self.alert_band(&agent.id, area.width as usize)
+            self.alert_band(&agent.id, area.width as usize, room, alerts::Place::Band)
         };
-        let room = area
-            .height
-            .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
+        band.truncate(room);
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2778,6 +2862,11 @@ impl Ui {
         for (offset, row) in band.iter().enumerate() {
             let y = body.y + body.height + offset as u16;
             buf.set_line(area.x, y, &row.line, area.width);
+            if let Some((column, edge)) = &row.edge
+                && *column < area.width
+            {
+                buf.set_span(area.x + column, y, edge, area.width - column);
+            }
             for (column, width, hit) in &row.hits {
                 self.hit(
                     Rect {
@@ -3387,8 +3476,9 @@ impl Ui {
         if !agent.starts_with("agent/") || area.height < 6 {
             return 0;
         }
-        let mut band = self.alert_band(agent, area.width as usize);
-        band.truncate((area.height as usize / 2).max(1));
+        let room = (area.height as usize / 2).max(1);
+        let mut band = self.alert_band(agent, area.width as usize, room, alerts::Place::Terminal);
+        band.truncate(room);
         for (offset, row) in band.iter().enumerate() {
             let y = area.y + 1 + offset as u16;
             buf.set_style(
@@ -3945,6 +4035,10 @@ impl Ui {
 
     /// A subject opens as its own tab in the focused split, or is focused where it already is.
     fn open(&mut self, id: &str) {
+        if documents::openable(id).is_some() {
+            self.open_document(id);
+            return;
+        }
         if let Some(pane) = glass::pane_for(id) {
             self.open_in_glass(pane, glass::Open::Tab);
         }
@@ -4228,6 +4322,20 @@ impl Ui {
                 self.confirm = None;
             }
             return;
+        }
+        // A prompt's form with the keys takes them, and Ctrl+N gives them to it or takes them
+        // back: in a conversation it expands the band in place, in Inbox it is the selected card.
+        if !self.terminal_focused() {
+            if self.form_key(key) {
+                return;
+            }
+            if key.code == KeyCode::Char('n')
+                && key.modifiers == KeyModifiers::CONTROL
+                && (self.inbox_in_view() || self.conversation_here().is_some())
+            {
+                self.toggle_form_keys();
+                return;
+            }
         }
         if self.glass_key(key) {
             return;
@@ -4847,6 +4955,7 @@ impl Ui {
                         }
                     }
                     ("request", 'y' | 'n') => self.confirm = Some(key),
+                    ("prompt", 'a') => self.toggle_form_keys(),
                     ("update", 'r') => self.read_update(),
                     ("message", 'm') => self.act('m'),
                     _ => {}
@@ -6120,6 +6229,10 @@ impl Ui {
     }
 
     fn click(&mut self, hit: Hit) {
+        // A click anywhere but on a prompt's own form takes the keys back from it.
+        if !matches!(hit, Hit::Alert(..)) {
+            self.prompt_keys = None;
+        }
         match hit {
             Hit::Message | Hit::Subject | Hit::Resize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
@@ -6128,6 +6241,8 @@ impl Ui {
             // The terminal may be on another machine than Fractal TUI (over SSH or fabric): the
             // clipboard is the person's, so the link lands where their browser is. Run locally,
             // the browser opens too.
+            Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
+            Hit::Document(tap) => self.document_tap(tap),
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
@@ -6766,23 +6881,6 @@ fn dump(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// A stored document: its name, then its text as Markdown.
-fn document_detail(name: &str, text: Option<&Load<String>>, width: usize) -> Doc {
-    let mut doc = Doc::new();
-    let (title, version) = name.rsplit_once('@').unwrap_or((name, ""));
-    doc.field("Document", title.trim_start_matches("doc/"), width, theme::fg(theme::TEXT));
-    if !version.is_empty() {
-        doc.field("Version", &version[..version.len().min(12)], width, theme::fg(theme::OVERLAY1));
-    }
-    doc.blank();
-    match text {
-        Some(Load::Ready(text)) => doc.lines(text::markdown(text, width, theme::fg(theme::TEXT))),
-        Some(Load::Failed(why)) => doc.field("Status", why, width, theme::fg(theme::RED)),
-        _ => doc.field("Status", "Loading…", width, theme::fg(theme::OVERLAY1)),
-    }
-    doc
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7139,6 +7237,7 @@ mod tests {
     fn a_custom_request_sends_the_generic_reply_and_has_no_yes_no_shortcut() {
         let mut world = demo::test_world();
         world.attention = Load::Ready(vec![Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7320,6 +7419,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-10-03T08:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
@@ -7389,6 +7489,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-10-16T08:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
@@ -7423,6 +7524,7 @@ mod tests {
     fn answering_a_request_leaves_the_next_one_closed() {
         let mut world = demo::test_world();
         let asks = |id: &str| Attention {
+            deadline: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7472,6 +7574,7 @@ mod tests {
     #[test]
     fn a_reconnect_keeps_the_answer_box_open_after_earlier_asks_left() {
         let asks = |id: &str| Attention {
+            deadline: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7782,6 +7885,7 @@ mod tests {
             ..Default::default()
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -7861,6 +7965,7 @@ mod tests {
                 attachments: Vec::new(),
             };
             let item = Attention {
+                deadline: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -7995,6 +8100,7 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8079,6 +8185,7 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8171,6 +8278,7 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8250,6 +8358,7 @@ mod tests {
         let mut world = demo::test_world();
         let mission = "mission/release-proof";
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8301,6 +8410,7 @@ mod tests {
     fn an_update_shows_what_was_asked_for_and_clears_once_read() {
         let mut world = demo::test_world();
         let item = Attention {
+            deadline: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -8554,6 +8664,7 @@ mod tests {
             items.insert(
                 0,
                 Attention {
+                    deadline: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
