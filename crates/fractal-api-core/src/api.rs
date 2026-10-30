@@ -116,6 +116,7 @@ mod github_watch;
 pub mod harness_events;
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
@@ -3433,6 +3434,7 @@ fn agent_delivery_presence(
         item["id"].as_str()?, driver, item["incarnation_id"].as_str(),
     ))
 }
+
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn client_agent_resources_uncached(
@@ -8352,7 +8354,7 @@ fn doctor_report_with_operation_drift(
             let mut blocked = agents
                 .iter()
                 .filter(|agent| {
-                    agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
                         || agent.pointer("/delivery/reason").and_then(Value::as_str)
                             .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
                                 || reason.starts_with("ownership proof unavailable"))
