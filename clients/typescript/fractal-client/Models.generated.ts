@@ -3020,11 +3020,14 @@ export type SloRow = {
   account?: string;
   current: string;
   explain: string;
+  forecast_basis_minutes?: number;
+  forecast_used_percent?: number;
   id: string;
   kind: "objective" | "budget";
   measured_at_unix_ms?: number;
   remaining_percent: number | null;
   resets_at_unix_ms?: number | null;
+  runs_out_at_unix_ms?: number;
   status: "met" | "missed" | "no-data" | "stale";
   target: string;
   window: string;

@@ -4635,12 +4635,18 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "account": optionalKey(Schema.String).annotate({ description: "A budget's declared account." }),
   "current": Schema.String,
   "explain": Schema.String,
+  /** How many minutes of recent readings the forecast was fitted to. */
+  "forecast_basis_minutes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "How many minutes of recent readings the forecast was fitted to." }),
+  /** A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings. */
+  "forecast_used_percent": optionalKey(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(100))).annotate({ description: "A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings." }),
   "id": Schema.String,
   "kind": Schema.Literals(["objective","budget"]),
   "measured_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   /** What is left of the error budget or allowance; null when nothing was measured. */
   "remaining_percent": Schema.OptionFromNullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(100))).annotate({ description: "What is left of the error budget or allowance; null when nothing was measured." }),
   "resets_at_unix_ms": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE),
+  /** When the allowance runs out at that rate, present only when that is before it resets. */
+  "runs_out_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the allowance runs out at that rate, present only when that is before it resets." }),
   "status": Schema.Literals(["met","missed","no-data","stale"]),
   "target": Schema.String,
   "window": Schema.String

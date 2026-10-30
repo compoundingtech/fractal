@@ -903,6 +903,15 @@ pub struct SloRow {
     pub resets_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub measured_at_unix_ms: Option<u64>,
+    /// A budget's projected use when it resets, at the rate of its recent past (at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_used_percent: Option<f64>,
+    /// How many minutes of recent readings the forecast was fitted to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_basis_minutes: Option<u64>,
+    /// When the allowance runs out at that rate; present only when that is before it resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_out_at_unix_ms: Option<u64>,
     pub explain: String,
 }
 /// What was left of one objective or budget across a period, in equal steps. A step holds its
