@@ -3391,8 +3391,10 @@ async fn only_work_wake_messages_wake_the_reconciler() {
 async fn quiet_replication_wakes_skip_full_graph_projection() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
+    // A store with no claims opens with its projection healthy at 0, so even its first wake
+    // has nothing to project.
     let Json(first) = replication_wake(State(state.clone())).await.unwrap();
-    assert_eq!(first["projection_attempted"], true);
+    assert_eq!(first["projection_attempted"], false);
     assert_eq!(first["projected"], true);
     let Json(second) = replication_wake(State(state)).await.unwrap();
     assert_eq!(second["projection_attempted"], false);
