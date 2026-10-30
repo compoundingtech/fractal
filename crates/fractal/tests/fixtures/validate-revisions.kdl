@@ -26,7 +26,7 @@ schedule "docs/daily-review" {
   anchor "2026-01-01T09:00:00Z"
   catch-up "latest"
   work {
-    mission "mission/docs/daily-review@b283ff12e887f06fbeb2da3094b10f8fd2b9b7840f7af8031445b124829f25f7"
+    mission "mission/docs/daily-review@41008d5f204b6853138a61dc4d3c1badf3deb110b2167dff3cbf6e8154d56370"
     workspace "."
   }
 }
