@@ -131,7 +131,8 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
   unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
-  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
+  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (45,000), and an
+  optional `reason` that says why (JSON has no comments).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
 **Whole trees.** A tree's records are deleted together or not at all, and a live tree's never; an input key's index
@@ -163,6 +164,10 @@ run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
 6,452 on 196 main trees within 3 days (12,904 refs), 241 on the trees of 193 open pull requests, and 92 on 183 other
 branch tips within 14 days. That is over the old cap of 5,000, so every daily run exited 3; `cap_records` is 20,000,
 about 2.5 times that live set. The plan leaves 15,541 refs.
+
+**Measured 2026-10-29**, the first run that kept every live tree's per-crate `rust-tests` keys: 57,529 refs, 28,790
+records. The live set was 21,518 records (7,399 crate keys of 532 live trees among them), over the cap of 20,000, so the
+run exited 3. `cap_records` is 45,000, about twice that live set.
 
 **On the remote.** A dead group goes whole or not at all. First go the names whose record keeps another name in its
 own group: a note beside its tag, a migrated or duplicate first-layout name. No record leaves any group, so no verdict
@@ -989,11 +994,23 @@ A gate job that dies before it decides also leaves the check to run: the refusal
 fix a refused check, sign the head with `scripts/st-test --all --push origin` and push, or re-run the jobs once the notes are on the
 remote. A failed check never needs a new commit.
 
+**Which base a pull request run is judged at.** The gate and everything it reads at the accepted base (the signed-only list, the
+author list, the keys, the policy) come from the first parent of the checked-out merge, `refs/pull/N/merge`: the base tip GitHub
+merged the head into, the same merge the gate judges. They used to come from the payload's `pull_request.base.sha`, which GitHub moves
+only on an open or a push: a reopen or a `ready_for_review` keeps the old one. On 2026-10-28 a reopen of #4144 ran its gate from main
+as it was before this list existed, so every check ran (46.6 runner minutes). The payload's base reaches the gate as `EVENT_BASE_SHA`
+(`event_base` on the decision line). A stale one in main's history decides nothing. One outside the history of the merge's first
+parent (a retargeted or rewritten base) is a doubt, and for a signed-only opener's enforced check it is a refusal
+(`reason=payload_base_outside_the_merge`): push again so GitHub records the current base, then re-run all jobs. A merge group and a
+push take the gate from their payload base, as before.
+
 ### The Linux group
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
 level, which allocates no runner at all: `linux-tests` and its three shards, `linux-clippy` and
-`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards, so
+`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. Each keyed stage also skips on its own gate:
+the test jobs on `rust-tests`, `linux-clippy` and `linux-fleet-compat` on a note for their own input key (`docs/keyed-clippy.md`), all
+in shadow until each entry is flipped. `linux-test-build` feeds the test shards, so
 it skips only when **every one of them** is covered; that condition is derived from theirs in the generator, never
 written twice. The VM tests (`isolation-vm`) and the mail redelivery canaries were members too, and required checks of
 their own, until 2026-10-23: they now run once a day (`daily-long.yml`), and a red daily run comments on its one open issue.
@@ -1979,7 +1996,8 @@ A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or 
 leaves `decision=run`.
 
 **The gate script comes from the accepted base, like the verifier.** The step runs
-`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy, and if the base has no
+`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy (for a `pull_request` run `BASE_SHA` is the merge's first
+parent, see "Which base a pull request run is judged at"), and if the base has no
 gate or it fails in any way the step reports `unavailable` and the check runs. A change that rewrites
 the gate therefore cannot make itself skip, and the protected-path rule above makes any such change
 run in full. What remains is the workflow file itself, which a same-repo change can edit; that is

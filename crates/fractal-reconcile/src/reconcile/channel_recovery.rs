@@ -78,6 +78,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
     /// The driver rechecks attachment every second. After its detection window, allow another
     /// backoff window for a late MCP initialization before replacing the exact blocked runtime.
+    /// Returns true when this evaluation is over because recovery parked the seat. A restart it
+    /// requests returns false and is left to the ordinary restart path.
     pub fn reconcile_claude_channel_recovery(
         &self,
         subject: &DesiredSubject,
@@ -322,6 +324,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 evidence: vec![token.clone(), harness.claim], expected_subject: None,
                 idempotency_key: Some(format!("{POLICY_OPERATION}:restart:{}:{token}:{incarnation}:{}:{episode}", subject.subject, harness.since_unix_ms)),
             })?;
+            self.signal_changed();
+            // The ordinary restart path, next in this member's evaluation, carries the request out
+            // now, as it does a changed declaration. Left to the next pass, it waited for the rest
+            // of this one, which took minutes on a loaded daemon.
+            return Ok(false);
         }
         self.signal_changed();
         Ok(true)

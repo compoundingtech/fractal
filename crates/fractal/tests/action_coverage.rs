@@ -2763,10 +2763,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
     }
 }
 
-/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
-/// after a restart, the same run reads the same way.
+/// What a run waits on and the blocked runs read the daemon's published lists, as a daemon
+/// serves them; before and after a restart, the same run reads the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_waiting_on_reads_published_lists_after_restart() {
+async fn cli_waiting_on_and_blocked_runs_read_published_lists_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -2792,6 +2792,16 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
         assert_eq!(waiting["open"][0]["path"], "work");
         assert_eq!(waiting["open"][0]["kind"], "ready");
         assert_eq!(waiting["open"][0]["who"], WORKER);
+        // Quiet for longer than a millisecond: nobody claims the ready step.
+        let output = daemon.cli(PERSON, &["missions", "blocked", "--quiet", "1ms"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"][0]["cause"], "unclaimed", "{blocked:#}");
+        assert_eq!(blocked["groups"][0]["runs"][0]["run"], run.subject.as_str());
+        let output = daemon.cli(PERSON, &["missions", "blocked"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"], json!([]), "within the default quiet limit nothing is blocked");
         daemon.restart().await;
     }
 }
@@ -3331,6 +3341,7 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     let image = daemon.root.path().join("copper.png");
     std::fs::write(&image, b"\x89PNG\r\n\x1a\nCopper image").unwrap();
     let arguments = [
@@ -3469,6 +3480,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     const PEER: &str = "agent/example/peer";
     let send = |key: &'static str, flag: &'static str| {
         vec![
@@ -3632,6 +3644,9 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
+    // Seed before the aged mail so the writer's monotonic clock does not make it fresh.
+    daemon.store().set_write_clock_at(now - 7_200_000).unwrap();
+    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\nagent \"example/other\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-cleanup-recipients");
     let mut messages = BTreeMap::new();
     for (name, recipient, phase, fresh) in [
         ("old-sent", READER, "sent", false),

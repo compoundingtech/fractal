@@ -40,9 +40,9 @@ CHECKS = ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests
 # The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
 POLICY_CHECKS = CHECKS
 # Every evidence gate job: the checks above, rust-tests, whose note covers one crate and whose gate asks whether every workspace
-# member has one (evidence-verify --members; its end-to-end test is scripts/fractal-test-test's PerCrate), and linux-clippy, keyed by
-# what the clippy stage reads (docs/keyed-clippy.md), which is shadow (enforce false).
-GATED = CHECKS + ('rust-tests', 'linux-clippy')
+# member has one (evidence-verify --members; its end-to-end test is scripts/fractal-test-test's PerCrate), and linux-clippy and
+# linux-fleet-compat, keyed by what their stages read (docs/keyed-clippy.md), both shadow (enforce false).
+GATED = CHECKS + ('rust-tests', 'linux-clippy', 'linux-fleet-compat')
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
 # here independently of the policy file so a typo in either cannot make the test agree with itself.
@@ -637,6 +637,41 @@ class EndToEnd(unittest.TestCase):
                               head_files={'.st/evidence-signed-only.json': json.dumps({'about': 'test', 'openers': []})})
         self.assertRefused(s['base'], 'the head\'s copy of the list decides nothing', **self.pr_env(s))
 
+    def sideways(self, s):
+        """A commit on the base that main's history does not hold: a payload base outside the merge's first parent."""
+        return self.f.git('commit-tree', s['base'] + '^{tree}', '-p', s['base'], '-m', 'a base main never had')
+
+    def test_a_signed_only_run_whose_payload_base_is_outside_the_merges_history_is_refused_even_when_signed(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        self.note(s['head'], s['head_tree'], seconds=1)
+        outside = self.sideways(s)
+        fields, outputs = self.run_gate(s['tip'], **self.pr_env(s, EVENT_BASE_SHA=outside))
+        self.assertEqual((fields['decision'], fields['reason'], fields['event_base'], outputs['skip'], outputs['refuse']),
+                         ('refuse', 'payload_base_outside_the_merge', outside, 'false', 'true'), fields)
+        self.assertEqual(outputs['refusal'], f"linux-gate: the payload base {outside[:12]} is not in the history of the base the merge was "
+                                             f"made on ({s['tip'][:12]}). Our pull requests are judged against the base GitHub merged them "
+                                             'into: push again so GitHub records the current base, then re-run all jobs')
+
+    def test_a_stale_payload_base_in_mains_history_decides_nothing_the_run_is_judged_at_the_merges_base(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        # A reopen or ready_for_review carries the base.sha of the last open or push: an older main commit.
+        fields, outputs = self.assertRefused(s['tip'], **self.pr_env(s, EVENT_BASE_SHA=s['base']))
+        self.assertEqual((fields['outcome'], fields['base'], fields['event_base']), ('no_note', s['tip'], s['base']))
+        self.assertTrue(outputs['refusal'].startswith('linux-gate: no signature for tree'), outputs['refusal'])
+        record = self.note(s['head'], s['head_tree'], seconds=1)
+        fields, outputs = self.run_gate(s['tip'], **self.pr_env(s, EVENT_BASE_SHA=s['base']))
+        self.assertEqual((fields['decision'], outputs['record'], outputs['refuse']), ('skip', record, 'false'), fields)
+
+    def test_a_payload_base_outside_the_merge_changes_nothing_for_another_opener_a_draft_or_the_queue(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        outside = self.sideways(s)
+        for why, env in (('another opener', self.pr_env(s, PR_USER='bob', ACTOR='bob', TRIGGERING_ACTOR='bob', EVENT_BASE_SHA=outside)),
+                         ('a draft', self.pr_env(s, PR_DRAFT='true', EVENT_BASE_SHA=outside)),
+                         ('the merge queue', dict(EVENT_NAME='merge_group', HEAD_SHA=s['merge'], EVENT_BASE_SHA=outside))):
+            with self.subTest(why):
+                fields, outputs = self.run_gate(s['tip'], **env)
+                self.assertEqual((fields['decision'], outputs['refuse']), ('run', 'false'), fields)
+
     def test_a_note_for_the_merge_tree_alone_does_not_cover_a_pull_request_head(self):
         s = self.pull_request()
         self.note(s['merge'], s['merge_tree'], seconds=1)
@@ -1189,8 +1224,8 @@ class EndToEnd(unittest.TestCase):
         enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests', 'rust-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
         # rust-tests (per crate, scripts/fractal-test) has a policy entry and a gate job of its own, enforced since 2026-10-28;
-        # linux-clippy (keyed) has both too, in shadow (enforce false).
-        self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests', 'linux-clippy')))
+        # linux-clippy and linux-fleet-compat (keyed) have both too, in shadow (enforce false).
+        self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests', 'linux-clippy', 'linux-fleet-compat')))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
             self.assertIn(entry.get('enforce', False), (True, False), check)
@@ -1628,6 +1663,34 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((outputs['skip'], outputs['outcome']), ('true', 'satisfied'))
         self.assertIn('decision=skip', printed)
 
+    def test_a_reopen_or_ready_for_review_with_a_stale_base_sha_is_judged_by_the_gate_at_the_merges_base(self):
+        # #4144, 2026-10-28: the PR was reopened and its payload's base.sha was still main from its opening, before the signed-only
+        # list existed, so the gate taken from there ran every check. The step now takes the gate and its base from the merge's
+        # first parent. Both events carry the same step environment; only the payload's age differs from a push.
+        for action in ('reopened', 'ready_for_review'):
+            with self.subTest(action):
+                self.f = fixtures.Fixture()
+                self.addCleanup(self.f.tmp.cleanup)
+                self.ci = self.f.key('ci', 'fleet/ci')
+                s = self.pull_request(main_files={'moved.txt': 'main moved', **self.SIGNED_ONLY})
+                env = self.pr_env(s, HEAD_REPOSITORY=REPOSITORY)
+                outputs, printed = self.run_step(s['base'], **env)  # the stale payload base.sha
+                fields = decision(printed)
+                self.assertEqual((fields['decision'], fields['base'], fields['event_base'], outputs['refuse']),
+                                 ('refuse', s['tip'], s['base'], 'true'), printed)
+                self.assertTrue(outputs['refusal'].startswith('linux-gate: no signature for tree'), outputs['refusal'])
+                record = self.note(s['head'], s['head_tree'], seconds=1)
+                outputs, printed = self.run_step(s['base'], **env)
+                self.assertEqual((outputs['skip'], outputs['record']), ('true', record), printed)
+
+    def test_a_merge_group_run_takes_the_gate_from_its_payload_base_as_before(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.note(commit, tree)
+        outputs, printed = self.run_step(base)
+        fields = decision(printed)
+        self.assertEqual((outputs['skip'], fields['base'], fields['event_base']), ('true', base, base), printed)
+
     def test_without_a_working_gate_at_the_base_the_step_reports_unavailable_and_runs_the_check(self):
         for name, gate_text in {'gate missing': None, 'gate crashes': 'raise SystemExit(3)\n',
                                 'gate has a syntax error': 'def (\n'}.items():
@@ -1707,7 +1770,7 @@ class EndToEnd(unittest.TestCase):
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
             'head_tree', 'behind', 'ci_inputs', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing',
             'log_fetch', 'log_unlogged', 'log_unlogged_crates', 'log_unlogged_observed_at', 'members', 'missing', 'manifests_fetch',
-            'members_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
+            'members_fetch', 'head', 'base', 'event_base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         # The per-crate fields are '-' for a check that is not per crate.
         self.assertEqual([fields[k] for k in ('members', 'missing', 'manifests_fetch', 'members_fetch')], ['-'] * 4)
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
@@ -1854,7 +1917,7 @@ class WorkflowStructure(unittest.TestCase):
             for event, rt in itertools.product(('pull_request', 'merge_group'), (False, True)):
                 with self.subTest(stage=job, event=event, rust_tests=rt):
                     condition = self.job_condition(blocks[job])
-                    self.assertFalse(self.truth(condition, {'linux-gate': False, 'linux-clippy': False, 'rust-tests': rt}, event, refused=('linux-gate',)))
+                    self.assertFalse(self.truth(condition, {'linux-gate': False, 'linux-clippy': False, 'linux-fleet-compat': False, 'rust-tests': rt}, event, refused=('linux-gate',)))
         self.assertEqual(self.steps_of('linux-gate')[0], (self.REFUSED_STEP, "needs.evidence-gate-linux-gate.outputs.refuse == 'true'"))
         # fractal-web: execution does not start, and the check carries the refusal to its verdict.
         execution = re.search(r'^    if: (.*)$', self.job_text('fractal-web-execution'), re.M).group(1)
@@ -1920,9 +1983,10 @@ class WorkflowStructure(unittest.TestCase):
         # The aggregate's GATE_SKIP is true when any gate its stages read decided skip, and reads exactly those gates.
         gate_skip = re.search(r'^          GATE_SKIP: (.*)$', aggregate, re.M).group(1)
         self.assertEqual(set(re.findall(r'needs\.evidence-gate-([a-z-]+)\.outputs\.skip', gate_skip)),
-                         {'linux-gate', 'rust-tests', 'linux-clippy'})
-        for lg, rt, lc in itertools.product((False, True), repeat=3):
-            self.assertEqual(self.truth(gate_skip, {'linux-gate': lg, 'rust-tests': rt, 'linux-clippy': lc}, 'pull_request'), lg or rt or lc)
+                         {'linux-gate', 'rust-tests', 'linux-clippy', 'linux-fleet-compat'})
+        for lg, rt, lc, fc in itertools.product((False, True), repeat=4):
+            self.assertEqual(self.truth(gate_skip, {'linux-gate': lg, 'rust-tests': rt, 'linux-clippy': lc, 'linux-fleet-compat': fc},
+                                        'pull_request'), lg or rt or lc or fc)
 
         def stage_flags(gates):
             """The per-stage skip flags the workflow would compute for these gate decisions."""
@@ -1941,12 +2005,12 @@ class WorkflowStructure(unittest.TestCase):
 
         tests = ('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4')
         checked = 0
-        for event, lg, rt, lc in itertools.product(('pull_request', 'merge_group'), (False, True), (False, True), (False, True)):
+        for event, lg, rt, lc, fc in itertools.product(('pull_request', 'merge_group'), *[(False, True)] * 4):
             # linux-gate's own note covers every stage; the per-crate rust-tests notes cover the test stages only; a keyed linux-clippy
-            # note covers clippy only.
-            gates = {'linux-gate': lg, 'rust-tests': rt, 'linux-clippy': lc}
+            # note covers clippy only, and a keyed linux-fleet-compat note fleet compatibility only.
+            gates = {'linux-gate': lg, 'rust-tests': rt, 'linux-clippy': lc, 'linux-fleet-compat': fc}
             runs = {job: self.truth(self.job_condition(blocks[job]), gates, event) for job in self.LINUX_JOB_LEVEL}
-            label = (event, lg, rt, lc)
+            label = (event, lg, rt, lc, fc)
             # The build runs whenever any job that needs its output does real work...
             dependents_work = any(runs[j] for j in tests)
             if dependents_work:
@@ -1956,11 +2020,12 @@ class WorkflowStructure(unittest.TestCase):
             for job in self.LINUX_JOB_LEVEL:
                 if job == 'linux-test-build' or (event == 'pull_request' and job in ('linux-tests-shard-3', 'linux-tests-shard-4')):
                     continue
-                covered = (lg or rt) if job in tests else (lg or lc) if job == 'linux-clippy' else lg  # fleet compatibility: linux-gate's
+                covered = ((lg or rt) if job in tests else (lg or lc) if job == 'linux-clippy' else (lg or fc) if job == 'linux-fleet-compat'
+                           else lg)
                 self.assertEqual(not runs[job], covered, label + (job,))
             # The real aggregate accepts the consistent outcome...
             results = {n: ('success' if runs.get(n, True) else 'skipped') for n in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']}
-            skip = 'true' if lg or rt or lc else None  # GATE_SKIP: some gate the stages read decided skip
+            skip = 'true' if lg or rt or lc or fc else None  # GATE_SKIP: some gate the stages read decided skip
             self.assertTrue(accepts(event, results, skip, gates), label)
             # ...and rejects a failure in ANY job that ran, even under a skip.
             for victim in stage_names + ['linux-tests-shard-3', 'linux-tests-shard-4']:
@@ -1968,20 +2033,21 @@ class WorkflowStructure(unittest.TestCase):
                     broken = {**results, victim: 'failure'}
                     self.assertFalse(accepts(event, broken, skip, gates), label + (victim,))
             # ...and rejects a skipped upgrade-impact even under a skip: it is never covered by it.
-            if lg or rt or lc:
+            if lg or rt or lc or fc:
                 self.assertFalse(accepts(event, {**results, 'upgrade-impact': 'skipped'}, skip, gates), label)
             # ...and rejects skipped stages when no stage's own rule said skip (no gate decided to skip).
             if any(v == 'skipped' for n, v in results.items() if n not in ('linux-tests-shard-3', 'linux-tests-shard-4')):
-                self.assertTrue(lg or rt or lc, label)  # a stage can only be skipped when a gate it reads decided skip
-                none = {'linux-gate': False, 'rust-tests': False, 'linux-clippy': False}
+                self.assertTrue(lg or rt or lc or fc, label)  # a stage can only be skipped when a gate it reads decided skip
+                none = {'linux-gate': False, 'rust-tests': False, 'linux-clippy': False, 'linux-fleet-compat': False}
                 self.assertFalse(accepts(event, results, None, gates, flags=stage_flags(none)), label)
             # ...and, without linux-gate's own skip, rejects a skipped stage that the gates that did say skip do not cover.
             if not lg:
-                uncovered = ['linux-fleet-compat'] + ([] if lc else ['linux-clippy']) + ([] if rt else ['linux-tests'])
-                for stage in uncovered if rt or lc else []:
+                uncovered = (([] if fc else ['linux-fleet-compat']) + ([] if lc else ['linux-clippy'])
+                             + ([] if rt else ['linux-tests']))
+                for stage in uncovered if rt or lc or fc else []:
                     self.assertFalse(accepts(event, {**results, stage: 'skipped'}, skip, gates), label + (stage,))
             checked += 1
-        self.assertEqual(checked, 16)
+        self.assertEqual(checked, 32)
 
     def test_a_stage_skipped_for_an_unrelated_reason_fails_even_when_the_aggregate_gate_said_skip(self):
         aggregate = self.blocks()['linux-gate']
