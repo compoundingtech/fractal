@@ -2092,22 +2092,13 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    // A daemon that opens no messages shard, or predates it, answers its peers route with 404.
-    // Any other failure is passing: ask again, so the worker never runs without a shard the
-    // daemon advertises.
-    let held = loop {
-        match shard_peers(&main, MESSAGES_SHARD).await {
-            Ok(peers) => break Some(peers),
-            Err(error)
-                if crate::client::api_error_parts(&error)
-                    .is_some_and(|(status, ..)| status == 404 || status == 405) =>
-            {
-                break None;
-            }
-            Err(error) => {
-                eprintln!("st replication-worker: messages shard peers unavailable, retrying: {error:#}");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+    // Graph sync never waits on the shard: a daemon that answers the peers route at all holds
+    // the shard, and one that fails it for another reason is followed from an empty peer set.
+    let held = match shard_peers(&main, MESSAGES_SHARD).await {
+        Ok(peers) => peers,
+        Err(error) => {
+            eprintln!("st replication-worker: messages shard peers unavailable, following: {error:#}");
+            Some(BTreeSet::new())
         }
     };
     if let Some(peers) = held {
@@ -2127,17 +2118,22 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
 /// The shard the daemon keeps messages in; see `fractal_store::store::messages_shard`.
 const MESSAGES_SHARD: &str = "messages";
 
-/// The members whose current daemon advertises holding `shard`.
-async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<BTreeSet<String>> {
+/// The members whose current daemon advertises holding `shard`, or `None` when this daemon
+/// holds no such shard: it opened none, or it predates shards and has no route for it.
+async fn shard_peers(backend: &MainBackend, shard: &str) -> Result<Option<BTreeSet<String>>> {
     #[derive(serde::Deserialize)]
     struct Peers {
         peers: BTreeSet<String>,
     }
-    let peers: Peers = backend
+    match backend
         .client
-        .get(&format!("/v1/internal/replication/shard/{shard}/peers"))
-        .await?;
-    Ok(peers.peers)
+        .get::<Peers>(&format!("/v1/internal/replication/shard/{shard}/peers"))
+        .await
+    {
+        Ok(peers) => Ok(Some(peers.peers)),
+        Err(error) if matches!(crate::client::http_status(&error), Some(404 | 405)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Keep a shard's peer set current: advertisements arrive as graph claims, so look again
@@ -2156,7 +2152,7 @@ async fn follow_shard_peers(
         // Graph wakes come in bursts; one look covers every wake in the pause.
         tokio::time::sleep(Duration::from_secs(5)).await;
         wake.mark_unchanged();
-        if let Ok(current) = shard_peers(&backend, shard).await {
+        if let Ok(Some(current)) = shard_peers(&backend, shard).await {
             peers.send_if_modified(|known| {
                 let changed = *known != current;
                 *known = current;
@@ -2207,6 +2203,49 @@ mod tests {
         assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
         assert_eq!(contextual.elapsed_ms, failure.elapsed_ms);
         assert_eq!(contextual.http_status, Some(500));
+    }
+
+    /// A daemon without the shard's route holds no shard; one that answers it names its peers;
+    /// any other failure is an error the caller follows from an empty peer set.
+    #[tokio::test]
+    async fn a_daemon_without_the_shard_route_holds_no_shard() {
+        use std::future::IntoFuture as _;
+        async fn answer(app: Router) -> Result<Option<BTreeSet<String>>> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let backend = MainBackend {
+                client: Client::new(crate::client::Endpoint::Http(format!("http://{address}"))),
+                socket: PathBuf::new(),
+                shard: None,
+            };
+            let result = shard_peers(&backend, "messages").await;
+            server.abort();
+            let _ = server.await;
+            result
+        }
+        let route = "/v1/internal/replication/shard/messages/peers";
+        assert_eq!(answer(Router::new()).await.unwrap(), None);
+        assert_eq!(
+            answer(Router::new().route(route, post(|| async { "" }))).await.unwrap(),
+            None,
+        );
+        let held = Router::new().route(
+            route,
+            get(|| async {
+                axum::Json(serde_json::json!({"api_version": "fractal.v1", "value": {"peers": ["host-b"]}}))
+            }),
+        );
+        assert_eq!(answer(held).await.unwrap(), Some(BTreeSet::from(["host-b".to_owned()])));
+        let failing = Router::new().route(
+            route,
+            get(|| async {
+                (StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({
+                    "code": "unavailable", "message": "busy", "details": {}
+                })))
+            }),
+        );
+        assert!(answer(failing).await.is_err());
     }
 
     #[test]
