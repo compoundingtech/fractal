@@ -330,6 +330,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "harness-inventory.get" {
             writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
+            // A relayed read of the GitHub plugin's mirror on its poller (docs/st3/plugins.md).
+            out.push_str(GITHUB_PLUGIN_READ);
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -2211,3 +2213,20 @@ public enum Next { case value } // {
         assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
     }
 }
+
+/// The owner side of a relayed GitHub plugin read: it asks this daemon's own mirror only, so a
+/// relayed read is never relayed again.
+const GITHUB_PLUGIN_READ: &str = r#"    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path.split(['/', '?']).any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!("not a GitHub plugin read: {path}")));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body.get_mut("value").map(serde_json::Value::take).unwrap_or(body))
+    }
+"#;
