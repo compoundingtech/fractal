@@ -56,7 +56,13 @@ pub fn boundary_rows(
         }
         previous = key;
     }
-    Ok(result.into_values().collect())
+    let mut rows = result.into_values().collect::<Vec<_>>();
+    // Rollups replicate hourly; the seat's host also has the readings since, so each boundary
+    // of the period finds the snapshot it ended on here.
+    for (subject, body) in fractal_store::store::unreplicated_usage_rollups(connection)? {
+        rows.push((subject, 0, body));
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
