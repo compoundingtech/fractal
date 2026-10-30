@@ -713,6 +713,15 @@ impl Ui {
                 self.flash("Fractal does not say which call this asks about: answer it in the terminal (Ctrl+])");
                 return;
             }
+            // st allows only the one call it serves beside the prompt, whole. The card may have
+            // changed since its buttons were drawn, so a tap is checked against it again.
+            AttentionKind::Prompt { allow, .. }
+                if matches!(answer, "allow" | "approve" | "answer")
+                    && !(*allow && self.prompt_calls(id).is_ok_and(|calls| calls.len() == 1)) =>
+            {
+                self.flash("st does not let this call be allowed from here: answer it in the terminal (Ctrl+])");
+                return;
+            }
             AttentionKind::Prompt { .. }
                 if item.actions.iter().any(|a| a == "prompt.respond") =>
             {
@@ -1076,6 +1085,48 @@ mod tests {
                 [Effect::Attention { action, answer: Some(answer), .. }]
                     if action == "prompt.respond" && answer == "deny"
             ), "{offered:?}: {:?}", ui.effects);
+        }
+    }
+
+    /// st's allow is checked again when a tap is dispatched: a card drawn while st allowed its call
+    /// may have changed since, because st no longer allows it or can no longer read the seat's
+    /// conversation. Then only deny goes from here.
+    #[test]
+    fn an_allow_tap_is_refused_once_st_no_longer_allows_the_call() {
+        let change = |ui: &mut Ui, stale: usize| {
+            let Load::Ready(items) = &mut ui.world.attention else {
+                panic!("no attention");
+            };
+            for item in items {
+                if let AttentionKind::Prompt { allow, calls, .. } = &mut item.kind {
+                    match stale {
+                        0 => *allow = false,
+                        _ => *calls = Err("st cannot read this seat's conversation: the seat runs elsewhere".into()),
+                    }
+                }
+            }
+        };
+        for offered in [&["allow", "deny"][..], &["approve", "deny"]] {
+            // While st allows it, the tap answers.
+            let mut ui = with_alerts(vec![naming(prompt("attention/one", offered), "call-Bash")]);
+            ui.live = true;
+            waiting(&mut ui, vec![bash("make")]);
+            ui.click(Hit::Alert("attention/one".into(), AlertTap::Answer(offered[0].into())));
+            assert!(matches!(ui.effects.as_slice(), [Effect::Attention { .. }]), "{offered:?}: {:?}", ui.effects);
+            for stale in [0, 1] {
+                let mut ui = with_alerts(vec![naming(prompt("attention/one", offered), "call-Bash")]);
+                ui.live = true;
+                waiting(&mut ui, vec![bash("make")]);
+                change(&mut ui, stale);
+                ui.click(Hit::Alert("attention/one".into(), AlertTap::Answer(offered[0].into())));
+                assert!(ui.effects.is_empty(), "{offered:?} {stale}: {:?}", ui.effects);
+                ui.click(Hit::Alert("attention/one".into(), AlertTap::Answer("deny".into())));
+                assert!(matches!(
+                    ui.effects.as_slice(),
+                    [Effect::Attention { action, answer: Some(answer), .. }]
+                        if action == "prompt.respond" && answer == "deny"
+                ), "{offered:?} {stale}: {:?}", ui.effects);
+            }
         }
     }
 
