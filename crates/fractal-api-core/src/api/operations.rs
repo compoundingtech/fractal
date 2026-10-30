@@ -505,6 +505,7 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let rows = blocking_store(move || {
         let mut rows = slo_rows(&store)?;
         add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
+        add_tones(&mut rows);
         Ok(rows)
     })
     .await?;
@@ -513,6 +514,19 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
         body["otel_ui_url"] = Value::String(url);
     }
     Ok(Json(body))
+}
+
+/// Say on each row how urgent it is, by the one rule the terminal UI colors with, so the phone
+/// and the web app need not decide what is red.
+fn add_tones(rows: &mut [Value]) {
+    for row in rows {
+        let tone = fractal_ui_model::slo::tone(
+            row["kind"].as_str().unwrap_or_default(),
+            row["status"].as_str().unwrap_or_default(),
+            row["remaining_percent"].as_f64(),
+        );
+        row["tone"] = Value::String(tone.word().into());
+    }
 }
 
 /// Say on each budget how much will be used when it resets, at the rate the local history log

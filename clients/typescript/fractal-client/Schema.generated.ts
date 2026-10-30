@@ -4649,6 +4649,8 @@ export const SloRow = /*#__PURE__*/ (() => Schema.Struct({
   "runs_out_at_unix_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the allowance runs out at that rate, present only when that is before it resets." }),
   "status": Schema.Literals(["met","missed","no-data","stale"]),
   "target": Schema.String,
+  /** How urgent the row is: red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule. */
+  "tone": optionalKey(Schema.Literals(["red","green","yellow","quiet"])).annotate({ description: "How urgent the row is: red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." }),
   "window": Schema.String
 }).annotate({ identifier: "SloRow", description: "One objective (a target with windows and an error budget) or one budget (an allowance that resets), as this daemon measures it. about, target, current, window and explain are display text for a person, not a contract; the pair of slo reads is experimental." }))()
 export type SloRow = typeof SloRow.Type

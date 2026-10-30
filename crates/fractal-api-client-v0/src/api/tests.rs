@@ -185,6 +185,9 @@ async fn slo_budgets_forecast_their_use_at_the_reset_from_the_local_history() {
         assert_eq!(status, StatusCode::OK, "{list}");
         let five = find(&list, "ada/claude-1/5h");
         assert_eq!(five["forecast_used_percent"], 100.0, "{path}: {five}");
+        // Forty percent used is within its allowance; the row is green, and every row has a tone.
+        assert_eq!(five["tone"], "green", "{path}: {five}");
+        assert!(list["rows"].as_array().unwrap().iter().all(|row| row["tone"].is_string()), "{path}: {list}");
         assert!(five["runs_out_at_unix_ms"].as_u64().unwrap() < now + 2 * 3_600_000, "{path}: {five}");
         assert!(five["explain"].as_str().unwrap().contains("will not last until it resets"), "{path}: {five}");
         // The weekly budget has no history, so it has no forecast.

@@ -3031,6 +3031,7 @@ export type SloRow = {
   runs_out_at_unix_ms?: number;
   status: "met" | "missed" | "no-data" | "stale";
   target: string;
+  tone?: "red" | "green" | "yellow" | "quiet";
   window: string;
 };
 

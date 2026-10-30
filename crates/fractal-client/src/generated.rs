@@ -903,6 +903,9 @@ pub struct SloRow {
     pub window: String,
     pub remaining_percent: Option<f64>,
     pub status: String,
+    /// How urgent the row is: `red`, `green`, `yellow` or `quiet`. Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
     #[serde(default)]
     pub resets_at_unix_ms: Option<u64>,
     #[serde(default)]

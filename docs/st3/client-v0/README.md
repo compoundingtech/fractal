@@ -884,7 +884,7 @@ limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has
 (`objective` or `budget`), `about`, `target`, `current`, `window`, `remaining_percent` (what is
 left of the error budget or allowance; null when nothing was measured), `status` (`met`, `missed`,
 `no-data` or `stale`, the last meaning the newest reading is not recent) and `explain`, the row in
-plain words. A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
+plain words, and `tone` (`red`, `green`, `yellow` or `quiet`: red when an objective missed or a budget has 10% or less left, the one rule the terminal UI colors by; absent from an older daemon). A budget adds `account`, `resets_at_unix_ms` and `measured_at_unix_ms`, and, when the local history
 has enough recent readings since its last reset, a forecast: `forecast_used_percent` (its projected use
 when it resets, at the rate of its recent past, at most 100), `forecast_basis_minutes` (how much history
 the rate was fitted to) and, only when the allowance would run out first, `runs_out_at_unix_ms`;

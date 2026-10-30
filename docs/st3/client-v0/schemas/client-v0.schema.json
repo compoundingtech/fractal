@@ -1175,6 +1175,7 @@
         "status": { "enum": ["met", "missed", "no-data", "stale"] },
         "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "tone": { "enum": ["red", "green", "yellow", "quiet"], "description": "How urgent the row is: red when an objective missed its target or a budget has 10% or less left, green when met, yellow when the newest reading is stale, quiet when nothing was measured. The terminal UI colors by the same rule." },
         "forecast_used_percent": { "type": "number", "minimum": 0, "maximum": 100, "description": "A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings." },
         "forecast_basis_minutes": { "type": "integer", "minimum": 0, "description": "How many minutes of recent readings the forecast was fitted to." },
         "runs_out_at_unix_ms": { "type": "integer", "minimum": 0, "description": "When the allowance runs out at that rate, present only when that is before it resets." },
