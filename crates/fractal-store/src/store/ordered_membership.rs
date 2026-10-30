@@ -198,6 +198,10 @@ pub(super) fn container_changed(transaction: &Transaction<'_>, container: &str, 
             drop(statement);
             for member in &members { refresh_pair(transaction, container, member, index, &view)?; }
         }
+    } else if arrangements::migrated(transaction, container)? {
+        // Migration retains a container lifecycle dependency even with zero pairs.
+        // Keep it current on name/folder edits and retirement, exactly as replay does.
+        remember_lifecycle(transaction, container)?;
     }
     if arrangements::version(transaction, container)? == 2 {
         transaction.execute(
@@ -287,6 +291,56 @@ pub fn member_repaired(transaction: &Transaction<'_>, subject: &str) -> Result<(
     )?;
     flush(transaction)?;
     repair_frontier(transaction, subject)
+}
+
+/// Historical placement claims keep their original canonical key, revision and real actor.
+/// This boundary translates values only; it never creates a replacement authority claim.
+fn legacy_head(transaction: &Transaction<'_>, container: &str, member: &str,
+    placement: &Value, (revision, winner): (&str, &[u8]), index: u64, view: &ContainerView) -> Result<()> {
+    let position = canonical_serialized_json_text(&Position {
+        bucket: placement["folder"].as_str().map(str::to_owned),
+        key: placement["key"].as_str().context("historical placement key")?.to_owned(),
+    })?;
+    let changed = transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h0c9f4b3ffede owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO ordered_membership_heads(container,member,position,revision,winner) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(container,member) DO UPDATE SET position=excluded.position,revision=excluded.revision,winner=excluded.winner
+         WHERE excluded.winner>ordered_membership_heads.winner", params![container,member,position,revision,winner],
+    )?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hc31f627d3a1e owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO declared_resource_edges(owner,relation,name,target)
+        VALUES(?1,'ordered-membership',?2,?2)", params![container,member])?;
+    if changed != 0 { refresh_pair(transaction, container, member, index, view)?; }
+    Ok(())
+}
+
+pub(super) fn backfill_legacy(transaction: &Transaction<'_>, container: &str, index: u64) -> Result<()> {
+    let view = container_view(transaction, container)?;
+    let mut statement = transaction.prepare_cached(
+        "SELECT substr(register,11),value,revision,winner FROM arrangement_registers
+         WHERE subject=?1 AND register LIKE 'placement/%' ORDER BY register")?;
+    let rows = statement.query_map([container], |row| Ok((row.get::<_,String>(0)?,
+        row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Vec<u8>>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (member, value, revision, winner) in rows {
+        legacy_head(transaction, container, &member, &serde_json::from_str(&value)?,
+            (&revision, &winner), index, &view)?;
+    }
+    Ok(())
+}
+
+pub(super) fn project_legacy_claim(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    if !arrangements::migrated(transaction, &claim.subject)? { return Ok(()); }
+    let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
+    let operations = fractal_schema::arrangements::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
+    let winner = canonical::sortable_key(&canonical::claim_key(transaction, &claim.id)?);
+    let view = container_view(transaction, &claim.subject)?;
+    for operation in operations {
+        if let fractal_schema::arrangements::Operation::SubjectPlace { subject, folder, key } = operation {
+            legacy_head(transaction, &claim.subject, &subject, &json!({"folder":folder,"key":key}),
+                (&claim.id, &winner), claim.store_index, &view)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
@@ -380,7 +434,8 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
         DELETE FROM ordered_membership_counts; DELETE FROM ordered_membership_lifecycle;
         DELETE FROM local_ordered_membership_pending; DELETE FROM declared_resource_edges WHERE relation='ordered-membership';")?;
     let mut statement = transaction.prepare("SELECT a.subject,a.changed_index FROM arrangements a
-        JOIN arrangement_registers r ON r.subject=a.subject WHERE r.register='version' AND r.value='2'")?;
+        WHERE EXISTS(SELECT 1 FROM arrangement_registers r WHERE r.subject=a.subject
+            AND ((r.register='version' AND r.value='2') OR r.register='membership-authority'))")?;
     let containers = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
@@ -390,10 +445,13 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
         }
     }
     let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims
-        WHERE kind='ordered-membership.edited' AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
+        WHERE kind IN ('ordered-membership.edited','arrangement.edited') AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
     let claims = statement.query_map([],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for claim in claims { project(transaction, &claim)?; }
+    for claim in claims {
+        if claim.kind == "arrangement.edited" { project_legacy_claim(transaction, &claim)?; }
+        else { project(transaction, &claim)?; }
+    }
     flush(transaction)?;
     Ok(())
 }

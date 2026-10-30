@@ -43,7 +43,9 @@ pub use staged::plan_staged;
 /// redundant receipts of recovered episodes after seven days.
 /// Version 21 covers ordered membership heads, live ordering, counters and lifecycle dependencies;
 /// it adds no drop rule and retains absent/hidden membership winners.
-pub const RULES_VERSION: u32 = 21;
+/// Version 22 includes winner-preserving legacy placement migration and its authority marker
+/// in the existing arrangement/membership witnesses; it adds no claim-drop rule.
+pub const RULES_VERSION: u32 = 22;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
