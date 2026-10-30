@@ -166,6 +166,11 @@ impl Layout {
         Ok(())
     }
 
+    fn lock_store(&self) -> Result<Option<File>> {
+        self.store_dir.as_deref().map(fractal_daemon::node_identity::lock_directory).transpose()
+            .context("cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration")
+    }
+
     fn pairs(&self, services: &Services) -> Vec<(PathBuf, PathBuf)> {
         let mut pairs = self.directories.to_vec();
         for old in &services.legacy {
@@ -490,6 +495,8 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     stop_legacy(manager, journal)?;
     let state_lock = fractal_daemon::node_identity::lock_after_stop(&layout.daemon_state).await
         .context("legacy daemon still owns its state after service stop")?;
+    // Directory-FD ownership follows a nested store's inode across the root exchange.
+    let store_lock = layout.lock_store()?;
     if home_manager(&journal.services) {
         journal.config_fence = true;
         save(layout, journal)?;
@@ -534,6 +541,7 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     let pre_start_budget = if cfg!(target_os = "macos") { 140 } else { 200 };
     ensure!(stopped_at.elapsed() < std::time::Duration::from_secs(pre_start_budget),
         "host swap exhausted its five-minute gap budget before target startup; restoring legacy");
+    drop(store_lock);
     drop(state_lock);
     manager.start(&journal.services.target[0])?;
     let protection = manager.protection(&journal.services.target[0])?;

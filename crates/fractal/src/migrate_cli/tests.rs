@@ -444,6 +444,51 @@ fn store_path_validation_and_target_reachability_have_exact_refusals() -> Result
 }
 
 #[tokio::test]
+async fn owned_store_refuses_before_root_exchange_and_restores_legacy_services() -> Result<()> {
+    for nested in [false, true] {
+        let mut fixture = Fixture::new()?;
+        let (old, new) = fixture.layout.directories[1].clone();
+        let store = if nested { old.join("store") } else { fixture.root.path().join("external-store") };
+        fs::create_dir(&store)?;
+        fs::write(store.join("claims.sqlite3"), b"unchanged authority")?;
+        fixture.layout.store_dir = Some(store.clone());
+        let owner = fractal_daemon::node_identity::lock_directory(&store)?;
+        assert_eq!(fixture.layout.lock_store().unwrap_err().to_string(),
+            "cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration");
+        let inode = fs::metadata(&old)?.ino();
+        let error = fixture.run(false, false).await.unwrap_err();
+        assert!(format!("{error:#}").contains("cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration"));
+        assert_eq!(fs::metadata(&old)?.ino(), inode);
+        assert!(!new.exists());
+        assert!(!fixture.layout.journal.exists());
+        assert!(fixture.manager.services.legacy.iter().all(|unit| unit.running));
+        assert_eq!(fs::read(store.join("claims.sqlite3"))?, b"unchanged authority");
+        drop(owner);
+        fixture.run(false, false).await?;
+    }
+    Ok(())
+}
+
+#[test]
+fn nested_store_directory_fence_follows_root_exchange_without_extra_files() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new) = fixture.layout.directories[1].clone();
+    let store = old.join("store");
+    fs::create_dir(&store)?;
+    fixture.layout.store_dir = Some(store.clone());
+    let guard = fixture.layout.lock_store()?;
+    symlink(&new, &new)?;
+    exchange(&old, &new)?;
+    let target = new.join("store");
+    assert!(fractal_daemon::node_identity::lock_directory(&target).is_err());
+    assert!(fs::read_dir(&target)?.next().is_none());
+    assert!(new.join("node-identity.lock").is_file());
+    drop(guard);
+    let _target_owner = fractal_daemon::node_identity::lock_directory(&target)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn nonempty_fractal_dotfiles_are_rejected_before_stop_even_with_a_receipt() -> Result<()> {
     for with_receipt in [false, true] {
         let mut fixture = Fixture::new()?;
