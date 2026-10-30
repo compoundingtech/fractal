@@ -2,6 +2,8 @@
 //!
 //! These run while the local daemon is stopped (or before it ever ran). The daemon then applies
 //! the result at start with [`super::activate`].
+//! Membership configuration and signing keys stay in the state directory; callers supply
+//! the database path separately when joining or migrating an existing store.
 
 use std::fs;
 use std::io::Write as _;
@@ -24,11 +26,6 @@ use crate::error::Error;
 use crate::store::{Runtime, Store, valid_fleet_node_name};
 
 pub const DEFAULT_PORT: u16 = 31313;
-
-/// The claim store inside a state directory.
-pub fn store_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("claims.sqlite3")
-}
 
 /// Where a node keeps the keys it signs claims with: its own node key while it is in no fleet,
 /// and the keys it holds for people and agents.
@@ -200,7 +197,10 @@ fn checkpoint_path(state_dir: &Path) -> PathBuf {
 
 #[derive(Clone)]
 pub struct JoinOptions {
+    /// The product state directory holding membership configuration and signing keys.
     pub state_dir: PathBuf,
+    /// The claim database, independently located from membership configuration and keys.
+    pub store_path: PathBuf,
     /// The configured node name, used when neither `--name` nor the code names one.
     pub configured_node: String,
     pub code: String,
@@ -595,9 +595,25 @@ pub async fn join(options: &JoinOptions) -> Result<Joined> {
     join_inner(options, None).await
 }
 
-async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
-    let code = JoinCode::decode(&options.code)?;
-    let state_dir = &options.state_dir;
+/// Resolve the writer a join will admit, including an already-saved checkpoint.
+/// This performs no key creation, store mutation, or invitation redemption.
+pub fn admission_name(
+    state_dir: &Path,
+    code: &JoinCode,
+    requested: Option<&str>,
+    configured: &str,
+) -> Result<String> {
+    Ok(match resumed_join(state_dir, code)? {
+        Some(joined) => joined.name,
+        None => fresh_join_name(code, requested, configured).to_owned(),
+    })
+}
+
+fn fresh_join_name<'a>(code: &'a JoinCode, requested: Option<&'a str>, configured: &'a str) -> &'a str {
+    requested.or(code.name.as_deref()).unwrap_or(configured)
+}
+
+fn resumed_join(state_dir: &Path, code: &JoinCode) -> Result<Option<Joined>> {
     if let Some(existing) = FleetFile::load(state_dir)? {
         anyhow::ensure!(
             existing.fleet_id == code.fleet_id.to_string(),
@@ -610,29 +626,34 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         if let Some(checkpoint) = checkpoint
             && !code.migrate
         {
-            if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
-                fs::remove_file(pairing_recovery_path(state_dir))?;
-                fs::File::open(fleet_dir(state_dir))?.sync_all()?;
-            }
-            return Ok(Joined {
+            return Ok(Some(Joined {
                 fleet_id: checkpoint.fleet_id,
                 name: checkpoint.name,
                 sponsor: checkpoint.sponsor,
                 writer_floor: existing.writer_floor,
                 migrate: false,
                 resumed: true,
-            });
+            }));
         }
         anyhow::ensure!(
             code.migrate || (code.pairing.is_some() && pairing_recovery_path(state_dir).exists()),
             "this machine is already a member of this fleet"
         );
     }
-    let name = options
-        .name
-        .clone()
-        .or_else(|| code.name.clone())
-        .unwrap_or_else(|| options.configured_node.clone());
+    Ok(None)
+}
+
+async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
+    let code = JoinCode::decode(&options.code)?;
+    let state_dir = &options.state_dir;
+    if let Some(joined) = resumed_join(state_dir, &code)? {
+        if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
+            fs::remove_file(pairing_recovery_path(state_dir))?;
+            fs::File::open(fleet_dir(state_dir))?.sync_all()?;
+        }
+        return Ok(joined);
+    }
+    let name = fresh_join_name(&code, options.name.as_deref(), &options.configured_node).to_owned();
     anyhow::ensure!(
         valid_fleet_node_name(&name),
         "`{name}` cannot name a fleet member; use --name"
@@ -644,7 +665,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     let key = member_key(state_dir)?;
     let writer_head = {
         fs::create_dir_all(state_dir)?;
-        let store = Store::open(&store_path(state_dir), &name, options.runtime.clone())?;
+        let store = Store::open(&options.store_path, &name, options.runtime.clone())?;
         if let Some(bound) = store.bound_fleet()? {
             anyhow::ensure!(
                 bound == code.fleet_id.to_string(),
@@ -774,7 +795,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     .save(state_dir)?;
     // A new member's first sync ends by checking that it projects the same graph as a peer.
     if !code.migrate {
-        Store::open(&store_path(state_dir), &name, options.runtime.clone())?
+        Store::open(&options.store_path, &name, options.runtime.clone())?
             .begin_first_sync(&sealed.sponsor)?;
     }
     write_private(
@@ -805,6 +826,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
 /// Legacy exchanges stay accepted until `st fleet migrate --finish`.
 pub fn migrate_anchor(
     state_dir: &Path,
+    store_path: &Path,
     node: &str,
     fleet_id: &str,
     secret_file: &Path,
@@ -821,7 +843,7 @@ pub fn migrate_anchor(
         "`{node}` cannot name a fleet member"
     );
     {
-        let store = Store::open(&store_path(state_dir), node, runtime)?;
+        let store = Store::open(store_path, node, runtime)?;
         match store.bound_fleet()? {
             Some(bound) => anyhow::ensure!(
                 bound == fleet_id,
@@ -875,7 +897,7 @@ mod tests {
         };
         let founded = found(&sponsor_dir, "sponsor", &settings).unwrap();
         let runtime = Arc::new(crate::store::runtime::Plain);
-        let store = Arc::new(Store::open(&store_path(&sponsor_dir), "sponsor", runtime.clone()).unwrap());
+        let store = Arc::new(Store::open(&sponsor_dir.join("claims.sqlite3"), "sponsor", runtime.clone()).unwrap());
         let file = FleetFile::load(&sponsor_dir).unwrap().unwrap();
         crate::fleet::activate(&store, &sponsor_dir, &file).unwrap();
         let sponsor_key = Arc::new(MemberKey::load(&file.node_key_path(&sponsor_dir)).unwrap());
@@ -941,11 +963,14 @@ mod tests {
             let joining_dir = root.path().join(name);
             let options = JoinOptions {
                 state_dir: joining_dir.clone(), configured_node: name.into(),
+                store_path: root.path().join(format!("{name}.sqlite3")),
                 code: code.encode().unwrap(), name: None, via: None,
                 settings: settings.clone(), legacy_secret_file: None, fabric_protocol: None,
                 runtime: runtime.clone(), version: "test".into(),
             };
             let result = join_inner(&options, Some(&helper)).await;
+            assert!(options.store_path.exists());
+            assert!(!joining_dir.join("claims.sqlite3").exists());
             if confirmed {
                 let joined = result.unwrap();
                 assert_eq!(joined.fleet_id, founded.fleet_id);
@@ -1013,6 +1038,7 @@ mod tests {
                     fs::set_permissions(&fresh_helper, fs::Permissions::from_mode(0o700)).unwrap();
                     let fresh_options = JoinOptions {
                         state_dir: fresh_dir.clone(), configured_node: name.into(),
+                        store_path: fresh_dir.with_extension("sqlite3"),
                         code: fresh_code.encode().unwrap(), ..options.clone()
                     };
                     let replaced = join_inner(&fresh_options, Some(&fresh_helper)).await;

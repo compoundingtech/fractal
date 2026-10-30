@@ -2516,8 +2516,21 @@ impl Store {
     }
 
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
+        Self::open_at(path, origin, true)
+    }
+
+    /// Open within an admitted directory without recreating a removed explicit store root.
+    pub fn open_existing_directory(path: &Path, origin: impl Into<String>) -> Result<Self> {
+        Self::open_at(path, origin, false)
+    }
+
+    fn open_at(path: &Path, origin: impl Into<String>, create_parent: bool) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
-        let graph = GraphStore::open(path, origin, fractal.clone())?;
+        let graph = if create_parent {
+            GraphStore::open(path, origin, fractal.clone())?
+        } else {
+            GraphStore::open_existing_directory(path, origin, fractal.clone())?
+        };
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
