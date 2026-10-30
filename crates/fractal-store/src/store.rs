@@ -9461,6 +9461,28 @@ fn publish_due_usage_tx(
             .map_err(internal)?;
         return Ok(None);
     }
+    // A context reading replaces the one before it in the fold, whatever its incarnation. Another
+    // incarnation's held occupancy replicates first, so a later end or flush can't put it over
+    // this one.
+    if occupancy {
+        let held = transaction
+            .prepare(
+                "SELECT o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                 WHERE s.subject=?1 AND s.kind='harness.usage' AND s.slot<>?2
+                   AND json_extract(s.slot, '$[1]')='context_occupancy'
+                 ORDER BY o.id",
+            )
+            .map_err(internal)?
+            .query_map(params![input.subject, slot], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(internal)?;
+        for body in held {
+            let body: Value = serde_json::from_str(&body).map_err(internal)?;
+            let fields = schema_fields_for_body("harness.usage", &body).map_err(internal)?;
+            publish_usage_slot_tx(transaction, origin, &input.subject, input.actor.as_deref(), &fields, now)?;
+        }
+    }
     publish_usage_slot_tx(
         transaction,
         origin,
