@@ -915,7 +915,7 @@ impl Store {
             None => {
                 let start = |table: &str| -> Result<i64> {
                     Ok(connection.query_row(
-                        &format!(
+                        /* sqlite-large-value: allow-for-now lv-h5fcb25afca0e owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ &format!(
                             "SELECT COALESCE((SELECT MIN(rowid) - 1 FROM {table} WHERE checkpoint=?1),
                                              (SELECT MAX(rowid) FROM {table}), 0)"
                         ),
@@ -1019,8 +1019,8 @@ impl Store {
             }
             if let Some(walk) = &cursor.local {
                 transaction
-                    .prepare_cached("INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
-                    .execute(params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h90aea7898bf3 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-hde0878901e21 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
             }
             transaction.commit()?;
             let held = held_since.elapsed();
@@ -1046,7 +1046,7 @@ impl Store {
                 /* sqlite-large-value: allow-for-now lv-ha26d7ebb680b owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='trimmed', updated_at_unix_ms=?2 WHERE id=?1",
                 params![checkpoint, i64::try_from(now_ms())?],
             )?;
-            transaction.execute("DELETE FROM meta WHERE key=?1", [local_walk_key(checkpoint)])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h51f966c0da12 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [local_walk_key(checkpoint)])?;
             // Every snapshot and page cursor taken before the trim expires, since the claims
             // they read may be gone.
             transaction.execute(
@@ -1161,7 +1161,7 @@ fn local_walk_key(checkpoint: &str) -> String {
 /// Record where a local cut's tombstones begin, before the first of them is recorded.
 fn start_local_walk_tx(transaction: &Transaction<'_>, checkpoint: &str) -> Result<()> {
     transaction.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES (?1,
+        /* sqlite-large-value: allow-for-now lv-hd6e8a46ee987 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO meta(key, value) VALUES (?1,
              (SELECT COALESCE(MAX(rowid), 0) FROM checkpoint_envelopes) || ' ' ||
              (SELECT COALESCE(MAX(rowid), 0) FROM checkpoint_claims))",
         [local_walk_key(checkpoint)],
@@ -1273,7 +1273,7 @@ fn next_local_envelope(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> R
             "SELECT rowid, writer, sequence, envelope_hash, accepted_at_unix_ms FROM checkpoint_envelopes
              WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
         )?
-        .query_row(params![walk.envelope, walk.checkpoint], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-hbdfea6a33a89 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.envelope, walk.checkpoint], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 EnvelopeTombstone {
@@ -1296,7 +1296,7 @@ fn next_local_claim(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> Resu
             "SELECT rowid, id, operation_id FROM checkpoint_claims
              WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
         )?
-        .query_row(params![walk.claim, walk.checkpoint], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-h42e6c69fa763 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.claim, walk.checkpoint], |row| {
             Ok((row.get::<_, i64>(0)?, deletable_claim(row.get(1)?, row.get(2)?)))
         })
         .optional()?;

@@ -215,7 +215,7 @@ fn every_committed_chunk_yields_without_a_writer_and_keeps_its_tombstones() {
 fn a_local_walk_visits_only_its_own_cuts_tombstones() {
     let mut db = Connection::open_in_memory().unwrap();
     db.execute_batch(
-        "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
+        /* sqlite-large-value: allow-for-now lv-h1b0708ce8e80 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE checkpoint_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              accepted_at_unix_ms INTEGER, checkpoint TEXT, PRIMARY KEY(writer,sequence,envelope_hash));
          CREATE TABLE replica_envelopes(writer TEXT, sequence INTEGER, envelope_hash TEXT,
              PRIMARY KEY(writer,sequence,envelope_hash));
@@ -228,18 +228,18 @@ fn a_local_walk_visits_only_its_own_cuts_tombstones() {
     let tx = db.transaction().unwrap();
     // Every earlier checkpoint's tombstones come first, then the cut's own.
     for sequence in 1..=10_000 {
-        tx.execute("INSERT INTO checkpoint_envelopes VALUES('w', ?1, 'h', 0, 'checkpoint/old')", [sequence]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h3ed673b5c629 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('w', ?1, 'h', 0, 'checkpoint/old')", [sequence]).unwrap();
         tx.execute(
-            "INSERT INTO checkpoint_claims VALUES(printf('old-%05d', ?1), NULL, 'w', ?1, 'h', 'checkpoint/old')",
+            /* sqlite-large-value: allow-for-now lv-h55b982191075 owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES(printf('old-%05d', ?1), NULL, 'w', ?1, 'h', 'checkpoint/old')",
             [sequence],
         )
         .unwrap();
     }
     for sequence in 1..=2 {
-        tx.execute("INSERT INTO checkpoint_envelopes VALUES('cut', ?1, 'h', 0, 'checkpoint/cut')", [sequence]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h05e8b31a243c owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes VALUES('cut', ?1, 'h', 0, 'checkpoint/cut')", [sequence]).unwrap();
     }
     for n in 1..=3 {
-        tx.execute("INSERT INTO checkpoint_claims VALUES(printf('cut-%d', ?1), NULL, 'cut', 9, 'h', 'checkpoint/cut')", [n])
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h02af172fc00e owner=smallclaims::store::checkpoint_trim::pacing_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims VALUES(printf('cut-%d', ?1), NULL, 'cut', 9, 'h', 'checkpoint/cut')", [n])
             .unwrap();
     }
     tx.commit().unwrap();
