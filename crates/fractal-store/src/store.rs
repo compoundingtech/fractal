@@ -219,6 +219,7 @@ pub mod delegation;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
+pub mod local_trim_fault;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
@@ -237,6 +238,8 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
+#[cfg(test)]
+mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
@@ -674,6 +677,33 @@ impl UsageFold {
     }
 }
 
+
+/// The newest crash-loop raise of each subject in the JSON array ?1 at store index ?2 since its
+/// newest running observation. One seek per subject on (subject, kind, store_index), and only
+/// past that observation: a seat that ran since it was parked has nothing to find. The index is
+/// named because the planner otherwise ranges over every subject's reconcile decisions by kind.
+pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, claims.body, claims.accepted_at_unix_ms
+     FROM json_each(?1) subjects
+     JOIN claims ON claims.id=(
+         SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=subjects.value
+            AND kind='runtime.reconcile-decision' AND store_index<=?2
+            AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                WHERE subject=subjects.value AND kind='runtime.observed'
+                  AND store_index<=?2
+                  AND json_extract(body, '$.fields.status')='running'), 0)
+            AND json_extract(body, '$.fields.decision')='raise'
+            AND (json_extract(body, '$.fields.key') GLOB 'runtime-crash-loop:*'
+              OR json_extract(body, '$.fields.key') GLOB 'codex-crash-loop:*')
+          ORDER BY store_index DESC LIMIT 1)";
+
+/// A seat st stopped restarting after it failed to start: why, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The crash-loop decision that parked it.
+    pub decision: String,
+    pub reason: String,
+    pub parked_at_unix_ms: u128,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentWorkQueue {
@@ -5467,6 +5497,58 @@ impl Store {
         Ok(times)
     }
 
+    /// Each of `subjects` that st parked at `at_index` and that has not run since: its newest
+    /// crash-loop raise (after repeated failed starts, or a failed explicit restart) for its
+    /// current launch, with no running observation after it. A new declaration launches afresh,
+    /// so a raise for an earlier launch parks nothing.
+    pub fn parked_seats_for(
+        &self,
+        subjects: &[String],
+        at_index: u64,
+    ) -> Result<BTreeMap<String, ParkedSeat>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he0201008ecc8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ PARKED_SEATS_SQL)?;
+        let mut parked = BTreeMap::new();
+        for chunk in subjects.chunks(256) {
+            let rows = statement
+                .query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (subject, id, body, accepted_at) in rows {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").unwrap_or(&body);
+                let token = fields
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| key.split_once(':'))
+                    .map(|(_, token)| token.to_owned())
+                    .unwrap_or_default();
+                if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
+                    continue;
+                }
+                parked.insert(
+                    subject,
+                    ParkedSeat {
+                        decision: id,
+                        reason: fields
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("st stopped restarting it after repeated failures")
+                            .to_owned(),
+                        parked_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Ok(parked)
+    }
+
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
     /// attachment reports: those are most of a long-lived seat's diagnostics, and their own
     /// index serves the attachment fence. An append raises the newest index and a checkpoint
@@ -8403,6 +8485,44 @@ fn usage_occupancy_percent(fields: &BTreeMap<String, Value>) -> Option<f64> {
     })
 }
 
+/// Every unreplicated `response_rollup` reading this node holds, for each series that has one
+/// pending, as (subject, body): the readings after the series' replicated snapshot, newest
+/// first. A period boundary inside the hour then finds the reading it ended on, not only the
+/// newest. Only the seat's host has them.
+pub fn unreplicated_usage_rollups(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let held = connection
+        .prepare_cached(
+            "SELECT subject, slot, published_at_unix_ms, pending_local_id FROM local_latest_slots
+             WHERE kind='harness.usage' AND pending_local_id IS NOT NULL
+               AND json_extract(slot, '$[1]')='response_rollup'",
+        )?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut readings = connection.prepare_cached(
+        "SELECT body, observed_at_unix_ms FROM local_observations INDEXED BY local_observations_subject_kind_index
+         WHERE subject=?1 AND kind='harness.usage' AND id<=?2 ORDER BY id DESC",
+    )?;
+    let mut rows = Vec::new();
+    for (subject, slot, published_at, pending) in held {
+        let mut found = readings.query(params![subject, pending])?;
+        while let Some(row) = found.next()? {
+            let (body, observed_at) = (row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
+            // Each reading is recorded when it arrives, on the clock that stamped the slot's last
+            // publication: one recorded before it has replicated or been superseded.
+            if observed_at < published_at {
+                break;
+            }
+            let fields = serde_json::from_str::<Value>(&body).ok().and_then(|body| {
+                body.get("fields").and_then(Value::as_object).map(|fields| fields.clone().into_iter().collect::<BTreeMap<_, _>>())
+            });
+            if fields.as_ref().is_some_and(|fields| usage_slot(fields) == slot) {
+                rows.push((subject.clone(), body));
+            }
+        }
+    }
+    Ok(rows)
+}
+
 /// The newest unreplicated reading of each held usage series of `subject` (of every subject when
 /// `None`) that this node holds, as (subject, body, observed at): rollups, and occupancy too
 /// unless `rollups_only`. Only the seat's host has them.
@@ -9405,7 +9525,9 @@ fn publish_pending_usage_tx(
         return Ok(published);
     }
     // Even a single response can have published before its native binding arrived, leaving
-    // no pending token change. Capture that binding in the normal stop flush as well.
+    // no pending token change. Capture that binding in the normal stop flush as well. A slot
+    // still holding a newer reading (a rollup waiting for its hour) gets the binding when
+    // that reading replicates; republishing the older one here would drop it.
     let unbound = {
         let mut statement = transaction
             .prepare(
@@ -9413,7 +9535,8 @@ fn publish_pending_usage_tx(
              WHERE subject=?1 AND kind='harness.usage'
                AND json_extract(published_fields, '$.semantics')='response_rollup'
                AND json_extract(published_fields, '$.incarnation_id')=?2
-               AND json_extract(published_fields, '$.native_session_id') IS NULL",
+               AND json_extract(published_fields, '$.native_session_id') IS NULL
+               AND pending_local_id IS NULL",
             )
             .map_err(internal)?;
         let rows = statement

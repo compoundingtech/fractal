@@ -2823,7 +2823,7 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
         .unwrap()
         .unwrap()
         .unwrap();
-    let fractal_client::CollectionEvent::Resync { id, code, message } = event else {
+    let fractal_client::CollectionEvent::Resync { id, code, message, .. } = event else {
         panic!("expected a resync, got {event:?}");
     };
     assert_eq!(id, "conversation");

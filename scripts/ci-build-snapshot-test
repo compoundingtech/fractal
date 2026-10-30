@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory() as tmp:
         saved = base / 'saved.tar.zst'; shutil.copy(archive, saved)
         shutil.rmtree(work / 'target')
         shutil.rmtree(cargo / 'registry'); shutil.rmtree(cargo / 'git')
-        shutil.rmtree(temp / 'st-ci-cache')
+        shutil.rmtree(temp / 'fractal-ci-cache')
         shutil.rmtree(zig)
         for path in module.source.source_paths(work):
             os.utime(work / path, None, follow_symlinks=False)

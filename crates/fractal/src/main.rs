@@ -1230,6 +1230,16 @@ enum MissionViewCommand {
         #[arg(long)]
         quiet: Option<String>,
     },
+    /// Every blocked run in the fleet, one line each, grouped by cause: an ask on a person, an
+    /// agent stopped or down, a claim with no progress, a ready step nobody claims, a hold.
+    ///
+    /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
+    /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
+    Blocked {
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
@@ -3348,6 +3358,10 @@ struct AgentStopArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Why the agent stops. `agents show` and `agents ls` print it beside who stopped it and
+    /// when.
+    #[arg(long)]
+    reason: Option<String>,
     /// Print the exact stop KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
@@ -6577,7 +6591,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
-    )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
+    )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?);
@@ -13071,6 +13085,39 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
     }
 }
 
+/// Why a seat that is not running stopped, who or what stopped it and when, from the card's end
+/// reason. A stopped seat without one says so rather than printing nothing.
+fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
+    let Some(end) = &agent.end_reason else {
+        return (agent.state == "stopped").then(|| "stopped, with no recorded reason".to_owned());
+    };
+    let actor = end.actor.as_deref().unwrap_or("unknown");
+    let mut line = match end.kind.as_str() {
+        "parked" => "parked by st after it failed to start".to_owned(),
+        "stopped-by-person" | "stopped-by-agent" => format!("stopped by {actor}"),
+        "stopped-by-mission" => format!("stopped by {actor} as its run ended"),
+        "retired" => match &end.actor {
+            Some(actor) => format!("retired by {actor}"),
+            None => "retired".to_owned(),
+        },
+        "crashed" => match (&end.exit_signal, end.exit_code) {
+            (Some(signal), _) => format!("crashed on signal {signal}"),
+            (None, Some(code)) => format!("crashed with exit code {code}"),
+            (None, None) => "crashed".to_owned(),
+        },
+        "harness-exited" => "its harness exited".to_owned(),
+        "host-lost" => "its host is unreachable".to_owned(),
+        "completed" => "exited cleanly".to_owned(),
+        other => other.to_owned(),
+    };
+    line.push_str(&format!(" at {}", end.ended_at));
+    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref()) {
+        line.push_str(": ");
+        push_todo_terminal_text(&mut line, reason);
+    }
+    Some(line)
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -13088,6 +13135,11 @@ fn render_client_agent(
         None => {
             let _ = writeln!(output, "STATE        {}", agent.state);
         }
+    }
+    if agent.state != "running"
+        && let Some(line) = agent_stop_line(agent)
+    {
+        let _ = writeln!(output, "WHY          {line}");
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     if let Some(custody) = &agent.mail_custody {
@@ -13386,6 +13438,11 @@ fn render_client_agents(
                     "{}\t{}\t{}",
                     agent.header.id, agent.name, agent.state
                 );
+            }
+            if agent.state != "running"
+                && let Some(line) = agent_stop_line(agent)
+            {
+                let _ = writeln!(output, "  {line}");
             }
             for relationship in &agent.under {
                 match relationship.reason.as_deref() {
@@ -15493,7 +15550,7 @@ impl NativeObservations {
                         {
                             *ready = true;
                         }
-                        if observed.reason.as_deref() == Some("providerCapacity") {
+                        if let Some(cause) = provider_retry_cause(observed.state, observed.reason.as_deref()) {
                             let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&(
                                 source_driver,
                                 observed.since_ms,
@@ -15503,6 +15560,7 @@ impl NativeObservations {
                                 client,
                                 subject,
                                 &event.runtime_incarnation,
+                                cause,
                                 observed.since_ms,
                                 &fingerprint,
                             )
@@ -16866,10 +16924,48 @@ fn provider_capacity_backoff_ms(subject: &str, incarnation: &str, attempt: u32) 
     base.saturating_add(jitter)
 }
 
+/// Why an observed seat's provider refused its turn for now, when st backs off and resumes the
+/// same session: the selected model at capacity, a 429 its harness stopped retrying
+/// (`rateLimited`), or a stream that kept dropping (`connection`). The last two only once the
+/// seat is idle, since an active turn is still the harness's own to retry.
+fn provider_retry_cause(
+    state: fractal_drivers::harness_state::Activity,
+    reason: Option<&str>,
+) -> Option<&str> {
+    match reason? {
+        cause @ "providerCapacity" => Some(cause),
+        cause @ ("rateLimited" | "connection")
+            if state == fractal_drivers::harness_state::Activity::Idle =>
+        {
+            Some(cause)
+        }
+        _ => None,
+    }
+}
+
+/// What a provider-retry diagnostic says while st waits, and once the retry limit is spent.
+fn provider_retry_reasons(cause: &str) -> (&'static str, &'static str) {
+    match cause {
+        "rateLimited" => (
+            "the provider answered 429 Too Many Requests after the harness's own retries; st will resume this session after a backoff",
+            "the provider kept answering 429 Too Many Requests after the automatic retry limit",
+        ),
+        "connection" => (
+            "the provider's connection failed after the harness's own retries; st will resume this session after a backoff",
+            "the provider's connection kept failing after the automatic retry limit",
+        ),
+        _ => (
+            "the selected model is temporarily at capacity; st will retry this session",
+            "the selected model remained at capacity after the automatic retry limit",
+        ),
+    }
+}
+
 async fn publish_provider_capacity_diagnostic(
     client: &Client,
     subject: &str,
     incarnation: &str,
+    cause: &str,
     observed_since_ms: Option<u64>,
     event_fingerprint: &str,
 ) -> Result<()> {
@@ -16908,6 +17004,7 @@ async fn publish_provider_capacity_diagnostic(
         .unwrap_or(0)
         .saturating_add(1);
     let retryable = attempt <= PROVIDER_CAPACITY_MAX_RETRIES;
+    let (waiting, exhausted) = provider_retry_reasons(cause);
     let mut fields = BTreeMap::from([
         (
             "severity".into(),
@@ -16920,11 +17017,7 @@ async fn publish_provider_capacity_diagnostic(
         ("code".into(), Value::String("provider-capacity".into())),
         (
             "reason".into(),
-            Value::String(if retryable {
-                "the selected model is temporarily at capacity; st will retry this session".into()
-            } else {
-                "the selected model remained at capacity after the automatic retry limit".into()
-            }),
+            Value::String(if retryable { waiting } else { exhausted }.into()),
         ),
         ("incarnation_id".into(), Value::String(incarnation.into())),
         ("retry_attempt".into(), Value::from(attempt)),
@@ -19770,7 +19863,14 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
             ..context.clone()
         };
         match store.connection.write_workers().spawn_blocking(move || {
-            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || {
+                let actions = store.checkpoint_step(&context)?;
+                // A local trim that stopped alerts the `[trim] notify` agent.
+                store
+                    .record_local_trim_stops(&actions)
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                anyhow::Ok(actions)
+            })
         })
         .await
         {

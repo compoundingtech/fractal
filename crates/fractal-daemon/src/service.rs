@@ -1435,6 +1435,7 @@ mod tests {
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
         seat_priority: None,
+        lanes: None,
         person: None,
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
