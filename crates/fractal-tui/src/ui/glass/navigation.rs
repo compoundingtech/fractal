@@ -80,13 +80,19 @@ impl Ui {
             .iter()
             .position(|glass| glass.id == place.space)?;
         let groups = self.glasses.all[space].layout.groups();
-        let group = groups.iter().position(|group| group.id == place.group_id)?;
-        let tab = match &place.tab_id {
-            Some(id) => Some(groups[group].tabs.iter().position(|tab| &tab.id == id)?),
-            None if place.pane == Pane::List(0).key() => None,
-            None => return None,
-        };
-        Some((space, group, tab))
+        match &place.tab_id {
+            Some(id) => groups.iter().enumerate().find_map(|(group, tabs)| {
+                tabs.tabs
+                    .iter()
+                    .position(|tab| &tab.id == id)
+                    .map(|tab| (space, group, Some(tab)))
+            }),
+            None if place.pane == Pane::List(0).key() => groups
+                .iter()
+                .position(|group| group.id == place.group_id)
+                .map(|group| (space, group, None)),
+            None => None,
+        }
     }
 
     pub(in crate::ui) fn place_exists(&self, place: &StoredPlace) -> bool {
@@ -106,7 +112,9 @@ impl Ui {
             return false;
         }
         match Pane::parse(&place.pane) {
-            Some(Pane::Agent(Some(id))) => {
+            // Only agent IDs have an authoritative inventory here. Conversations
+            // include saved sessions, and their partial cache cannot prove deletion.
+            Some(Pane::Agent(Some(id))) if id.starts_with("agent/") => {
                 self.world.agents.ready().is_none()
                     || self.world.agents.items().iter().any(|agent| agent.id == id)
             }
@@ -334,6 +342,39 @@ mod tests {
     }
 
     #[test]
+    fn saved_session_history_survives_reopen_prune_and_back_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glasses.json");
+        let mut ui = Ui::new(demo::test_world());
+        ui.glasses = Glasses::open(None, Some(path.clone()));
+        let session = Pane::Agent(Some("session/saved-omp".into()));
+        assert!(
+            !ui.world
+                .agents
+                .items()
+                .iter()
+                .any(|agent| agent.id == "session/saved-omp")
+        );
+        ui.open_in_glass(session.clone(), Open::Tab);
+        let saved = ui.current_place().unwrap();
+        let document = Pane::Document("doc/next".into());
+        ui.open_in_glass(document.clone(), Open::Tab);
+        let next = ui.current_place().unwrap();
+        let history = ui.glasses.history.clone();
+
+        let mut ui = Ui::new(demo::test_world());
+        ui.glasses = Glasses::open(None, Some(path));
+        ui.prune_place_history();
+        assert_eq!(ui.glasses.history, history);
+        ui.navigate_history(false);
+        assert_eq!(ui.focused_pane(), Some(session));
+        assert_eq!(ui.current_place(), Some(saved));
+        ui.navigate_history(true);
+        assert_eq!(ui.focused_pane(), Some(document));
+        assert_eq!(ui.current_place(), Some(next));
+    }
+
+    #[test]
     fn enhanced_and_legacy_history_keys_pass_through_attached_terminals() {
         for enhanced in [false, true] {
             let mut ui = Ui::new(demo::test_world());
@@ -436,6 +477,32 @@ mod tests {
         assert!(ui.restore_place(&second));
         assert_eq!(ui.focused_pane(), Some(b));
         assert!(ui.glasses.glass().layout.find(&c.key()).is_some());
+    }
+
+    #[test]
+    fn back_restores_a_moved_tab_in_its_destination_after_its_group_is_removed() {
+        let mut ui = Ui::new(demo::test_world());
+        let a = Pane::Document("doc/a".into());
+        let b = Pane::Document("doc/b".into());
+        ui.open_in_glass(a.clone(), Open::Tab);
+        let first = ui.current_place().unwrap();
+        ui.open_in_glass(b.clone(), Open::Right);
+        let destination = ui.current_place().unwrap().group_id;
+        ui.drop_tab((0, 0), Drop::Strip { group: 1, index: 1 });
+        assert_eq!(ui.glasses.glass().layout.groups().len(), 1);
+        ui.prune_place_history();
+        assert!(ui.glasses.history.contains(&first));
+        ui.navigate_history(false);
+        assert_eq!(ui.focused_pane(), Some(b.clone()));
+        ui.navigate_history(false);
+        assert_eq!(ui.focused_pane(), Some(a));
+        let restored = ui.current_place().unwrap();
+        assert_eq!(restored.tab_id, first.tab_id);
+        assert_eq!(restored.group_id, destination);
+        assert_eq!(restored.group, 0);
+        assert_eq!(restored.tab, 1);
+        ui.navigate_history(true);
+        assert_eq!(ui.focused_pane(), Some(b));
     }
 
     #[test]
@@ -543,6 +610,72 @@ mod tests {
         let closed = ui.current_place().unwrap().tab_id;
         ui.close_tab();
         assert!(ui.glasses.history.iter().all(|place| place.tab_id != closed));
+    }
+
+    #[test]
+    fn persisted_history_follows_tabs_moved_to_another_group_strip() {
+        for keep_source_group in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("glasses.json");
+            let mut ui = Ui::new(demo::test_world());
+            ui.glasses = Glasses::open(None, Some(path.clone()));
+            ui.open_in_glass(Pane::Document("doc/a".into()), Open::Tab);
+            let source = ui.current_place().unwrap();
+            if keep_source_group {
+                ui.open_in_glass(Pane::Document("doc/stays".into()), Open::Tab);
+                ui.show_in(source.group, source.tab);
+            }
+            // Different content stops belong to the same stable tab, not its latest pane.
+            ui.swap_focused_pane(Pane::Document("doc/b".into()));
+            ui.swap_focused_pane(Pane::List(0));
+            let home = ui.current_place().unwrap();
+            ui.open_in_glass(Pane::Document("doc/destination".into()), Open::Right);
+            let destination = ui.current_place().unwrap();
+            assert_ne!(source.group_id, destination.group_id);
+            assert_eq!(ui.glasses.glass().layout.groups().len(), 2);
+            let before_move = Glasses::open(None, Some(path.clone()));
+            assert_eq!(before_move.history, ui.glasses.history);
+
+            ui.drop_tab(
+                (source.group, source.tab),
+                Drop::Strip { group: destination.group, index: 0 },
+            );
+            let moved = ui.current_place().unwrap();
+            assert_eq!(moved.tab_id, source.tab_id);
+            assert_eq!(moved.group_id, destination.group_id);
+            assert_eq!(moved.group, usize::from(keep_source_group));
+            assert_eq!(moved.tab, 0);
+            assert_eq!(
+                ui.glasses.glass().layout.groups().len(),
+                if keep_source_group { 2 } else { 1 },
+            );
+
+            let expected = ui.glasses.history.iter()
+                .filter(|place| place.tab_id == source.tab_id)
+                .cloned()
+                .map(|mut place| {
+                    place.group = moved.group;
+                    place.group_id.clone_from(&moved.group_id);
+                    place.tab = moved.tab;
+                    place
+                })
+                .collect::<Vec<_>>();
+            assert!(expected.iter().any(|place| place.pane == Pane::Document("doc/a".into()).key()));
+            assert!(expected.iter().any(|place| place.pane == Pane::Document("doc/b".into()).key()));
+            assert!(expected.iter().any(|place| {
+                place.pane == home.pane && place.selection == home.selection
+            }));
+            let reopened = Glasses::open(None, Some(path));
+            let actual = reopened.history.iter()
+                .filter(|place| place.tab_id == source.tab_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                reopened.history[reopened.history_cursor],
+                ui.glasses.history[ui.glasses.history_cursor],
+            );
+        }
     }
 
     #[test]
