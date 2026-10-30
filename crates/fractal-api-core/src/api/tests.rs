@@ -1620,9 +1620,21 @@ fn message_delivery_does_not_hold_stale_or_restarted_native_decisions() {
     let now = observed.accepted_at_unix_ms;
     assert!(message_delivery_value(&store, to, "staged", now, now).unwrap()["reason"]
         .as_str().unwrap().contains("held"));
-    let stale = message_delivery_value(&store, to, "staged", now, now + 90_001).unwrap();
+    // An unchanged human ask remains current throughout the real heartbeat interval.
+    let freshness = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+    for age in [90_001, 180_000, 300_000, freshness] {
+        for phase in ["sent", "staged"] {
+            let held = message_delivery_value(&store, to, phase, now, now + age).unwrap();
+            assert_eq!(held["state"], "waiting");
+            assert_eq!(held["phase"], phase);
+            assert_eq!(held["age_ms"], age);
+            assert!(held["reason"].as_str().unwrap().contains("held outside the native harness"));
+        }
+    }
+    let stale = message_delivery_value(&store, to, "staged", now, now + freshness + 1).unwrap();
     assert_eq!(stale["state"], "waiting");
-    assert!(!stale["reason"].as_str().unwrap().contains("held"));
+    assert_eq!(stale["phase"], "staged");
+    assert_eq!(stale["reason"], "waiting for native handoff; failed handoffs retry automatically");
 
     let restarted = append("runtime.observed", json!({
         "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "second"
