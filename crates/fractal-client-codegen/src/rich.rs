@@ -36,6 +36,7 @@ const KEYWORDS: &[&str] = &[
     "format",
     "contains",
     "propertyNames",
+    "maxProperties",
     "maxItems",
     "uniqueItems",
     "x-st-ref",
@@ -464,32 +465,33 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             )?);
         }
     }
-    let mut schema = match object.get("x-st-ref") {
+    let mut checks = vec![];
+    if !object.contains_key("x-st-ref")
+        && let Some(pattern) = object.get("pattern")
+    {
+        checks.push(format!(
+            "Schema.isPattern(new RegExp({}, \"u\"))",
+            js(pattern)
+        ));
+    }
+    if let Some(min) = object.get("minLength") {
+        checks.push(format!("Schema.isMinLength({min})"));
+    }
+    if let Some(max) = object.get("maxLength") {
+        checks.push(format!("Schema.isMaxLength({max})"));
+    }
+    match object.get("format").and_then(Value::as_str) {
+        Some("date-time") => checks.push(
+            "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
+        ),
+        Some("uri-reference") | None => {}
+        Some(other) => bail!("unsupported string format `{other}`"),
+    }
+    let base = match object.get("x-st-ref") {
         Some(families) => subject_ref(object, families)?,
-        None => {
-            let mut checks = vec![];
-            if let Some(pattern) = object.get("pattern") {
-                checks.push(format!(
-                    "Schema.isPattern(new RegExp({}, \"u\"))",
-                    js(pattern)
-                ));
-            }
-            if let Some(min) = object.get("minLength") {
-                checks.push(format!("Schema.isMinLength({min})"));
-            }
-            if let Some(max) = object.get("maxLength") {
-                checks.push(format!("Schema.isMaxLength({max})"));
-            }
-            match object.get("format").and_then(Value::as_str) {
-                Some("date-time") => checks.push(
-                    "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
-                ),
-                Some("uri-reference") | None => {}
-                Some(other) => bail!("unsupported string format `{other}`"),
-            }
-            with_checks("Schema.String".into(), checks)
-        }
+        None => "Schema.String".into(),
     };
+    let mut schema = with_checks(base, checks);
     if let Some(value) = excluded {
         schema = format!(
             "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
@@ -1059,6 +1061,10 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         Some(schema) => Some(emit(schema, cx)?),
     };
     let mut checks = vec![];
+    if let Some(max) = object.get("maxProperties") {
+        let max = max.as_u64().context("maximum object property count")?;
+        checks.push(format!("Schema.makeFilter((o: object) => Object.keys(o).length <= {max}, {{ expected: \"at most {max} properties\" }})"));
+    }
     if let Some(conditions) = object.get("x-st-conditions") {
         for condition in conditions.as_array().context("object conditions")? {
             let condition = condition.as_object().context("object condition")?;
@@ -1637,6 +1643,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subject_references_keep_string_length_constraints() -> Result<()> {
+        let schema = json!({
+            "type": "string",
+            "pattern": ID_PATTERN,
+            "x-st-ref": "*",
+            "minLength": 8,
+            "maxLength": 256
+        });
+        let output = emit_string(schema.as_object().context("string schema")?)?;
+        assert!(output.contains("subjectRef<string>"));
+        assert!(output.contains("Schema.isMinLength(8)"));
+        assert!(output.contains("Schema.isMaxLength(256)"));
+        Ok(())
+    }
+
+    #[test]
     fn wire_alias_schemas_keep_the_deployed_sender_constant() -> Result<()> {
         let schema: Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
@@ -1836,6 +1858,26 @@ mod tests {
         unsupported["$defs"]["Entry"]["allOf"][1]["then"]["properties"]["tags"] =
             json!({ "uniqueItems": true });
         assert!(models(&unsupported).is_err());
+    }
+
+    #[test]
+    fn harness_answer_maps_preserve_key_vocabulary_and_property_bound() {
+        let schema = json!({"x-st-integers": "json-safe", "$defs": {
+            "Answers": {
+                "type": "object", "maxProperties": 16,
+                "propertyNames": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"},
+                "additionalProperties": {"type": "object", "additionalProperties": false,
+                    "required": ["positions"], "properties": {
+                        "positions": {"type": "array", "maxItems": 64, "uniqueItems": true,
+                            "items": {"type": "integer", "minimum": 0, "maximum": 63}}
+                    }}
+            }
+        }});
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("Object.keys(o).length <= 16"));
+        assert!(generated.contains("Object.keys(o).every(Schema.is("));
+        assert!(generated.contains("Schema.isMaxLength(64)"));
+        assert!(generated.contains("Schema.isUnique()"));
     }
 
     #[test]
