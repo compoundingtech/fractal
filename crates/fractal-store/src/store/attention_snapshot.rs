@@ -2585,6 +2585,19 @@ impl Store {
         .transpose()
     }
 
+    /// The id of the exact call the native prompt `episode` of `seat` asks about, while it is the
+    /// seat's newest observation: what its hook (Claude) or driver (Codex) published for it.
+    pub fn native_prompt_call(&self, seat: &str, episode: &str) -> Result<Option<String>> {
+        let Some((claim, _, harness)) = self.newest_harness_observation(seat)? else {
+            return Ok(None);
+        };
+        if claim != episode {
+            return Ok(None);
+        }
+        let connection = self.readers.get();
+        prompt_call(&connection, seat, &harness)
+    }
+
     /// The prompt a hook waits on: the very observation it published, named by the state
     /// record's ownership and transition sequences. Open until that observation is published and
     /// while it is the seat's newest; gone once the seat has moved on.
