@@ -31281,7 +31281,19 @@ schedule "{name}" {{
             tokio::task::yield_now().await;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
-        reconciler.reconcile_once().unwrap();
+        // On a loaded host several passes can arm due occurrences before any timer runs, and the
+        // last await reaches them all. One scheduled run is active at a time, so the later
+        // requests wait for the earlier runs to end. This runtime has one thread, so with no
+        // further await no timer reaches another occurrence; drive passes until they have started.
+        let mut passes = 0;
+        loop {
+            reconciler.reconcile_once().unwrap();
+            passes += 1;
+            if store.pending_schedule_work_requests("schedule/cycle").unwrap().is_empty() {
+                break;
+            }
+            assert!(passes < 20, "the schedule's requests did not start after {passes} passes");
+        }
 
         let reached = store
             .claims_for("schedule/cycle", Some("schedule.occurrence-reached"))
