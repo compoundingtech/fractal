@@ -12809,7 +12809,7 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
     let peer_root = tempfile::tempdir().unwrap();
     let mut peer = state(peer_root.path());
     peer.store = Arc::new(Store::open_memory("mail-peer").unwrap());
-    peer.node = "mail-peer".into();
+    // The shared HTTP harness fixes snapshot_host to node; replication uses store.origin().
     peer.store.bind_fleet(FLEET).unwrap();
     let exchange = owner.store.export_replication_exchange(
         FLEET, &peer.store.replication_inventory().unwrap(),
