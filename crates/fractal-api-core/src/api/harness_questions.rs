@@ -7,6 +7,8 @@ use fractal_schema::harness_questions::Answer;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HarnessQuestionAdapterError {
     Missing,
+    /// After a submit this may mean delivery is uncertain. No success receipt is implied;
+    /// the native close observation reconciles the outcome before a client retries.
     Unavailable,
 }
 

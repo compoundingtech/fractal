@@ -1660,6 +1660,7 @@ dependencies = [
  "fractal-api-mailbox",
  "fractal-drivers",
  "fractal-runtime",
+ "fractal-schema",
  "futures-util",
  "hex",
  "http-body-util",
