@@ -1277,6 +1277,108 @@ async fn create_after_standalone_run_records_explicit_name_before_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn explicit_store_writer_changes_are_refused_before_join_side_effects() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    for source in ["argument", "code", "configuration"] {
+        let old_name = format!("standalone-{source}");
+        let new_name = format!("joined-{source}");
+        let mut node = Node::new(root.path(), &old_name);
+        let store_dir = node.root.join("external-store");
+        fs::create_dir(&store_dir).unwrap();
+        let config_path = node.root.join("config/st3/config.toml");
+        fs::write(
+            &config_path,
+            format!("node = {old_name:?}\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+        ).unwrap();
+        // Establish the real standalone database writer and identity pin.
+        node.start().await;
+        node.stop();
+        let database = store_dir.join("claims.sqlite3");
+        let writer = || {
+            rusqlite::Connection::open_with_flags(
+                &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ).unwrap().query_row(
+                "SELECT value FROM meta WHERE key='local_node_writer'", [], |row| row.get::<_, String>(0),
+            ).unwrap()
+        };
+        assert_eq!(writer(), old_name);
+        let pin = node.state_dir().join("node-identity.json");
+        let original_pin = fs::read(&pin).unwrap();
+        let code = if source == "configuration" {
+            fs::write(
+                &config_path,
+                format!("node = {new_name:?}\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+            ).unwrap();
+            // An unnamed invitation falls back to the configured node.
+            sponsor.st_ok(&["fleet", "invite", "--code-only", "--via", "loopback", "--as", PERSON])
+                .trim().to_owned()
+        } else {
+            sponsor.invite(&new_name, &[])
+        };
+        let invites_before = sponsor.st_json(&["fleet", "invites", "--all"]);
+        let mut arguments = vec!["fleet", "join", code.as_str(), "--no-service"];
+        if source == "argument" {
+            arguments.extend(["--name", new_name.as_str()]);
+        }
+        let refused = node.st(&arguments);
+        assert!(!refused.status.success(), "{source}: {refused:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("writer"),
+            "{source}: {refused:?}"
+        );
+        for path in ["fleet.toml", "join.json", "node.key"] {
+            assert!(!node.state_dir().join("fleet").join(path).exists(), "{source}: {path}");
+        }
+        assert_eq!(fs::read(&pin).unwrap(), original_pin, "{source}");
+        assert_eq!(writer(), old_name, "{source}");
+        let first_sync_rows: u64 = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap().query_row(
+            "SELECT count(*) FROM meta WHERE key='first_sync'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(first_sync_rows, 0, "{source}");
+        // A real sponsor still sees the untouched invitation, not a redeemed member.
+        assert_eq!(sponsor.st_json(&["fleet", "invites", "--all"]), invites_before, "{source}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_store_join_resume_uses_checkpoint_name_before_configured_name() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    let node = Node::new(root.path(), "fern");
+    let store_dir = node.root.join("external-store");
+    fs::create_dir(&store_dir).unwrap();
+    fs::write(
+        node.root.join("config/st3/config.toml"),
+        format!("node = \"fern-computer\"\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+    ).unwrap();
+    let code = sponsor.st_ok(&[
+        "fleet", "invite", "--code-only", "--via", "loopback", "--as", PERSON,
+    ]).trim().to_owned();
+    let joined = node.join(&code, &[]);
+    assert!(joined.status.success(), "{joined:?}");
+    let membership = node.state_dir().join("fleet/fleet.toml");
+    let saved_membership = fs::read(&membership).unwrap();
+    let resumed = node.st(&["fleet", "join", &code, "--no-service"]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("fern joined"));
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed"));
+    assert_eq!(fs::read(&membership).unwrap(), saved_membership);
+    let pin: String = serde_json::from_slice(
+        &fs::read(node.state_dir().join("node-identity.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(pin, "fern");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn saved_join_resumes_when_membership_was_saved_before_the_identity_pin() {
     if fractal_daemon::test_support::supervise_test() {
         return;

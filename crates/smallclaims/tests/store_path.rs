@@ -7,6 +7,20 @@ use smallclaims::{
 };
 use std::{collections::BTreeMap, path::{Path, PathBuf}, sync::Arc};
 
+#[test]
+fn explicit_store_open_never_recreates_a_removed_parent_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("store");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+    let database = directory.join("claims.sqlite3");
+    assert!(Store::open_existing_directory(&database, "alder", Arc::new(Plain)).is_err());
+    assert!(!directory.exists());
+    std::fs::create_dir(&directory).unwrap();
+    let store = Store::open_existing_directory(&database, "alder", Arc::new(Plain)).unwrap();
+    assert!(store.path.exists());
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut path = path.as_os_str().to_os_string();
     path.push(suffix);
