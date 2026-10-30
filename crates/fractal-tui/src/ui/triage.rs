@@ -3,7 +3,7 @@
 use super::{
     Ui,
     pane::Pane,
-    view::{Attention, AttentionKind},
+    view::{Attention, AttentionKind, Load},
 };
 use chrono::{DateTime, FixedOffset};
 use std::cmp::Ordering;
@@ -74,10 +74,18 @@ impl Ui {
     /// Visit the next (or previous) outstanding Inbox item. The boundary is a distinct stop:
     /// leave the last card visible, announce all clear, then wrap on the following command.
     pub(super) fn triage_next(&mut self, forward: bool) {
-        let mut items: Vec<_> = self
-            .world
-            .attention
-            .items()
+        let items = match &self.world.attention {
+            Load::Ready(items) => items,
+            Load::Loading => {
+                self.flash("loading attention…");
+                return;
+            }
+            Load::Failed(_) => {
+                self.flash("attention unavailable");
+                return;
+            }
+        };
+        let mut items: Vec<_> = items
             .iter()
             .filter(|item| !self.closed.contains(&item.id) && !self.snoozed.contains(&item.id))
             .map(|item| (class(item), item))
@@ -440,6 +448,38 @@ mod tests {
         assert_eq!(
             ui.focused_pane(),
             Some(Pane::Home(Some("attention/first".into())))
+        );
+    }
+    fn unavailable_attention_keeps_the_current_place(attention: Load<Vec<Attention>>, message: &str) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut ui = ui(vec![
+            item("first", question(), "2026-10-01T00:00:00Z"),
+            item("last", update(), "2026-10-02T00:00:00Z"),
+        ]);
+        ui.triage_next(true);
+        let before = ui.current_place();
+        let ready = std::mem::replace(&mut ui.world.attention, attention);
+        ui.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert_eq!(ui.current_place(), before);
+        assert_eq!(
+            ui.flash.as_ref().map(|(message, _)| message.as_str()),
+            Some(message)
+        );
+        ui.world.attention = ready;
+        ui.triage_next(true);
+        focused(&ui, "last", "2/2 · update");
+    }
+
+    #[test]
+    fn loading_attention_is_not_reported_as_all_clear() {
+        unavailable_attention_keeps_the_current_place(Load::Loading, "loading attention…");
+    }
+
+    #[test]
+    fn failed_attention_is_not_reported_as_all_clear() {
+        unavailable_attention_keeps_the_current_place(
+            Load::Failed("initial fetch failed".into()),
+            "attention unavailable",
         );
     }
 }

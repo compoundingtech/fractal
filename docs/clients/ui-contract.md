@@ -254,6 +254,8 @@ come first, then decisions, failures, and other items; each class is oldest firs
 Closed and snoozed items are excluded. The flash gives `n/m · reason`; after the last item,
 `all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
+While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
+flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
 
 
 ### Starting a mission
