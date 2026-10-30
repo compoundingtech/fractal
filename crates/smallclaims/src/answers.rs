@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use rusqlite::{Connection, OptionalExtension as _};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -653,7 +653,7 @@ fn moved_since(connection: &Connection, subjects: &BTreeSet<String>, cut_unix_ms
     )?;
     let mut moved = BTreeSet::new();
     for subject in subjects {
-        let accepted: Option<String> = newest.query_row([subject], |row| row.get(0)).optional()?;
+        let accepted: Option<String> = newest.query([subject])?.next()?.map(|row| row.get(0)).transpose()?;
         if accepted.is_some_and(|accepted| accepted.parse::<u128>().map_or(true, |accepted| accepted >= cut_unix_ms)) {
             moved.insert(subject.clone());
         }
