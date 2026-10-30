@@ -3,24 +3,65 @@ use super::*;
 use glass_store::StoredPlace;
 
 impl Ui {
+    pub(in crate::ui) fn prune_place_history(&mut self) {
+        let mut history = std::mem::take(&mut self.glasses.history);
+        let old_cursor = self.glasses.history_cursor;
+        let mut retained: usize = 0;
+        let mut index = 0;
+        history.retain(|place| {
+            let keep = self.place_exists(place);
+            if keep && index <= old_cursor {
+                retained += 1;
+            }
+            index += 1;
+            keep
+        });
+        self.glasses.history = history;
+        self.glasses.history_cursor = retained.saturating_sub(1);
+        self.glasses.save();
+    }
     pub(in crate::ui) fn current_place(&self) -> Option<StoredPlace> {
         let glass = self.glasses.glass();
         let groups = glass.layout.groups();
         let group = groups.get(glass.focus)?;
-        let pane = group.tabs.get(group.current).map_or_else(|| Pane::List(0).key(), |tab| tab.pane.clone());
-        Some(StoredPlace { space: glass.id.clone(), group: glass.focus, tab: group.current, pane })
+        let pane = group
+            .tabs
+            .get(group.current)
+            .map_or_else(|| Pane::List(0).key(), |tab| tab.pane.clone());
+        let selection = (pane == Pane::List(0).key())
+            .then(|| self.selected_id())
+            .flatten();
+        Some(StoredPlace {
+            space: glass.id.clone(),
+            group: glass.focus,
+            tab: group.current,
+            pane,
+            selection,
+        })
     }
 
     pub(in crate::ui) fn record_place_change(&mut self, before: Option<StoredPlace>) {
-        if self.glasses.restoring { return; }
-        let Some(after) = self.current_place() else { return };
-        if before.as_ref() == Some(&after) { return; }
+        if self.glasses.restoring {
+            return;
+        }
+        let Some(after) = self.current_place() else {
+            return;
+        };
+        if before.as_ref() == Some(&after) {
+            return;
+        }
         let glasses = &mut self.glasses;
         // A higher-level open may surround show_in; record that destination only once.
-        if glasses.history.get(glasses.history_cursor) == Some(&after) { return; }
-        glasses.history.truncate(glasses.history_cursor.saturating_add(1));
+        if glasses.history.get(glasses.history_cursor) == Some(&after) {
+            return;
+        }
+        glasses
+            .history
+            .truncate(glasses.history_cursor.saturating_add(1));
         if let Some(before) = before {
-            if glasses.history.last() != Some(&before) { glasses.history.push(before); }
+            if glasses.history.last() != Some(&before) {
+                glasses.history.push(before);
+            }
         }
         glasses.history.push(after);
         if glasses.history.len() > 50 {
@@ -31,25 +72,69 @@ impl Ui {
     }
 
     fn place_exists(&self, place: &StoredPlace) -> bool {
-        if !self.glasses.all.iter().any(|glass| glass.id == place.space &&
-            glass.layout.groups().get(place.group).is_some_and(|group| place.tab < group.tabs.len() || (group.tabs.is_empty() && place.tab == 0 && place.pane == Pane::List(0).key()))) {
+        if !self.glasses.all.iter().any(|glass| {
+            glass.id == place.space
+                && glass.layout.groups().get(place.group).is_some_and(|group| {
+                    place.tab < group.tabs.len()
+                        || (group.tabs.is_empty()
+                            && place.tab == 0
+                            && place.pane == Pane::List(0).key())
+                })
+        }) {
+            return false;
+        }
+        if let Some(selection) = &place.selection
+            && self.world.attention.ready().is_some()
+            && !self
+                .world
+                .attention
+                .items()
+                .iter()
+                .any(|item| &item.id == selection)
+        {
             return false;
         }
         match Pane::parse(&place.pane) {
-            Some(Pane::Agent(Some(id))) => self.world.agents.ready().is_none() || self.world.agents.items().iter().any(|agent| agent.id == id),
-            Some(Pane::Mission(Some(id)) | Pane::Declaration(Some(id))) => self.world.missions.ready().is_none() || self.world.missions.items().iter().any(|mission| mission.id == id),
-            Some(Pane::Home(Some(id))) => self.world.attention.ready().is_none() || self.world.attention.items().iter().any(|item| item.id == id),
+            Some(Pane::Agent(Some(id))) => {
+                self.world.agents.ready().is_none()
+                    || self.world.agents.items().iter().any(|agent| agent.id == id)
+            }
+            Some(Pane::Mission(Some(id)) | Pane::Declaration(Some(id))) => {
+                self.world.missions.ready().is_none()
+                    || self
+                        .world
+                        .missions
+                        .items()
+                        .iter()
+                        .any(|mission| mission.id == id)
+            }
+            Some(Pane::Home(Some(id))) => {
+                self.world.attention.ready().is_none()
+                    || self
+                        .world
+                        .attention
+                        .items()
+                        .iter()
+                        .any(|item| item.id == id)
+            }
             Some(_) => true,
             None => false,
         }
     }
 
     pub(in crate::ui) fn restore_place(&mut self, place: &StoredPlace) -> bool {
-        if !self.place_exists(place) { return false; }
+        if !self.place_exists(place) {
+            return false;
+        }
         let before = self.current_place();
         let was_restoring = self.glasses.restoring;
         self.glasses.restoring = true;
-        let index = self.glasses.all.iter().position(|glass| glass.id == place.space).unwrap();
+        let index = self
+            .glasses
+            .all
+            .iter()
+            .position(|glass| glass.id == place.space)
+            .unwrap();
         self.glasses.shown = index;
         self.glasses.home = false;
         self.glasses.palette = None;
@@ -59,13 +144,21 @@ impl Ui {
         glass.focus = place.group;
         let group = glass.layout.group_mut(place.group).unwrap();
         group.current = place.tab;
-        let changed = group.tabs.get(place.tab).is_some_and(|tab| tab.pane != place.pane);
+        let changed = group
+            .tabs
+            .get(place.tab)
+            .is_some_and(|tab| tab.pane != place.pane);
         if let Some(tab) = group.tabs.get_mut(place.tab) {
             tab.pane.clone_from(&place.pane);
         }
         let id = glass.id.clone();
-        if changed { self.glass_changed(&id); }
+        if changed {
+            self.glass_changed(&id);
+        }
         self.show_focused();
+        if let Some(selection) = &place.selection {
+            self.focus_pane(&Pane::Home(Some(selection.clone())));
+        }
         self.attach_when = None;
         self.glasses.restoring = was_restoring;
         self.record_place_change(before);
@@ -75,7 +168,13 @@ impl Ui {
 
     pub(in crate::ui) fn navigate_history(&mut self, forward: bool) {
         let mut cursor = self.glasses.history_cursor;
-        while let Some(next) = if forward { cursor.checked_add(1).filter(|next| *next < self.glasses.history.len()) } else { cursor.checked_sub(1) } {
+        while let Some(next) = if forward {
+            cursor
+                .checked_add(1)
+                .filter(|next| *next < self.glasses.history.len())
+        } else {
+            cursor.checked_sub(1)
+        } {
             cursor = next;
             let place = self.glasses.history[cursor].clone();
             self.glasses.restoring = true;
@@ -88,19 +187,26 @@ impl Ui {
                 return;
             }
         }
-        self.flash(if forward { "No next place" } else { "No previous place" });
+        self.flash(if forward {
+            "No next place"
+        } else {
+            "No previous place"
+        });
     }
 
     pub(in crate::ui) fn navigation_key(&mut self, key: KeyEvent) -> bool {
-        let Some(forward) = history_chord(key, self.keyboard_enhanced) else { return false };
+        let Some(forward) = history_chord(key, self.keyboard_enhanced) else {
+            return false;
+        };
         self.navigate_history(forward);
         true
     }
-
 }
 
 fn history_chord(key: KeyEvent, enhanced: bool) -> Option<bool> {
-    if key.kind != KeyEventKind::Press || key.modifiers != KeyModifiers::CONTROL { return None; }
+    if key.kind != KeyEventKind::Press || key.modifiers != KeyModifiers::CONTROL {
+        return None;
+    }
     match key.code {
         KeyCode::Char('[') if enhanced => Some(false),
         KeyCode::Char(']') if enhanced => Some(true),
@@ -117,13 +223,42 @@ mod tests {
     #[test]
     fn history_chords_are_disjoint_from_escape_attach_and_plain_tabs() {
         for enhanced in [false, true] {
-            for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('['), KeyCode::Char(']')] {
-                assert_eq!(history_chord(KeyEvent::new(code, KeyModifiers::NONE), enhanced), None);
+            for code in [
+                KeyCode::Esc,
+                KeyCode::Enter,
+                KeyCode::Char('['),
+                KeyCode::Char(']'),
+            ] {
+                assert_eq!(
+                    history_chord(KeyEvent::new(code, KeyModifiers::NONE), enhanced),
+                    None
+                );
             }
-            assert_eq!(history_chord(KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL), enhanced), None);
-            assert_eq!(history_chord(KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL), enhanced), enhanced.then_some(false));
-            assert_eq!(history_chord(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL), enhanced), enhanced.then_some(true));
-            assert_eq!(history_chord(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL), enhanced), (!enhanced).then_some(true));
+            assert_eq!(
+                history_chord(KeyEvent::new(KeyCode::Esc, KeyModifiers::CONTROL), enhanced),
+                None
+            );
+            assert_eq!(
+                history_chord(
+                    KeyEvent::new(KeyCode::Char('['), KeyModifiers::CONTROL),
+                    enhanced
+                ),
+                enhanced.then_some(false)
+            );
+            assert_eq!(
+                history_chord(
+                    KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL),
+                    enhanced
+                ),
+                enhanced.then_some(true)
+            );
+            assert_eq!(
+                history_chord(
+                    KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL),
+                    enhanced
+                ),
+                (!enhanced).then_some(true)
+            );
         }
     }
 
@@ -196,8 +331,56 @@ mod tests {
             for code in [KeyCode::Char('['), KeyCode::Char(']'), KeyCode::Char('5')] {
                 let key = KeyEvent::new(code, KeyModifiers::CONTROL);
                 ui.key(key);
-                assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(sent)) if *sent == key));
+                assert!(
+                    matches!(ui.effects.last(), Some(Effect::TerminalKey(sent)) if *sent == key)
+                );
             }
         }
+    }
+
+    #[test]
+    fn opening_inbox_cards_records_the_selection_without_changing_the_list() {
+        let mut ui = Ui::new(demo::test_world());
+        let ids: Vec<_> = ui
+            .world
+            .attention
+            .items()
+            .iter()
+            .take(2)
+            .map(|item| item.id.clone())
+            .collect();
+        assert_eq!(ids.len(), 2);
+        ui.open_in_glass(Pane::Home(Some(ids[0].clone())), Open::Here);
+        let first = ui.current_place().unwrap();
+        ui.open_in_glass(Pane::Home(Some(ids[1].clone())), Open::Here);
+        ui.navigate_history(false);
+        assert_eq!(ui.current_place(), Some(first));
+        assert_eq!(ui.selected_id().as_ref(), Some(&ids[0]));
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+    }
+
+    #[test]
+    fn history_crosses_spaces_and_prunes_closed_tabs_and_missing_subjects() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::List(1), Open::Tab);
+        let first = ui.current_place().unwrap();
+        ui.open_in_glass(Pane::List(2), Open::Glass);
+        let second = ui.current_place().unwrap();
+        assert_ne!(first.space, second.space);
+        ui.navigate_history(false);
+        assert_eq!(ui.current_place(), Some(first));
+        ui.navigate_history(true);
+        assert_eq!(ui.current_place(), Some(second));
+        ui.open_in_glass(Pane::Agent(Some("agent/removed".into())), Open::Tab);
+        ui.prune_place_history();
+        assert!(
+            !ui.glasses
+                .history
+                .iter()
+                .any(|place| place.pane.contains("agent/removed"))
+        );
+        ui.close_tab();
+        ui.navigate_history(false);
+        assert!(!ui.current_place().unwrap().pane.contains("agent/removed"));
     }
 }
