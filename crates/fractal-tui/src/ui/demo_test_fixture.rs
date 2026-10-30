@@ -93,7 +93,6 @@ pub fn world() -> World {
             },
         ]),
         conversations,
-        pending_calls: BTreeMap::new(),
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
