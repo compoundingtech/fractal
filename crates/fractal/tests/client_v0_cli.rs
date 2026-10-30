@@ -616,7 +616,7 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
             .unwrap()
             .len(),
         2,
-        "second response stays pending within five minutes"
+        "second response stays pending within its hour"
     );
     append(
         "harness.observed",
@@ -627,7 +627,8 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
             .claims_for(subject, Some("harness.usage"))
             .unwrap()
             .len(),
-        3
+        2,
+        "a turn end no longer replicates a rollup; this host's reads below still count it"
     );
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
