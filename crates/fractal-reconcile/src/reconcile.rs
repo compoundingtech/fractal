@@ -15087,6 +15087,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         })
     }
 
+    /// Whether catch-up now selects an occurrence after `occurrence`. A timer that runs an interval
+    /// or more late finds a later occurrence current, and passes made in the meantime armed it
+    /// too: `latest` and `skip` start only that one, and `all` keeps the missed occurrences.
+    fn superseded_by_catch_up(spec: &crate::model::ScheduleSpec, occurrence: u64,
+        last: Option<u64>, now: i64) -> Result<bool> {
+        if !matches!(spec.catch_up.as_str(), "latest" | "skip") || spec.at_unix_ms.is_some() {
+            return Ok(false);
+        }
+        if let Some(calendar) = &spec.calendar {
+            // As for a standby, compare with the current tick, not the next one `skip` would choose.
+            return Ok(calendar_occurrence(calendar, last, now, "latest", spec.max_catch_up)?.0 > occurrence);
+        }
+        let (Some(interval), Some(anchor)) = (spec.every_ms, spec.anchor_unix_ms) else { return Ok(false) };
+        if now < anchor { return Ok(false); }
+        Ok((now - anchor) as u64 / interval > occurrence)
+    }
+
     fn reconcile_schedule(&self, schedule: &DesiredSubject) -> Result<()> {
         self.store
             .owned_desired_guard(schedule)
@@ -15368,6 +15385,36 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let candidate_current = takeover.is_none() || current_spec.as_ref().is_some_and(|spec|
                     Self::standby_candidate_current(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false));
                 if !ready || already_reached || !candidate_current {
+                    armed
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&operation);
+                    signal_changed(&notify, &event_notify);
+                    return;
+                }
+                // A late timer can find that later passes already armed a newer occurrence. The
+                // standby's candidate check above covers a takeover; the owner checks here.
+                if takeover.is_none() && let Some(spec) = current_spec.as_ref()
+                    && Self::superseded_by_catch_up(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false) {
+                    let _ = store.append_claim(&ClaimInput {
+                        subject: schedule_subject.clone(),
+                        kind: "schedule.occurrence-cancelled".into(),
+                        actor: None,
+                        fields: BTreeMap::from([
+                            ("revision".into(), Value::String(revision.clone())),
+                            ("occurrence".into(), Value::from(occurrence)),
+                            (
+                                "reason".into(),
+                                Value::String(format!(
+                                    "catch-up \"{}\" selects a later occurrence",
+                                    spec.catch_up
+                                )),
+                            ),
+                        ]),
+                        evidence: vec![request.id.clone()],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("clock-cancel:{operation}")),
+                    });
                     armed
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -31322,6 +31369,74 @@ schedule "{name}" {{
                 .unwrap()
                 .len(),
             occurrences.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_timer_starts_only_the_occurrence_catch_up_latest_selects() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        const ANCHOR: u128 = 1_800_000_000_000;
+        const HOUR: u128 = 3_600_000;
+        smallclaims::store::set_thread_clock(Some(ANCHOR + 7 * HOUR + 1));
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        let anchor = chrono::DateTime::from_timestamp_millis(ANCHOR as i64)
+            .unwrap()
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        apply_source(
+            &store,
+            &format!(
+                r#"version 2
+ schedule "late" {{
+   every "1h"
+   anchor "{anchor}"
+   catch-up "latest"
+   work {{ mission "scheduled-cycle@{revision}"; workspace "/tmp/st3-schedule-test" }}
+ }}"#
+            ),
+            "late-schedule",
+        );
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let occurrences = |kind: &str| {
+            store
+                .claims_for("schedule/late", Some(kind))
+                .unwrap()
+                .iter()
+                .filter_map(|claim| claim.body.pointer("/fields/occurrence").and_then(Value::as_u64))
+                .collect::<Vec<_>>()
+        };
+
+        // The runtime has one thread, so no timer runs between these passes, as on a daemon
+        // whose timers fall an hour behind: each pass arms the occurrence current at its clock.
+        for hour in [7, 8, 9] {
+            smallclaims::store::set_thread_clock(Some(ANCHOR + hour * HOUR + 1));
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(occurrences("schedule.occurrence-scheduled"), [7, 8, 9]);
+        finish_armed_schedules(&reconciler).await;
+        let mut passes = 0;
+        while !store.pending_schedule_work_requests("schedule/late").unwrap().is_empty() {
+            passes += 1;
+            assert!(passes < 20, "the schedule's request did not start after {passes} passes");
+            reconciler.reconcile_once().unwrap();
+        }
+
+        assert_eq!(occurrences("schedule.occurrence-reached"), [9]);
+        assert_eq!(occurrences("schedule.occurrence-cancelled"), [7, 8]);
+        assert_eq!(
+            store.claims_for("schedule/late", Some("schedule.work-started")).unwrap().len(),
+            1
         );
     }
 
