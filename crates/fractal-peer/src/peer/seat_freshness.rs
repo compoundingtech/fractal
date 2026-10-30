@@ -61,10 +61,11 @@ pub struct ReceivedSeatFreshness {
     pub seats: Vec<SeatHeard>,
 }
 
-/// The receiver's answer: how many seats it recorded, those its declarations place on the sender.
+/// The receiver's answer: the seats it recorded, those its declarations place on the sender. A
+/// seat it left out, say one whose declaration has not reached it yet, is still owed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatFreshnessAck {
-    pub recorded: usize,
+    pub recorded: Vec<String>,
 }
 
 pub(super) async fn receive_seat_freshness(

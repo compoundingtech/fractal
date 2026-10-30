@@ -11418,6 +11418,17 @@ fn merge_actual_value(
             resources::merge_observation(merged, &fields);
             return;
         }
+        // A compact item state lays its facts over the item's observed facts, as the resource
+        // projection does, and names the item's kind when no observation did.
+        if kind == fractal_schema::github_plugin::ITEM_STATE {
+            if let Some(item_kind) = fields.get("item_kind") {
+                merged.entry("kind").or_insert_with(|| item_kind.clone());
+            }
+            if let Some(facts) = merged.entry("facts").or_insert_with(|| json!({})).as_object_mut() {
+                fractal_schema::github_plugin::overlay_item_state(facts, &fields);
+            }
+            return;
+        }
         let registry = fractal_schema::registry();
         if registry
             .claim(kind)

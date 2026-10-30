@@ -306,6 +306,7 @@ impl Store {
                     );
                     store_envelope_signature_tx(
                         &transaction,
+                        None,
                         fleet,
                         &envelope.writer,
                         envelope.sequence,
@@ -371,6 +372,7 @@ impl Store {
             );
             store_envelope_signature_tx(
                 &transaction,
+                None,
                 fleet,
                 &signature.writer,
                 signature.sequence,

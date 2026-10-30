@@ -41,7 +41,7 @@ pub async fn seat_freshness(
             .filter(|seat| hosted.contains(&seat.agent))
             .map(|seat| (seat.agent, seat.incarnation_id, u128::from(seat.heard_at_unix_ms)))
             .collect::<Vec<_>>();
-        let recorded = seats.len();
+        let recorded = seats.iter().map(|(agent, _, _)| agent.clone()).collect();
         store.extension::<RelayedFreshness>().record(seats);
         Ok(SeatFreshnessAck { recorded })
     })
@@ -155,14 +155,20 @@ pub async fn push_seat_freshness(
         }
         let member = member.clone();
         sends.push(async move {
-            let mut result = Ok(Some(SeatFreshnessAck::default()));
+            let mut recorded = BTreeSet::new();
+            let mut result = Ok(Some(()));
             for chunk in seats.chunks(crate::peer::MAX_SEAT_FRESHNESS_SEATS) {
                 let push = SeatFreshnessPush { seats: chunk.to_vec() };
-                result = relay.push_seat_freshness(&member, &push, timeout).await;
-                if !matches!(result, Ok(Some(_))) {
-                    break;
+                match relay.push_seat_freshness(&member, &push, timeout).await {
+                    Ok(Some(ack)) => recorded.extend(ack.recorded),
+                    other => {
+                        result = other.map(|ack| ack.map(|_| ()));
+                        break;
+                    }
                 }
             }
+            // Only what the member recorded is delivered; the rest stays owed for the next round.
+            let seats = seats.into_iter().filter(|seat| recorded.contains(&seat.agent)).collect::<Vec<_>>();
             (member, seats, result)
         });
     }
@@ -181,7 +187,9 @@ pub async fn push_seat_freshness(
                 for seat in &seats {
                     to.seats.insert(seat.agent.clone(), (seat.incarnation_id.clone(), u128::from(seat.heard_at_unix_ms)));
                 }
-                round.pushed.insert(member, seats.len());
+                if !seats.is_empty() {
+                    round.pushed.insert(member, seats.len());
+                }
             }
             // Its advertisement was ahead of its build, or no route reaches it directly.
             Ok(None) => {}
