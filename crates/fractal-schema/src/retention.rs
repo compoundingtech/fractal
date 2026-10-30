@@ -296,7 +296,9 @@ mod tests {
             "native-screen-prompt-delivered", "native-screen-prompt-undelivered",
             "native-plan-approved", "native-resume-unavailable", "native-continue-unavailable",
             "work-wake-exhausted", "work-claim-socket-failed", "stop-deferred",
-            "stop-deferral-cleared", "claude-message-unforwarded", "a-code-nobody-classed",
+            "stop-deferral-cleared", "claude-message-unforwarded",
+            // Kept on purpose beside the first-launch receipts (docs/st3/checkpoints.md).
+            "first-native-launch-incomplete", "a-code-nobody-classed",
         ] {
             assert!(!policy.local_code("harness.diagnostic", Some(code)), "{code} must stay a claim");
         }

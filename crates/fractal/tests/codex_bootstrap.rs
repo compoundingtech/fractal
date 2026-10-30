@@ -440,7 +440,7 @@ async fn delivery_recovery_control(
         until(|| root.join("driver-returned").exists(),
             "Codex preflight failure was hidden waiting for a harness event").await;
         assert_eq!(std::fs::read_to_string(root.join("driver-returned")).unwrap(), "2");
-        let diagnostic = store.latest_claim(SUBJECT, Some("harness.diagnostic")).unwrap().unwrap();
+        let diagnostic = store.latest_observation(SUBJECT, "harness.diagnostic").unwrap().unwrap();
         assert_eq!(diagnostic.body["fields"]["code"], "codex-launch-failed");
         assert!(diagnostic.body["fields"]["reason"].as_str().unwrap()
             .contains("synthetic app-server schema failure"));
@@ -824,7 +824,7 @@ async fn delivery_recovery_control(
         );
         if let Some(control) = completion {
             if control.failure {
-                assert!(store.claims_for(SUBJECT, Some("harness.diagnostic")).unwrap().iter()
+                assert!(store.observations_for(SUBJECT, "harness.diagnostic").unwrap().iter()
                     .any(|claim| claim.body["fields"]["code"] == "codex-driver-failed"));
             }
             assert_eq!(offers(), 1, "terminal disposition must not replay native mail");

@@ -1171,6 +1171,31 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
         assert!(!plan.contains("SCAN claims"), "{plan}");
     }
 
+    /// Observability diagnostics never replicate, so the seat's own node reads them from its
+    /// local observation log for the stored-history timeline, bounded by the same position.
+    #[test]
+    fn conversation_timeline_owner_reads_its_local_diagnostics() {
+        let store = Store::open_memory("node").unwrap();
+        let control = append(&store, "agent/alder", "harness.diagnostic",
+            json!({"code":"provider-capacity","reason":"rate limited","severity":"warning"}));
+        let local = append(&store, "agent/alder", "harness.diagnostic",
+            json!({"code":"native-delivery-degraded","reason":"socket closed","severity":"warning"}));
+        append(&store, "agent/birch", "harness.diagnostic",
+            json!({"code":"native-delivery-degraded","reason":"another seat","severity":"warning"}));
+        assert_eq!(local.store_index, control.store_index, "the local row follows the claim");
+        let owner = store.conversation_timeline_owner_claims_at("agent/alder", None).unwrap();
+        assert_eq!(owner.iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), [control.id.as_str()]);
+        let diagnostics = store
+            .conversation_timeline_owner_local_diagnostics_at("agent/alder", None)
+            .unwrap();
+        assert_eq!(diagnostics.iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), [local.id.as_str()]);
+        assert_eq!(diagnostics[0].body["fields"]["reason"], "socket closed");
+        assert!(store
+            .conversation_timeline_owner_local_diagnostics_at("agent/alder", Some(control.store_index))
+            .unwrap()
+            .is_empty(), "a page before the claim it follows leaves it out");
+    }
+
     #[test]
     fn conversation_timeline_owner_decode_does_not_pin_the_wal() {
         let root = tempfile::tempdir().unwrap();
