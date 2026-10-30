@@ -34,6 +34,8 @@ Use the installed build's help for exact flags, required arguments, and actor ru
 
 ## Publication and planning
 
+`fractal validate FILE...` checks authored KDL offline, parsing each file independently with the literal default host `local`. It prints declared subject kinds and IDs plus mission IDs and revisions; `--json` returns `subjects` and `missions` arrays. It needs no configuration, identity, or daemon. Validation is not an authorization or deployment preview: it does not run gates, resolve live graph references, or publish anything.
+
 `fractal apply FILE --as ACTOR --dry-run` previews KDL without publishing. Omit `--dry-run` to publish it. `fractal missions start` creates a run; publishing a definition does not start it. `fractal launch` creates and reviews a planner-backed candidate.
 
 With `--json`, the preview names a `predicted_actions` entry for every changed

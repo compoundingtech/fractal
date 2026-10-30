@@ -690,7 +690,7 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
         .unwrap();
     let first = loop {
         match next_collection_event(&mut stream, "the first screen").await {
-            CollectionEvent::Screen { id, screen } if id == "screen" => break screen,
+            CollectionEvent::Screen { id, screen, .. } if id == "screen" => break screen,
             // The attach and the observation behind it may still move the agents window.
             CollectionEvent::Changes { id, .. } if id == "agents" => {}
             other => panic!("expected the first screen, got {other:?}"),
@@ -727,7 +727,7 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
 
     pty.write(b"\x1b[1;32mecho\x1b[0m hi");
     let changed = match next_collection_event(&mut stream, "the changed screen").await {
-        CollectionEvent::Screen { id, screen } if id == "screen" => screen,
+        CollectionEvent::Screen { id, screen, .. } if id == "screen" => screen,
         other => panic!("expected the changed screen, got {other:?}"),
     };
     assert_eq!(changed.value.lines[1].text, "$ echo hi");
@@ -1159,6 +1159,8 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: person.into(),
                 title: "Choose a date".into(),
@@ -1708,7 +1710,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         .unwrap();
     loop {
         match next_collection_event(&mut collections, "the paired terminal screen").await {
-            CollectionEvent::Screen { id, screen } if id == "screen" => {
+            CollectionEvent::Screen { id, screen, .. } if id == "screen" => {
                 assert_eq!(
                     screen.value.runtime_incarnation,
                     "terminal-demo-runtime:fabric-i1"

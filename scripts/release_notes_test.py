@@ -486,6 +486,9 @@ class ReleaseNotes(unittest.TestCase):
         self.assertEqual(json.loads((downloads / 'UPGRADE-IMPACT.json').read_text()), report)
         self.assertFalse(any(args[:2] == ('gh', 'release') for args in commands))
         workflow = (ROOT / '.github/workflows/release-fractal.yml.genie.ts').read_text()
+        # Only native tag publication renders release notes; the independent embed
+        # publisher has its own provenance-only notes and can appear earlier.
+        workflow = workflow.split('"publish": {', 1)[1].split('    advance:', 1)[0]
         self.assertIn('python3 scripts/release_notes.py --source', workflow)
         self.assertLess(workflow.index('python3 scripts/release_notes.py --source'), workflow.index('gh release create'))
 

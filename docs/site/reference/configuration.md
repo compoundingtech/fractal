@@ -6,6 +6,8 @@ order: 3
 
 # Configuration and KDL
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 Local configuration selects the person, node, access mode, state paths, and runtime settings. Declarations describe agents, missions, and other graph subjects. Keep these responsibilities separate.
 
 ## Local configuration
@@ -18,12 +20,38 @@ Agents inherit the daemon user's environment and account access. A provider perm
 
 Every declaration file starts with `version 2`. Declarations follow directly:
 
-```kdl
+```ts group=worker variant=effect
+import { Fractal } from 'fractal/effect'
+
+export const worker = Fractal.agent({
+  id: 'example/worker',
+  lifecycle: 'standing',
+  host: 'local',
+  workspace: '/work/example',
+  harness: { kind: 'claude', model: 'sonnet' },
+})
+```
+
+```ts group=worker variant=ts
+import { Fractal } from 'fractal'
+
+export const worker = Fractal.agent({
+  id: 'example/worker',
+  lifecycle: 'standing',
+  host: 'local',
+  workspace: '/work/example',
+  harness: { kind: 'claude', model: 'sonnet' },
+})
+```
+
+```kdl group=worker variant=kdl
 version 2
 agent "example/worker" {
   workspace "/work/example"
   restart "always"
-  harness "claude" { model "sonnet"; }
+  harness "claude" {
+    model "sonnet"
+  }
 }
 ```
 

@@ -16,6 +16,21 @@ delivers messages. The agent grammar and harness-facing contract remain
 canonical in
 [`compoundingtech/evals/AGENT-SPEC.md`](https://github.com/compoundingtech/evals/blob/main/AGENT-SPEC.md).
 
+## Rolling fleet compatibility (R49)
+
+```text
+authenticated member capabilities
+  -> all-active-member support -> fleet feature activation
+return after >30 days offline -> re-sync fence -> write admission
+```
+
+The Fractal fleet protocol design, current implementation gaps, checkpoint and
+client boundaries, and required test matrix live in
+[the compatibility contract](../st3/compatibility.md). This extends the fleet
+requirements beyond the legacy st2 catalog implementation described below.
+Implementation of R49 is open in [#4002](https://github.com/compoundingtech/fractal/issues/4002).
+This specification does not claim the window is already implemented.
+
 ## Decision citations
 
 Decision records are cited by their full filename stem, `NNNN-<slug>`. Bare

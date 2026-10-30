@@ -113,6 +113,10 @@ pub struct World {
     /// What was left of each objective or budget across the chart period, by its id.
     #[serde(skip)]
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
+    /// Why the last refresh of the objectives and budgets failed, while the rows shown are
+    /// from an earlier read.
+    #[serde(skip)]
+    pub slo_stale: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -275,10 +279,10 @@ pub enum AttentionKind {
         answers: Vec<String>,
         /// The harness observation that opened it, which an answer names.
         episode: String,
-        /// The exact call it asks about, as st names it: `Some(None)` when its harness named
-        /// none, `None` from a daemon that predates naming it. Allow is offered only beside it.
+        /// The exact call it asks about, as st names it; none when it names none. Allow is
+        /// offered only beside it.
         #[serde(skip)]
-        call: Option<Option<String>>,
+        call: Option<String>,
     },
     /// A harness not signed in to its provider; one sign-in answers every seat that shares it.
     Login {
@@ -370,7 +374,7 @@ pub struct PreviewAgent {
 
 // --------------------------------------------------------------------- agents
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Harness {
     Claude,

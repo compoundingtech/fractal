@@ -643,6 +643,36 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
 }
 
 #[tokio::test]
+async fn an_unprepared_agents_roster_prints_its_own_code_and_says_to_retry() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("roster.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/roster-test",
+            "code": "agent-roster-not-ready",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let error = generated_client(&Endpoint::Unix(socket), None).unwrap()
+        .agents_list(None, Some(50), false).await.unwrap_err();
+    assert!(error.is_transient(), "{error:?}");
+    let error = anyhow::Error::new(error);
+    assert_eq!(cli_error_message(&error, false),
+        "Fractal is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    assert_eq!(plain_error(&error),
+        "st is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
     use axum::{Json, Router, http::StatusCode};
     let directory = tempfile::tempdir().unwrap();
@@ -2056,6 +2086,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 refilled_at_ms: 1_234,
             },
             claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
+            claude_attachment_answered: Some(Instant::now()),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -2082,6 +2113,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // Nor the daemon's first answer: the replacement's attach window counts from its own.
+    assert!(back.loop_state.claude_attachment_answered.is_none());
     // An unpushed attachment poll is not carried: the replacement image polls once at once.
     assert!(back.loop_state.claude_attachment_polled.is_none());
 }
@@ -2162,6 +2195,59 @@ fn agent_card_shows_the_member_reconcile_fault() {
     assert!(card.contains(
         "FAULT        render refuses to change tracked file .claude/settings.local.json"
     ));
+}
+
+fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
+    serde_json::from_value(serde_json::json!({
+        "kind": "agent", "id": "agent/garden/worker", "revision": "one",
+        "updated_at": "2026-10-21T04:37:42Z", "name": "garden/worker",
+        "state": "stopped", "reachability": "unreachable", "runtime_ids": [],
+        "end_reason": end_reason
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
+    let parked = stopped_agent(serde_json::json!({
+        "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
+        "reason": "the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)"
+    }));
+    let card = render_client_agent(&parked, &[], 0);
+    assert!(card.contains(
+        "STATE        stopped\nWHY          parked by st after it failed to start at 2026-10-21T04:37:42.469Z: the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)\n"
+    ), "{card}");
+    let by_person = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-person", "actor": "person/ada", "ended_at": "2026-10-22T09:00:00.000Z",
+        "reason": "Done for the week.\n\u{1b}[31mspoof"
+    }));
+    assert!(render_client_agent(&by_person, &[], 0).contains(
+        "WHY          stopped by person/ada at 2026-10-22T09:00:00.000Z: Done for the week. spoof\n"
+    ));
+    let by_run = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-mission", "actor": "mission-run/garden/one", "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    let unknown = stopped_agent(serde_json::Value::Null);
+    let page: ClientPage = serde_json::from_value(serde_json::json!({
+        "kind": "page", "collection": "agents",
+        "items": [by_run, unknown],
+        "page": {"limit": 50, "has_more": false}
+    }))
+    .unwrap();
+    assert_eq!(
+        render_client_agents(&page, false, false, "st agents ls"),
+        "AGENTS  2\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped, with no recorded reason\n"
+    );
+    // A running agent prints no stop line, even with an end reason from an earlier incarnation.
+    let mut running = stopped_agent(serde_json::json!({
+        "kind": "crashed", "exit_code": 1, "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    running.state = "running".into();
+    assert!(!render_client_agent(&running, &[], 0).contains("WHY"));
 }
 
 #[test]
@@ -3016,6 +3102,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     #[cfg(test)]
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
+    #[cfg(test)]
+    const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -3033,6 +3121,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("validate", VALIDATE_SOURCE),
         ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
@@ -3752,6 +3841,27 @@ fn provider_capacity_backoff_is_bounded_deterministic_and_increases() {
     );
 }
 
+/// The model at capacity is retried whatever the turn shows; a 429 or a failing connection only
+/// once the seat is idle, since an active turn is still its harness's own to retry.
+#[test]
+fn a_provider_retry_is_owed_for_capacity_and_for_an_idle_rate_limit_or_connection() {
+    use fractal_drivers::harness_state::Activity;
+    assert_eq!(
+        provider_retry_cause(Activity::Idle, Some("providerCapacity")),
+        Some("providerCapacity")
+    );
+    for cause in ["rateLimited", "connection"] {
+        assert_eq!(provider_retry_cause(Activity::Idle, Some(cause)), Some(cause));
+        assert_eq!(provider_retry_cause(Activity::Active, Some(cause)), None, "{cause}");
+        assert_eq!(provider_retry_cause(Activity::Ended, Some(cause)), None, "{cause}");
+    }
+    assert_eq!(provider_retry_cause(Activity::Idle, Some("usageLimit")), None);
+    assert_eq!(provider_retry_cause(Activity::Idle, None), None);
+    let (waiting, exhausted) = provider_retry_reasons("rateLimited");
+    assert!(waiting.contains("429") && waiting.contains("resume this session"));
+    assert!(exhausted.contains("retry limit"));
+}
+
 #[test]
 fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
     let mut page = fixture_product_page(&["session"], false);
@@ -4417,6 +4527,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         wake: MessageWakeArgs::default(),
         print_kdl: false,
         idempotency_key: Some("refuse-a-person".into()),
+        allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
         let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();

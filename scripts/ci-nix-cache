@@ -21,7 +21,7 @@ case "$cmd" in
     sudo chown -R "$(id -un)" "$cache"
     nix store info --store "file://$cache" > /dev/null
     # One signing key per cache entry; Actions scopes entries to the repository and ref.
-    [ -s "$key.sec" ] || nix key generate-secret --key-name st-ci-cache-1 > "$key.sec"
+    [ -s "$key.sec" ] || nix key generate-secret --key-name fractal-ci-cache-1 > "$key.sec"
     nix key convert-secret-to-public < "$key.sec" > "$key.pub"
     {
       echo "NIX_CONFIG<<ST_CI_NIX_CONFIG"

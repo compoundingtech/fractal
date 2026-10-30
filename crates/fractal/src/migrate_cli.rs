@@ -17,6 +17,7 @@ use fractal_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
 
 mod native;
 mod home_manager;
+mod mounts;
 #[cfg(test)]
 mod tests;
 
@@ -369,6 +370,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         ensure!(unit.installed && unit.file.is_file() && !unit.enabled && !unit.running, "{} must be pre-staged, disabled and stopped", unit.name);
     }
     let pairs = layout.pairs(&services);
+    mounts::preflight(&layout.directories)?;
     for (index, (old, new)) in pairs.iter().enumerate() {
         if index < 2 || old.exists() { destination_free(old, new)?; }
         if index < 2 {

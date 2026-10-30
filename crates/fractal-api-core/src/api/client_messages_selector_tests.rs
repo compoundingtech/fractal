@@ -627,6 +627,9 @@ fn all_selector_page_items(store: &Store, case: Case) -> Vec<Value> {
 }
 
 fn assert_complete_selector_pages_match_oracle(store: &Store) {
+    // Pages read at the store's own index. A commit folds selectors for at most 10 ms of wall
+    // time, so on a loaded host an edit's supersession or a deletion's promotion can be pending.
+    while store.maintain_client_message_selectors().unwrap() {}
     for case in CASES.into_iter().chain([
         Case { name: "edited_person_history", person: Some("person/blair"), actor: None, history: true },
         Case { name: "edited_person_open", person: Some("person/blair"), actor: Some("agent/edited"), history: false },

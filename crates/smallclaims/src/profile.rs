@@ -898,13 +898,41 @@ impl Drop for Span {
     }
 }
 
+thread_local! {
+    /// What [`tagged`] appends to the key of each statement it runs on this thread.
+    static STATEMENT_TAG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `work` with `tag` appended to the key of every statement it runs on this thread, so the
+/// profile tells apart the callers of one query, such as which kind and which call site read a
+/// subject's whole history. Free when profiling is off: `tag` is not built.
+pub fn tagged<T>(tag: impl FnOnce() -> String, work: impl FnOnce() -> T) -> T {
+    if !enabled() {
+        return work();
+    }
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STATEMENT_TAG.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(STATEMENT_TAG.with(|slot| slot.replace(Some(tag()))));
+    work()
+}
+
 /// A SQLite statement finished after `duration`.
 pub fn sql(statement: &str, duration: Duration) {
     if !enabled() {
         return;
     }
     let ns = nanos(duration);
-    with_acc_or_unlabeled(|acc| acc.statement(statement, ns));
+    STATEMENT_TAG.with(|tag| match &*tag.borrow() {
+        Some(tag) => {
+            let tagged = format!("{statement} -- {tag}");
+            with_acc_or_unlabeled(|acc| acc.statement(&tagged, ns));
+        }
+        None => with_acc_or_unlabeled(|acc| acc.statement(statement, ns)),
+    });
 }
 
 /// Before waiting for the store's writer: when, and who holds it.
@@ -1829,6 +1857,44 @@ mod tests {
         let stage = spans.iter().find(|span| span["name"] == "stage/invented").unwrap();
         assert!(stage["io_read_mb"].as_f64().unwrap() >= 1.0);
         assert!(stage.get("disk_read_mb").is_some());
+    }
+
+    #[test]
+    fn a_tagged_statement_is_keyed_by_its_tag_and_an_untagged_one_is_not() {
+        // Profiling is process-global, so this runs in a child with its own enabled profiler.
+        const CHILD: &str = "ST3_PROFILE_STATEMENT_TAG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "profile::tests::a_tagged_statement_is_keyed_by_its_tag_and_an_untagged_one_is_not",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated statement tag test failed");
+            return;
+        }
+        init_from_env();
+        let op = Op::start("task invented-pass", None).unwrap();
+        {
+            let _entered = op.enter();
+            sql("SELECT invented", Duration::from_millis(1));
+            tagged(|| "kind=invented at here".into(), || {
+                sql("SELECT invented", Duration::from_millis(2));
+                // Tags do not nest into each other: the inner one replaces, then restores.
+                tagged(|| "inner".into(), || sql("SELECT invented", Duration::from_millis(3)));
+                sql("SELECT invented", Duration::from_millis(4));
+            });
+            sql("SELECT invented", Duration::from_millis(5));
+        }
+        let acc = op.0.acc.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(acc.statements["SELECT invented"].count, 2);
+        assert_eq!(acc.statements["SELECT invented -- kind=invented at here"].count, 2);
+        assert_eq!(acc.statements["SELECT invented -- inner"].count, 1);
     }
 
     #[test]
