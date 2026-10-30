@@ -190,6 +190,7 @@
         "clients/typescript/fractal-client",
         "clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json",
         "clients/typescript/fractal-scenarios/scripts/recording-script.schema.json",
+        "clients/typescript/fractal-views/tests/fixtures",
         "clippy.toml",
         "components",
         "crates",
