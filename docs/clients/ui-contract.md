@@ -268,7 +268,6 @@ and Ctrl+PageDown.
 
 
 
-
 ### Starting a mission
 
 Missions has **New mission**: the person writes what they want (and picks a workspace), and the
