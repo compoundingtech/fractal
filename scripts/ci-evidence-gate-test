@@ -2297,11 +2297,13 @@ class WorkflowStructure(unittest.TestCase):
             expression = expression[3:-2].strip()
         for gate, value in gates.items():
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", str(value))
+            expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip != 'true'", str(not value))
         for gate in ('linux-gate', 'rust-tests', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web'):
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.refuse == 'true'", str(gate in refused))
         expression = expression.replace("github.event_name != 'pull_request' || github.event.pull_request.draft == false", 'True')
         expression = expression.replace('!cancelled()', 'True')
         expression = expression.replace("github.event_name == 'merge_group'", str(event == 'merge_group'))
+        expression = expression.replace("github.event_name", repr(event))
         expression = expression.replace('!(', 'not (').replace('&&', ' and ').replace('||', ' or ')
         return bool(eval(expression, {'__builtins__': {}}))
 
@@ -2733,24 +2735,40 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(json.loads(shard_env['STEP_COMMAND'].strip().strip("'")), FRACTAL_WEB_SHARD_ARGV)
         self.assertNotEqual(FRACTAL_WEB_SHARD_ARGV, rule['command'])
 
-    def test_the_fractal_web_lane_skips_its_jobs_only_for_trusted_pull_request_evidence(self):
-        """The semantic check remains emitted; only PR execution avoids runner allocation.
-        Queue and manual execution retain their complete proof and shard coverage."""
+    def test_the_fractal_web_lane_honors_trusted_pr_and_queue_skips_but_runs_on_main_and_manual(self):
+        """Evidence suppresses both execution and receipts on PR/queue events.
+        Push and manual runs cannot receive a trusted skip and retain full hosted proof."""
         blocks = self.blocks()
         execution, verdict = blocks['fractal-web-execution'], blocks['fractal-web']
         self.assertIn('evidence-gate-fractal-web', self.needs_of(execution))
         self.assertIn('evidence-gate-fractal-web', self.needs_of(verdict))
         condition = self.job_condition(execution)
         self.assertIn("github.event_name == 'pull_request'", condition)
-        self.assertIn("needs.evidence-gate-fractal-web.outputs.skip == 'true'", condition)
+        self.assertIn("needs.evidence-gate-fractal-web.outputs.skip != 'true'", condition)
         self.assertIn("!(", condition)
         self.assertNotIn('evidence-gate', self.job_condition(verdict))
         self.assertNotIn('evidence covered by a trusted note', execution)
         self.assertIn("EVIDENCE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip }}", verdict)
         self.assertIn("EVENT_NAME: ${{ github.event_name }}", verdict)
+        ready = condition.replace("needs.fractal-web-changes.result == 'success'", 'True') \
+                         .replace("needs.fractal-web-changes.outputs.relevant == 'true'", 'True') \
+                         .replace("needs.genie-freshness.result == 'success'", 'True')
+        for event in ('pull_request', 'merge_group', 'push', 'workflow_dispatch'):
+            context, result, tree = Decide().good()
+            context['event'] = event
+            allowed = gate.decide(context, 'satisfied', result, tree)[0] == 'skip'
+            self.assertEqual(allowed, event in ('pull_request', 'merge_group'))
+            self.assertEqual(self.truth(ready, {'fractal-web': allowed}, event), not allowed)
+            self.assertTrue(self.truth(ready, {'fractal-web': False}, event))
         for name, condition in self.steps_of('fractal-web'):
             if name == 'Require every kit shard and exact full-index coverage':
-                self.assertNotIn('evidence-gate', condition)
+                self.assertIn("needs.evidence-gate-fractal-web.outputs.skip != 'true'", condition)
+                sharded = condition.replace("needs.fractal-web-changes.outputs.kit-inputs == 'true'", 'True') \
+                                   .replace("needs.fractal-web-changes.outputs.relevant == 'true'", 'True')
+                for event in ('merge_group', 'push', 'workflow_dispatch'):
+                    skip = event == 'merge_group'
+                    self.assertEqual(self.truth(sharded, {'fractal-web': skip}, event), not skip)
+                    self.assertTrue(self.truth(sharded, {'fractal-web': False}, event))
             elif name == 'Require detection and, for web changes, execution':
                 self.assertIsNone(condition, 'the verdict always runs')
 
