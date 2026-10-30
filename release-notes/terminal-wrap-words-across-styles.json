@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The terminal interface wraps a styled word and the punctuation after it together, so a link or a doc/ reference never leaves its full stop or comma alone on the next row",
+  "replay": {
+    "status": "none",
+    "detail": "No claim or replay changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema, version or stored data changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or coordination changes; no coordinated upgrade required."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Display only: the terminal interface's text wrapping keeps a word whole across style changes. No client, API or stored-data change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes."
+  }
+}

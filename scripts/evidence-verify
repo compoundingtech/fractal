@@ -80,6 +80,19 @@ def git(repo, *args, stdin=None, config=(), env=None):
     return done.stdout
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for extracted base tools.
+def config_path(repo, revision, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    listing = git(repo, 'ls-tree', '-z', '--full-tree', revision, '--', preferred, legacy)
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}
+    return preferred if preferred in names else legacy if legacy in names else None
+
+
+def config_blob(repo, revision, legacy):
+    path = config_path(repo, revision, legacy)
+    return git(repo, 'show', '--end-of-options', f'{revision}:{path or legacy}')
+
+
 POLICY_KEYS = {'version', 'checks'}
 CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample_one_in', 'require', 'events'}
 REQUIRE_MODES = ('off', 'shadow', 'reject')
@@ -507,8 +520,24 @@ def job_needs(lines):
     return []
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — selectors read the selected layout at this exact tree.
+def selector_item(repo, tree, item):
+    path, separator, selector = item.partition('::')
+    if separator and path.startswith(('.st/', '.fractal/')):
+        legacy = path.replace('.fractal/', '.st/', 1)
+        path = config_path(repo, tree, legacy)
+        return f'{path}::{selector}' if path is not None else None
+    return item
+
+
 def selected(repo, tree, item):
-    """The canonical bytes `item` (PATH::SELECTOR) selects in `tree`, or None when the file or the entry is not there."""
+    """Canonical selected bytes, using the same tree's configuration layout; None for an absent file or entry."""
+    resolved = selector_item(repo, tree, item)
+    return selected_content(repo, tree, resolved) if resolved is not None else None
+
+
+def selected_content(repo, tree, item):
+    """Read an already resolved PATH::SELECTOR without changing its identity."""
     path, _, selector = item.partition('::')
     if not git(repo, 'ls-tree', '--full-tree', tree, '--', path).strip():
         return None
@@ -544,7 +573,8 @@ def project(repo, tree, paths):
     newline or any other byte in a name cannot turn one entry into two; symlinks and gitlinks keep their mode."""
     plain = [p for p in paths if not p.startswith('!') and '::' not in p]
     excluded = [p[1:].encode() for p in paths if p.startswith('!')]
-    chosen = sorted(p for p in paths if '::' in p)
+    chosen = sorted({resolved for p in paths if '::' in p
+                     for resolved in [selector_item(repo, tree, p)] if resolved is not None})
     if '.' in plain and not excluded and not chosen:
         return tree
     listing = git(repo, 'ls-tree', '-r', '-z', '--full-tree', tree, *(['--', *plain] if '.' not in plain else [])) if plain else b''
@@ -562,7 +592,7 @@ def project(repo, tree, paths):
     for item in chosen:
         # One selected part of a shared CI file is an entry of its own, named PATH::SELECTOR, whose blob is the canonical bytes of that
         # part: the key stays a git tree id, and a change elsewhere in the file leaves it alone.
-        content = selected(repo, tree, item)
+        content = selected_content(repo, tree, item)
         if content is not None:
             blob = git(repo, 'hash-object', '--stdin', stdin=content).decode().strip()
             entries.append(f'100644 {blob} 0\t'.encode() + item.encode() + b'\0')
@@ -898,9 +928,10 @@ def signed_for_crate(statement, crate, key, needs_tests=False):
 def zero_test_crates(repo, policy_base):
     """The crates the accepted base lists under `no_tests` (reviewed: they have no test to run). Empty when the base has no such list;
     a list that is not an array of crate names is a verifier error, never an empty allowance by accident."""
-    code, data = no_lazy(repo, 'show', '--end-of-options', f'{policy_base}:.st/rust-test-inputs.json')
-    if code != 0:
+    path = config_path(repo, policy_base, '.st/rust-test-inputs.json')
+    if path is None:
         return set()
+    data = git(repo, 'show', '--end-of-options', f'{policy_base}:{path}')
     try:
         listed = json.loads(data.decode()).get('no_tests', [])
     except (ValueError, AttributeError, UnicodeDecodeError):
@@ -1267,14 +1298,14 @@ def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runne
 
 def read_policy(repo, commit):
     try:
-        return git(repo, 'show', '--end-of-options', f'{commit}:{POLICY_PATH}').decode()
+        return config_blob(repo, commit, POLICY_PATH).decode()
     except (Failure, UnicodeDecodeError):
         raise Failure('no_policy', f'no readable skip policy at {commit}:{POLICY_PATH}')
 
 
 def read_lanes(repo, commit):
     try:
-        return git(repo, 'show', '--end-of-options', f'{commit}:{LANES_PATH}').decode()
+        return config_blob(repo, commit, LANES_PATH).decode()
     except (Failure, UnicodeDecodeError):
         raise Failure('error', f'no readable lane file at {commit}:{LANES_PATH}')
 
@@ -1296,7 +1327,11 @@ def lane_for(repo, tree, lanes, check, lane_base=None):
         code, _ = no_lazy(repo, 'merge-base', '--is-ancestor', lane_base, base)
         if code != 0:
             raise Failure('error', f'the lane base {lane_base[:12]} is not an ancestor of the accepted base')
-        code, shown = no_lazy(repo, 'show', f'{lane_base}:{LANES_PATH}')
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve at the branch point, not the checkout.
+        path = config_path(repo, lane_base, LANES_PATH)
+        code, shown = no_lazy(repo, 'show', f'{lane_base}:{path or LANES_PATH}')
+        if path is not None and code != 0:
+            raise Failure('error', f'could not read lane file at {lane_base}:{path}')
         here = lane_entry(shown.decode(errors='replace'), check) if code == 0 else None
         if here is None or here != lane_entry(text, check):
             raise Failure('definition_changed', f'lane {check} in {LANES_PATH} differs between the branch point and the accepted base')
@@ -1532,7 +1567,7 @@ def main(argv):
             rules = None
             if args.policy_from:
                 try:
-                    text = git(args.repo, 'show', '--end-of-options', f'{args.policy_from}:{POLICY_PATH}').decode()
+                    text = config_blob(args.repo, args.policy_from, POLICY_PATH).decode()
                 except (Failure, UnicodeDecodeError):
                     raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
                 rules = policy_rules(text, args.check, args.repository)
@@ -1547,7 +1582,7 @@ def main(argv):
             return 0
         if args.keys_from:
             keyfile = tempfile.NamedTemporaryFile(suffix='.keys')
-            keyfile.write(git(args.repo, 'show', '--end-of-options', f'{args.keys_from}:{KEYS_PATH}'))
+            keyfile.write(config_blob(args.repo, args.keys_from, KEYS_PATH))
             keyfile.flush()
             keys = keyfile.name
         else:
@@ -1563,7 +1598,7 @@ def main(argv):
         rules = None
         if args.policy_from:
             try:
-                text = git(args.repo, 'show', '--end-of-options', f'{args.policy_from}:{POLICY_PATH}').decode()
+                text = config_blob(args.repo, args.policy_from, POLICY_PATH).decode()
             except (Failure, UnicodeDecodeError):
                 raise Failure('no_policy', f'no readable skip policy at {args.policy_from}:{POLICY_PATH}')
             rules = policy_rules(text, args.check, args.repository)
@@ -1578,8 +1613,9 @@ def main(argv):
             run_inputs.update(base_input_values(args.repo, args.policy_from, rules))
         log_keys = os.path.abspath(args.log_keys) if args.log_keys else None
         if args.log_keys_from:
-            code, text = no_lazy(args.repo, 'show', '--end-of-options', f'{args.log_keys_from}:{LOG_KEY_PATH}')
-            if code == 0:
+            log_path = config_path(args.repo, args.log_keys_from, LOG_KEY_PATH)
+            if log_path is not None:
+                text = git(args.repo, 'show', '--end-of-options', f'{args.log_keys_from}:{log_path}')
                 logfile = tempfile.NamedTemporaryFile(suffix='.log-keys')
                 logfile.write(text)
                 logfile.flush()

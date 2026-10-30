@@ -121,49 +121,67 @@ pub fn wrap(
     let mut joining = None;
     start(&mut current, &mut used, first);
     let mut line_has_words = false;
-    for run in runs {
-        let style = with_bg(run.style, fill);
-        for (line_index, logical_line) in run.text.split('\n').enumerate() {
-            if line_index > 0 {
+    let tokens = tokens(runs, fill);
+    let mut next = 0;
+    while next < tokens.len() {
+        match &tokens[next] {
+            Token::Newline => {
                 // A source newline is a real row boundary, including blank paragraphs.
                 // Ratatui spans cannot carry it: Buffer::set_line drops control characters.
                 finish(&mut current, used, &mut lines, joining);
                 joining = None;
                 start(&mut current, &mut used, rest);
                 line_has_words = false;
+                next += 1;
             }
-            for (index, piece) in logical_line.split(' ').enumerate() {
-                if index > 0 {
-                    // A space: keep it unless it would start a line.
-                    if line_has_words && used < width {
-                        push(&mut current, " ", style);
-                        used += 1;
-                    }
+            Token::Space(style) => {
+                // A space: keep it unless it would start a line.
+                if line_has_words && used < width {
+                    push(&mut current, " ", *style);
+                    used += 1;
                 }
-                if piece.is_empty() {
-                    continue;
-                }
-                let piece_width = self::width(piece);
-                if used + piece_width > width && line_has_words {
+                next += 1;
+            }
+            Token::Piece(..) => {
+                // A word is every piece up to the next space or newline, whatever runs it spans,
+                // so a styled word and the punctuation after it wrap together.
+                let end = tokens[next..]
+                    .iter()
+                    .position(|token| !matches!(token, Token::Piece(..)))
+                    .map_or(tokens.len(), |offset| next + offset);
+                let word: Vec<(&str, Style)> = tokens[next..end]
+                    .iter()
+                    .filter_map(|token| match token {
+                        Token::Piece(text, style) => Some((text.as_str(), *style)),
+                        _ => None,
+                    })
+                    .collect();
+                next = end;
+                let word_width = word.iter().map(|(text, _)| self::width(text)).sum::<usize>();
+                if used + word_width > width && line_has_words {
                     trim_trailing_space(&mut current, &mut used);
                     finish(&mut current, used, &mut lines, joining);
                     joining = Some(SPACE_WRAP);
                     start(&mut current, &mut used, rest);
                 }
-                if used + piece_width <= width {
-                    push(&mut current, piece, style);
-                    used += piece_width;
+                if used + word_width <= width {
+                    for (text, style) in word {
+                        push(&mut current, text, style);
+                    }
+                    used += word_width;
                 } else {
                     // A word longer than the line: break it by character.
-                    for character in piece.chars() {
-                        let w = character.width().unwrap_or(0);
-                        if used + w > width {
-                            finish(&mut current, used, &mut lines, joining);
-                            joining = Some(WORD_WRAP);
-                            start(&mut current, &mut used, rest);
+                    for (text, style) in word {
+                        for character in text.chars() {
+                            let w = character.width().unwrap_or(0);
+                            if used + w > width {
+                                finish(&mut current, used, &mut lines, joining);
+                                joining = Some(WORD_WRAP);
+                                start(&mut current, &mut used, rest);
+                            }
+                            push(&mut current, &character.to_string(), style);
+                            used += w;
                         }
-                        push(&mut current, &character.to_string(), style);
-                        used += w;
                     }
                 }
                 line_has_words = true;
@@ -210,6 +228,34 @@ pub fn prefixed(prefix: Vec<Span<'static>>, line: Line<'static>) -> Line<'static
     let mut line = Line::from(spans);
     line.alignment = alignment;
     line
+}
+
+/// What `wrap` lays out: the runs cut at every space and newline, each piece keeping its style.
+enum Token {
+    Piece(String, Style),
+    Space(Style),
+    Newline,
+}
+
+fn tokens(runs: &[Run], fill: Option<Color>) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    for run in runs {
+        let style = with_bg(run.style, fill);
+        for (line_index, logical_line) in run.text.split('\n').enumerate() {
+            if line_index > 0 {
+                tokens.push(Token::Newline);
+            }
+            for (index, piece) in logical_line.split(' ').enumerate() {
+                if index > 0 {
+                    tokens.push(Token::Space(style));
+                }
+                if !piece.is_empty() {
+                    tokens.push(Token::Piece(piece.to_owned(), style));
+                }
+            }
+        }
+    }
+    tokens
 }
 
 fn trim_trailing_space(current: &mut [Span<'static>], used: &mut usize) {
@@ -876,6 +922,37 @@ mod tests {
         let text = lines.iter().map(plain).collect::<Vec<_>>();
         assert_eq!(text, vec!["• one two", "  three four", "  five six"]);
         assert!(lines.iter().all(|line| line.width() <= 12));
+    }
+
+    #[test]
+    fn a_word_spread_over_runs_wraps_as_one_word() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let lines = wrap(
+            &[run("See ", Style::default()), run("doc/a", bold), run(". Then go", Style::default())],
+            9,
+            &[],
+            &[],
+            None,
+        );
+        let text = lines.iter().map(plain).collect::<Vec<_>>();
+        assert_eq!(text, vec!["See", "doc/a.", "Then go"], "the full stop stays with its word");
+        assert_eq!(lines[1].spans.iter().map(|span| (span.content.as_ref(), span.style)).collect::<Vec<_>>(), vec![("doc/a", bold), (".", Style::default())]);
+        // A word longer than the line still breaks by character, keeping each piece's style.
+        let lines = wrap(&[run("ab", bold), run("cdefg", Style::default())], 4, &[], &[], None);
+        assert_eq!(lines.iter().map(plain).collect::<Vec<_>>(), vec!["abcd", "efg"]);
+        assert_eq!(lines[0].spans[0].style, bold);
+    }
+
+    #[test]
+    fn recording_a_reference_never_moves_where_a_line_wraps() {
+        let theme = crate::tests::theme();
+        for width in 4..14 {
+            let input = "See doc/a. Then doc/a, then (doc/a).";
+            let (lines, links) = markdown_with_links(input, width, Style::default(), &theme, &["doc/a".to_owned()]);
+            let rows = lines.iter().map(plain).collect::<Vec<_>>();
+            assert_eq!(rows, markdown(input, width, Style::default(), &theme).iter().map(plain).collect::<Vec<_>>(), "width {width}");
+            assert!(links.iter().all(|link| link.url == "doc/a"), "{links:?}");
+        }
     }
 
     #[test]

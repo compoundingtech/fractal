@@ -4208,6 +4208,7 @@ impl MissionsStore for Store {
                 params![retired.id, retired.revision, mission_state_name(&retired.state), claim.id],
             )
             .map_err(internal)?;
+        fractal_store::store::ordered_membership::flush(&transaction).map_err(internal)?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h87aff5859f70 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
@@ -6155,14 +6156,27 @@ impl MissionsStore for Store {
                 let readiness_epoch = current
                     .readiness_epoch
                     .saturating_add(u32::from(status == "ready" && current.status != "ready"));
-                transaction
-                    .execute(
-                        /* sqlite-large-value: allow-for-now lv-hc0f4401bbed1 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
+                if !publish {
+                    // A quiet renewal preserves ownership and state. Naming those indexed
+                    // columns in UPDATE still makes SQLite maintain their indexes, even
+                    // when every value is unchanged.
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-h8d3cdf97e396 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
+                                updated_at_unix_ms=?3 WHERE subject=?1",
+                            params![subject, claim_expiry.map(|value| value.to_string()), now.to_string()],
+                        )
+                        .map_err(internal)?;
+                } else {
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-hc0f4401bbed1 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
                                 lease_expires_at_unix_ms=?6, blocked_reason=CASE WHEN ?10 THEN ?7 ELSE blocked_reason END, readiness_epoch=?8,
                                 updated_at_unix_ms=?9 WHERE subject=?1",
-                        params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
-                    )
-                    .map_err(internal)?;
+                            params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
+                        )
+                        .map_err(internal)?;
+                }
                 renew_nested_ancestor_leases_tx(
                     transaction,
                     &current.generation,
@@ -6200,6 +6214,12 @@ impl MissionsStore for Store {
                 }
                 if let Some(input) = handoff {
                     adhoc_work::transfer_tx(transaction, &self.origin, &current, input, &mut body)?;
+                }
+                if matches!(action, "complete" | "fail" | "release") {
+                    // The run is judged on its origin, maybe another member, as soon as the step
+                    // ends, and a loop's token budget reads the seat's replicated usage then: its
+                    // held rollups replicate with this receipt, not when their hour is over.
+                    fractal_store::store::flush_held_usage_tx(transaction, &self.origin, &actor, now)?;
                 }
                 let claim_kind = match action {
                     "claim" => "work.claimed",
