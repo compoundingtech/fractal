@@ -115,6 +115,10 @@ mod delivery_probes;
 mod end_reason;
 mod github_watch;
 pub mod harness_events;
+mod harness_questions;
+pub use harness_questions::{
+    HarnessQuestion, HarnessQuestionAdapterError, HarnessQuestionSettleSink, live_input_session,
+};
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod delivery_metrics;
@@ -245,6 +249,8 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Native answering is unavailable unless an adapter is explicitly installed.
+    pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
     /// Caller-bound assistant read receipts committed off the request path. Shut it down before
     /// the store closes; the last state reference to drop commits what remains.
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
@@ -1884,6 +1890,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "invalid-answer"
+        | "not-answerable"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"
@@ -2537,16 +2545,16 @@ pub async fn client_capabilities(
     // The request snapshot may predate a checkpoint or legacy conversion. Advertise the
     // frontier and floor from one current read so the SDK's first event request can resume.
     let store = state.store.clone();
-    let (oldest, newest) = blocking_store(move || {
+    let capability_state = state.clone();
+    let capability_session = session.clone();
+    let (oldest, newest, capabilities) = blocking_store(move || {
         // No further than the published index, as an event page (`read_event_page`).
         let through = store.index()?;
-        store.read_snapshot(|_| store.event_bounds())
-            .map(|(oldest, newest)| (oldest, newest.min(through)))
-    })
-    .await?;
+        let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
+        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session)))
+    }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&state, &session);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
@@ -10769,13 +10777,7 @@ pub async fn input_session_as(
     {
         return Ok(Json(session_control_response(&subject, &result)));
     }
-    let session = live_session(state, &subject, Some(&request.expected_incarnation))?;
-    if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
-            "unsupported-capability",
-            "session input requires a terminal session",
-        )));
-    }
+    let session = live_input_session(state, &subject, &request.expected_incarnation)?;
     let bytes = match request.mode {
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)

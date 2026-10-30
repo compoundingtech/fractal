@@ -449,6 +449,11 @@ enum Command {
         #[command(subcommand)]
         command: SubjectCommand,
     },
+    /// Inspect native harness question metadata or answer with option positions.
+    HarnessQuestions {
+        #[command(subcommand)]
+        command: HarnessQuestionsCommand,
+    },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
     /// close wakes this agent once.
     Gh {
@@ -2213,6 +2218,44 @@ struct DevicesArgs {
     limit: usize,
     #[command(subcommand)]
     command: Option<DevicesCommand>,
+}
+
+#[derive(Subcommand)]
+enum HarnessQuestionsCommand {
+    /// List native question metadata without question or option text.
+    List {
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        /// Maximum questions on this page (the daemon defaults to 50, capped at 200).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue the snapshot-bound page using its next_cursor.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Read one native question's metadata.
+    Show {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+    },
+    /// Answer with a JSON file mapping question ids to {positions: [zero-based indexes]}.
+    Answer {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        #[arg(long)]
+        answers_file: PathBuf,
+        /// Observation revision returned by `harness-questions show`.
+        #[arg(long)]
+        revision: String,
+        /// Runtime incarnation returned by `harness-questions show`.
+        #[arg(long)]
+        incarnation: String,
+        /// Reuse this key and the identical answer file when retrying.
+        #[arg(long)]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5703,6 +5746,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
+        Command::HarnessQuestions { command } => {
+            run_harness_questions(&endpoint, command, cli.json).await
+        }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
@@ -6722,6 +6768,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        harness_question_sink: None,
         assistant_receipts: Default::default(),
         private_notes: Arc::new(fractal_daemon::private_notes::Authority {
             catalogs: config.private_notes_catalogs.clone(),
@@ -10496,6 +10543,76 @@ fn unseen_timeline_entries(
             .then(a.sequence.cmp(&b.sequence))
     });
     changed
+}
+
+fn parse_harness_question_person(actor: &str) -> std::result::Result<String, String> {
+    let person = parse_person_subject(actor)?;
+    if person.contains('*') || person.chars().any(char::is_whitespace) {
+        return Err("harness questions require a concrete `person/NAME` subject".into());
+    }
+    Ok(person)
+}
+
+fn harness_answer_action_id(key: &str, question: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [key, question] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("action/harness-answer-{}", hex::encode(digest.finalize()))
+}
+
+async fn run_harness_questions(
+    endpoint: &Endpoint,
+    command: HarnessQuestionsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        HarnessQuestionsCommand::List { person, cursor, limit } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_questions(cursor.as_deref(), limit)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Show { question, person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_question(&question)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Answer {
+            question,
+            person,
+            answers_file,
+            revision,
+            incarnation,
+            idempotency_key,
+        } => {
+            let generated = generated_client(endpoint, Some(&person))?;
+            let capabilities = generated.capabilities().await?;
+            let question = if question.starts_with("harness-question/") {
+                question
+            } else {
+                format!("harness-question/{question}")
+            };
+            let answers: BTreeMap<String, fractal_client::HarnessAnswerInput> =
+                serde_json::from_slice(&fs::read(answers_file)?)?;
+            let result = generated
+                .harness_answer(
+                    harness_answer_action_id(&idempotency_key, &question),
+                    idempotency_key,
+                    ClientFence {
+                        snapshot_id: capabilities.snapshot.id,
+                        subject_revisions: BTreeMap::from([(question.clone(), revision)]),
+                        runtime_incarnation: Some(incarnation),
+                        ..ClientFence::default()
+                    },
+                    fractal_client::HarnessAnswerParameters { question, answers },
+                )
+                .await?;
+            print_client_value(&result, json_output)
+        }
+    }
 }
 
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {
