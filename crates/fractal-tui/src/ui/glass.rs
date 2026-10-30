@@ -4319,7 +4319,9 @@ impl Ui {
             group.tabs.push(Tab::pane(pane.key()));
             group.current = 0;
         } else {
-            group.tabs[group.current] = Tab::pane(pane.key());
+            let tab = &mut group.tabs[group.current];
+            tab.pane = pane.key();
+            tab.title = None;
         }
         let id = glass.id.clone();
         self.glass_changed(&id);
