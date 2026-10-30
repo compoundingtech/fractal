@@ -414,6 +414,14 @@ mod tests {
             assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(sent)) if *sent == key));
             ui.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL));
             ui.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+            if enhanced {
+                assert_eq!(
+                    ui.flash.as_ref().map(|(message, _)| message.as_str()),
+                    Some("all clear")
+                );
+                ui.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+                ui.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+            }
             assert!(matches!(ui.focused_pane(), Some(Pane::Home(_))));
         }
     }
