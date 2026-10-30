@@ -157,7 +157,11 @@ pub async fn bind(
         let _admission = admission;
         let mut primary_admitted = false;
         let bound = authority::with_claude_primary(&bind_state, &request, &peer, None, || {
-        if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
+        if !cfg!(target_os = "linux") {
+            // No native authority on this route: permission to bind also permits diagnostics.
+            primary_admitted = true;
+            return bind_state.store.bind_mailbox(&request);
+        }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
             validate()?;
             primary_admitted = true;
@@ -1447,6 +1451,27 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn non_linux_store_bind_refusal_updates_delivery_state() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        crate::store::mailbox_tests::ready(&state.store, "current");
+        let subject = "agent/eval.worker";
+        let old = state.store.bind_mailbox(&Fence::new(subject, "current", "delivery")).unwrap();
+        let current = state.store.bind_mailbox(&Fence::new(subject, "current", "delivery")).unwrap();
+        let peer = NativeDeliveryPeer {
+            agent: subject.into(), transport: "omp-channel",
+            pid: std::process::id(), archives_inbox: false,
+        };
+        let error = bind(State(state.clone()), Some(Extension(peer)), Json(old)).await.unwrap_err();
+        assert_eq!(error.code, "stale-mailbox-session");
+        let delivery = delivery_presence::assess_current(subject, "omp", Some("current"));
+        assert_eq!(delivery.state, "refused");
+        assert_eq!(delivery.reason.as_deref(), Some("delivery refused: stale-mailbox-session"));
+        state.store.check_mailbox(&current).unwrap();
+    }
     use fractal_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
     #[cfg(all(feature = "test-support", target_os = "linux"))]

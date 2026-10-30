@@ -677,6 +677,9 @@ A nested Claude caller also passes the primary process gate; argv callers must
 pass physical process validation. Wrong-provider and outside-runtime rejections
 cannot mark healthy primary delivery refused. A subsequent session/fence refusal
 encountered by the authenticated caller remains visible.
+On non-Linux platforms there is no native authority on the Store bind route:
+after the Claude primary gate, permission to attempt that bind also permits
+its refusal diagnostics.
 
 Free-form diagnostic text is never exported as a label.
 
