@@ -123,6 +123,21 @@ const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
+
+/// While a seat has reached Claude's trust prompt more than [`CLAUDE_TRUST_RECOVERY_ATTEMPTS`]
+/// times within [`CLAUDE_TRUST_RECOVERY_WINDOW_MS`], recovery holds back; this is when enough of
+/// those prompts leave the window for it to resume. `None` while recovery may run.
+fn claude_trust_recovery_resumes_at(prompts: &[crate::model::ClaimRecord], now: u128) -> Option<u128> {
+    let mut recent = prompts
+        .iter()
+        .map(|claim| claim.accepted_at_unix_ms)
+        .filter(|at| now.saturating_sub(*at) < CLAUDE_TRUST_RECOVERY_WINDOW_MS)
+        .collect::<Vec<_>>();
+    recent.sort_unstable_by(|a, b| b.cmp(a));
+    recent
+        .get(CLAUDE_TRUST_RECOVERY_ATTEMPTS)
+        .map(|at| at.saturating_add(CLAUDE_TRUST_RECOVERY_WINDOW_MS))
+}
 // A failed checkout fetch or worktree command waits this long before Git runs again.
 const CHECKOUT_RETRY_MS: u128 = 30_000;
 /// How long a member's launch evidence, read once, is trusted before it is read again.
@@ -208,23 +223,22 @@ fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) ->
 }
 
 /// Moving a schedule (or removing its standby) must not turn an old missing-history
-/// comparison into permission to run on a second host. Conservatively retain the strict
-/// policy for the entire retained history after any role/owner change, not just a timeout.
+/// comparison into permission to run on a second host. Retain the strict policy after
+/// any role, owning run, or declaring step change. Revising the same owning run changes
+/// its generation, not its ownership, and does not require complete history.
 fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
     let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
     if current.standby.is_some() { return Ok(true); }
-    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+    // The first earlier declaration that differs, or that does not parse, decides it.
+    let differs = store.oldest_claim_where(&schedule.subject, "intent.desired", |claim| {
         let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
-            return Ok(true);
+            return true;
         };
-        if previous.host != current.host || previous.standby.is_some()
+        previous.host != current.host || previous.standby.is_some()
             || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
-            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
-            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref()
+    })?;
+    Ok(differs.is_some())
 }
 
 fn schedule_progress_ready<'a>(
@@ -523,6 +537,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
+    /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
+    /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
+    /// without one has nothing to end.
+    fn end_lane(&self, _runtime_id: &str) {}
 }
 
 pub struct NativeRuntime {
@@ -578,6 +596,18 @@ pub fn member_environment(
     let mut environment = crate::environment::overlay(inherited, declared, executable)?;
     record_member_commands(&mut environment, recorder)?;
     Ok(environment)
+}
+
+/// Hands a seat's lane to its spawn. Only a `capacity` declaration selects one; a value in the
+/// seat's own `env` does not.
+fn set_lane(environment: &mut BTreeMap<String, String>, capacity: Option<fractal_runtime::Capacity>) {
+    environment.remove(fractal_runtime::CAPACITY_ENV);
+    for alias in fractal_runtime::CAPACITY_ENV_ALIASES {
+        environment.remove(alias);
+    }
+    if let Some(capacity) = capacity {
+        environment.insert(fractal_runtime::CAPACITY_ENV.into(), capacity.to_string());
+    }
 }
 
 /// Puts the recorder directory first on a member's PATH, after the declaration and the st3
@@ -878,6 +908,10 @@ impl RuntimeControl for NativeRuntime {
             self.exec.end_leftovers_later(runtime_id);
         }
     }
+
+    fn end_lane(&self, runtime_id: &str) {
+        fractal_runtime::end_lane(runtime_id);
+    }
 }
 
 impl NativeRuntime {
@@ -908,8 +942,9 @@ impl NativeRuntime {
         backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
-        let environment =
+        let mut environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
+        set_lane(&mut environment, member.capacity);
         let mut launch = fractal_runtime::Launch::from(&member.launch);
         match &mut launch {
             fractal_runtime::Launch::Shell(source) => {
@@ -1524,6 +1559,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         fractal_runtime::set_configured_seat_priority(priority);
         self.runtime_environment
             .insert(fractal_runtime::PRIORITY_ENV.into(), priority.as_str().into());
+        self
+    }
+
+    /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
+    /// install config). Applies to launches after this call.
+    pub fn with_lanes(self, enforced: bool) -> Self {
+        fractal_runtime::set_lanes_enforced(enforced);
         self
     }
 
@@ -3685,7 +3727,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
+                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -3767,9 +3809,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/provider-capacity-retries", &daemon, || {
             self.reconcile_provider_capacity_retries(&desired)
         });
-        self.isolate("stage/person-asks", &daemon, || {
-            self.store.reconcile_person_asks()
-        });
+        self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -4039,15 +4079,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .get("incarnation_id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let same_capacity_session =
-                self.store
-                    .current_harness(&subject.subject)?
-                    .is_some_and(|harness| {
-                        harness.incarnation_id == incarnation
-                            && harness.state == "idle"
-                            && harness.reason.as_deref() == Some("providerCapacity")
-                    });
-            if !same_capacity_session {
+            // What refused the turn, read from the seat's current reason: the model at capacity,
+            // a 429 the harness stopped retrying, or a failing connection.
+            let cause = self
+                .store
+                .current_harness(&subject.subject)?
+                .filter(|harness| harness.incarnation_id == incarnation && harness.state == "idle")
+                .and_then(|harness| harness.reason)
+                .filter(|reason| matches!(reason.as_str(), "providerCapacity" | "rateLimited" | "connection"));
+            let Some(cause) = cause.as_deref() else {
                 self.store.append_claim(&ClaimInput {
                     subject: subject.subject.clone(),
                     kind: "publication.operation".into(),
@@ -4069,7 +4109,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })?;
                 self.signal_changed();
                 continue;
-            }
+            };
             let attempt = fields
                 .get("retry_attempt")
                 .and_then(Value::as_u64)
@@ -4090,7 +4130,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     (
                         "content".into(),
                         Value::String(format!(
-                            "The provider-capacity backoff elapsed.{work_context} Resume in this existing session; do not create a replacement worker."
+                            "The {} backoff elapsed.{work_context} Resume in this existing session; do not create a replacement worker.",
+                            match cause {
+                                "rateLimited" => "rate-limit (429 Too Many Requests)",
+                                "connection" => "provider-connection",
+                                _ => "provider-capacity",
+                            }
                         )),
                     ),
                     (
@@ -4100,7 +4145,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                     (
                         "title".into(),
                         Value::String(format!(
-                            "Provider capacity retry {attempt}"
+                            "{} retry {attempt}",
+                            match cause {
+                                "rateLimited" => "Rate limit",
+                                "connection" => "Provider connection",
+                                _ => "Provider capacity",
+                            }
                         )),
                     ),
                     ("in_reply_to".into(), Value::Null),
@@ -4395,6 +4445,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn decide_session_start(&self, subject: &str, incarnation: &str) -> Result<()> {
         let mut started = None;
         let mut replaced = false;
+        // Whole history: the oldest running claim of this incarnation, and any other incarnation's.
         for claim in self.store.claims_for(subject, Some("runtime.observed"))? {
             if claim.body.pointer("/fields/status").and_then(Value::as_str) != Some("running") {
                 continue;
@@ -4632,15 +4683,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|prompt| prompt.kind != "plan");
         let shown = match shown {
             Some(prompt) if driver == "claude" && prompt.kind == "trust" => {
-                let recent = self
-                    .claude_trust_prompts(&subject.subject)?
-                    .iter()
-                    .filter(|claim| {
-                        now.saturating_sub(claim.accepted_at_unix_ms)
-                            < CLAUDE_TRUST_RECOVERY_WINDOW_MS
-                    })
-                    .count();
-                (recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS).then_some(prompt)
+                let resumes_at =
+                    claude_trust_recovery_resumes_at(&self.claude_trust_prompts(&subject.subject)?, now);
+                if let Some(at) = resumes_at {
+                    smallclaims::touched::note_due(at);
+                }
+                resumes_at.map(|_| prompt)
             }
             shown => shown,
         };
@@ -5257,9 +5305,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             > HARNESS_READINESS_DEADLINE_MS
             || self
                 .store
-                .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?
-                .iter()
-                .any(|claim| {
+                .oldest_claim_where(&subject.subject, "runtime.reconcile-decision", |claim| {
                     claim
                         .body
                         .pointer("/fields/decision")
@@ -5267,7 +5313,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                         == Some("channel-consent")
                         && claim.body.pointer("/fields/key").and_then(Value::as_str)
                             == Some(incarnation)
-                })
+                })?
+                .is_some()
         {
             return Ok(());
         }
@@ -5371,7 +5418,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 now.saturating_sub(claim.accepted_at_unix_ms) < CLAUDE_TRUST_RECOVERY_WINDOW_MS
             })
             .count();
-        if recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS {
+        if let Some(resumes_at) = claude_trust_recovery_resumes_at(&prompts, now) {
+            // A seat left at the dialog changes nothing a pass would notice, so the member is
+            // due again when recovery may resume.
+            smallclaims::touched::note_due(resumes_at);
             let key = format!(
                 "claude-trust-prompt-repeated:{}:{incarnation}",
                 subject.subject
@@ -5478,16 +5528,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         incarnation: &str,
     ) -> Result<Option<crate::model::ClaimRecord>> {
-        Ok(self
-            .store
-            .claims_for(subject, Some("runtime.observed"))?
-            .into_iter()
-            .rev()
-            .find(|claim| {
+        self.store
+            .newest_claim_where(subject, "runtime.observed", |claim| {
                 claim_incarnation(claim) == Some(incarnation)
                     && claim.body.pointer("/fields/status").and_then(Value::as_str)
                         == Some("running")
-            }))
+            })
     }
 
     fn prepare_fresh_context(
@@ -5680,7 +5726,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6235,7 +6281,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -6749,10 +6795,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         DECLARATION_PARSES.with(|parses| parses.set(parses.get() + 1));
         let declared = self
             .store
-            .claims_for(subject, Some("intent.desired"))?
-            .into_iter()
-            .rev()
-            .find(|claim| claim.body.get("kind").and_then(Value::as_str) == Some("agent"))
+            .newest_claim_where(subject, "intent.desired", |claim| claim.body.get("kind").and_then(Value::as_str) == Some("agent"))?
             .and_then(|declaration| {
                 let checkout = declaration
                     .body
@@ -6982,6 +7025,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
+            let desired = self.store.selected_desired_token(subject)?;
+            let stop = match &desired {
+                Some(token) if self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop") => {
+                    Some(token.clone())
+                }
+                _ => None,
+            };
+            // A seat stopped for good (an explicit stop, or no declaration left) ends its lane, if
+            // it has one, and the jobs in it. A stop for a restart of a live declaration keeps them.
+            if stop.is_some() || desired.is_none() {
+                self.runtime.end_lane(runtime_id);
+            }
             let mut fields = BTreeMap::from([
                 ("status".into(), Value::String("stopped".into())),
                 ("runtime_id".into(), Value::String(runtime_id.into())),
@@ -6994,15 +7049,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             // A confirmed explicit stop can fence a later move even while this host is offline.
             // Stops for a restart of a still-live declaration cannot release a placement fence.
-            let mut evidence = Vec::new();
-            if let Some(token) = self.store.selected_desired_token(subject)?
-                && self
-                    .store
-                    .claim_by_id(&token)?
-                    .is_some_and(|c| c.body["kind"] == "stop")
-            {
-                evidence.push(token);
-            }
+            let evidence = Vec::from_iter(stop);
             fields.insert("host".into(), Value::String(self.host.clone()));
             if self.store.latest_actual_value(subject)?.is_some_and(|actual| {
                 actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
@@ -8197,10 +8244,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     let diagnostic = self
                         .store
-                        .claims_for(agent, Some("harness.diagnostic"))?
-                        .into_iter()
-                        .rev()
-                        .find(|claim| {
+                        .newest_claim_where(agent, "harness.diagnostic", |claim| {
                             // The driver can refuse before this owner records the launch.
                             let incarnation =
                                 observation.and_then(|item| item.incarnation_id.as_deref());
@@ -8214,7 +8258,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         claim.accepted_at_unix_ms >= suspension.requested_at_unix_ms
                                     }
                                 }
-                        });
+                        })?;
                     // A driver records why it could not resume as it ends; give that record a
                     // moment to land after the harness's last observation.
                     if diagnostic.is_none()
@@ -8318,8 +8362,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 claim.body["fields"]["action"].as_str(),
                 Some("suspend" | "resume" | "stop" | "terminate")
             ));
-        let retired = self.store.claims_for(&subject.subject, Some("agent.retired"))?
-            .into_iter().any(|claim| claim.store_index > request.store_index);
+        // Any retirement after the request: the newest one's store index says.
+        smallclaims::touched::note_read(|| subject.subject.clone());
+        let retired = self.store.newest_claim_index(&subject.subject, "agent.retired")?
+            > request.store_index;
         let reason = if self.store.selected_desired_token(&subject.subject)?.as_deref()
             != request.body.pointer("/evidence/0").and_then(Value::as_str)
         {
@@ -8939,12 +8985,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         let decision_key = format!("codex-crash-loop:{token}");
         Ok(self
             .store
-            .claims_for(subject, Some("runtime.reconcile-decision"))?
-            .iter()
-            .any(|claim| {
+            .oldest_claim_where(subject, "runtime.reconcile-decision", |claim| {
                 claim.body.pointer("/fields/key").and_then(Value::as_str)
                     == Some(decision_key.as_str())
-            }))
+            })?
+            .is_some())
     }
 
     fn start_failures(&self, subject: &str, token: &str) -> Result<Vec<crate::model::ClaimRecord>> {
@@ -9040,6 +9085,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(first_launch) = first_launch else {
             return Ok(false);
         };
+        // Whole history: every incarnation that ever became ready, since readiness has no time bound.
         let ready = self
             .store
             .claims_for(&subject.subject, Some("harness.observed"))?
@@ -9058,17 +9104,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter_map(|claim| claim_incarnation(claim).map(str::to_owned))
             .collect::<BTreeSet<_>>();
         let now = now_ms();
-        let exits = self
-            .store
-            .claims_for(&subject.subject, Some("runtime.observed"))?
-            .into_iter()
-            .filter(|claim| {
-                matches!(
+        // Newest first, acceptance times only fall: once one is outside the window, so is every
+        // older one.
+        let mut windowed = Vec::new();
+        self.store
+            .claims_in_order(&subject.subject, "runtime.observed", true, |claim| {
+                if claim.accepted_at_unix_ms < first_launch
+                    || now.saturating_sub(claim.accepted_at_unix_ms) >= CODEX_CRASH_LOOP_INTERVAL_MS
+                {
+                    return false;
+                }
+                if matches!(
                     claim.body.pointer("/fields/status").and_then(Value::as_str),
                     Some("exited" | "vanished")
-                ) && claim.accepted_at_unix_ms >= first_launch
-                    && now.saturating_sub(claim.accepted_at_unix_ms) < CODEX_CRASH_LOOP_INTERVAL_MS
-            })
+                ) {
+                    windowed.push(claim.clone());
+                }
+                true
+            })?;
+        let exits = windowed
+            .into_iter()
             .filter_map(|claim| claim_incarnation(&claim).map(str::to_owned))
             .filter(|incarnation| {
                 !ready.contains(incarnation) && !trust_recovery.contains(incarnation)
@@ -9100,6 +9155,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if member.restart != RestartType::Always {
             return Ok(false);
         }
+        // Whole history: the count of every retry decision goes into the next one's key.
         let decisions = self
             .store
             .claims_for(&subject.subject, Some("runtime.reconcile-decision"))?;
@@ -9232,11 +9288,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let key = format!("runtime-crash-loop:{token}");
         Ok(self
             .store
-            .claims_for(subject, Some("runtime.reconcile-decision"))?
-            .iter()
-            .any(|claim| {
+            .oldest_claim_where(subject, "runtime.reconcile-decision", |claim| {
                 claim.body.pointer("/fields/key").and_then(Value::as_str) == Some(key.as_str())
-            }))
+            })?
+            .is_some())
     }
 
     fn raise_runtime_crash_loop(&self, subject: &str, token: &str, reason: &str) -> Result<()> {
@@ -9271,12 +9326,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let decision_key = format!("codex-crash-loop:{token}");
         let existing = self
             .store
-            .claims_for(subject, Some("runtime.reconcile-decision"))?
-            .into_iter()
-            .find(|claim| {
+            .oldest_claim_where(subject, "runtime.reconcile-decision", |claim| {
                 claim.body.pointer("/fields/key").and_then(Value::as_str)
                     == Some(decision_key.as_str())
-            });
+            })?;
         let mut changed = false;
         if existing.is_none() {
             self.store.append_claim(&ClaimInput {
@@ -9331,6 +9384,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     == Some(desired_token.as_str())
             })
             .collect::<Vec<_>>();
+        // Whole history: the newest reset by store index, which is not canonical order; small.
         let resets = self
             .store
             .claims_for(&subject.subject, Some("runtime.restart-window-reset"))?;
@@ -9403,10 +9457,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if intensity.delay_ms > 0 {
             let observed_at = self
                 .store
-                .claims_for(&subject.subject, Some("runtime.observed"))?
-                .into_iter()
-                .rev()
-                .find(|claim| {
+                .newest_claim_where(&subject.subject, "runtime.observed", |claim| {
                     matches!(
                         claim.body.pointer("/fields/status").and_then(Value::as_str),
                         Some("exited" | "vanished")
@@ -9420,7 +9471,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .and_then(Value::as_str)
                                 == Some(incarnation)
                         })
-                })
+                })?
                 .map(|claim| claim.accepted_at_unix_ms)
                 .unwrap_or(now);
             let delayed = observed_at.saturating_add(intensity.delay_ms as u128);
@@ -9614,6 +9665,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some("exited" | "vanished" | "stopped")
             )
         {
+            // The process exit that follows is not a claim. Watch the exec until it ends, so
+            // that exit wakes a pass whatever waits on it: an exit-code gate behind a pending
+            // gate is never evaluated, and cannot arm the watch itself.
+            if member.host == self.host {
+                self.arm_gate_poll(&member.runtime_id);
+            }
             return Ok(());
         }
         if subject.kind == "agent"
@@ -10034,7 +10091,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10116,8 +10173,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
-    /// an incremental pass would have missed this write. Counted, and in tests a failure.
+    /// What an evaluation of `item` that nothing marked and nothing made due did, which an
+    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
+    /// limit it found, which no skipping pass would have woken for.
+    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+        if let Some(due) = due
+            && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
+        {
+            missed.push(format!("due {item} at {due}"));
+        }
+        missed
+    }
+
+    /// An evaluation of `subject` wrote or found an earlier due time although nothing it read
+    /// had changed and nothing was due: an incremental pass would have missed it. Counted by
+    /// cause (`write` or `due`), and in tests a failure.
     fn incremental_correction(
         &self,
         item: &str,
@@ -10125,15 +10197,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         reads: &BTreeSet<String>,
         wrote: &[String],
     ) {
-        crate::performance::record_correction(item);
+        let causes = wrote
+            .iter()
+            .map(|entry| if entry.starts_with("due ") { "due" } else { "write" })
+            .collect::<BTreeSet<_>>();
+        for cause in causes {
+            crate::performance::record_correction(&format!("{item} · {cause}"));
+        }
         smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
-            "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
+            "st3: incremental correction: {subject} missed {wrote:?} with no change among {} reads",
             reads.len()
         );
         assert!(
             !self.strict_incremental,
-            "an incremental pass would have missed a write by {subject}: it wrote {wrote:?}; its reads: {reads:?}"
+            "an incremental pass would have missed a write or due time by {subject}: {wrote:?}; its reads: {reads:?}"
         );
     }
 
@@ -10464,6 +10542,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(view) = views.get(step.spec.path.as_str()).copied() else {
                 continue;
             };
+            // A gate process that exits while its step is evaluated is seen running by the gate
+            // and ended by the liveness check after it, and its answer would be cancelled unread.
+            // A cancelled finally step must have had no live process before its evaluation too.
+            let ended_before_evaluation = run.phase == "final-cancelled"
+                && view.agentless
+                && view.status == "working"
+                && !self.step_has_live_process(&view.subject)?;
             // One step that fails records a fault on that step. The run's other steps and its
             // status are still evaluated.
             let step_changed = self
@@ -10832,6 +10917,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // and declarations. Once it only waits on evidence, cancellation must not hold
             // the mission's active-run slot until the step's execution budget expires.
             if step_changed == Some(false)
+                && ended_before_evaluation
                 && run.phase == "final-cancelled"
                 && view.agentless
                 && view.status == "working"
@@ -11439,12 +11525,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]),
             )?;
         }
-        let timed_out = if let Some(timeout) = loop_spec.timeout_ms {
-            self.loop_first_execution_at(run, view)?
-                .is_some_and(|started| now_ms().saturating_sub(started) >= timeout as u128)
-        } else {
-            false
+        let deadline = match loop_spec.timeout_ms {
+            Some(timeout) => self
+                .loop_first_execution_at(run, view)?
+                .map(|started| started.saturating_add(u128::from(timeout))),
+            None => None,
         };
+        let timed_out = deadline.is_some_and(|deadline| now_ms() >= deadline);
+        // A loop waiting on a blocked child or a person changes nothing a pass would notice
+        // when its timeout passes, so the run is due again then. A deadline already passed is
+        // not noted: the loop ends below, and a due time in the past would make every pass
+        // evaluate the run again while it stays exhausted.
+        if let Some(deadline) = deadline.filter(|_| !timed_out) {
+            smallclaims::touched::note_due(deadline);
+        }
         if timed_out {
             return self.finish_exhausted_loop(
                 run,
@@ -11970,6 +12064,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("loop-metric".into()),
             terminal_size: None,
+            capacity: None,
         };
         self.perform_start(
             &DesiredSubject {
@@ -12008,20 +12103,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(current) = metrics.get(metric_name) else {
             anyhow::bail!("the keep metric has no current value");
         };
+        let metric_of = |claim: &crate::model::ClaimRecord| {
+            claim
+                .body
+                .pointer(&format!("/fields/metrics/{metric_name}"))
+                .and_then(Value::as_f64)
+        };
         let prior = self
             .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .into_iter()
-            .filter(|claim| {
+            .newest_claim_where(loop_subject, "loop.round-result", |claim| {
                 claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("completed")
-            })
-            .filter_map(|claim| {
-                claim
-                    .body
-                    .pointer(&format!("/fields/metrics/{metric_name}"))
-                    .and_then(Value::as_f64)
-            })
-            .next_back();
+                    && metric_of(claim).is_some()
+            })?
+            .as_ref()
+            .and_then(metric_of);
         Ok(prior.is_none_or(|prior| {
             if metric.direction == "higher" {
                 current - prior >= metric.min_improvement
@@ -12034,26 +12129,26 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// The feedback the next round reads: the latest outcome document, which says what the
     /// exit gates answered, else the feedback its last round result recorded.
     fn loop_prior_feedback(&self, loop_subject: &str) -> Result<String> {
+        let outcome_of = |claim: &crate::model::ClaimRecord| {
+            claim
+                .body
+                .pointer("/fields/feedback")
+                .and_then(Value::as_str)
+                .filter(|feedback| loop_outcome_reference(feedback).is_some())
+                .map(str::to_owned)
+        };
         if let Some(outcome) = self
             .store
-            .claims_for(loop_subject, Some("loop.state"))?
-            .iter()
-            .rev()
-            .find_map(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/feedback")
-                    .and_then(Value::as_str)
-                    .filter(|feedback| loop_outcome_reference(feedback).is_some())
-                    .map(str::to_owned)
-            })
+            .newest_claim_where(loop_subject, "loop.state", |claim| outcome_of(claim).is_some())?
+            .as_ref()
+            .and_then(outcome_of)
         {
             return Ok(outcome);
         }
         Ok(self
             .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .last()
+            .latest_claim(loop_subject, Some("loop.round-result"))?
+            .as_ref()
             .and_then(|claim| claim.body.pointer("/fields/feedback"))
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -12266,11 +12361,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         round: u32,
         candidate: Option<u32>,
     ) -> Result<Option<crate::model::ClaimRecord>> {
-        Ok(self
-            .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .into_iter()
-            .find(|claim| {
+        self.store
+            .oldest_claim_where(loop_subject, "loop.round-result", |claim| {
                 claim.body.pointer("/fields/round").and_then(Value::as_u64)
                     == Some(u64::from(round))
                     && claim
@@ -12278,7 +12370,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         .pointer("/fields/candidate")
                         .and_then(Value::as_u64)
                         == candidate.map(u64::from)
-            }))
+            })
     }
 
     fn evaluate_for_each_loop(
@@ -12295,9 +12387,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             .expect("the caller selected a for-each loop");
         let snapshot = self
             .store
-            .claims_for(loop_subject, Some("loop.state"))?
-            .into_iter()
-            .find_map(|claim| claim.body.pointer("/fields/items").cloned());
+            .oldest_claim_where(loop_subject, "loop.state", |claim| {
+                claim.body.pointer("/fields/items").is_some()
+            })?
+            .and_then(|claim| claim.body.pointer("/fields/items").cloned());
         let items = if let Some(Value::Array(items)) = snapshot {
             items
         } else {
@@ -12665,6 +12758,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 active += 1;
             }
         }
+        // Whole history: every result of this round counts, and a round's results need not be
+        // contiguous in canonical order, so no read can stop early here.
         let all_results = self
             .store
             .claims_for(loop_subject, Some("loop.round-result"))?
@@ -13020,23 +13115,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let timed_out = self
             .store
-            .claims_for(&child.subject, Some("mission-run.state"))?
-            .iter()
-            .any(|claim| {
+            .oldest_claim_where(&child.subject, "mission-run.state", |claim| {
                 claim
                     .body
                     .pointer("/fields/reason")
                     .and_then(Value::as_str)
                     .is_some_and(|reason| reason.contains("timeout expired"))
-            });
+            })?
+            .is_some();
         if !timed_out {
             return Ok(false);
         }
         for step in &child.steps {
-            if !self
+            if self
                 .store
-                .claims_for(&step.subject, Some("work.claimed"))?
-                .is_empty()
+                .latest_claim(&step.subject, Some("work.claimed"))?
+                .is_some()
             {
                 return Ok(false);
             }
@@ -13051,6 +13145,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         candidate: Option<u32>,
         item_id: Option<&str>,
     ) -> Result<u32> {
+        // Whole history: the largest dispatch number, which need not be the newest claim's.
         Ok(self
             .store
             .claims_for(loop_subject, Some("loop.round-dispatch"))?
@@ -13195,17 +13290,21 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn repeated_loop_failures(&self, loop_subject: &str) -> Result<u32> {
-        Ok(self
-            .store
-            .claims_for(loop_subject, Some("loop.round-result"))?
-            .iter()
-            .rev()
-            .filter(|claim| claim.body.pointer("/fields/candidate").is_none())
-            .filter(|claim| claim.body.pointer("/fields/item").is_none())
-            .take_while(|claim| {
-                claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("failed")
-            })
-            .count() as u32)
+        // The plain rounds that failed in a row, newest first, up to the first that did not.
+        let mut failed = 0_u32;
+        self.store
+            .claims_in_order(loop_subject, "loop.round-result", true, |claim| {
+                if claim.body.pointer("/fields/candidate").is_some()
+                    || claim.body.pointer("/fields/item").is_some()
+                {
+                    return true;
+                }
+                let failure =
+                    claim.body.pointer("/fields/status").and_then(Value::as_str) == Some("failed");
+                failed += u32::from(failure);
+                failure
+            })?;
+        Ok(failed)
     }
 
     fn mission_run_token_usage(&self, run: &MissionRunView) -> Result<u64> {
@@ -13228,9 +13327,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         loop_subject: &str,
         loop_spec: &LoopSpec,
     ) -> Result<(u64, BTreeMap<String, f64>)> {
-        let claims = self
-            .store
-            .claims_for(loop_subject, Some("loop.round-result"))?;
+        // With a keep metric the best of every completed round counts, so it reads them all.
+        let claims = if loop_spec.keep_metric.is_some() {
+            self.store.claims_for(loop_subject, Some("loop.round-result"))?
+        } else {
+            Vec::new()
+        };
+        let newest_completed;
         let selected = if let Some(metric_name) = &loop_spec.keep_metric {
             let metric = loop_spec
                 .metrics
@@ -13263,14 +13366,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 })
                 .map(|(claim, round, _)| (claim, round))
         } else {
-            claims
-                .iter()
-                .rfind(|claim| {
-                    claim.body.pointer("/fields/candidate").is_none()
-                        && claim.body.pointer("/fields/item").is_none()
-                        && claim.body.pointer("/fields/status").and_then(Value::as_str)
-                            == Some("completed")
-                })
+            newest_completed = self.store.newest_claim_where(loop_subject, "loop.round-result", |claim| {
+                claim.body.pointer("/fields/candidate").is_none()
+                    && claim.body.pointer("/fields/item").is_none()
+                    && claim.body.pointer("/fields/status").and_then(Value::as_str)
+                        == Some("completed")
+            })?;
+            newest_completed
+                .as_ref()
                 .and_then(|claim| {
                     claim
                         .body
@@ -13297,6 +13400,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn loop_stop_reason(&self, loop_subject: &str, loop_spec: &LoopSpec) -> Result<Option<String>> {
+        // Whole history: the token budget sums every round and the plateau folds over them.
         let results = self
             .store
             .claims_for(loop_subject, Some("loop.round-result"))?;
@@ -13362,6 +13466,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // One outcome per round, in order. The reference ends in the document's content
             // hash, so equal hashes mean equal metrics and equal exit gate answers.
             let mut outcomes: Vec<(&str, &str)> = Vec::new();
+            // Whole history: the outcomes fold in order, collapsing repeats.
             let states = self.store.claims_for(loop_subject, Some("loop.state"))?;
             for reference in states.iter().filter_map(|claim| {
                 claim
@@ -14609,16 +14714,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let claimant = self
             .store
-            .claims_for(subject, Some("work.claimed"))?
-            .into_iter()
-            .rev()
-            .find(|claim| {
+            .newest_claim_where(subject, "work.claimed", |claim| {
                 claim
                     .body
                     .pointer("/fields/attempt")
                     .and_then(Value::as_u64)
                     == Some(u64::from(attempt))
-            })
+            })?
             .and_then(|claim| {
                 claim
                     .body
@@ -14705,6 +14807,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.arm_step_deadline(&handle, &view.subject, remaining);
         }
         Ok(false)
+    }
+
+    /// End the asks whose owner ended and resolve the ones whose deadline passed. Nothing else
+    /// writes when an unanswered ask's deadline passes, so arm a wake for the next one.
+    fn reconcile_person_asks(&self) -> Result<bool> {
+        let pass = self.store.reconcile_person_asks_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
     }
 
     /// Wake the reconciler in `remaining` ms for `step`, unless the step already armed a wake at
@@ -14996,6 +15112,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(revision) = self.store.selected_desired_revision(&schedule.subject)? else {
             return Ok(());
         };
+        // Whole history: the largest occurrence reached, which both hosts write and catch-up can
+        // skip, so it need not be the newest claim's.
         let reached = self
             .store
             .claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
@@ -15070,12 +15188,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let scheduled_at = if spec.calendar.is_some() {
             self.store
-                .claims_for(&schedule.subject, Some("schedule.occurrence-scheduled"))?
-                .into_iter()
-                .find(|claim| {
+                .oldest_claim_where(&schedule.subject, "schedule.occurrence-scheduled", |claim| {
                     claim.body["fields"]["revision"].as_str() == Some(revision.as_str())
                         && claim.body["fields"]["occurrence"].as_u64() == Some(occurrence)
-                })
+                })?
                 .map(|claim| -> Result<i64> {
                     Ok(claim.body["fields"]["scheduled_at_unix_ms"]
                         .as_str()
@@ -15244,6 +15360,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 };
                 let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
+                // Whole history: the largest occurrence reached, as in reconcile_schedule.
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
                     .filter_map(|claim| claim.body["fields"]["occurrence"].as_u64()).max());
@@ -15483,6 +15600,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     self.fail_schedule_work(schedule, &request.id, "standby-role-changed", "the standby schedule revision changed before work started")?;
                     continue;
                 }
+                // Whole history: it compares occurrence values from both hosts, which order does not bound.
                 let history = self.store.claims_for(&schedule.subject, Some("schedule.occurrence-reached"))?;
                 let other_reached = history.iter().any(|claim| claim.origin != self.host
                     && claim.body["fields"]["occurrence"].as_u64().is_some_and(|known| known >= occurrence));
@@ -15766,6 +15884,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 == Some(true)
         };
         let released = if requests.iter().any(is_held) {
+            // Whole history: any held request may have been released at any time.
             self.store
                 .claims_for(&item.subject, Some("subscription.mission-request-released"))?
                 .into_iter()
@@ -16001,19 +16120,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         spec: &SubscriptionSpec,
         every_ms: u64,
     ) -> Result<()> {
-        let batches = self
+        let last = self
             .store
-            .claims_for(&item.subject, Some("subscription.batched"))?;
-        let sent = self
-            .store
-            .claims_for(&item.subject, Some("subscription.batch-sent"))?;
-        let last = sent.last();
-        let after = last
+            .latest_claim(&item.subject, Some("subscription.batch-sent"))?;
+        let last = last.as_ref();
+        let through = last
             .and_then(|claim| claim.body.pointer("/fields/through"))
-            .and_then(Value::as_str)
-            .and_then(|through| batches.iter().position(|claim| claim.id == through))
-            .map_or(0, |position| position + 1);
-        let pending = &batches[after.min(batches.len())..];
+            .and_then(Value::as_str);
+        // The batches after the last one sent, read back from the newest only as far as that one.
+        // When it is not found, every batch is pending, as when nothing was sent.
+        let mut pending = Vec::new();
+        self.store
+            .claims_in_order(&item.subject, "subscription.batched", true, |claim| {
+                if Some(claim.id.as_str()) == through {
+                    return false;
+                }
+                pending.push(claim.clone());
+                true
+            })?;
+        pending.reverse();
+        let pending = pending.as_slice();
         let mut deadlines = self
             .batch_deadlines
             .lock()
@@ -16905,11 +17031,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 format!(
                                     "{operation}:{reason}:{retry_at}:{}",
                                     store
-                                        .claims_for(&observer_subject, Some("observer.state"))
+                                        .newest_claim_where(&observer_subject, "observer.state", |claim| {
+                                            claim.body["fields"]["state"] == "healthy"
+                                        })
                                         .unwrap_or_default()
-                                        .into_iter()
-                                        .rev()
-                                        .find(|claim| claim.body["fields"]["state"] == "healthy")
                                         .map_or_else(|| "first".into(), |claim| claim.id)
                                 )
                                 .as_bytes(),
@@ -17471,6 +17596,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("mechanical-gate".into()),
             terminal_size: None,
+            capacity: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -17698,10 +17824,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         Ok(self
             .store
-            .claims_for(subject, Some("runtime.observed"))?
-            .into_iter()
-            .rev()
-            .find(|claim| claim.actor.as_deref() == Some(subject))
+            .newest_claim_where(subject, "runtime.observed", |claim| claim.actor.as_deref() == Some(subject))?
             .and_then(|claim| {
                 claim
                     .body
@@ -17833,13 +17956,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 });
             }
             // A runner that posted its verdict but never exits still has the gate's time limit.
-            let timed_out = self
+            let time_limit_at = self
                 .store
                 .latest_claim(&result_subject, Some("gate.requested"))?
-                .is_some_and(|requested| {
-                    now_ms().saturating_sub(requested.accepted_at_unix_ms)
-                        >= u128::from(time_limit_ms)
+                .map(|requested| {
+                    requested.accepted_at_unix_ms.saturating_add(u128::from(time_limit_ms))
                 });
+            let timed_out = time_limit_at.is_some_and(|at| now_ms() >= at);
             smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
             match self.runtime.observe_exec(&runtime_id)? {
                 Some(observation) if observation.status == "running" && !timed_out => {
@@ -17855,6 +17978,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Ok(GateOutcome::Pending);
                 }
                 Some(observation) if observation.status == "indeterminate" && !timed_out => {
+                    // Nothing marks the gate while the runner's status stays unknown, so it is
+                    // due again when its time limit passes.
+                    if let Some(at) = time_limit_at {
+                        smallclaims::touched::note_due(at);
+                    }
                     return Ok(GateOutcome::Pending);
                 }
                 _ => {}
@@ -18020,6 +18148,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("llm-gate".into()),
             terminal_size: None,
+            capacity: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -19003,10 +19132,8 @@ pub fn append_fault_message(
 
 fn message_sent_at(store: &Store, message: &MessageView) -> Option<u128> {
     store
-        .claims_for(&message.subject, Some("message.sent"))
+        .oldest_claim_where(&message.subject, "message.sent", |_| true)
         .ok()?
-        .into_iter()
-        .next()
         .map(|claim| claim.accepted_at_unix_ms)
 }
 
@@ -19808,6 +19935,21 @@ pub mod tests {
     }
 
     #[test]
+    fn only_a_capacity_declaration_selects_a_lane() {
+        use fractal_runtime::{CAPACITY_ENV, Capacity};
+        let authored = |key: &str| BTreeMap::from([(key.to_string(), "cores=64,memory=68719476736".to_string())]);
+        for key in [CAPACITY_ENV, "ST_SEAT_CAPACITY", "ST3_SEAT_CAPACITY"] {
+            let mut environment = authored(key);
+            super::set_lane(&mut environment, None);
+            assert!(environment.is_empty(), "{key} selected a lane without a declaration");
+        }
+        let declared = Capacity { cores: 2, memory: 4 << 30 };
+        let mut environment = authored("ST_SEAT_CAPACITY");
+        super::set_lane(&mut environment, Some(declared));
+        assert_eq!(environment, BTreeMap::from([(CAPACITY_ENV.to_string(), declared.to_string())]));
+    }
+
+    #[test]
     fn a_terminal_a_person_opened_stays_at_normal_priority() {
         use super::overlay_runtime_environment;
         use fractal_runtime::PRIORITY_ENV;
@@ -19834,9 +19976,11 @@ pub mod tests {
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
+    mod final_cancel_gate_exit;
     mod gate_on_demand;
     mod github_watch_selection;
     mod helper_launcher;
+    mod bounded_loop_reads;
     mod incremental_deadlines;
     #[cfg(test)]
     mod schedule_standby_parent;
@@ -20243,11 +20387,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(observed_pty_status(&observation), "running");
     }
 
+    /// The exec a hook waits for, and what happens right after that exec is next observed.
+    type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Runs once, right after the named exec is next observed: its process ends just then.
+        after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         logs: Mutex<HashMap<String, String>>,
@@ -20270,6 +20419,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         /// How many keys `send_key_if` takes before it fails, when set.
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
+        lanes_ended: Mutex<Vec<String>>,
     }
 
     #[test]
@@ -20490,7 +20640,19 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 !self.failed_observes.lock().unwrap().contains(runtime_id),
                 "fake observe failed"
             );
-            Ok(self.execs.lock().unwrap().get(runtime_id).cloned())
+            let observed = self.execs.lock().unwrap().get(runtime_id).cloned();
+            let after = {
+                let mut after = self.after_observe_exec.lock().unwrap();
+                if after.as_ref().is_some_and(|(id, _)| id == runtime_id) {
+                    after.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, after)) = after {
+                after();
+            }
+            Ok(observed)
         }
         fn start(&self, member: &MemberSpec) -> Result<()> {
             self.starts.lock().unwrap().push(member.runtime_id.clone());
@@ -20577,6 +20739,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 .lock()
                 .unwrap()
                 .push((runtime_id.into(), terminal));
+        }
+        fn end_lane(&self, runtime_id: &str) {
+            self.lanes_ended.lock().unwrap().push(runtime_id.into());
         }
     }
 
@@ -21222,6 +21387,109 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             reconciler.evaluate_gate(&stage, &gate).unwrap(),
             GateOutcome::Fail(_)
         ));
+    }
+
+    /// The same late process exit, reached through a working step whose first gate is still
+    /// pending: the step never evaluates its exit-code gate, so the wake cannot come from it.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_process_exit_wakes_a_step_whose_exit_code_gate_waits_behind_a_pending_gate() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "orchid/replay" state="ready" {
+  goal "Explain an impossible predicate behind a pending gate."
+  step "prepare" {
+    agentless
+    exec "prepare" { host "node"; workspace "/tmp"; command "exit 2"; restart "never" }
+    gate "an external result exists" { exists "resource/orchid/result" }
+    gate "prepared" { field "exit_code" "exec/${ST_MISSION_RUN}/prepare" is 0 }
+  }
+}
+"#,
+            "late-exit-behind-pending-gate",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "orchid/replay".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "late-exit-behind-pending-gate-run".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let notify = Arc::new(Notify::new());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), notify.clone());
+        let subject = format!("exec/{}/prepare", run.id);
+        let started = || {
+            store
+                .observations_for(&subject, "runtime.action.succeeded")
+                .unwrap()
+                .into_iter()
+                .find(|claim| claim.body["fields"]["action"] == "start")
+        };
+        // The first passes claim the step and declare its exec; a later one starts it.
+        for _ in 0..4 {
+            if started().is_some() {
+                break;
+            }
+            reconciler.reconcile_once().unwrap();
+        }
+        let incarnation = started()
+            .unwrap_or_else(|| panic!("{subject} was not started: {:?}", store.desired_subjects().unwrap().iter().map(|desired| &desired.subject).collect::<Vec<_>>()))
+            .body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
+        let desired = store.desired_subject_with_writer(&subject).unwrap().unwrap().0;
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let running = RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: false,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation),
+        };
+        runtime.execs.lock().unwrap().insert(runtime_id.clone(), running.clone());
+        reconciler.reconcile_once().unwrap();
+        // The driver reports its child's exit while its own process still runs.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(2)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let stuck = || {
+            let view = store.mission_run(&run.subject).unwrap().unwrap();
+            let missions = store.mission_specs_for_runs(std::slice::from_ref(&run.subject)).unwrap();
+            stuck_field_gates(&store, &view, &missions[&run.subject]).unwrap()
+        };
+        assert_eq!(store.step_run(&run.steps[0].subject).unwrap().unwrap().status, "working");
+        assert!(stuck().is_empty(), "the wrapper's receipt alone proves no exit of this launch");
+        // Consume prior writes' wake, then exit with no new graph claim.
+        notify.notified().await;
+        runtime.execs.lock().unwrap().insert(
+            runtime_id,
+            RuntimeObservation { status: "exited".into(), exit_code: Some(2), ..running },
+        );
+        tokio::time::timeout(Duration::from_secs(11), notify.notified())
+            .await
+            .expect("the late process exit must wake a pass although the exit-code gate is not evaluated");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(stuck().len(), 1, "the exit of this launch makes the exit-code gate impossible");
     }
 
     /// An exec started by a pass, observed running as `incarnation`, whose `st3 driver exec`
@@ -21895,22 +22163,37 @@ version 2
         let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
             Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
         ));
+        let before = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
         let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
         observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
         // What a write through the API does after it commits.
         reconciler.event_notify.send_modify(|generation| *generation += 1);
-        let ready = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let step = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
-                if step.status == "ready" {
-                    return step;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // The step is agentless, so the follower's next evaluation admits it and completes it:
+        // `ready` can be gone before any read of the run. Its state history keeps it, and the
+        // follower wakes the pass after every evaluation that wrote, after that write.
+        let readied = || {
+            store
+                .claims_page(Some(&before.subject), None, 0, None, false, 500)
+                .unwrap()
+                .claims
+                .into_iter()
+                .find(|claim| {
+                    claim.kind == "step-run.state"
+                        && claim.body.pointer("/fields/status").and_then(Value::as_str)
+                            == Some("ready")
+                })
+        };
+        let ready = loop {
+            if let Some(ready) = readied() {
+                break ready;
             }
-        })
-        .await
-        .expect("the step is ready without a pass");
-        assert_eq!(ready.blocked_reason, None);
+            reconciler.notify.notified().await;
+        };
+        assert_eq!(ready.body.pointer("/fields/reason"), Some(&Value::Null));
+        assert_eq!(
+            ready.body.pointer("/fields/readiness_epoch"),
+            Some(&Value::from(before.readiness_epoch + 1))
+        );
         follower.abort();
     }
 
@@ -28046,6 +28329,86 @@ mission "proof" state="ready" {{
     }
 
     #[test]
+    fn an_llm_gate_with_an_indeterminate_runner_is_due_at_its_time_limit() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"
+            version 2
+
+              mission "proof" state="ready" {
+                goal "Complete mission proof."
+                step "review" {
+                  title "A held-out gate accepts the result"
+                  gate "review" type="llm" {
+                    model "claude-sonnet"
+                    host "node"
+                    workspace "."
+                    tools "shell"
+                    token-budget 10
+                    time-limit "1h"
+                    prompt "Inspect the result."
+                  }
+                }
+              }
+
+        "#;
+        apply_source(&store, source, "mission-llm-indeterminate");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "proof".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-llm-indeterminate".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_once().unwrap();
+        let (runtime_id, result_subject) = {
+            let members = runtime.started_members.lock().unwrap();
+            let gate = members
+                .iter()
+                .find(|member| member.driver.as_deref() == Some("llm-gate"))
+                .unwrap();
+            (
+                gate.runtime_id.clone(),
+                gate.environment["ST_GATE_SUBJECT"].clone(),
+            )
+        };
+        // The runner's status can't be read. Nothing marks the gate while that lasts, so the
+        // run must be due again when the gate's time limit passes.
+        runtime.execs.lock().unwrap().insert(
+            runtime_id.clone(),
+            RuntimeObservation {
+                runtime_id: runtime_id.clone(),
+                terminal: false,
+                status: "indeterminate".into(),
+                exit_code: None,
+                incarnation_id: Some("gate-run".into()),
+            },
+        );
+        reconciler.reconcile_once().unwrap();
+        let requested = store
+            .latest_claim(&result_subject, Some("gate.requested"))
+            .unwrap()
+            .unwrap()
+            .accepted_at_unix_ms;
+        assert_eq!(
+            reconciler.incremental.next_due(&run.subject),
+            Some(requested + 3_600_000),
+            "the run is due when the gate's time limit passes"
+        );
+    }
+
+    #[test]
     fn adopts_a_matching_pty_without_a_start() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let intent =
@@ -28129,6 +28492,8 @@ mission "proof" state="ready" {{
                 expected_starts,
                 "{name}"
             );
+            // An exit of a live declaration, relaunched or not, keeps the seat's lane and its jobs.
+            assert!(runtime.lanes_ended.lock().unwrap().is_empty(), "{name}");
         }
     }
 
@@ -28743,7 +29108,13 @@ agent "worker" {
             .selected_desired_token("agent/node.worker")
             .unwrap()
             .unwrap();
-        let attention = store.fault_items(Some("person/alex")).unwrap();
+        // The parked seat's fault goes to its owner; find it by the seat.
+        let attention = store
+            .fault_items(None)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "agent/node.worker")
+            .collect::<Vec<_>>();
         assert_eq!(attention.len(), 1);
         assert_eq!(attention[0].subject, "agent/node.worker");
         assert!(
@@ -29493,6 +29864,8 @@ agent "worker" {
             &*runtime.leftovers.lock().unwrap(),
             &[("node.worker".to_owned(), true)]
         );
+        // Stopped for good: its lane ends too.
+        assert_eq!(&*runtime.lanes_ended.lock().unwrap(), &["node.worker".to_owned()]);
         assert_eq!(
             actual_field(
                 &store
@@ -29565,6 +29938,18 @@ mission "scheduled-cycle" state="ready" {
             .unwrap()
             .unwrap()
             .revision
+    }
+
+    /// Waits until every schedule timer the reconciler armed has run; only for a test whose armed
+    /// occurrences are already due. Each timer removes its operation from `armed_schedules` and
+    /// then signals the reconciler's events, so this waits on that signal. A fixed pause does not
+    /// order the two: on a loaded host the test's own timer can expire in the same tick as the
+    /// schedule's and be polled first.
+    async fn finish_armed_schedules<R>(reconciler: &Reconciler<R>) {
+        let mut events = reconciler.event_notify.subscribe();
+        while !reconciler.armed_schedules.lock().unwrap_or_else(PoisonError::into_inner).is_empty() {
+            events.changed().await.unwrap();
+        }
     }
     #[test]
     fn scheduled_start_contention_waits_without_durable_failure_then_starts() {
@@ -30002,7 +30387,7 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         let key = reached[0].body["fields"]["occurrence"].as_u64().unwrap();
@@ -30054,7 +30439,7 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         assert_eq!(reached[0].body["fields"]["occurrence"], key);
@@ -30896,7 +31281,19 @@ schedule "{name}" {{
             tokio::task::yield_now().await;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
-        reconciler.reconcile_once().unwrap();
+        // On a loaded host several passes can arm due occurrences before any timer runs, and the
+        // last await reaches them all. One scheduled run is active at a time, so the later
+        // requests wait for the earlier runs to end. This runtime has one thread, so with no
+        // further await no timer reaches another occurrence; drive passes until they have started.
+        let mut passes = 0;
+        loop {
+            reconciler.reconcile_once().unwrap();
+            passes += 1;
+            if store.pending_schedule_work_requests("schedule/cycle").unwrap().is_empty() {
+                break;
+            }
+            assert!(passes < 20, "the schedule's requests did not start after {passes} passes");
+        }
 
         let reached = store
             .claims_for("schedule/cycle", Some("schedule.occurrence-reached"))
@@ -31065,7 +31462,7 @@ schedule "{name}" {{
         );
 
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
 
         let reached = store
             .claims_for("schedule/cycle", Some("schedule.occurrence-reached"))
@@ -32912,6 +33309,86 @@ mission "untimed-clock" state="ready" {
     }
 
     #[test]
+    fn a_timed_loop_is_due_again_when_its_timeout_passes() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        const START: u128 = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(START));
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.set_write_clock_at(START).unwrap();
+        // The round waits on a document nobody writes, so nothing marks the run again before
+        // the loop's hour is up.
+        let source = r#"version 2
+mission "timed-clock" state="ready" {
+  goal "Stop the loop when its hour is up, though nothing else changes."
+  loop "improve" timeout="1h" {
+    max-rounds 2
+    round {
+      completion { when "all-steps-exhausted" }
+      step "work" { agentless; gate "wait" { document "doc/invented-never" } }
+    }
+  }
+}
+"#;
+        apply_source(&store, source, "timed-clock-source");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "timed-clock".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "timed-clock-run".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..6 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let run = store.mission_run(&run.id).unwrap().unwrap();
+        let mission = store
+            .mission_spec("timed-clock", Some(&run.revision))
+            .unwrap()
+            .unwrap();
+        let steps = flatten_mission_steps(&mission);
+        let (step, view) = (&steps[0], &run.steps[0]);
+        let loop_spec = step.spec.loop_spec.as_ref().unwrap();
+        let started = store
+            .loop_first_execution_at(&run.root_mission_run, &view.subject)
+            .unwrap()
+            .expect("the first round has started");
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert_eq!(due, Some(started + 3_600_000), "the loop is due when its timeout passes");
+        // Once the timeout has passed the loop ends, and notes no due time in the past.
+        smallclaims::store::set_thread_clock(Some(started + 3_600_000));
+        store.set_write_clock_at(started + 3_600_000).unwrap();
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert!(
+            due.is_none_or(|due| due > started + 3_600_000),
+            "a passed loop timeout is not a due time: {due:?}"
+        );
+    }
+
+    #[test]
     fn an_unclaimed_timed_out_round_is_redispatched_without_spending_a_round() {
         struct TestClock;
         impl Drop for TestClock {
@@ -33922,6 +34399,71 @@ agent "node.parked" { workspace "/tmp"; command "true" }
             "{}",
             after.item.detail
         );
+    }
+
+    /// A seat an agent declared outside any run answers to that agent, not to the fleet's fault
+    /// agent: the agent that made the seat is the one that can fix its launch.
+    #[test]
+    fn a_parked_seat_an_agent_declared_raises_its_fault_to_that_agent() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+agent "node.ops" { workspace "/tmp"; command "true"; handles-faults }
+agent "node.lead" { workspace "/tmp"; command "true" }
+"#,
+            "fault-agent-and-lead",
+        );
+        let source = "version 2\nagent \"node.built\" { workspace \"/tmp\"; command \"true\" }";
+        let intent = parse_intent(source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(
+                &intent,
+                &mission.subject_tokens,
+                "agent-declared",
+                Some("agent/node.lead"),
+            )
+            .unwrap();
+        let parked = "agent/node.built";
+        let token = store.selected_desired_token(parked).unwrap().unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: parked.into(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("decision".into(), Value::String("raise".into())),
+                    (
+                        "key".into(),
+                        Value::String(format!("runtime-crash-loop:{token}")),
+                    ),
+                    (
+                        "reason".into(),
+                        Value::String("the runtime failed three times in a row".into()),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("parked-decision".into()),
+            })
+            .unwrap();
+        let fault = store
+            .fault_snapshot(now_ms())
+            .unwrap()
+            .into_iter()
+            .find(|fault| fault.item.subject == parked)
+            .expect("a parked seat is not a fault");
+        assert_eq!(fault.owner.as_deref(), Some("agent/node.lead"));
     }
     /// A person's now holds only requests and reviews. A message stays in conversations, and
     /// each fault, on a live run or a terminal one, goes once to the agent that owns it.
@@ -38100,6 +38642,49 @@ mission "review" state="ready" {
   step "review" { agentless }
 }"#;
 
+    /// The host that starts a requested mission reads the request's discovery when the request
+    /// arrives, so an observation seals a request in the batch that holds its discovery, and the
+    /// two reach every member in one envelope.
+    #[test]
+    fn a_mission_request_travels_in_the_batch_of_its_discovery() {
+        let store = Store::open_memory("node").unwrap();
+        apply_source(&store, REDELIVERY_REVIEW_SOURCE, "review-mission");
+        let revision = store.mission_spec("review", None).unwrap().unwrap().revision;
+        let source = format!(
+            r#"version 2
+resource "repo" {{ kind "vcs.repository" }}
+observer "repo" {{ resource "resource/repo"; provider "github.repository"; locator "example/repo"; field "pull_requests" }}
+subscription "reviews" {{
+  observer "observer/repo"
+  on "pull_requests"
+  delivery "mission" {{ mission "review@{revision}"; resource "source"; workspace "/srv/reviews" }}
+}}"#
+        );
+        apply_source(&store, &source, "watch");
+        let observer_revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let subscriptions = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "subscription/reviews")
+            .map(|item| (item.subject, crate::graph::subscription_spec(&item.desired).unwrap()))
+            .collect::<Vec<_>>();
+        for pulls in [serde_json::json!([]), serde_json::json!([{"number": 4, "head": "a".repeat(40), "state": "open", "draft": false}])] {
+            store
+                .record_resource_observation("observer/repo", &observer_revision, None, "resource/repo", None,
+                    &serde_json::json!({"repository_id": 17, "pull_requests": pulls}), now_ms() + 60_000, &subscriptions, None)
+                .unwrap();
+        }
+        let request = store
+            .claims_for("subscription/reviews", Some("subscription.mission-requested"))
+            .unwrap()
+            .remove(0);
+        let discovery = request.body["fields"]["discovery"].as_str().unwrap();
+        let discovered = store.claim_by_id(discovery).unwrap().unwrap();
+        assert_eq!(discovered.kind, "resource.observed");
+        assert_eq!(request.batch_id, discovered.batch_id);
+    }
+
     #[test]
     fn replacement_intake_does_not_request_an_already_delivered_head() {
         let store = Store::open_memory("node").unwrap();
@@ -39994,6 +40579,9 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
 
         // Member A: the first poll records the baseline, which wakes nobody.
         let (issues, comments) = since("2026-09-09T23:59:59Z");
+        // Resuming from the claim's bare position, a poll also reads the open listing once.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&issues, serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&comments, serde_json::json!([]));
         let member_a = Arc::new(github_plugin_store::GithubPluginStore::memory());
@@ -40007,8 +40595,8 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let before = vec![delivery("comments", "open", 91), delivery("issues", "open", 91)];
         assert_eq!(delivered(), before);
 
-        // In the gap the issue closes and a second comment lands. Nothing reads the open listing
-        // any more, so it would not show the closure.
+        // In the gap the issue closes and a second comment lands. The open listing no longer
+        // names it, so only reading on from the claim's position shows the closure.
         let (issues, comments) = since("2026-09-10T23:59:59Z");
         github.route("/repos/acme/garden/issues?state=open&per_page=100", serde_json::json!([]));
         github.route(&issues, serde_json::json!([issue("closed", "2026-09-12T00:00:00Z", 2)]));
@@ -42935,9 +43523,17 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert!(alert.detail.starts_with("Claude asks you to approve its plan;"));
         reconciler.reconcile_once().unwrap();
         assert!(runtime.keys.lock().unwrap().is_empty(), "nobody approved it yet");
+        let plan_alert = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
         store
             .answer_native_prompt("agent/node.seat", &asked.id, "approve", "person/avery")
             .unwrap();
+        assert!(plan_alert().is_none(), "an approved plan is no longer an alert");
         // The dialog is not on screen yet: nothing is typed into whatever is.
         reconciler.reconcile_once().unwrap();
         assert!(runtime.keys.lock().unwrap().is_empty());
@@ -42946,6 +43542,30 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
         assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["return"]);
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.keys.lock().unwrap().len(), 1, "approved once");
+
+        // A later plan answered in the terminal clears once Claude says it is no longer blocked.
+        let observe = |fields: serde_json::Value| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.seat".into(),
+                    kind: "harness.observed".into(),
+                    actor: Some("agent/node.seat".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap()
+        };
+        observe(serde_json::json!({
+            "state": "working", "driver": "claude", "incarnation_id": "one",
+            "blocked_on": "human", "ask": "permission", "reason": "ExitPlanMode",
+            "ownership_sequence": 1, "transition_sequence": 5}));
+        assert!(plan_alert().is_some(), "a later plan is its own alert");
+        observe(serde_json::json!({
+            "state": "working", "driver": "claude", "incarnation_id": "one",
+            "blocked_on": null, "ask": null, "ownership_sequence": 1, "transition_sequence": 6}));
+        assert!(plan_alert().is_none(), "a plan answered in the terminal clears");
     }
 
     #[test]
@@ -43430,6 +44050,99 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             "Claude keeps stopping at its workspace trust prompt"
         );
         assert_eq!(attention[0].targets, ["agent/node.seat"]);
+        // Nothing changes while the seat sits at the dialog, so the member is due again when
+        // the oldest prompt that holds recovery back leaves the window.
+        let mut prompts = reconciler
+            .claude_trust_prompts("agent/node.seat")
+            .unwrap()
+            .iter()
+            .map(|claim| claim.accepted_at_unix_ms)
+            .collect::<Vec<_>>();
+        prompts.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            reconciler.incremental.next_due("member:agent/node.seat"),
+            Some(prompts[CLAUDE_TRUST_RECOVERY_ATTEMPTS] + CLAUDE_TRUST_RECOVERY_WINDOW_MS)
+        );
+    }
+
+    /// Once st has given up replacing a seat stuck at Claude's workspace trust prompt, the prompt
+    /// is its person's alert: it clears when it is answered in the terminal, and an answer from a
+    /// client is pressed into the dialog with its own keys, once.
+    #[test]
+    fn a_trust_prompt_st_gave_up_recovering_is_its_persons_alert_answered_with_its_keys() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let source = format!(
+            "version 2\nagent \"seat\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            workspace.path().display().to_string()
+        );
+        let intent = parse_intent(&source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.clone(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(&intent, &mission.subject_tokens, "trust-alert", Some("person/avery"))
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        *runtime.screen.lock().unwrap() = CLAUDE_TRUST_SCREEN.into();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let alert = || {
+            store
+                .attention_items(Some("person/avery"))
+                .unwrap()
+                .into_iter()
+                .find(|item| item.kind == "harness-prompt")
+        };
+
+        for attempt in 1..=CLAUDE_TRUST_RECOVERY_ATTEMPTS + 1 {
+            let incarnation = format!("seat-{attempt}");
+            *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("seat", "running", &incarnation)];
+            reconciler.reconcile_once().unwrap();
+            if attempt <= CLAUDE_TRUST_RECOVERY_ATTEMPTS {
+                assert!(alert().is_none(), "st recovers it first: attempt {attempt}");
+                *runtime.ptys.lock().unwrap() =
+                    vec![claude_seat_pty("seat", "exited", &incarnation)];
+                reconciler.reconcile_once().unwrap();
+            }
+        }
+        reconciler.reconcile_once().unwrap();
+        let cwd = runtime.started_members.lock().unwrap()[0].cwd.clone();
+        let shown = alert().expect("once recovery gives up, the trust prompt is an alert");
+        assert_eq!(shown.answers, vec!["trust", "exit"]);
+        assert!(shown.detail.contains(&cwd), "it names the folder: {}", shown.detail);
+
+        // Answered in the terminal: Claude moves on and the alert clears.
+        *runtime.screen.lock().unwrap() = "Claude is working".into();
+        reconciler.reconcile_once().unwrap();
+        assert!(alert().is_none(), "an answer in the terminal clears it");
+
+        // Shown again and answered from a client: pressed into the dialog once.
+        *runtime.screen.lock().unwrap() = CLAUDE_TRUST_SCREEN.into();
+        reconciler.reconcile_once().unwrap();
+        let again = alert().expect("a later trust prompt is its own alert");
+        assert_ne!(again.episode, shown.episode);
+        assert!(runtime.keys.lock().unwrap().is_empty(), "nobody answered yet");
+        store
+            .answer_native_prompt("agent/node.seat", &again.episode, "trust", "person/avery")
+            .unwrap();
+        assert!(alert().is_none(), "an answered prompt is no longer an alert");
+        reconciler.reconcile_once().unwrap();
+        // From "No, exit" (selected) down to "Yes, I trust this folder", then Return.
+        assert_eq!(runtime.keys.lock().unwrap().as_slice(), ["down", "return"]);
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(runtime.keys.lock().unwrap().len(), 2, "pressed once");
     }
 
     fn harness_claim(subject: &str, state: &str, incarnation: &str) -> ClaimInput {
@@ -44464,6 +45177,15 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .selected_desired_token("agent/node.worker")
             .unwrap()
             .unwrap();
+        // The parked seat's fault goes to its owner, whoever that is; find it by the seat.
+        let parked_faults = |store: &Store| {
+            store
+                .fault_items(None)
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.subject == "agent/node.worker" && item.title.starts_with("A Codex agent stopped"))
+                .count()
+        };
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -44482,7 +45204,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .codex_crash_loop_raised("agent/node.worker", &token_a)
                 .unwrap()
         );
-        assert_eq!(store.fault_items(Some("person/alex")).unwrap().len(), 1);
+        assert_eq!(parked_faults(&store), 1);
 
         // A person revises the declaration, and the new revision's incarnation becomes ready.
         apply_source(&store, &source("gpt-5.6-sol"), "crash-loop-b");
@@ -44507,12 +45229,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             )
             .unwrap();
 
-        assert!(
-            store
-                .fault_items(Some("person/alex"))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(parked_faults(&store), 0);
     }
 
     #[test]
@@ -45510,6 +46227,8 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Repair simulator components".into(),
@@ -46144,6 +46863,93 @@ agent "worker" { workspace "/tmp"; command "true"; restart "never" }
                 .unwrap()
                 .is_some(),
             "the stale retry must be durably consumed"
+        );
+    }
+
+    /// A 429 the harness stopped retrying is backed off and resumed in the same session, as the
+    /// model at capacity is; a seat that has since moved on is not resumed again.
+    #[test]
+    fn a_due_rate_limit_retry_resumes_the_same_session_until_the_seat_recovers() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+agent "worker" { workspace "/tmp"; command "true"; restart "never" }
+"#,
+            "rate-limit-worker",
+        );
+        let append = |kind: &str, fields: Value, key: &str| {
+            store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.worker".into(),
+                    kind: kind.into(),
+                    actor: Some("agent/node.worker".into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap()
+        };
+        let diagnostic = |attempt: u64, key: &str| {
+            append(
+                "harness.diagnostic",
+                serde_json::json!({"severity": "warning", "status": "waiting",
+                    "code": "provider-capacity",
+                    "reason": "the provider answered 429 Too Many Requests",
+                    "incarnation_id": "worker-one", "retry_attempt": attempt,
+                    "retry_after_unix_ms": 0}),
+                key,
+            )
+        };
+        append(
+            "runtime.observed",
+            serde_json::json!({"status": "running", "runtime_id": "worker", "incarnation_id": "worker-one"}),
+            "rate-limit-runtime",
+        );
+        append(
+            "harness.observed",
+            serde_json::json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-one", "reason": "rateLimited"}),
+            "rate-limited-harness",
+        );
+        let first = diagnostic(1, "rate-limit-diagnostic-1");
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let desired = store.desired_subjects().unwrap();
+        reconciler
+            .reconcile_provider_capacity_retries(&desired)
+            .unwrap();
+        let messages = store.messages(Some("agent/node.worker"), true).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0].content.contains("429 Too Many Requests")
+                && messages[0].content.contains("existing session"),
+            "{}",
+            messages[0].content
+        );
+        assert!(messages[0].tags.contains(&format!("diagnostic-claim:{}", first.id)));
+
+        // The resumed turn went through: a later due retry for this incarnation is not sent.
+        append(
+            "harness.observed",
+            serde_json::json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-one", "reason": null}),
+            "recovered-harness",
+        );
+        let later = diagnostic(2, "rate-limit-diagnostic-2");
+        reconciler
+            .reconcile_provider_capacity_retries(&desired)
+            .unwrap();
+        assert_eq!(store.messages(Some("agent/node.worker"), true).unwrap().len(), 1);
+        assert!(
+            store
+                .operation_claim(&provider_capacity_retry_key(&later.id))
+                .unwrap()
+                .is_some(),
+            "the retry a recovered seat no longer needs is durably consumed"
         );
     }
 

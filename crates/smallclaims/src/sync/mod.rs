@@ -54,6 +54,8 @@ pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 /// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
 /// in. Older builds neither serve nor call it.
 pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
+/// Where a member asks another for its answers per claim kind; see `crate::answers`.
+pub const ANSWERS_PATH: &str = "/v1/peer/answers";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
 pub const MAX_JOIN_BYTES: usize = 4096;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.

@@ -211,8 +211,8 @@ const PromptAlert = ({
       )}
       {prompt !== null && gated !== undefined && !offered.includes(gated) ? (
         <div {...stylex.props(styles.note)}>
-          {shown.length > 1
-            ? `${shown.length} calls are waiting and the prompt does not say which one it asks about: answer it in the seat's terminal.`
+          {prompt.call_id == null
+            ? 'Fractal does not say which call this asks about: answer it in the seat\'s terminal.'
             : 'What it would let through is not in the conversation yet: answer it in the seat\'s terminal.'}
         </div>
       ) : null}

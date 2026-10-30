@@ -264,11 +264,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             // Drop admission before waking the planner: a completion can admit queued work.
             drop(_lock);
-            live.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
-            live.1.notify_all();
             incremental.touch(&format!("local-runtime-start:{subject}"));
             incremental.touch(&subject);
             signal_changed(&notify, &events);
+            // Leave `live` only once the completion is marked and its wake sent, so whoever waits
+            // for this start sees that wake before it goes on, never after.
+            live.0.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+            live.1.notify_all();
         }));
         if let Err(error) = spawned {
             self.start_jobs

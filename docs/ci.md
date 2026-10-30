@@ -163,6 +163,13 @@ the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 - `conversation-model`: tests `fractal-conversation-ui` without default features
   and verifies that its normal dependencies do not include `ratatui`.
 
+The normal Rust test suite separately covers the deployed PTY writer contract in
+`deployed_pty_0_13_0_record_without_boot_id_binds_mailbox`. It calls the production
+mailbox bind handler with a pinned PTY 0.13.0 (`063ff7f`) metadata fixture without
+`daemonBootId` and a matching live process start token. The previous-release
+fleet test uses a stub PTY and covers replication; the metadata fixture covers
+native channel admission even when the devShell PTY advances.
+
 The workflow verifies that its configured partition inventories are disjoint and
 cover the complete selected suite. The generated `fleet.yml` declares the
 partitions and which shards apply to PRs and merge groups. `linux-gate` requires
@@ -219,11 +226,16 @@ remains available for a full run. Release and deployment workflows keep their ow
 Each stage restores a job-keyed `actions/cache` entry (Namespace serves it from its accelerated
 backend) holding Cargo's registry and the workspace `target/` directory, keyed on `Cargo.lock` and
 `flake.lock`, workspace manifests and linker configuration. A second keyed entry (`nix5-<job>-...`) holds a signed local Nix binary cache in
-`$RUNNER_TEMP/st-ci-cache`. Its key includes `flake.lock`, the flake, Nix expressions and both compatibility baseline pins.
+`$RUNNER_TEMP/fractal-ci-cache`. Its key includes `flake.lock`, the flake, Nix expressions and both compatibility baseline pins.
 `scripts/ci-nix-cache use` makes it a preferred substituter. After a successful stage, `save`
 copies reference-free downloads and sources fetched by the run, plus the closures of the
 previous-release messaging package and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
+Complete build and performance snapshots using only the known previous cache-directory layout
+are clean cache misses: the reader skips them without extracting or installing outputs.
+Unexpected roots, mixed directory generations and incomplete archives remain hard validation errors.
+New signing keys use the name `fractal-ci-cache-1`; restored keys retain their identity, and trust
+is derived from the restored secret rather than a hardcoded signing-name prefix.
 
 Genie uses a separate `nix6-genie-closure-...` entry keyed on its locked shell and cache policy.
 It retains the complete `nix print-dev-env .#genie` profile closure, including upstream-signed
@@ -258,6 +270,14 @@ the recipient's local message arrival; channel readiness records an observation,
 `.config/nextest.toml` gives the messaging fault matrix and the fleet reconnect test, both with
 real multi-minute outages, first priority so their retries fit the CI test window. Failed tests
 retry twice with fixed 30-second delays; a retry pass is reported as flaky, not a gate failure.
+A test still running after 10 minutes (`slow-timeout = { period = "60s", terminate-after = 10 }`) is killed and
+fails as TIMEOUT, retried like any other failure, so a hung test fails its run within about 31 minutes instead of
+holding it until the job's timeout-minutes in CI, or forever in a local `scripts/st-test`. The longest tests take under
+2 minutes. `scripts/ci-linux`'s `nextest_timeout_check`, run before the tests on shard 1 and in every unpartitioned local
+run, refuses a ci profile or override without that bound or looser than it, then runs real nextest on a scratch crate whose
+test hangs: it must be killed, exit 100 and carry a `test timeout` failure in the JUnit report, which
+`scripts/ci-rust-test-result` counts as FAIL. It is a function in `ci-linux` rather than a script of its own because a new
+file the stage runs would have to join `.st/required-lanes.json`.
 The messaging fault cases need the pinned historical st3 (`.github/messaging-compat-baseline.json`).
 CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separate nextest process, runs
 `scripts/messaging-compat-binary`, which prints the checksum-verified previous-release executable from

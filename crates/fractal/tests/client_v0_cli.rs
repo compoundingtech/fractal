@@ -379,6 +379,16 @@ async fn run_cli_with_agent_env(socket: &Path, agent: &str, args: &[&str]) -> Ou
     .unwrap()
 }
 
+/// Human detail output with each `UPDATED` age blanked. Two CLI runs render that age against
+/// their own clocks, so it can read `now` in one and `1s ago` in the next.
+fn without_ages(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| if line.starts_with("UPDATED ") { "UPDATED" } else { line })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn value(output: &Output) -> Value {
     assert!(
         output.status.success(),
@@ -606,7 +616,7 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
             .unwrap()
             .len(),
         2,
-        "second response stays pending within five minutes"
+        "second response stays pending within its hour"
     );
     append(
         "harness.observed",
@@ -617,7 +627,8 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
             .claims_for(subject, Some("harness.usage"))
             .unwrap()
             .len(),
-        3
+        2,
+        "a turn end no longer replicates a rollup; this host's reads below still count it"
     );
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -1831,7 +1842,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
     assert!(listed["value"]["items"].as_array().unwrap().is_empty());
     assert!(
         !store
-            .events_after_bounded(0, 200)
+            .events_after_bounded(0, u64::MAX, 200)
             .unwrap()
             .iter()
             .any(|c| c.subject.starts_with("attention/"))
@@ -4730,7 +4741,7 @@ mission "orchid-actor" state="ready" {
                         assert_eq!(returned, plain_json);
                     }
                 } else {
-                    assert_eq!(output.stdout, plain_human.stdout);
+                    assert_eq!(without_ages(&output.stdout), without_ages(&plain_human.stdout));
                 }
             }
         }
@@ -5059,6 +5070,8 @@ async fn alerts_cli_uses_granted_agent_identity_and_sender_owned_update_sources(
     let update = state
         .store
         .ask_person(&PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Invented old status".into(),

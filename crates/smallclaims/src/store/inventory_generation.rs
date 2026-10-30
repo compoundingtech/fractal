@@ -25,6 +25,9 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
             "UPDATE",
             "WHEN OLD.writer IS NOT NEW.writer OR OLD.sequence IS NOT NEW.sequence OR OLD.envelope_hash IS NOT NEW.envelope_hash",
         ),
+        // Where the retired ledger is the authority, the inventory lists its identities.
+        ("retired_envelopes", "DELETE", ""),
+        ("retired_envelopes", "INSERT", ""),
     ] {
         connection.execute_batch(&format!(
             /* sqlite-large-value: allow-for-now lv-hbd9e8ba6fd14 owner=smallclaims::store::inventory_generation TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_inventory_{event} AFTER {event} ON {table}
@@ -34,6 +37,16 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
              END;"
         ))?;
     }
+    Ok(())
+}
+
+/// Mark the inventory changed for a reason no table trigger sees.
+pub(super) fn bump(connection: &Connection) -> Result<()> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-ha017db4fd2e3 owner=smallclaims::store::inventory_generation TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1')
+         ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
+        [KEY],
+    )?;
     Ok(())
 }
 
