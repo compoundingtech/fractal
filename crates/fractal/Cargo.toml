@@ -6,6 +6,8 @@ description = "Claims-graph agent reconciler"
 license = "MIT"
 # Most tests share one binary; descriptor-limit fault injection needs its own process.
 autotests = false
+# src/main.rs is the library's root, not a binary: st3 is crates/st3, and fractal-fixture is declared below.
+autobins = false
 
 [features]
 # Forwarded to the library; tests enable it through the dev-dependencies below, which also turn on this
