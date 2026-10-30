@@ -113,10 +113,8 @@ impl GithubPluginStore {
     /// Record where `observer` polled `resource` to. The row stays when the cursor is gone, so
     /// this member reads its own state from then on, never a cursor in a claim.
     pub fn set_cursor(&self, observer: &str, resource: &str, cursor: Option<&str>) -> Result<()> {
-        self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
-        self.connection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
+        connection
             .execute(
                 /* sqlite-large-value: allow-for-now lv-he3683455757b owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
                 "INSERT INTO observer_cursors(observer, resource, cursor, updated_at_unix_ms)
@@ -126,6 +124,9 @@ impl GithubPluginStore {
                      updated_at_unix_ms=excluded.updated_at_unix_ms",
                 params![observer, resource, cursor, super::now_ms() as i64],
             )?;
+        // Under the connection, as forget remembers an absent observer, so a forget that found
+        // no row cannot remember it after this row is written.
+        self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         Ok(())
     }
 
@@ -212,6 +213,29 @@ mod tests {
         store.fail_reads(false);
         store.forget("observer/github/acme/garden").unwrap();
         assert_eq!(store.cursor("observer/github/acme/garden").unwrap(), None);
+    }
+
+    /// A cursor written while a forget that found no row still holds the database is forgotten
+    /// by the next forget: the observer is not left remembered as absent with a row.
+    #[test]
+    fn a_cursor_written_during_a_forget_is_forgotten_later() {
+        let store = GithubPluginStore::memory();
+        let observer = "observer/github/acme/garden";
+        std::thread::scope(|scope| {
+            // Between its SELECT, which found no row, and remembering the observer as absent, a
+            // forget holds the connection.
+            let connection = store.connection.lock().unwrap();
+            let writer = scope.spawn(|| {
+                store.set_cursor(observer, "resource/github/acme/garden", Some("c1")).unwrap()
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            store.absent.lock().unwrap().insert(observer.to_owned());
+            drop(connection);
+            writer.join().unwrap();
+        });
+        assert_eq!(store.cursor(observer).unwrap(), Some(Some("c1".into())));
+        store.forget(observer).unwrap();
+        assert_eq!(store.cursor(observer).unwrap(), None, "the forget after the write drops its row");
     }
 
     #[test]
