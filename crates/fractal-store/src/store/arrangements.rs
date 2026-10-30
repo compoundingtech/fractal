@@ -30,6 +30,7 @@ pub fn register(head: &Head) -> Value { json!({"value":head.0,"revision":head.1}
 /// Projects one edit and bumps its owner's inventory revision. The projector registry calls this
 /// for every appended or replicated `arrangement.edited` claim.
 pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    if repaired(transaction, claim)? { return Ok(()); }
     let owner = project_owner(transaction, claim)?;
     bump_inventory_revisions(transaction, std::iter::once(owner))
 }
@@ -37,6 +38,7 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
 /// Projects a replicated claim without bumping: the range may hold several claims of one owner,
 /// including this node's own, so the owner is marked and [`flush`] bumps it once per transaction.
 pub fn project_replicated(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    if repaired(transaction, claim)? { return Ok(()); }
     let owner = project_owner(transaction, claim)?;
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-hfbe6fe22ef0f owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES('arrangement_inventory_pending_v1/'||?1,'1')",
@@ -48,6 +50,13 @@ pub fn project_replicated(transaction: &Transaction<'_>, claim: &ClaimRecord) ->
 pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
     let owners = take_pending(transaction)?;
     bump_inventory_revisions(transaction, owners.iter().map(String::as_str))
+}
+
+fn repaired(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<bool> {
+    Ok(transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1) OR EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND state='repaired')",
+        [&claim.id], |row| row.get(0),
+    )?)
 }
 
 fn take_pending(transaction: &Transaction<'_>) -> Result<BTreeSet<String>> {
@@ -66,16 +75,22 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
     let operations = schema::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
     let owner = schema::owner(&claim.subject).map_err(anyhow::Error::new)?;
     let key = canonical::sortable_key(&canonical::claim_key(transaction, &claim.id)?);
+    let membership_before = ordered_membership::container_projection(transaction, &claim.subject)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h578768b2ae12 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO arrangements(subject,owner,revision,winner,updated_at,changed_index) VALUES(?1,?2,?3,?4,?5,?6)
         ON CONFLICT(subject) DO UPDATE SET revision=CASE WHEN excluded.winner>arrangements.winner THEN excluded.revision ELSE arrangements.revision END,
         updated_at=CASE WHEN excluded.winner>arrangements.winner THEN excluded.updated_at ELSE arrangements.updated_at END,
         winner=MAX(arrangements.winner,excluded.winner),changed_index=MAX(arrangements.changed_index,excluded.changed_index)", params![claim.subject,owner,claim.id,key,claim.accepted_at_unix_ms.to_string(),claim.store_index])?;
     let mut writes = Vec::new();
+    let mut legacy_authority = false;
+    let mut created_v2 = false;
     for operation in operations {
         match operation {
             Operation::Create { name } => {
+                if fields.get("version").and_then(Value::as_u64) == Some(2) { created_v2 = true; }
+                else { legacy_authority = true; }
                 transaction.execute(/* sqlite-large-value: allow-for-now lv-hd08924f6fa10 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET created=1 WHERE subject=?1", [&claim.subject])?;
                 writes.push(("name".into(), json!(name)));
+                if let Some(version) = fields.get("version") { writes.push(("version".into(), version.clone())); }
             }
             Operation::Rename { name } => writes.push(("name".into(), json!(name))),
             Operation::FolderCreate { id,name,parent,key } => {
@@ -86,6 +101,7 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
             Operation::FolderMove { id,parent,key } => writes.push((format!("folder/{id}/position"), json!({"parent":parent,"key":key}))),
             Operation::FolderDelete { id } => writes.push((format!("folder/{id}/tombstone"), json!(true))),
             Operation::SubjectPlace { subject,folder,key } => {
+                legacy_authority = true;
                 // Local admission already binds aliases; signed replay references are immutable.
                 writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key})));
             }
@@ -97,6 +113,16 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
             ON CONFLICT(subject,register) DO UPDATE SET value=excluded.value,revision=excluded.revision,winner=excluded.winner
             WHERE excluded.winner>arrangement_registers.winner", params![claim.subject,register,canonical_json_text(&value)?,claim.id,key])?;
     }
+    if legacy_authority || (created_v2 && version(transaction, &claim.subject)? == 2
+        && retained_legacy_authority(transaction, &claim.subject)?) {
+        // The version register caches effective layout authority, not the raw source
+        // version. Keep its canonical winner/revision, but a concurrent retained v1
+        // create or placement prevents migration regardless of that winner. Updating
+        // only an existing register leaves pure legacy projections unchanged.
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h40e8b57085c3 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangement_registers SET value='1'
+            WHERE subject=?1 AND register='version' AND value!='1'", [&claim.subject])?;
+    }
+    ordered_membership::container_changed(transaction, &claim.subject, claim.store_index, membership_before)?;
     Ok(owner)
 }
 
@@ -117,7 +143,7 @@ pub fn bump_inventory_revisions<'a>(
 
 /// Cut cycles in raw positions first (including tombstoned folders), then lift through deleted
 /// ancestors. Raw registers stay intact; missing folders and orphan roster subjects stay durable.
-fn resolved(heads: &BTreeMap<String, Head>) -> Value {
+fn live_ancestors(heads: &BTreeMap<String, Head>) -> (BTreeMap<String, Option<String>>, BTreeMap<String, Option<String>>) {
     let mut positions = BTreeMap::<String, (Option<String>, Vec<u8>)>::new();
     let mut deleted = BTreeSet::new();
     for (register,head) in heads {
@@ -162,11 +188,65 @@ fn resolved(heads: &BTreeMap<String, Head>) -> Value {
     }
     let live_ancestor = |id: Option<&str>| id.and_then(|id| ancestors.get(id)).cloned().flatten();
     let parents: BTreeMap<_,_> = positions.iter().map(|(id,(parent,_))| (id.clone(),live_ancestor(parent.as_deref()))).collect();
-    let folders: BTreeMap<_,_> = heads.iter().filter_map(|(register,head)| register.strip_prefix("placement/").map(|subject| (subject.to_owned(),live_ancestor(head.0["folder"].as_str())))).collect();
+    (parents, ancestors)
+}
+
+fn resolved(heads: &BTreeMap<String, Head>) -> Value {
+    let (parents, ancestors) = live_ancestors(heads);
+    let folders: BTreeMap<_,_> = heads.iter().filter_map(|(register,head)| register.strip_prefix("placement/").map(|subject| {
+        (subject.to_owned(), head.0["folder"].as_str().and_then(|id| ancestors.get(id)).cloned().flatten())
+    })).collect();
     json!({"parents":parents,"folders":folders})
 }
 
+/// Resolve the bounded folder tree once for an atomic edit or lifecycle fanout batch.
+pub fn effective_buckets(connection: &Connection, container: &str) -> Result<BTreeMap<String, Option<String>>> {
+    Ok(live_ancestors(&heads(connection, container)?).1)
+}
+
+fn retained_legacy_authority(connection: &Connection, subject: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims c, json_each(COALESCE(json_extract(c.body,'$.fields'),c.body),'$.operations') op
+         WHERE c.subject=?1 AND c.kind='arrangement.edited'
+           AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims r WHERE r.id=c.id)
+           AND NOT EXISTS(SELECT 1 FROM replica_records r WHERE r.claim_id=c.id AND r.state='repaired')
+           AND (json_extract(op.value,'$.op')='subject.place'
+             OR (json_extract(op.value,'$.op')='create'
+               AND COALESCE(json_extract(COALESCE(json_extract(c.body,'$.fields'),c.body),'$.version'),1)=1)))",
+        [subject], |row| row.get(0),
+    )?)
+}
+
+pub fn version(connection: &Connection, subject: &str) -> Result<u8> {
+    Ok(connection.query_row(
+        "SELECT CAST(value AS INTEGER) FROM arrangement_registers WHERE subject=?1 AND register='version'",
+        [subject], |row| row.get(0),
+    ).optional()?.unwrap_or(1))
+}
+
+fn repair_index(connection: &Connection) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='local_arrangement_repair_index'),0)",
+        [], |row| row.get(0),
+    )?)
+}
+
+/// Layout repair can remove the last arrangement row, so its local invalidation
+/// watermark must outlive the rebuilt rows and their surviving claim indexes.
+pub fn repair_frontier(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    let index = current_index(transaction)?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h7da81077df1c owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_arrangement_repair_index',?1)
+         ON CONFLICT(key) DO UPDATE SET value=CAST(MAX(CAST(meta.value AS INTEGER),CAST(excluded.value AS INTEGER)) AS TEXT)",
+        [index],
+    )?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h3a6af971ba05 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET changed_index=MAX(changed_index,?2) WHERE subject=?1",
+        params![subject,index])?;
+    Ok(())
+}
+
 pub fn arrangement_at(connection: &Connection, subject: &str, through: u64) -> Result<Option<Value>> {
+    anyhow::ensure!(repair_index(connection)? <= through, "arrangement snapshot frontier is stale after layout repair");
     let row = connection.query_row("SELECT owner,created,retired,revision,updated_at,changed_index FROM arrangements WHERE subject=?1", [subject], |row| Ok((row.get::<_,String>(0)?,row.get::<_,bool>(1)?,row.get::<_,bool>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,u64>(5)?))).optional()?;
     let Some((owner,created,retired,revision,time,index)) = row else { return Ok(None); };
     anyhow::ensure!(index <= through, "arrangement snapshot frontier is stale; read current heads in a read snapshot");
@@ -196,10 +276,10 @@ pub fn arrangement_at(connection: &Connection, subject: &str, through: u64) -> R
             current_heads.insert(key, head);
         }
     }
-    resource(subject, &owner, &revision, time.parse()?, &current_heads).map(Some)
+    resource(subject, &owner, &revision, time.parse()?, &current_heads, version(connection, subject)?).map(Some)
 }
 
-pub fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &BTreeMap<String, Head>) -> Result<Value> {
+pub fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &BTreeMap<String, Head>, version: u8) -> Result<Value> {
     let mut folders = serde_json::Map::new();
     let mut placements = serde_json::Map::new();
     for (key,head) in heads {
@@ -209,13 +289,16 @@ pub fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &
         }
         if let Some(subject) = key.strip_prefix("placement/") { placements.insert(subject.into(),register(head)); }
     }
+    let mut body = json!({"version":version,"name":register(heads.get("name").context("created arrangement name")?),"folders":folders});
+    let resolved = resolved(heads);
+    if version == 1 { body["placements"] = json!(placements); }
     Ok(json!({"id":subject,"kind":"arrangement","owner":owner,"revision":revision,"deleted":false,
-        "body":{"version":1,"name":register(heads.get("name").context("created arrangement name")?),"folders":folders,"placements":placements},"resolved":resolved(heads),
+        "body":body,"resolved":resolved,
         "updated_at":chrono::DateTime::from_timestamp_millis(i64::try_from(time).unwrap_or(i64::MAX)).unwrap_or(chrono::DateTime::UNIX_EPOCH).to_rfc3339_opts(chrono::SecondsFormat::Millis,true)}))
 }
 pub fn arrangements_at(connection: &Connection, person: &str, through: u64) -> Result<Vec<Value>> {
     let changed: u64 = connection.query_row("SELECT COALESCE(MAX(changed_index),0) FROM arrangements WHERE owner=?1", [person], |row| row.get(0))?;
-    anyhow::ensure!(changed <= through, "arrangement collection snapshot frontier is stale; read current heads in a read snapshot");
+    anyhow::ensure!(changed.max(repair_index(connection)?) <= through, "arrangement collection snapshot frontier is stale; read current heads in a read snapshot");
     let mut statement = connection.prepare_cached("SELECT subject FROM arrangements WHERE owner=?1 AND created=1 AND retired=0 ORDER BY subject")?;
     let subjects = statement.query_map([person], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     subjects.into_iter().filter_map(|subject| arrangement_at(connection,&subject,through).transpose()).collect()
@@ -228,6 +311,15 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
     if state.is_some_and(|(_,retired)| retired) { return Err(St3Error::new("arrangement-retired","a retired arrangement ID cannot be reused")); }
     let creating = operations.iter().any(|op| matches!(op,Operation::Create { .. }));
     if creating == state.is_some_and(|(created,_)| created) { return Err(St3Error::new(if creating { "arrangement-exists" } else { "not-found" }, "creation requires a new arrangement; other edits require an existing arrangement")); }
+    if !creating {
+        let version = version(transaction, &input.subject).map_err(internal)?;
+        if input.fields.contains_key("version") {
+            return Err(St3Error::new("invalid-arrangement-operations", "an arrangement version may only be supplied on creation"));
+        }
+        if version == 2 && operations.iter().any(|operation| matches!(operation, Operation::SubjectPlace { .. })) {
+            return Err(St3Error::new("invalid-arrangement-operations", "version-2 placements require ordered membership actions"));
+        }
+    }
     if creating {
         let count: usize = transaction.query_row("SELECT COUNT(*) FROM arrangements WHERE owner=?1 AND created=1 AND retired=0", [schema::owner(&input.subject).map_err(|e| St3Error::new(e.code,e.message))?], |row| row.get(0)).map_err(internal)?;
         if count >= schema::MAX_ARRANGEMENTS { return Err(St3Error::new("arrangement-limit","at most 100 arrangements may be live locally")); }
@@ -242,7 +334,11 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
     // former parent into that child in one rekey operation is valid, independent of op order.
     for op in &operations {
         match op {
-            Operation::Create { name } | Operation::Rename { name } => { heads.insert("name".into(), prepared_head(json!(name))); }
+            Operation::Create { name } => {
+                heads.insert("name".into(), prepared_head(json!(name)));
+                heads.insert("version".into(), prepared_head(input.fields.get("version").cloned().unwrap_or(json!(1))));
+            }
+            Operation::Rename { name } => { heads.insert("name".into(), prepared_head(json!(name))); }
             Operation::FolderCreate { id,name,parent,key } => {
                 if known_ids.contains(id) { return Err(St3Error::new("arrangement-folder-exists","folder IDs cannot be reused")); }
                 heads.insert(format!("folder/{id}/name"),prepared_head(json!(name)));
@@ -283,7 +379,10 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
     let folders = heads.keys().filter(|k| k.starts_with("folder/") && k.ends_with("/name")).count();
     let placements = heads.keys().filter(|k| k.starts_with("placement/")).count();
     if folders > schema::MAX_FOLDERS || placements > schema::MAX_PLACEMENTS { return Err(St3Error::new("arrangement-limit","arrangement folder or placement count exceeds its admission bound")); }
-    let projected = resource(&input.subject, input.fields["owner"].as_str().expect("validated owner"), &"0".repeat(64), now_ms(), &heads).map_err(internal)?;
+    let layout_version = if creating {
+        u8::try_from(input.fields.get("version").and_then(Value::as_u64).unwrap_or(1)).expect("validated arrangement version")
+    } else { version(transaction, &input.subject).map_err(internal)? };
+    let projected = resource(&input.subject, input.fields["owner"].as_str().expect("validated owner"), &"0".repeat(64), now_ms(), &heads, layout_version).map_err(internal)?;
     if serde_json::to_vec(&projected).map_err(internal)?.len() > schema::MAX_RESOURCE_BYTES { return Err(St3Error::new("arrangement-body-too-large","projected arrangement resource exceeds 512 KiB")); }
     Ok(())
 }
@@ -303,7 +402,7 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     owners.extend(take_pending(transaction)?);
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h7c3bbd8abba7 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangement_registers", [])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-hcceb66437e23 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM arrangements", [])?;
-    let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='arrangement.edited' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
+    let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE kind='arrangement.edited' AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired') AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)")?;
     let claims = statement.query_map([],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     for claim in &claims {

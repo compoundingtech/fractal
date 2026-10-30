@@ -36,6 +36,7 @@ const apply = (doc: SidebarDocument, operations: readonly SidebarOperation[]): S
     position: { value: { parent: regs.position?.parent ?? null, key: regs.position?.key ?? '' }, revision: regs.position?.at[2] ?? 'claim/test' },
     tombstone: regs.deleted === undefined ? null : { value: true, revision: regs.deleted[2] },
   }]))
+  if (arrangement.body.version !== 1) throw new Error('the fixture is a version 1 layout')
   arrangement.body.placements = Object.fromEntries(Object.entries(doc.placements).map(([subject, value]) => [subject, { value: { folder: value.folder, key: value.key }, revision: value.at[2] }]))
   return { ...arrangementSidebarDoc(optimisticArrangement(arrangement, operations)), roster: doc.roster }
 }
