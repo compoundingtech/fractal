@@ -12314,6 +12314,17 @@ fn daemon_diagnostics_stay_local_while_older_members_claims_still_arrive() {
     assert_eq!(claims.len(), 1, "the pre-upgrade claim stays");
     assert_eq!(claims[0].body["fields"]["reason"], "before the upgrade");
 
+    // A key the node recorded as a claim before the upgrade still names that request: a retry
+    // gets the claim, with no new local row, and a changed request is refused.
+    let keyed = diagnostic("workspace-unavailable", "blocked", Some("daemon-diagnostic:before"));
+    let before = store.append_as_older_build_for_test(&keyed).unwrap();
+    let local_before = store.local_observations_after(0, 10).unwrap().len();
+    let (retried, created) = store.append_claim_outcome(&keyed).unwrap();
+    assert_eq!((retried.id, created), (before.id, false), "a retry gets the pre-upgrade claim");
+    assert_eq!(store.local_observations_after(0, 10).unwrap().len(), local_before);
+    let changed = diagnostic("workspace-unavailable", "permission denied", Some("daemon-diagnostic:before"));
+    assert_eq!(store.append_claim_outcome(&changed).unwrap_err().code, "idempotency-mismatch");
+
     // An older member still replicates its diagnostics; this node stores them as before.
     legacy("older-node", "daemon/older-node", "written by an older build");
     let received = store.claims_for("daemon/older-node", Some("daemon.diagnostic")).unwrap();

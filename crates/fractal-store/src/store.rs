@@ -21760,9 +21760,46 @@ fn append_local_observation_fenced(
                     return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
                 }
             }
+            // A key an older build recorded as a replicated claim, before the kind became local,
+            // still names that request: a retry gets the claim and a changed request is refused.
+            if let Some(claim) = replicated_operation_outcome_tx(transaction, input)? {
+                return Ok((claim, false));
+            }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
         .map_err(|error| St3Error::new("internal", error))?
+}
+
+/// The outcome of `input`'s idempotency key in the replicated operation registry, as a claim
+/// append would settle it: the stored claim for a retry, an error for a changed or conflicting
+/// request or a checkpointed one, and `None` when no claim was ever written for the key.
+fn replicated_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+) -> Result<Option<ClaimRecord>, St3Error> {
+    let Some((operation_id, request_digest)) = claim_operation(input)? else {
+        return Ok(None);
+    };
+    if let Some((stored_digest, canonical_claim, state)) =
+        operation_tx(transaction, &operation_id).map_err(internal)?
+    {
+        if state == "conflict" {
+            return Err(St3Error::new("idempotency-conflict", "the replicated operation has conflicting requests")
+                .with_detail("operation_id", operation_id));
+        }
+        if stored_digest != request_digest {
+            return Err(St3Error::new("idempotency-mismatch", "the idempotency key already identifies a different request")
+                .with_detail("operation_id", operation_id)
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest));
+        }
+        return claim_by_id_tx(transaction, &canonical_claim)
+            .map_err(internal)?
+            .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))
+            .map(Some);
+    }
+    checkpointed_operation_outcome(transaction, &operation_id, &request_digest)?;
+    Ok(None)
 }
 
 /// Record an observation of `latest` retention. The local observation log keeps every
