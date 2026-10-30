@@ -23819,8 +23819,11 @@ mission "example/zero-run" state="ready" {
         for subject in ["agent/cedar", "agent/birch"] {
             append(subject, "runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
         }
+        // Both reports are an hour old, on the host as everywhere.
+        smallclaims::store::set_thread_clock(Some(client_now_ms() - 3_600_000));
         append("agent/cedar", "harness.observed", json!({"state":"working", "driver":"codex", "incarnation_id":"one"}));
         append("agent/birch", "harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        smallclaims::store::set_thread_clock(None);
         let index = state.store.index().unwrap();
         let mut cards = client_agent_resources(&state.store, false, "", index).unwrap();
         for card in &mut cards {
@@ -23837,6 +23840,54 @@ mission "example/zero-run" state="ready" {
         let birch = cards.iter().find(|item| item["id"] == "agent/birch").unwrap();
         assert_eq!(birch["harness_state"], "indeterminate");
         assert_eq!(birch["state"], "waiting");
+    }
+
+    /// A re-stamp that changes nothing stays in the seat's host's local log. The host's cards hear
+    /// it, so a resting seat stays current there; another member has only the replicated report,
+    /// and its card lapses as before. A local report of another incarnation says nothing.
+    #[test]
+    fn the_seats_host_hears_its_local_re_stamps_while_another_member_reads_the_replicated_report() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "status-host-heard");
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "status-peer");
+        let subject = "agent/cedar";
+        let append = |kind: &str, fields: Value| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        let index = state.store.index().unwrap();
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        assert_eq!(state.store.index().unwrap(), index, "the unchanged re-stamp stayed local");
+        peer.store.import_replication("status-host-heard", &state.store.export_replication(0).unwrap()).unwrap();
+        // The replicated report is an hour old; the host heard the re-stamp just now.
+        let card = |store: &Store, incarnation: &str| {
+            let index = store.index().unwrap();
+            let mut cards = client_agent_resources(store, false, "", index).unwrap();
+            for card in &mut cards {
+                let mut harness = store.observed_harness_at(subject, index).unwrap().unwrap();
+                harness.observed_at_unix_ms = client_now_ms() - 3_600_000;
+                harness.incarnation_id = incarnation.into();
+                card["_status_source"] = json!(harness);
+            }
+            overlay_agent_resources(store, &mut cards, "").unwrap();
+            cards.into_iter().find(|item| item["id"] == subject).unwrap()
+        };
+        let host = card(&state.store, "one");
+        assert_eq!(host["observation"], "current");
+        assert_eq!(host["harness_state"], "idle");
+        assert_eq!(host["state"], "running");
+        let elsewhere = card(&peer.store, "one");
+        assert_eq!(elsewhere["observation"], "stale");
+        assert_eq!(elsewhere["harness_state"], "indeterminate");
+        assert_eq!(elsewhere["state"], "waiting");
+        let other_incarnation = card(&state.store, "zero");
+        assert_eq!(other_incarnation["observation"], "stale", "the host heard another incarnation");
     }
 
     #[test]
@@ -23933,14 +23984,22 @@ mission "example/zero-run" state="ready" {
         assert_eq!(before["observation"], "current");
         assert_eq!(before["harness_state"], "idle");
         assert!(before.get("_status_source").is_none());
+        // Another member has only the card's time; aged, the card lapses.
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "status-cache-peer");
+        peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
         cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
         aged[0]["_status_source"] = json!(cached_harness);
-        overlay_agent_resources(&state.store, &mut aged, "").unwrap();
+        let mut on_host = aged.clone();
+        overlay_agent_resources(&peer.store, &mut aged, "").unwrap();
         assert_eq!(aged[0]["observation"], "stale");
         assert_eq!(aged[0]["harness_state"], "indeterminate");
         assert_eq!(aged[0]["since"], before["since"]);
+        // The seat's host heard the report itself just now, in its local log.
+        overlay_agent_resources(&state.store, &mut on_host, "").unwrap();
+        assert_eq!(on_host[0]["observation"], "current");
         append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":client_now_ms() as u64}));
         assert_eq!(state.store.index().unwrap(), index, "same state stays local within the publish interval");
         let after = client_agent_resources(&state.store, false, "", index).unwrap();
