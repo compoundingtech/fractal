@@ -541,4 +541,20 @@ mod tests {
         ui.close_tab();
         assert!(ui.glasses.history.iter().all(|place| place.tab_id != closed));
     }
+
+    #[test]
+    fn legacy_control_five_keeps_palette_section_ownership() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Document("doc/a".into()), Open::Tab);
+        ui.open_in_glass(Pane::Document("doc/b".into()), Open::Tab);
+        ui.navigate_history(false);
+        let before = ui.current_place();
+        ui.open_palette(None, Open::Here);
+        ui.key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL));
+        assert_eq!(ui.glasses.palette.as_ref().unwrap().section, Some(4));
+        assert_eq!(ui.current_place(), before);
+        ui.key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL));
+        assert_eq!(ui.glasses.palette.as_ref().unwrap().section, None);
+        assert_eq!(ui.current_place(), before);
+    }
 }
