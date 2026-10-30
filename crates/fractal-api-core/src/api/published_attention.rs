@@ -327,6 +327,8 @@ fn refresh_attention_list_reading(
             },
         };
         let projection = store.attention_projection_frontier()?;
+        let ask_deadline_policy =
+            crate::store::person_work::ask_deadline_policy(&store.readers.get())?;
         let (rows, evaluated_at_unix_ms, due_at_unix_ms, future_after) = match (cause, &previous) {
             (None, Some(previous)) => {
                 // Still pending future acceptance times stand beside the new ones.
@@ -391,6 +393,7 @@ fn refresh_attention_list_reading(
                 rows,
                 fleet,
                 owners,
+                ask_deadline_policy,
             },
             changed,
         );
@@ -870,6 +873,7 @@ mod tests {
                 owners: AttentionPublication::index_owners(&rows),
                 rows: Arc::new(rows),
                 fleet: first.fleet.clone(),
+                ask_deadline_policy: first.ask_deadline_policy,
             },
             true,
         );

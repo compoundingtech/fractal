@@ -928,7 +928,7 @@ impl Ui {
         }
         let mut doc = Doc::new();
         doc.card(
-            &format!("{} · waiting {}", item.kind.word(), item.age),
+            &card_title(item),
             if heavy { theme::PERSON } else { color },
             heavy,
             card,
@@ -1059,7 +1059,7 @@ impl Ui {
         }
         let mut doc = Doc::new();
         doc.card(
-            &format!("{} · waiting {}", item.kind.word(), item.age),
+            &card_title(item),
             if heavy { theme::PERSON } else { color },
             heavy,
             card,
@@ -1427,6 +1427,16 @@ fn question_key(alert: &str, call: &str) -> String {
     format!("{alert}\u{0}{call}")
 }
 
+/// An alert card's title: what it is and how long it has waited, then, for an ask, how long is
+/// left and what then applies.
+fn card_title(item: &Attention) -> String {
+    let title = format!("{} · waiting {}", item.kind.word(), item.age);
+    match &item.deadline {
+        Some(deadline) => format!("{title} · {deadline}"),
+        None => title,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,6 +1447,7 @@ mod tests {
 
     fn prompt(id: &str, answers: &[&str], text: &str) -> Attention {
         Attention {
+            deadline: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: "builder is waiting for permission".into(),
@@ -2333,6 +2344,7 @@ mod tests {
         }
         let request: fractal_client::StructuredRequest = serde_json::from_value(value).unwrap();
         Attention {
+            deadline: None,
             id: "attention/release".into(),
             tier: Tier::Stopped,
             title: "How far does the release go?".into(),
@@ -2363,6 +2375,34 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Every ask has a deadline: its card says how long is left and what then applies, worded
+    /// as the web and phone word it.
+    #[test]
+    fn an_ask_card_says_how_long_is_left_and_what_then_applies() {
+        let now = "2026-10-26T08:00:00Z";
+        assert_eq!(
+            crate::ui::adapt::ask_deadline("2026-10-26T11:00:00Z", Some("Hold"), now),
+            "answer within 3h, or “Hold” applies"
+        );
+        assert_eq!(
+            crate::ui::adapt::ask_deadline("2026-10-28T08:00:00Z", None, now),
+            "answer within 2d, or it times out"
+        );
+        assert_eq!(
+            crate::ui::adapt::ask_deadline("2026-10-26T07:00:00Z", None, now),
+            "answer within 0s, or it times out"
+        );
+        let mut item = request(None);
+        item.deadline = Some("answer within 3h, or “Hold” applies".into());
+        let mut ui = with_alerts(vec![item]);
+        ui.live = true;
+        let shown = texts(&ui.expanded_band("agent/example/atlas", 120));
+        assert!(
+            shown.contains("WAITING 1M · ANSWER WITHIN 3H, OR “HOLD” APPLIES"),
+            "{shown}"
+        );
     }
 
     /// The asker's recommended answer leads its card even when it is fourth, so the three-button
