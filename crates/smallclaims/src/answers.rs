@@ -542,6 +542,7 @@ impl AnswersCache {
         let thread_job = job.clone();
         let spawned = std::thread::Builder::new().name("st3-answers".into()).spawn(move || {
             let (cut, kind) = thread_job;
+            let started = Instant::now();
             let store: &Store = (*store).borrow();
             let computed = crate::task_cpu::blocking("replication.answers", || match &kind {
                 None => {
@@ -564,6 +565,12 @@ impl AnswersCache {
             state.computing.remove(&(cut, kind.clone()));
             match computed {
                 Ok(Computed::Summary(summary, readers)) => {
+                    eprintln!(
+                        "st3: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
+                        started.elapsed().as_secs(),
+                        summary.kinds.len(),
+                        readers.len()
+                    );
                     state.summary = Some((Instant::now(), summary));
                     state.readers = readers;
                 }

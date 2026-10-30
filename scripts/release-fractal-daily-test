@@ -223,7 +223,11 @@ with tempfile.TemporaryDirectory() as temporary:
 
 # run() still returns a successful command's output unchanged.
 from importlib.machinery import SourceFileLoader
-module = SourceFileLoader('daily', str(repo / 'scripts/release-fractal-daily')).load_module()
+from importlib.util import module_from_spec, spec_from_file_location
+loader = SourceFileLoader('daily', str(repo / 'scripts/release-fractal-daily'))
+spec = spec_from_file_location(loader.name, loader.path, loader=loader)
+module = module_from_spec(spec)
+spec.loader.exec_module(module)
 assert module.run('printf', 'ok\n') == 'ok'
 
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.

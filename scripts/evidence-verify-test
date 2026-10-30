@@ -517,8 +517,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests', 'rust-tests')
 # The checks a host or agent may sign (scripts/fractal-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
-HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy'})
-HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy'})
+HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy', 'linux-fleet-compat'})
+HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy', 'linux-fleet-compat'})
 
 
 def policy_text(**overrides):
@@ -1417,7 +1417,7 @@ class CommittedPolicy(unittest.TestCase):
         text = root_config('evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
-                                 'rust-tests': 'off', 'linux-clippy': 'off'})
+                                 'rust-tests': 'off', 'linux-clippy': 'off', 'linux-fleet-compat': 'off'})
         lanes = json.loads(root_config('required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
@@ -2654,6 +2654,65 @@ class Layouts(unittest.TestCase):
         self.f.git('update-ref', f'refs/notes/evidence/{self.tree}/{"1" * 40}', record)  # the suffix is not the commit
         self.assertEqual(self.f.verify(self.tree)[1]['reason'], 'no_record')
         self.assertEqual(self.f.verify(other_tree)[0], 0)
+
+
+class FleetCompatKey(unittest.TestCase):
+    """linux-fleet-compat's note is reused by every tree with the same key: the projection of its declared inputs. A key that missed an
+    input would let a note cover a tree it never measured, so each declared input, changed alone, must change the key, and a file the
+    stage does not read (a doc, an unrelated script, a crate outside fractal's closure, the root package) must leave it alone."""
+
+    CHECK = 'linux-fleet-compat'
+    # Files the fleet-compat stage does not read: none of them may move its key.
+    OUTSIDE = ('docs/ci.md', 'README.md', 'scripts/st-test', 'src/main.rs', 'tests/integration.rs', 'crates/fractal-e2e/src/lib.rs',
+               '.github/workflows/fleet.yml', '.github/messaging-compat-baseline.json', '.st/rust-test-inputs.json')
+
+    def setUp(self):
+        self.inputs = evidence_verify.policy_rules((ROOT / '.st/evidence-skip-policy.json').read_text(), self.CHECK,
+                                                   'compoundingtech/fractal')['inputs']
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+
+    def file_for(self, path):
+        """One file the declared path covers: the path itself when it is a file here, else a file inside it (a directory, or a path
+        this checkout does not hold, such as the crates in ci-script-tests' sparse copy)."""
+        here = ROOT / path
+        return path if here.is_file() else f'{path}/key-probe'
+
+    def tree(self):
+        self.f.git('add', '-A')
+        return self.f.git('write-tree')
+
+    def key(self, tree):
+        return evidence_verify.project(self.f.repo, tree, self.inputs)
+
+    def test_the_stage_reads_its_baseline_and_crate_fractals_closure(self):
+        # crates/pty-launch-environment.rs and scripts/ci-test-paths.rs sit outside every crate: closure crates compile them in
+        # through #[path = ...], and the stage's dep-info check found the first one missing from an earlier key.
+        for path in ('.github/fleet-compat-baseline.json', 'scripts/compat-baseline', 'scripts/ci-linux', 'crates/fractal',
+                     'crates/fractal-daemon', 'Cargo.lock', 'flake.lock', 'crates/pty-launch-environment.rs', 'scripts/ci-test-paths.rs'):
+            self.assertTrue(any(path == item or path.startswith(item + '/') for item in self.inputs), path)
+        for path in self.OUTSIDE:
+            self.assertFalse(any(path == item or path.startswith(item + '/') for item in self.inputs), f'{path} is declared')
+
+    def test_each_declared_input_changed_alone_changes_the_key_and_no_other_file_does(self):
+        files = [self.file_for(path) for path in self.inputs]
+        for name in files + list(self.OUTSIDE):
+            target = self.f.repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f'{name}\n')
+        base = self.key(self.tree())
+        self.assertIsNotNone(base)
+        for name in files:
+            target = self.f.repo / name
+            target.write_text(f'{name} changed\n')
+            self.assertNotEqual(self.key(self.tree()), base, f'changing {name} must change the key')
+            target.write_text(f'{name}\n')
+        self.assertEqual(self.key(self.tree()), base)
+        for name in self.OUTSIDE:
+            target = self.f.repo / name
+            target.write_text(f'{name} changed\n')
+            self.assertEqual(self.key(self.tree()), base, f'{name} is not read by the stage and must not change the key')
+            target.write_text(f'{name}\n')
 
 
 if __name__ == '__main__':

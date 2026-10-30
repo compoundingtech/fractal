@@ -36,6 +36,10 @@ supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explic
 policy path remains explicit; malformed or unreadable preferred configuration
 never selects the legacy file. The generated workflow environment is a bridge
 site documented here because its comments come from generator output.
+The newly keyed `linux-fleet-compat` workflow and `scripts/ci-fleet-compat-keyed`
+use the same `auto:` bridge through `CI_KEYED_FLEET_COMPAT_POLICY`. Both keyed
+stages share the argument-based missing-only resolver; their existing hosted
+policy dependencies are retained, not introduced by the directory migration.
 
 Configuration selectors in lane `ci_inputs` resolve through the same bridge
 at each pinned tree; checkout closure validation selects at its own root.
@@ -1061,7 +1065,9 @@ push take the gate from their payload base, as before.
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
 level, which allocates no runner at all: `linux-tests` and its three shards, `linux-clippy` and
-`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards, so
+`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. Each keyed stage also skips on its own gate:
+the test jobs on `rust-tests`, `linux-clippy` and `linux-fleet-compat` on a note for their own input key (`docs/keyed-clippy.md`), all
+in shadow until each entry is flipped. `linux-test-build` feeds the test shards, so
 it skips only when **every one of them** is covered; that condition is derived from theirs in the generator, never
 written twice. The VM tests (`isolation-vm`) and the mail redelivery canaries were members too, and required checks of
 their own, until 2026-10-23: they now run once a day (`daily-long.yml`), and a red daily run comments on its one open issue.

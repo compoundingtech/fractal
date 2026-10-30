@@ -493,24 +493,28 @@ class CiLocal(unittest.TestCase):
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
-    def test_keyed_clippy_default_and_explicit_values_pass_through_ci_local(self):
-        shutil.copy(ROOT / 'scripts/ci-clippy-keyed', self.work / 'scripts/ci-clippy-keyed')
-        for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
-            extra = {} if explicit is None else {'CI_KEYED_CLIPPY_POLICY': explicit}
-            done, calls = self.run_local(entry='ci-clippy-keyed', CLIPPY_BASE_SHA='f' * 40, **extra)
+    def test_keyed_defaults_and_explicit_values_pass_through_ci_local(self):
+        for entry, stage, variable in (('ci-clippy-keyed', 'clippy', 'CI_KEYED_CLIPPY_POLICY'),
+                                       ('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY')):
+            shutil.copy(ROOT / 'scripts' / entry, self.work / 'scripts' / entry)
+            for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
+                with self.subTest(entry=entry, explicit=explicit):
+                    extra = {} if explicit is None else {variable: explicit}
+                    done, calls = self.run_local(entry=entry, CLIPPY_BASE_SHA='f' * 40, **extra)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual(calls[-1]['env'][variable], 'auto:.st/evidence-skip-policy.json' if explicit is None else explicit)
+                    self.assertEqual(calls[-1]['argv'], [stage])
+                    self.log.unlink()
+            done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
             self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertEqual(calls[-1]['env']['CI_KEYED_CLIPPY_POLICY'], 'auto:.st/evidence-skip-policy.json' if explicit is None else explicit)
-            self.assertEqual(calls[-1]['argv'], ['clippy'])
+            self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
             self.log.unlink()
-        done, calls = self.run_local('clippy', CLIPPY_BASE_SHA='f' * 40)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertNotIn('CI_KEYED_CLIPPY_POLICY', calls[-1]['env'], 'ordinary linux-gate clippy stays unkeyed')
 
-    def test_keyed_clippy_consumer_selects_missing_only_without_running_compiles(self):
+    def test_keyed_consumer_selects_missing_only_without_running_compiles(self):
         source = (ROOT / 'scripts/ci-linux').read_text()
-        function = 'keyed_clippy_policy() {' + source.split('keyed_clippy_policy() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        function = 'keyed_policy() {' + source.split('keyed_policy() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
         def resolve(value='auto:.st/evidence-skip-policy.json'):
-            return subprocess.run(['bash', '-euc', function + '\nkeyed_clippy_policy'], cwd=self.work,
+            return subprocess.run(['bash', '-euc', function + '\nkeyed_policy "$CI_KEYED_CLIPPY_POLICY"'], cwd=self.work,
                                   env=dict(os.environ, CI_KEYED_CLIPPY_POLICY=value), capture_output=True, text=True)
         old = self.work / '.st/evidence-skip-policy.json'
         new = self.work / '.fractal/evidence-skip-policy.json'
