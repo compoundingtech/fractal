@@ -18530,7 +18530,12 @@ fn mirror_observation(
     };
     let result = (|| -> Result<()> {
         if !plugin.seeded(&spec.resource) {
-            let items = store.repository_items(&spec.resource, None)?;
+            // This look's own items are already in the graph; they are mirrored below, against
+            // the mirror's older row, so their change is an event.
+            let items = store.repository_items(&spec.resource, None)?
+                .into_iter()
+                .filter(|graph| !recorded.iter().any(|recorded| recorded.subject == graph.subject))
+                .collect::<Vec<_>>();
             plugin.seed(&spec.resource, observer, &spec.locator, &items.iter().filter_map(item).collect::<Vec<_>>())?;
         }
         if !recorded.is_empty() {
@@ -40651,6 +40656,13 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // A restart reopens the plugin database: the older build's claim is not adopted again.
         poll(disk(), listing(&[1, 3]), cursor(12)).await;
         assert_eq!(delivered(), 1, "issue 3 opened after the last poll");
+        // The poller's mirror holds what the graph recorded before this process mirrored, and
+        // each item the poll recorded since; a first sighting is a baseline and holds no event.
+        let mirror = disk();
+        assert_eq!(mirror.item("resource/repo", 1).unwrap().expect("seeded from the graph")["facts"]["title"], "issue 1");
+        assert_eq!(mirror.item("resource/repo", 3).unwrap().expect("mirrored from the poll")["kind"], "vcs.issue");
+        assert_eq!(mirror.repositories("acme/garden").unwrap()[0]["observer"], "observer/repo");
+        assert!(mirror.events("resource/repo", None, 10).unwrap().is_empty());
         let observed = newest_observed();
         assert_eq!(observed["changed"], true);
         // The claim carries how far the poll read, not the version maps.
@@ -40672,6 +40684,15 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         ]);
         assert_eq!(claimed(&newest_observed()), position(13));
 
+        // Back on the member with the plugin database, a change the poll records is one keyed
+        // event in its mirror.
+        let mut closed = issue(3);
+        closed["state"] = Value::String("closed".into());
+        poll(disk(), serde_json::json!({"repository_id": 7, "issues": [issue(1), closed, issue(4)]}), cursor(14)).await;
+        let events = disk().events("resource/repo", Some(3), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "closed");
+        assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
