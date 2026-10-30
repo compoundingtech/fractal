@@ -1,0 +1,216 @@
+//! Real in-memory SQLite stores, real member keys and sealed replication bytes; no mocks.
+use super::*;
+use crate::store::fleet_admission_tests_shared_seats::{FLEET, key, node};
+use smallclaims::proof::{RenameProofBundle, verify_rename_proof};
+
+const ORIGINAL: &str = "agent/example-original/worker";
+const RENAMED: &str = "agent/example-renamed/worker";
+const FINAL: &str = "agent/example-final/worker";
+const ACTOR: &str = "person/operator";
+
+fn signed_store() -> (Store, Arc<crate::fleet::MemberKey>) {
+    let member = key();
+    let store = node("example", Some(&member), Some(&member));
+    store.admit_fleet_anchor(FLEET, member.public(), "listening").unwrap();
+    store.ensure_principal_key(ACTOR).unwrap();
+    (store, member)
+}
+
+fn publish(store: &Store, source: &str, operation: &str) {
+    let intent = crate::parse_intent(source, store.origin()).unwrap();
+    let preview = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply_as(&intent, &preview.subject_tokens, operation, Some(ACTOR)).unwrap();
+    store.seal_local_batches().unwrap();
+}
+
+fn rename(store: &Store, kind: IdentityKind, from: &str, to: &str, operation: &str) -> RenameReceipt {
+    let receipt = store.rename_identity(kind, &RenameRequest {
+        from: from.into(), to: to.into(), actor: ACTOR.into(), reason: "Clarify responsibility".into(),
+        expected_naming_revision: None, expected_declaration: None, idempotency_key: operation.into(),
+    }, &[]).unwrap();
+    store.seal_local_batches().unwrap();
+    receipt
+}
+
+fn twice_renamed() -> (Store, Arc<crate::fleet::MemberKey>, RenameReceipt, RenameReceipt) {
+    let (store, member) = signed_store();
+    publish(&store, "version 2\nagent \"example-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n", "declare-agent");
+    let first = rename(&store, IdentityKind::Agent, ORIGINAL, RENAMED, "first");
+    let second = rename(&store, IdentityKind::Agent, RENAMED, FINAL, "second");
+    (store, member, first, second)
+}
+
+fn exported() -> (RenameProofBundle, Arc<crate::fleet::MemberKey>) {
+    let (store, member, _, _) = twice_renamed();
+    let proof = store.export_rename_proof(IdentityKind::Agent, FINAL, None).unwrap();
+    // The verifier below cannot consult this store, its principal cache or its anchor.
+    drop(store);
+    (proof, member)
+}
+
+#[test]
+fn real_agent_twice_rename_exports_every_alias_and_exact_historical_revision() {
+    let (store, member, first, second) = twice_renamed();
+    for name in [ORIGINAL, RENAMED, FINAL] {
+        let proof = store.export_rename_proof(IdentityKind::Agent, name, None).unwrap();
+        assert_eq!(proof.storage_id, ORIGINAL);
+        assert_eq!(proof.canonical_id, FINAL);
+        assert_eq!(proof.chain, [first.claim_id.clone(), second.claim_id.clone()]);
+        assert_eq!(proof.naming_revision, second.naming_revision);
+        verify_rename_proof(&proof, member.public(), Some(&first.naming_revision)).unwrap();
+        let old = store.export_rename_proof(IdentityKind::Agent, name, Some(&first.naming_revision)).unwrap();
+        assert_eq!(old.canonical_id, RENAMED);
+        assert_eq!(old.chain, [first.claim_id.clone()]);
+        verify_rename_proof(&old, member.public(), None).unwrap();
+    }
+    let error = store.export_rename_proof(IdentityKind::Agent, ORIGINAL, Some("not-a-revision")).unwrap_err();
+    assert_eq!(error.code, "stale-revision");
+}
+
+#[test]
+fn real_mission_rename_proves_published_declaration() {
+    let (store, member) = signed_store();
+    publish(&store, "version 2\nmission \"example-original\" state=\"ready\" { goal \"Deliver the result.\"; step \"work\" { agentless } }\n", "publish-mission");
+    let receipt = rename(&store, IdentityKind::Mission, "mission/example-original", "mission/example-renamed", "rename-mission");
+    let proof = store.export_rename_proof(IdentityKind::Mission, "mission/example-renamed", None).unwrap();
+    assert_eq!(proof.identity_kind, "mission");
+    assert_eq!(proof.storage_id, "mission/example-original");
+    assert_eq!(proof.canonical_id, "mission/example-renamed");
+    assert_eq!(proof.naming_revision, receipt.naming_revision);
+    verify_rename_proof(&proof, member.public(), None).unwrap();
+}
+
+#[test]
+fn portable_proof_verifies_after_source_store_is_dropped() {
+    let (proof, member) = exported();
+    let wire = serde_json::to_vec(&proof).unwrap();
+    let isolated: RenameProofBundle = serde_json::from_slice(&wire).unwrap();
+    let verdict = verify_rename_proof(&isolated, member.public(), None).unwrap();
+    let value = serde_json::to_value(verdict).unwrap();
+    assert_eq!(value["schema"], "fractal.rename-proof-verdict.v1");
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["kind"], "agent");
+    assert_eq!(value["storage_identity"], ORIGINAL);
+    assert_eq!(value["from"], RENAMED);
+    assert_eq!(value["to"], FINAL);
+    assert_eq!(value["revision"], proof.naming_revision);
+    assert_eq!(value["chain"][0]["from"], ORIGINAL);
+    assert_eq!(value["chain"][0]["to"], RENAMED);
+    assert_eq!(value["chain"][1]["from"], RENAMED);
+    assert_eq!(value["chain"][1]["to"], FINAL);
+    assert_eq!(value["actor"], ACTOR);
+    assert_eq!(value["reason"], "Clarify responsibility");
+    assert_eq!(value["owner_host"], "example");
+    assert_eq!(value["signer_member"], "example");
+    assert_eq!(value["signer_key"], member.public());
+    assert_eq!(value["fleet_id"], FLEET);
+    assert_eq!(value["storage_id"], ORIGINAL);
+    assert_eq!(value["canonical_id"], FINAL);
+}
+
+#[test]
+fn portable_proof_rejects_tampered_metadata_envelope_and_signature() {
+    let (proof, member) = exported();
+    let mut changed = proof.clone();
+    changed.canonical_id = "agent/example-forged".into();
+    assert!(verify_rename_proof(&changed, member.public(), None).is_err());
+
+    let mut changed = proof.clone();
+    let envelope = changed.envelopes.last_mut().unwrap();
+    let mut bytes = envelope.payload.bytes().unwrap().to_vec();
+    bytes[0] ^= 1;
+    envelope.payload = bytes.into();
+    assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "invalid-signature");
+
+    let mut changed = proof;
+    changed.envelopes.last_mut().unwrap().signature = Some("not-a-signature".into());
+    assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "invalid-signature");
+}
+
+#[test]
+fn portable_proof_rejects_outsider_member_wrong_anchor_and_truncated_history() {
+    let (proof, member) = exported();
+    let outsider = key();
+    let mut changed = proof.clone();
+    let envelope = changed.envelopes.last_mut().unwrap();
+    envelope.member_key = Some(outsider.public().to_owned());
+    envelope.signature = Some(outsider.sign(&crate::fleet::envelope_signature_message(
+        &proof.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
+    )));
+    assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "untrusted-membership");
+    assert_eq!(verify_rename_proof(&proof, outsider.public(), None).unwrap_err().code, "untrusted-membership");
+
+    let mut changed = proof;
+    assert!(changed.envelopes.len() > 2);
+    changed.envelopes.remove(1);
+    assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "broken-chain");
+}
+
+#[test]
+fn after_revision_requires_strict_proven_ancestry_not_lexical_order() {
+    let (proof, member) = exported();
+    verify_rename_proof(&proof, member.public(), Some(&proof.chain[0])).unwrap();
+    for token in [&proof.naming_revision[..], "absent-revision", "0", "999999999"] {
+        let error = verify_rename_proof(&proof, member.public(), Some(token)).unwrap_err();
+        assert_eq!(error.code, "stale-revision");
+    }
+}
+
+#[test]
+fn portable_proof_rejects_claim_fields_and_signatures_inside_valid_member_envelopes() {
+    let (original, member) = exported();
+    for tamper_signature in [false, true] {
+        let mut proof = original.clone();
+        let envelope = proof.envelopes.last_mut().unwrap();
+        let mut payload: smallclaims::claim::ReplicaEnvelopePayload =
+            ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+        if tamper_signature {
+            payload.claim_signatures.get_mut(&proof.naming_revision).unwrap().signature = "invalid-claim-signature".into();
+        } else {
+            let claim = payload.batch.claims.iter_mut().find(|claim| claim.id == proof.naming_revision).unwrap();
+            claim.body["fields"]["to"] = json!("agent/example-forged");
+        }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&payload, &mut bytes).unwrap();
+        envelope.hash = smallclaims::hash::replica_envelope_hash(
+            &envelope.writer, envelope.sequence, envelope.previous_hash.as_deref(),
+            envelope.accepted_at_unix_ms, &bytes,
+        );
+        envelope.payload = bytes.into();
+        envelope.signature = Some(member.sign(&crate::fleet::envelope_signature_message(
+            &proof.fleet_id, &envelope.writer, envelope.sequence, &envelope.hash,
+        )));
+        assert_eq!(verify_rename_proof(&proof, member.public(), None).unwrap_err().code, "invalid-signature");
+    }
+}
+
+#[test]
+fn renamed_actor_alias_is_proven_against_immutable_signed_actor() {
+    let (store, member) = signed_store();
+    publish(&store, "version 2\nagent \"example-actor\" { command \"true\"; }\nagent \"example-target\" { command \"true\"; }\n", "declare-actor-and-target");
+    rename(&store, IdentityKind::Agent, "agent/example-actor", "agent/example-actor-alias", "rename-actor");
+    let receipt = store.rename_identity(IdentityKind::Agent, &RenameRequest {
+        from: "agent/example-target".into(), to: "agent/example-target-renamed".into(),
+        actor: "agent/example-actor-alias".into(), reason: "Clarify responsibility".into(),
+        expected_naming_revision: None, expected_declaration: None, idempotency_key: "rename-by-alias".into(),
+    }, &[]).unwrap();
+    let proof = store.export_rename_proof(IdentityKind::Agent, "agent/example-target-renamed", None).unwrap();
+    let claim = store.claim_by_id(&receipt.claim_id).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some("agent/example-actor"));
+    assert_eq!(claim.body["fields"]["request"]["actor"], "agent/example-actor-alias");
+    drop(store);
+    let verdict = verify_rename_proof(&proof, member.public(), None).unwrap();
+    assert_eq!(verdict.actor, "agent/example-actor-alias");
+    assert_eq!(verdict.request_actor, "agent/example-actor-alias");
+}
+
+#[test]
+fn portable_proof_rejects_unknown_schema_and_forged_embedded_anchor() {
+    let (proof, member) = exported();
+    let mut changed = proof.clone();
+    changed.schema = "fractal.rename-proof.unknown".into();
+    assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "malformed-bundle");
+    let mut changed = proof;
+    changed.fleet_anchor = key().public().to_owned();
+    assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "untrusted-membership");
+}
