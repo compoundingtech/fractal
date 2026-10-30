@@ -25,7 +25,8 @@ const PENDING: Duration = Duration::from_secs(60);
 const RECHECK: Duration = Duration::from_secs(30 * 60);
 /// How long a difference lasts before it is reported.
 const SETTLE: Duration = Duration::from_secs(2 * 60 * 60);
-/// The kinds narrowed to keys, the buckets read per kind, and the keys named per kind.
+/// The claim kinds narrowed to keys (fold readers are always narrowed), the buckets read per
+/// kind, and the keys named per kind.
 const MAX_KINDS: usize = 8;
 const MAX_BUCKETS: usize = 8;
 const MAX_KEYS: usize = 20;
@@ -170,7 +171,8 @@ async fn compare_answers<B: Backend>(
         return Ok(Step::Differ);
     }
     let mut differences = Vec::new();
-    for (index, kind) in kinds.into_iter().enumerate() {
+    let mut narrowed = 0;
+    for kind in kinds {
         let mut report = KindReport {
             kind: kind.kind,
             ours: kind.ours,
@@ -178,7 +180,10 @@ async fn compare_answers<B: Backend>(
             keys: Vec::new(),
             complete: false,
         };
-        if index < MAX_KINDS {
+        // A fold reader's keys come with the summary, so narrowing one computes nothing.
+        let reader = report.kind.starts_with(crate::answers::READER_PREFIX);
+        if reader || narrowed < MAX_KINDS {
+            narrowed += usize::from(!reader);
             let Some((ours, theirs)) = both(ask(Some(&report.kind), BTreeSet::new())).await? else {
                 return Ok(Step::Pending);
             };
@@ -521,8 +526,12 @@ mod tests {
         let compare = async |settled| {
             compare_answers(&http, &backend, "birch", &peer, &auth, &dialer, cut, settled).await.unwrap()
         };
-        assert_eq!(compare(false).await, Step::Differ, "the summaries differ while item/b moves");
+        let summary = |store: &Store| store.answers_summary(cut).unwrap().kinds["example.state"].clone();
+        let (ours, theirs) = (summary(&birch), summary(&alder));
+        assert_ne!((ours.keys, &ours.digest), (theirs.keys, &theirs.digest), "item/b counts only on birch");
+        assert_eq!(ours.before_cut, theirs.before_cut, "both hold item/b's claim before the cut");
         let agree = AnswersCheck { peer: "alder".into(), cut_unix_ms: cut, differences: Vec::new() };
+        assert_eq!(compare(false).await, Step::Found(agree.clone()), "they agree on the claims before the cut");
         assert_eq!(compare(true).await, Step::Found(agree), "a moving key is not reported");
         server.abort();
     }

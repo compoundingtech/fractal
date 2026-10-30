@@ -164,6 +164,26 @@ fn a_key_moving_on_either_member_is_no_difference() {
     assert_eq!(differing_keys(&ours, &theirs), []);
     assert_eq!(differing_keys(&theirs, &ours), []);
 
+    // Both still hold item/b's claim before the cut, so the kind agrees without narrowing.
+    let summary = |connection: &Connection| {
+        let mut summary = AnswersSummary { cut_unix_ms: 50, ..AnswersSummary::default() };
+        summary.kinds.insert("example.state".into(), kind_answers(connection, "example.state", 50).unwrap());
+        summary
+    };
+    let (moved, behind) = (fixture(), fixture());
+    for connection in [&moved, &behind] {
+        claim(connection, "a1", "example.state", "item/a", "alder", 10, 1);
+        claim(connection, "b1", "example.state", "item/b", "alder", 10, 2);
+    }
+    claim(&moved, "b2", "example.state", "item/b", "alder", 100, 3);
+    assert_eq!(differing_kinds(&summary(&moved), &summary(&behind), true), []);
+    // A member that trimmed item/b's older claim no longer agrees on the claims before the cut,
+    // so the kind differs until narrowing finds only the moving key.
+    delete(&moved, "b1");
+    assert_eq!(differing_kinds(&summary(&moved), &summary(&behind), false).len(), 1);
+    let keys = |connection: &Connection| all_keys(connection, "example.state", 50);
+    assert_eq!(differing_keys(&keys(&moved), &keys(&behind)), []);
+
     // A fold reader's moving subject is listed but not counted.
     let key = |subject: &str, moving| AnswerKey { subject: subject.into(), origin: String::new(), claim: String::new(), moving };
     let (_, with_moving, buckets) = reader_answers("status_history", 50, vec![key("agent/a", false), key("agent/b", true)]);
@@ -328,7 +348,7 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
 
 #[test]
 fn readers_compare_only_between_members_that_both_run_them() {
-    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into() };
+    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into(), before_cut: String::new() };
     let summary = |kinds: &[(&str, &str)]| AnswersSummary {
         kinds: kinds.iter().map(|(kind, digest)| (kind.to_string(), answers(digest))).collect(),
         ..AnswersSummary::default()
