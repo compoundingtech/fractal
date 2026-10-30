@@ -1277,6 +1277,49 @@ async fn create_after_standalone_run_records_explicit_name_before_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fresh_explicit_store_fleet_create_resolves_identity_under_admission_lock() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for requested in [None, Some("fern")] {
+        let directory = if requested.is_some() { "renamed" } else { "configured" };
+        let mut node = Node::named(root.path(), directory, "orchid");
+        let store_dir = node.root.join("external-store");
+        fs::create_dir(&store_dir).unwrap();
+        fs::write(
+            node.root.join("config/st3/config.toml"),
+            format!("node = \"orchid\"\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+        ).unwrap();
+        let pin = node.state_dir().join("node-identity.json");
+        assert!(!pin.exists());
+        assert!(!store_dir.join("claims.sqlite3").exists());
+        let mut arguments = vec!["fleet", "create", "--no-service", "--dial-out"];
+        if let Some(name) = requested {
+            arguments.extend(["--name", name]);
+        }
+        let founded = node.st_json(&arguments);
+        let expected = requested.unwrap_or("orchid");
+        assert_eq!(founded["node"], expected);
+        assert_eq!(
+            serde_json::from_slice::<String>(&fs::read(&pin).unwrap()).unwrap(),
+            expected,
+        );
+        assert_eq!(
+            fractal_daemon::config::FleetFile::load(&node.state_dir()).unwrap().unwrap().node.as_deref(),
+            Some(expected),
+        );
+        assert!(!node.state_dir().join("claims.sqlite3").exists());
+        node.name = expected.into();
+        node.start().await;
+        assert_eq!(node.st_json(&["fleet", "status"])["node"], expected);
+        assert!(store_dir.join("claims.sqlite3").exists());
+        assert!(!node.state_dir().join("claims.sqlite3").exists());
+        node.stop();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn explicit_store_writer_changes_are_refused_before_join_side_effects() {
     if fractal_daemon::test_support::supervise_test() {
         return;

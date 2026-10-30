@@ -75,11 +75,23 @@ merely because its filename or config node matches.
 Preserve the original files and resolve the missing identity evidence; do not erase or edit
 identity metadata to bypass the refusal.
 
-The three database files must not be symlinks. The daemon fences the selected directory's
-inode and refuses startup if that pathname is removed, replaced, or retargeted while it
-opens the database; it never recreates a missing explicit store directory. A fleet join
-that would change an existing configured store's local writer is refused before redeeming
-the invite or saving membership. Keep that writer name when joining.
+The three database files must not be symlinks; ancestor directory symlinks are supported.
+One admitted-store handle retains the directory FD and exclusive flock throughout daemon
+and fleet admission. Linux opens through `/proc/self/fd/FD/claims.sqlite3`; before any
+SQLite initialization or migration write, the opened filename and database entry must match
+the admitted directory and file identity. A removed or replaced explicit directory is never
+recreated. macOS uses pathname opening with the same pre-write identity checks, rather than
+a Linux `/proc` descriptor path. SQLite's Unix VFS can canonicalize descriptor paths, so the
+checks compare pathname metadata rather than SQLite's internal file descriptor. Transient
+namespace changes that are switched back between checks, and later VFS sidecar operations,
+remain residual risks on both platforms. Keep the directory stable throughout daemon use
+and fleet admission; this is not protection against a hostile process rewriting its namespace.
+
+A fleet join that would change an existing configured store's local writer is refused before
+redeeming the invite or saving membership. Keep that writer name when joining. Explicit-store
+fleet migration checks the database's fleet binding after stopping the daemon and acquiring
+the admitted-store lock; it cannot inspect through that exclusive handle while the daemon
+still owns it.
 
 1. Stop **only the daemon**, using its service manager (for example,
    `systemctl --user stop st3.service` for the legacy Linux unit; use the actual installed unit).
