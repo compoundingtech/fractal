@@ -1072,7 +1072,7 @@ fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
     );
     for (family, member, policy) in fixtures {
         assert_eq!(fractal_schema::lifecycle::registry().member(member).unwrap().family, family);
-        let store = Store::open_memory(&format!("membership-registry-{family}")).unwrap();
+        let store = Store::open_memory(format!("membership-registry-{family}")).unwrap();
         create(&store);
         let placed = edit(&store, json!([place(member, None, "a0")]));
         let retained = head(&store, member);
@@ -1145,7 +1145,7 @@ fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
         assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(),
             u64::try_from(expected.len()).unwrap(), "{family}");
         let digests = membership_digests(&store);
-        let replica = Store::open_memory(&format!("membership-registry-{family}-replica")).unwrap();
+        let replica = Store::open_memory(format!("membership-registry-{family}-replica")).unwrap();
         sync(&store, &replica);
         for target in [&store, &replica] {
             assert_eq!(rows(target), expected, "{family}: replication");
