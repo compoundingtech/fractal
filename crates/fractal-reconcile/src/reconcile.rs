@@ -1226,6 +1226,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
     github_plugin: Arc<github_plugin_store::GithubPluginStore>,
+    /// Whether an unfilled mirror refills from GitHub with a look of its own. The daemon's
+    /// reconciler does; a test's, with no GitHub behind its provider, does when it asks.
+    refill_mirrors: bool,
     /// By observer: the cursor its plugin database did not keep. Every arm of the observer keeps
     /// it before it asks the provider again.
     unkept_cursors: Arc<Mutex<HashMap<String, UnkeptCursor>>>,
@@ -1442,6 +1445,7 @@ impl Reconciler<NativeRuntime> {
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: github_plugin_store::GithubPluginStore::shared(state_dir)?,
+            refill_mirrors: true,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1620,6 +1624,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: Arc::new(github_plugin_store::GithubPluginStore::memory()),
+            refill_mirrors: false,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1793,6 +1798,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     #[doc(hidden)]
     pub fn with_github_plugin(mut self, store: Arc<github_plugin_store::GithubPluginStore>) -> Self {
         self.github_plugin = store;
+        self
+    }
+
+    /// Refill unfilled GitHub mirrors from the resource provider, as the daemon's reconciler does.
+    pub fn with_mirror_refill(mut self, refill: bool) -> Self {
+        self.refill_mirrors = refill;
         self
     }
 
@@ -16777,6 +16788,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let unkept_cursors = self.unkept_cursors.clone();
         let github_plugin = self.github_plugin.clone();
+        let refill_mirrors = self.refill_mirrors;
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -16951,7 +16963,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     );
                                     // A mirror that is new, moved, restored, set aside or behind
                                     // the cursor refills from GitHub once the listing has caught up.
-                                    if !continuing
+                                    if refill_mirrors
+                                        && !continuing
                                         && !github_plugin.filled(&spec.resource).unwrap_or(true)
                                         && github_plugin.refill_due(&spec.resource, now_ms())
                                     {
@@ -40685,6 +40698,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
             )
             .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
             .with_resource_provider(Arc::new(OnePoll { asked: asked.clone(), facts, cursor: cursor.clone() }));
             // Due now, rather than at the deadline the last poll recorded.
             reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
