@@ -141,7 +141,7 @@ fn mission_preview(
                     named.extend(agents.iter().cloned());
                     json!({"kind": "any", "agent": null, "label": format!("any of {} agents", agents.len())})
                 }
-                Some(WorkSelector::Agentless) => json!({"kind": "st", "agent": null, "label": "st"}),
+                Some(WorkSelector::Agentless) => json!({"kind": "st", "agent": null, "label": "Fractal"}),
                 None => json!({"kind": "none", "agent": null, "label": "no one"}),
             };
             let stops = step.gates.iter().any(|gate| matches!(gate, GateSpec::Human { .. }));
@@ -251,7 +251,7 @@ mission "audit" state="ready" {
         // An agent st does not know reads as its id without `agent/`.
         assert_eq!(steps[1]["assignee"]["label"], "example/elm");
         assert_eq!(steps[1]["after"], json!(["prepare"]));
-        assert_eq!(steps[2]["assignee"], json!({"kind":"st","agent":null,"label":"st"}));
+        assert_eq!(steps[2]["assignee"], json!({"kind":"st","agent":null,"label":"Fractal"}));
         assert_eq!(
             steps.iter().map(|step| step["asks_you"].as_bool().unwrap()).collect::<Vec<_>>(),
             [false, false, true]

@@ -316,17 +316,11 @@ def case_alert(stui):
     wait_for(stui.status, lambda status: status["answered"] == ["ask/probe=Yes"], "answer sent")
     time.sleep(0.2)
     assert bytes(stui.wire_input[start:]) == b"", f"clicks reached the program: {bytes(stui.wire_input[start:])!r}"
-    # Opening it works while attached: "open in Inbox" opens a regular tab; Ctrl+W closes it
-    # and returns focus to the still-attached terminal. Ctrl+H refocuses Inbox, not a toggle.
+    # The card is the whole alert: nothing over the terminal sends the person to Inbox for it.
     status = stui.status()
-    inbox = next(alert["rect"] for alert in status["alerts"] if alert["tap"] == "Open")
-    stui.click(inbox)
-    wait_for(stui.status, lambda status: status["pane"] == "list:home" and not status["focused"], "Inbox tab opened")
-    stui.send(b"\x1b[104;5u")  # Ctrl+H as a kitty-keyboard terminal sends it
-    wait_for(stui.status, lambda status: status["pane"] == "list:home" and not status["home"], "Inbox tab refocused")
-    stui.send(b"\x1b[119;5u")  # Ctrl+W closes the Inbox tab
-    wait_for(stui.status, lambda status: status["pane"] != "list:home" and status["focused"], "back on the terminal")
-    print("alert: shown on top of the attached terminal; keys reach the program; clicks show, answer and open it in Inbox")
+    assert all(alert["tap"] != "Open" for alert in status["alerts"]), status["alerts"]
+    assert "open in Inbox" not in screen(status), "the band still offers open in Inbox"
+    print("alert: shown on top of the attached terminal; keys reach the program; clicks show and answer it")
 
 
 def case_reconnect(stui):

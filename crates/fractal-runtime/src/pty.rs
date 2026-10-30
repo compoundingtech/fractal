@@ -358,6 +358,10 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
+        // The lane is the scope's, never the harness's environment.
+        let mut env = env.clone();
+        let capacity = crate::lane::Capacity::take(&mut env);
+        let env = &env;
         let _spawn_lock = self.acquire_spawn_lock(id)?;
         let fence = self.spawn_state_path(id, "pending");
         let prior_pending = fence.try_exists()?;
@@ -432,6 +436,7 @@ impl PtyRuntime {
             .filter(|operation| tags.get("st3.start-operation") == Some(*operation));
         let scope_identity = operation.map_or_else(|| id.to_owned(), |operation| format!("{id}-{operation}"));
         let unit = crate::scope_unit("st3", &scope_identity);
+        let lane = crate::lane::prepare(capacity, id)?;
         // An existing or unreadable ownership record may describe an earlier
         // entered producer. Refusing its replay is not a never-started witness.
         let previously_entered = *producer_entered;
@@ -471,6 +476,16 @@ impl PtyRuntime {
         terminal_env
             .entry("TERM".into())
             .or_insert_with(|| "xterm-256color".into());
+        // A lane's variables are the harness's own, forwarded by name like the seat's, not left to
+        // what the PTY server happens to inherit from the launcher.
+        if let Some(lane) = &lane {
+            let host = |key: &str| match &self.command_environment {
+                Some(base) => base.get(key).cloned(),
+                None => std::env::var(key).ok(),
+            };
+            let added = crate::lane::environment(lane, |key| terminal_env.get(key).cloned(), host);
+            terminal_env.extend(added.into_iter().map(|(key, value)| (key.to_owned(), value)));
+        }
         // Name-only `--env`: the pty launcher resolves each name against its
         // inherited environment (exported to it below), so no seat
         // environment value is ever placed on a command line that a service
@@ -543,6 +558,7 @@ impl PtyRuntime {
                 program.as_os_str(),
                 &argument_refs,
                 launcher_environment.as_ref(),
+                lane.as_ref(),
             );
             if launcher_environment.is_none() {
                 command.envs(&terminal_env);
@@ -2534,6 +2550,88 @@ exit 0
                 "only the server scope should remain populated");
             assert!(!runtime.start_operation_closed(id, &operation).unwrap(),
                 "an unrecorded live server would incorrectly certify closure");
+        }
+    }
+
+    /// A terminal seat's lane holds its harness (docs/st3/seat-lanes.md): each launch runs in a
+    /// scope inside the seat's capped slice, the harness never sees the lane's launch key and keeps
+    /// its builds in place, stopping the session ends its scope but keeps the lane for a restart,
+    /// and ending the lane removes it.
+    #[test]
+    fn a_laned_harness_runs_in_its_seats_capped_slice_until_the_lane_ends() {
+        let Some(pty) = scoped_pty() else {
+            eprintln!("skipped: no systemd user scopes or no pty binary");
+            return;
+        };
+        if !crate::isolate::systemd_254() {
+            eprintln!("skipped: lanes need systemd 254");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("r")).with_binary(pty.to_string_lossy());
+        let pid_file = root.path().join("harness.pid");
+        // No other test run on this host shares the lane.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos();
+        let id = format!("laned-{}-{nanos}", std::process::id());
+        let slice_name = crate::lane::seat_slice(&id);
+        struct EndLane(String);
+        impl Drop for EndLane {
+            fn drop(&mut self) {
+                for verb in ["stop", "revert"] {
+                    let _ = std::process::Command::new("systemctl").args(["--user", verb, &self.0]).output();
+                }
+            }
+        }
+        let _lane = EndLane(slice_name.clone());
+        let lane = crate::lane::Capacity { cores: 1, memory: 256 << 20 };
+        let environment = BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (crate::lane::CAPACITY_ENV.into(), lane.to_string()),
+        ]);
+        let harness = Launch::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo \"${{BUILDS_SLICE_ACTIVE:-unset}} ${{FRACTAL_SEAT_CAPACITY:-unset}} $FRACTAL_LANE_SLICE\" > '{}'; \
+                 echo $$ > '{}'; exec sleep 60",
+                pid_file.with_extension("env").display(),
+                pid_file.display(),
+            ),
+        ]);
+        let switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::lane::set_enforced(true);
+        let spawned = runtime.spawn(&id, &harness, root.path(), &environment, None, &BTreeMap::new(), None);
+        crate::lane::set_enforced(false);
+        drop(switch);
+        spawned.unwrap();
+        let harness = read_pid(&pid_file);
+
+        let work_unit = runtime.session(&id).map(observation).unwrap().unwrap().tags["st3.scope-unit"].clone();
+        assert_eq!(cgroup_leaf(harness), work_unit);
+        let cgroup = fs::read_to_string(format!("/proc/{harness}/cgroup")).unwrap();
+        let cgroup = Path::new("/sys/fs/cgroup")
+            .join(cgroup.lines().find_map(|line| line.strip_prefix("0::")).unwrap().trim_start_matches('/'));
+        let slice = cgroup.parent().unwrap().to_path_buf();
+        assert!(slice.ends_with(format!("app.slice/app-lanes.slice/{slice_name}")), "{}", slice.display());
+        assert_eq!(fs::read_to_string(slice.join("cpu.max")).unwrap().trim(), "100000 100000");
+        assert_eq!(fs::read_to_string(slice.join("memory.max")).unwrap().trim(), (256u64 << 20).to_string());
+        assert_eq!(
+            fs::read_to_string(pid_file.with_extension("env")).unwrap().trim(),
+            format!("1 unset {slice_name}")
+        );
+
+        runtime.stop(&id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cgroup.exists() {
+            assert!(Instant::now() < deadline, "the harness scope {work_unit} outlived its stopped session");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(slice.exists(), "a stopped session keeps its seat's lane for a restart");
+        crate::lane::end(&id);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while slice.exists() {
+            assert!(Instant::now() < deadline, "the lane {slice_name} outlived its end");
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 

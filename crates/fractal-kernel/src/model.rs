@@ -256,6 +256,10 @@ pub struct MemberSpec {
     /// read at each launch. Never declared, so never a launch change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_size: Option<fractal_runtime::TerminalSize>,
+    /// The seat's lane: the CPU and memory cap its scope holds when its host enforces lanes
+    /// (docs/st3/seat-lanes.md). Absent, the seat runs without one. Read at each launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<fractal_runtime::Capacity>,
 }
 
 impl MemberSpec {

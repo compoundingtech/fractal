@@ -165,6 +165,8 @@ person-repair registry
 (`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`).
 It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
 kinds carry; nothing in v10 is removed. The simulation selects v11 and records that filename in its
-audit summary; v1 to v10 stay fixed. Every fixed seed converges and trims a checkpoint, so
-`NEVER_TRIMS` stays empty. The characterization run used
-`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`.
+audit summary; v1 to v10 stay fixed. Every fixed seed converges; 16 of the 17 trim a checkpoint,
+and seed 144 converges without one, so `NEVER_TRIMS` is `[144]`. Claim generation shares the
+schedule's RNG, so regenerating v11 after a registry change on main can move this set. The
+characterization run used
+`cargo nextest run -p fractal -E 'test(convergence)'`.
