@@ -102,6 +102,7 @@ mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod validate_cli;
 mod work_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
@@ -113,6 +114,7 @@ use launch_cli::{run_launch, run_mission_view};
 use replication_cli::run_replication;
 use terminals_cli::run_pty;
 use uninstall_cli::run_uninstall;
+use validate_cli::{ValidateArgs, run_validate};
 use work_cli::{run_wait, run_work};
 
 use presentation::{
@@ -298,6 +300,9 @@ enum Command {
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
+    /// Validate KDL files offline using default host "local", without contacting a daemon.
+    /// This is not an authorization or deployment preview.
+    Validate(ValidateArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
         #[command(subcommand)]
@@ -1221,6 +1226,16 @@ enum MissionViewCommand {
     WaitingOn {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
         run: String,
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
+    /// Every blocked run in the fleet, one line each, grouped by cause: an ask on a person, an
+    /// agent stopped or down, a claim with no progress, a ready step nobody claims, a hold.
+    ///
+    /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
+    /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
+    Blocked {
         /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
         #[arg(long)]
         quiet: Option<String>,
@@ -3343,6 +3358,10 @@ struct AgentStopArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Why the agent stops. `agents show` and `agents ls` print it beside who stopped it and
+    /// when.
+    #[arg(long)]
+    reason: Option<String>,
     /// Print the exact stop KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
@@ -3886,6 +3905,15 @@ struct WorkAskArgs {
     step: Option<String>,
     #[arg(long, conflicts_with = "step")]
     new_run: Option<String>,
+    /// How long the person has to answer, such as `4h` or `2d`. At the deadline the ask
+    /// resolves by itself with --default, and the asking step resumes. Without it the fleet's
+    /// default deadline applies: 24h unless `[asks] default_deadline` says otherwise.
+    #[arg(long, value_name = "DURATION")]
+    deadline: Option<String>,
+    /// The answer id of the --request that applies at the deadline. Without it an unanswered
+    /// ask resolves as timed out, with no answer.
+    #[arg(long = "default", value_name = "ANSWER", requires = "request")]
+    default_answer: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
@@ -4229,6 +4257,9 @@ struct MessageSendArgs {
     /// the message already sent instead of sending it twice.
     #[arg(long)]
     idempotency_key: Option<String>,
+    /// Send even if this daemon has not yet learned the recipient through fleet replication.
+    #[arg(long)]
+    allow_undeclared_recipient: bool,
 }
 
 /// Whether a message wakes its recipient. A person's message, a handoff, a fault, a ready step
@@ -4821,6 +4852,16 @@ fn cli_main() -> ExitCode {
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Validation must precede identity lookup, configuration loading and client construction.
+    if let Command::Validate(args) = &cli.command {
+        return match run_validate(args, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}: {}", ClientMessage::for_output(false).diagnostic_prefix("st"), plain_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if let Command::ActorContract { effective } = &cli.command {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
@@ -5458,6 +5499,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
+        Command::Validate(_) => unreachable!("validation runs before the CLI runtime"),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
@@ -6374,7 +6416,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.bind_fleet(fleet_id)?;
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
-    store.trim_locally(config.trim.local);
+    store.trim_locally(config.trim.local)?;
+    *store
+        .extension::<fractal_store::store::answers_check::TrimSettings>()
+        .notify
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = config.trim.notify.clone();
+    // The daily answers check also covers the readers that fold claims themselves.
+    store
+        .extension::<smallclaims::answers::AnswersCache>()
+        .set_readers(Arc::new(fractal_store::store::answers_check::fold_reader_answers));
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6543,6 +6594,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?);
+    store.set_ask_deadlines(config.asks.deadlines);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
@@ -6556,6 +6609,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
@@ -10831,7 +10885,7 @@ fn render_performance(view: &Value) -> String {
     {
         let _ = writeln!(
             out,
-            "INCREMENTAL CORRECTIONS  count · item (writes an incremental pass would have missed; each is a bug)"
+            "INCREMENTAL CORRECTIONS  count · item · cause (a write or a due time an incremental pass would have missed; each is a bug)"
         );
         for row in corrections {
             let _ = writeln!(
@@ -13031,6 +13085,39 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
     }
 }
 
+/// Why a seat that is not running stopped, who or what stopped it and when, from the card's end
+/// reason. A stopped seat without one says so rather than printing nothing.
+fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
+    let Some(end) = &agent.end_reason else {
+        return (agent.state == "stopped").then(|| "stopped, with no recorded reason".to_owned());
+    };
+    let actor = end.actor.as_deref().unwrap_or("unknown");
+    let mut line = match end.kind.as_str() {
+        "parked" => "parked by st after it failed to start".to_owned(),
+        "stopped-by-person" | "stopped-by-agent" => format!("stopped by {actor}"),
+        "stopped-by-mission" => format!("stopped by {actor} as its run ended"),
+        "retired" => match &end.actor {
+            Some(actor) => format!("retired by {actor}"),
+            None => "retired".to_owned(),
+        },
+        "crashed" => match (&end.exit_signal, end.exit_code) {
+            (Some(signal), _) => format!("crashed on signal {signal}"),
+            (None, Some(code)) => format!("crashed with exit code {code}"),
+            (None, None) => "crashed".to_owned(),
+        },
+        "harness-exited" => "its harness exited".to_owned(),
+        "host-lost" => "its host is unreachable".to_owned(),
+        "completed" => "exited cleanly".to_owned(),
+        other => other.to_owned(),
+    };
+    line.push_str(&format!(" at {}", end.ended_at));
+    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref()) {
+        line.push_str(": ");
+        push_todo_terminal_text(&mut line, reason);
+    }
+    Some(line)
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -13048,6 +13135,11 @@ fn render_client_agent(
         None => {
             let _ = writeln!(output, "STATE        {}", agent.state);
         }
+    }
+    if agent.state != "running"
+        && let Some(line) = agent_stop_line(agent)
+    {
+        let _ = writeln!(output, "WHY          {line}");
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     if let Some(custody) = &agent.mail_custody {
@@ -13346,6 +13438,11 @@ fn render_client_agents(
                     "{}\t{}\t{}",
                     agent.header.id, agent.name, agent.state
                 );
+            }
+            if agent.state != "running"
+                && let Some(line) = agent_stop_line(agent)
+            {
+                let _ = writeln!(output, "  {line}");
             }
             for relationship in &agent.under {
                 match relationship.reason.as_deref() {
@@ -14026,6 +14123,27 @@ async fn for_each_message(
             Some(next) => cursor = Some(next),
             None => return Ok(()),
         }
+    }
+}
+
+async fn preflight_message_recipient(client: &Client, to: &str, allow_undeclared: bool) -> Result<()> {
+    let to = normalize_message_subject(to);
+    fractal_daemon::model::refuse_person_recipient(&to)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !to.starts_with("agent/") || allow_undeclared {
+        return Ok(());
+    }
+    match client.get::<serde::de::IgnoredAny>(&format!(
+        "/v1/messages/recipient?to={}", urlencoding::encode(&to),
+    )).await {
+        Ok(_) => Ok(()),
+        Err(error) if fractal_daemon::client::http_status(&error) == Some(404)
+            && fractal_daemon::client::api_error_code(&error) != Some("unknown-recipient") =>
+        {
+            eprintln!("st: this daemon has no recipient preflight; sending without checking the recipient. Upgrade the daemon to reject unknown recipients.");
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -14798,6 +14916,11 @@ struct NativeLoopState {
     /// image polls once at once.
     #[serde(skip)]
     claude_attachment_polled: Option<((String, u64, String), u64)>,
+    /// Since when the daemon has answered every attachment check, so the attach window counts
+    /// from the current daemon's first answer. A failed check clears it. Not carried: a
+    /// replacement image counts from its own first answer.
+    #[serde(skip)]
+    claude_attachment_answered: Option<Instant>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -17590,16 +17713,34 @@ async fn check_claude_attachment(
         };
         report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
     }
-    let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
-    let phase = if attached {
-        "attached"
-    } else if started.elapsed() >= claude_attachment_window()
-        || state.claude_attachment_phase == "blocked"
-    {
-        "blocked"
+    // A check that failed, such as a starting daemon's "API is not ready" or no answer within two
+    // seconds, is evidence about the daemon, not the channel. It moves no phase, and the attach
+    // window counts again from the daemon's next answer, so a slow daemon start never reads as a
+    // lost channel.
+    if checked.is_ok() {
+        state.claude_attachment_answered.get_or_insert_with(Instant::now);
     } else {
-        "starting"
+        state.claude_attachment_answered = None;
+    }
+    let phase = match &checked {
+        Ok(attachment) if attachment.attached => "attached",
+        Ok(_)
+            if state.claude_attachment_phase == "blocked"
+                || state.claude_attachment_answered.is_some_and(|answered| {
+                    started.max(answered).elapsed() >= claude_attachment_window()
+                }) =>
+        {
+            "blocked"
+        }
+        Ok(_) => "starting",
+        Err(_) if state.claude_attachment_phase == "attached" => "attached",
+        Err(_) if state.claude_attachment_phase == "blocked" => "blocked",
+        Err(_) => "starting",
     };
+    // Its reason would describe the daemon, so a failed check never republishes a settled phase.
+    if checked.is_err() && phase != "starting" {
+        return Ok(());
+    }
     if state.claude_attachment_reconciled && state.claude_attachment_phase == phase {
         return Ok(());
     }
@@ -17654,7 +17795,8 @@ fn finish_claude_attachment_publication(
     published
 }
 
-/// How long a Claude seat may start before an unattached channel is reported as blocked.
+/// How long a Claude seat may start before an unattached channel is reported as blocked, counted
+/// from the later of the driver's settle and the daemon's first answer to its checks.
 /// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
 /// the boot canaries need not wait out the production window.
 fn claude_attachment_window() -> Duration {
@@ -18752,11 +18894,13 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
             .ok()
             .flatten();
         match reloaded {
-            Some(Ok((reloaded, reconcile))) => {
+            Some(Ok((reloaded, reconcile, asks))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
+                store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline"));
+                store.set_ask_deadlines(asks.deadlines);
                 limits = reloaded;
                 last_error = None;
             }
@@ -19290,6 +19434,21 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
+/// path: exchanges only take what a scan found. A stopped scan restarts after a membership change.
+async fn backfill_envelope_signatures(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            fractal_daemon::task_cpu::blocking("maintenance.signature_backfill", || worker.advance_signature_backfill())
+        }).await;
+        if !matches!(result, Ok(Ok(_))) {
+            stderr_message("st3", format_args!("signature backfill scan failed: {result:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 

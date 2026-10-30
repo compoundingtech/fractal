@@ -418,7 +418,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         statement, = self.statements()
         digest = statement['predicate']['observed']['inputs']['lane_definition_sha256']
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
         base_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
         self.assertEqual(digest, verifier.lane_definition(str(self.work), base_tree, git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256'])
@@ -430,7 +433,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertNotIn('not signed', out)
         statement, = self.statements()
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
         definition = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', 'origin/main^{tree}'),
                                               git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)
@@ -476,7 +482,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn('covered by wrapper', out)
         statement, = self.statements()
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', f'{point}:.st/required-lanes.json'), 'demo')
         at_point = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', f'{point}^{{tree}}'),
                                             git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256']
@@ -2099,7 +2108,8 @@ if os.environ.get('FAKE_NO_REPORT') != '1':
         if package == os.environ.get('FAKE_EMPTY'):
             continue  # the selection matched no test of this crate
         out.append('<testsuite name=%s>' % quoteattr(package))
-        out.append('<testcase name="unit_one" classname=%s></testcase>' % quoteattr(package))
+        retried = '<flakyFailure message="x"/>' if package == os.environ.get('FAKE_FLAKY') else ''  # passed on a retry
+        out.append('<testcase name="unit_one" classname=%s>%s</testcase>' % (quoteattr(package), retried))
         failing = package == os.environ.get('FAKE_FAIL')
         out.append('<testcase name="unit_two" classname=%s>%s</testcase>' % (quoteattr(package), '<failure message="x"/>' if failing else ''))
         out.append('</testsuite>')
@@ -2905,12 +2915,16 @@ class PerCrate(StTest):
         self.assertIn('to run: base, top', out)
 
     def test_rust_tests_is_in_the_default_suite_after_linux_gate(self):
-        self.assertEqual(st_test.OPT_IN, frozenset())
+        # Only linux-clippy and linux-fleet-compat are opt-in: linux-gate's own run still includes both stages, so a default run never
+        # runs them twice.
+        self.assertEqual(st_test.OPT_IN, frozenset({'linux-clippy', 'linux-fleet-compat'}))
         self.assertIn('rust-tests', st_test.BUILDS)
         for flags in ((), ('--all',)):
             code, out, err = self.run_st_test('--list', *flags)
             names = [line.split(':')[0] for line in out.splitlines()]
             self.assertIn('rust-tests', names, flags)
+            self.assertNotIn('linux-clippy', names, flags)
+            self.assertNotIn('linux-fleet-compat', names, flags)
             self.assertLess(names.index('linux-gate') if 'linux-gate' in names else -1, names.index('rust-tests'), flags)
         code, out, err = self.run_st_test('--list', '--check', 'rust-tests')
         self.assertIn('rust-tests: python3 scripts/ci-rust-test-result', out)
@@ -2962,6 +2976,15 @@ class PerCrate(StTest):
         self.assertIn('1 left for CI, a test passed only on a retry: top', out)
         gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']
         self.assertEqual((gate['checks']['linux-gate']['exit_code'], gate['inputs']['flaky_tests']), (0, 'top unit_one'))
+
+    def test_a_crate_with_a_test_that_failed_every_try_fails_even_when_another_passed_only_on_a_retry(self):
+        # nextest: '2 tests run: 1 passed (1 flaky), 1 failed', ci-local's tests exit 100. The retried pass must not hide the failure.
+        code, out, err = self.run_crates(FAKE_FAIL='top', FAKE_FLAKY='top')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 1)], 'top is recorded as a failure, as any failing crate')
+        self.assertRegex(out, r'rust-tests\s+FAILED')
+        self.assertRegex(out, r'rust-tests:top\s+FAILED .*unit_two')
+        self.assertNotIn('left for CI', out)
 
     def test_without_a_report_from_linux_gate_rust_tests_runs_the_crates_it_lacks_itself(self):
         code, out, err = self.run_with_gate(FAKE_GATE_NO_REPORT='1')
