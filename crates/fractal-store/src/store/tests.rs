@@ -8811,6 +8811,57 @@ fn context_occupancy_replicates_when_it_moves_five_points_not_every_turn() {
     assert_eq!(replicated(), [1, 6, 11, 16, 21, 26, 2, 5], "the end replicates the last");
 }
 
+/// Held occupancy follows its incarnation. After a restart, the host's cards show the new
+/// incarnation's replicated context, not an older reading the replaced one left pending; a late
+/// reading from the replaced incarnation, and a changed one after the seat ended, replicate at once.
+#[test]
+fn held_occupancy_yields_to_a_newer_incarnation_and_replicates_after_the_end() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let state = |incarnation: &str, state: &str, at: u128| {
+        let mut input = harness_state(subject, state, at as u64);
+        input.fields.insert("incarnation_id".into(), json!(incarnation));
+        input.idempotency_key = Some(format!("state:{incarnation}:{state}:{at}"));
+        store.append_latest_observation(&input, at).unwrap();
+    };
+    let occupancy = |incarnation: &str, used: u64, at: u128| {
+        let mut reading = harness_usage(subject, "context_occupancy", used, 0);
+        reading.fields.insert("incarnation_id".into(), json!(incarnation));
+        reading.fields.insert("context_window_tokens".into(), json!(100));
+        reading.idempotency_key = Some(format!("occupancy:{incarnation}:{used}"));
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| (claim.body["fields"]["incarnation_id"].as_str().unwrap().to_owned(),
+                claim.body["fields"]["context_used_tokens"].as_u64().unwrap()))
+            .collect::<Vec<_>>()
+    };
+    let cards = || {
+        let at = Some(store.index().unwrap());
+        let many = store.usage_summaries_at(&[subject.to_owned()], at).unwrap()[subject].context.as_ref().unwrap().used_tokens;
+        let one = store.usage_summary_at(subject, None, at).unwrap().unwrap().context.unwrap().used_tokens;
+        assert_eq!(many, one, "both summary paths agree");
+        many.unwrap()
+    };
+    let pair = |incarnation: &str, used: u64| (incarnation.to_owned(), used);
+    state("inc-a", "working", start);
+    occupancy("inc-a", 10, start + 1);
+    occupancy("inc-a", 12, start + 2);
+    assert_eq!(replicated(), [pair("inc-a", 10)], "12 is held: 2 points");
+    assert_eq!(cards(), 12);
+    state("inc-b", "working", start + 10);
+    occupancy("inc-b", 30, start + 11);
+    assert_eq!(replicated(), [pair("inc-a", 10), pair("inc-b", 30)]);
+    assert_eq!(cards(), 30, "the replaced incarnation's held reading doesn't replace the newer context");
+    occupancy("inc-a", 14, start + 12);
+    assert_eq!(replicated().last(), Some(&pair("inc-a", 14)), "a late reading from the replaced incarnation replicates at once");
+    state("inc-b", "ended", start + 20);
+    occupancy("inc-b", 31, start + 21);
+    assert_eq!(replicated().last(), Some(&pair("inc-b", 31)), "a changed reading after the end replicates at once");
+}
+
 /// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
 /// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
 /// reading every minute replicates once, and a reading that changes still replicates.

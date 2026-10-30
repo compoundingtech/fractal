@@ -8601,7 +8601,13 @@ pub fn pending_usage(
         "SELECT o.subject, o.body, o.observed_at_unix_ms FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
          WHERE (?1 IS NULL OR s.subject=?1) AND s.kind='harness.usage' AND s.pending_local_id IS NOT NULL
            AND (json_extract(s.slot, '$[1]')='response_rollup'
-             OR (NOT ?2 AND json_extract(s.slot, '$[1]')='context_occupancy'))
+             OR (NOT ?2 AND json_extract(s.slot, '$[1]')='context_occupancy'
+                 -- Only the live incarnation's: a restart leaves the replaced one's held reading,
+                 -- older than the new incarnation's context.
+                 AND json_extract(s.slot, '$[0]')=(
+                     SELECT json_extract(state.body, '$.fields.incarnation_id') FROM local_observations AS state
+                     WHERE state.subject=s.subject AND state.kind='harness.observed'
+                     ORDER BY state.id DESC LIMIT 1)))
          ORDER BY o.id",
     )?;
     let rows = statement.query_map(params![subject, rollups_only], |row| {
@@ -9373,7 +9379,8 @@ fn publish_due_usage_tx(
         published
     };
     // Occupancy is held on its points only when both readings say how full the window is.
-    let held_occupancy = input.fields.get("semantics").and_then(Value::as_str) == Some("context_occupancy")
+    let occupancy = input.fields.get("semantics").and_then(Value::as_str) == Some("context_occupancy");
+    let held_occupancy = occupancy
         && resting_since != Some(u128::MAX)
         && live_incarnation
         && usage_occupancy_percent(&input.fields).is_some()
@@ -9393,7 +9400,8 @@ fn publish_due_usage_tx(
             let repeat = published == input.fields;
             ((moved || changed) && !repeat, repeat)
         }
-        Some((_, text)) if rollup && resting_since != Some(u128::MAX) && !live_incarnation => {
+        // Held semantics replicate at once once their incarnation ended or was replaced.
+        Some((_, text)) if (rollup || occupancy) && resting_since != Some(u128::MAX) && !live_incarnation => {
             let repeat = published_fields(text) == input.fields;
             (!repeat, repeat)
         }
