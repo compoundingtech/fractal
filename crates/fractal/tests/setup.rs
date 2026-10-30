@@ -928,19 +928,24 @@ async fn onboarding_api(
     let store = std::sync::Arc::new(
         fractal_daemon::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
-    let state = fractal_daemon::api::AppState { owning_person: None,
-    store: store.clone(),
-    notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-    event_notify: tokio::sync::watch::channel(0_u64).0,
-    node: "studio".into(),
-    state_dir: state_dir.clone(),
-    pty_root: state_dir.join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = fractal_daemon::api::AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "studio".into(),
+        state_dir: state_dir.clone(),
+        pty_root: state_dir.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     // These declarations use a simulated provider; no host provider or daemon is touched.
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         |request: axum::extract::Request, next: axum::middleware::Next| async move {
