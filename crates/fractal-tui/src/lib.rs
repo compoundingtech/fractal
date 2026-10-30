@@ -1425,8 +1425,7 @@ mission "release" state="ready" {
                     .unwrap();
             });
             for _ in 0..200 {
-                if self.socket.exists() {
-                    self.client.capabilities().await.unwrap();
+                if self.socket.exists() && self.client.capabilities().await.is_ok() {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
