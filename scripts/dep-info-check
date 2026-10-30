@@ -12,8 +12,9 @@ input of --check (default linux-clippy) covers (equal, or a parent directory). T
 `dep-info: check=NAME units=N files=M uncovered=K`, which the daily report counts.
 
 The skip policy is named by the caller (--policy), never by this script: scripts/ci-linux runs it only when CI_KEYED_CLIPPY_POLICY
-names the policy, which linux-clippy's own run sets (scripts/ci-clippy-keyed, CI's linux-clippy job). linux-gate runs the same clippy
-stage without it, so linux-gate never depends on the policy file (lane-definition-closure --check holds it to that).
+(or CI_KEYED_FLEET_COMPAT_POLICY) names the policy, which the keyed check's own run sets (scripts/ci-clippy-keyed and
+scripts/ci-fleet-compat-keyed, CI's linux-clippy and linux-fleet-compat jobs). linux-gate runs the same stages without it, so linux-gate
+never depends on the policy file (lane-definition-closure --check holds it to that).
 
 --warn reports the same files as warnings and exits 0. linux-clippy is in shadow and no default local run checks it yet, so the
 merge queue would be the first place a failure showed; scripts/ci-linux passes --warn until linux-clippy is a default local check.
