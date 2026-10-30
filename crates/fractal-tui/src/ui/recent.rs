@@ -449,7 +449,17 @@ mod tests {
 
         add_live_question(&mut ui);
 
-        assert_eq!(ui.recent.popup.as_ref().unwrap().matches.len(), 1);
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(
+            popup.matches.len(),
+            2,
+            "the agent and Inbox both show the question"
+        );
+        assert!(
+            popup.matches.iter().any(|index| {
+                popup.entries[*index].place.pane == Pane::List(0).key()
+            })
+        );
         assert_eq!(selected_place(&ui).pane, "agent:agent/recent-b");
         let mut world = ui.world.clone();
         if let Load::Ready(items) = &mut world.attention {
