@@ -3616,8 +3616,7 @@ fn client_agent_cards_presented(
         .map(|mut subject| -> anyhow::Result<(String, Value)> {
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
             // A seat st parked is a fault until it runs again, not a seat someone stopped.
-            let parked = parked_seats.get(&subject.subject)
-                .filter(|_| subject.kind.as_deref() != Some("stop"));
+            let parked = end_reason::holding_park(&subject, parked_seats.get(&subject.subject), retired_subjects.contains(&subject.subject));
             let member_fault = member_faults.get(&subject.subject)
                 .or_else(|| parked.map(|parked| &parked.reason));
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));

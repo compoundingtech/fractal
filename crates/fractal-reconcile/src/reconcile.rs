@@ -34320,6 +34320,71 @@ agent "node.parked" { workspace "/tmp"; command "true" }
             after.item.detail
         );
     }
+
+    /// A seat an agent declared outside any run answers to that agent, not to the fleet's fault
+    /// agent: the agent that made the seat is the one that can fix its launch.
+    #[test]
+    fn a_parked_seat_an_agent_declared_raises_its_fault_to_that_agent() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+agent "node.ops" { workspace "/tmp"; command "true"; handles-faults }
+agent "node.lead" { workspace "/tmp"; command "true" }
+"#,
+            "fault-agent-and-lead",
+        );
+        let source = "version 2\nagent \"node.built\" { workspace \"/tmp\"; command \"true\" }";
+        let intent = parse_intent(source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(
+                &intent,
+                &mission.subject_tokens,
+                "agent-declared",
+                Some("agent/node.lead"),
+            )
+            .unwrap();
+        let parked = "agent/node.built";
+        let token = store.selected_desired_token(parked).unwrap().unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: parked.into(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("decision".into(), Value::String("raise".into())),
+                    (
+                        "key".into(),
+                        Value::String(format!("runtime-crash-loop:{token}")),
+                    ),
+                    (
+                        "reason".into(),
+                        Value::String("the runtime failed three times in a row".into()),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("parked-decision".into()),
+            })
+            .unwrap();
+        let fault = store
+            .fault_snapshot(now_ms())
+            .unwrap()
+            .into_iter()
+            .find(|fault| fault.item.subject == parked)
+            .expect("a parked seat is not a fault");
+        assert_eq!(fault.owner.as_deref(), Some("agent/node.lead"));
+    }
     /// A person's now holds only requests and reviews. A message stays in conversations, and
     /// each fault, on a live run or a terminal one, goes once to the agent that owns it.
     #[test]
