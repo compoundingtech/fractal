@@ -390,6 +390,18 @@ fn denial_fixture(actions: &[&str]) -> (Store, ClaimRecord, DelegationProof) {
     (store, denial, proof)
 }
 
+/// `denial_fixture` over a file store, for tests whose callers race. The in-memory store shares
+/// one cache between its connections, where a reader and the writer find each other's tables
+/// locked at once (SQLITE_LOCKED); a file store waits on its busy timeout, as the daemon's does.
+fn file_denial_fixture(
+    path: &std::path::Path,
+    actions: &[&str],
+) -> (Store, ClaimRecord, DelegationProof) {
+    let store = Store::open(path, "alder").unwrap();
+    let (denial, proof) = seed_denial(&store, actions);
+    (store, denial, proof)
+}
+
 pub fn seed_denial(store: &Store, actions: &[&str]) -> (ClaimRecord, DelegationProof) {
     let source = "version 2\nagent \"worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n";
     let intent = crate::graph::parse_internal_intent(source, "alder").unwrap();
@@ -878,7 +890,9 @@ fn sender_withdraws_its_update_without_releasing_its_held_step_and_retains_histo
 
 #[test]
 fn concurrent_delegated_dismissals_have_one_source_answer_and_one_notice() {
-    let (store, denial, proof) = denial_fixture(&["close-item"]);
+    let directory = tempfile::tempdir().unwrap();
+    let (store, denial, proof) =
+        file_denial_fixture(&directory.path().join("dismissals.sqlite3"), &["close-item"]);
     let store = std::sync::Arc::new(store);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let handles = (0..2)
