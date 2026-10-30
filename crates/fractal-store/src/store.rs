@@ -10894,6 +10894,18 @@ fn message_view_at_with_desired(
     } else {
         desired_row()?
     }.and_then(|row| serde_json::from_str::<Value>(&row.body).ok());
+    message_view_from(connection, subject, created_index, actual, desired)
+}
+
+/// A message's view from its folded fields and its declaration, if it has one. A stream
+/// item's fields come from the messages shard; references still resolve in the graph.
+pub(crate) fn message_view_from(
+    connection: &Connection,
+    subject: &str,
+    created_index: u64,
+    actual: Value,
+    desired: Option<Value>,
+) -> Result<MessageView> {
     let field = |name: &str| actual.get(name).and_then(Value::as_str).map(str::to_owned);
     let child = |name: &str| {
         desired

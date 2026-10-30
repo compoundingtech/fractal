@@ -481,6 +481,17 @@ pub async fn post_message_claim(
                 fields.insert("runtime_id".into(), Value::String(runtime_id));
             }
         }
+        // A stream item's lifecycle is this member's record, not a graph claim.
+        if message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            let appended = crate::store::messages_shard::record_lifecycle(
+                &store, &subject, kind, Some(&actor), &fields,
+            )
+            .map_err(ApiError::bad)?;
+            let record = crate::store::messages_shard::lifecycle_receipt(
+                &store.graph.origin, &subject, kind, Some(&actor), &fields,
+            );
+            return Ok((record, appended, is_work_wake(&message.tags)));
+        }
         let (record, appended) = store
             .append_claim_outcome(&ClaimInput {
                 subject,

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use fractal_daemon::client::Client;
-use fractal_daemon::model::ClaimInput;
+use fractal_daemon::model::{ClaimInput, MessagePage, MessageView};
 
 fn st3() -> &'static str {
     test_env!("CARGO_BIN_EXE_fractal-fixture")
@@ -5958,6 +5958,71 @@ async fn members_that_advertise_the_messages_shard_replicate_it_beside_the_graph
         n2.claims().await.iter().all(|claim| claim["subject"] != "message/0000000000000a01"),
         "a stream item reached the graph"
     );
+}
+
+/// A member's readers merge what the stream holds with the graph's mail: the recipient's page
+/// and the message read find a stream item that replicated in, and its recipient records it read
+/// on its own member with an offset receipt, writing no lifecycle claim to the graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn readers_find_stream_items_and_record_their_lifecycle_on_the_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fleet_id = "8c7b6a5d-4e3f-4210-9a8b-7c6d5e4f3a2b";
+    let secret = root.path().join("fleet.secret");
+    fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut n1 = Node::new(root.path(), "n1");
+    let mut n2 = Node::new(root.path(), "n2");
+    n1.legacy_config(fleet_id, &secret, &[("n2", n2.port)]);
+    n2.legacy_config(fleet_id, &secret, &[("n1", n1.port)]);
+    for node in [&mut n1, &mut n2] {
+        node.start().await;
+    }
+    wait_for_stream_peers(&n1, &["n2"], 60).await;
+    let subject = "message/0000000000000c01";
+    append_stream_item(&n1, subject).await;
+    wait_for_stream_item(&n2, subject, 60).await;
+
+    let page: MessagePage =
+        n2.client().get("/v1/messages/page?to=agent/fleet-reader").await.unwrap();
+    let listed = page.items.iter().find(|item| item.subject == subject)
+        .expect("the page lists the stream item");
+    assert_eq!(listed.content, "through the stream");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.from, "agent/fleet-sender");
+
+    let receipt: Value = n2
+        .client()
+        .post(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/fleet-reader", "idempotency_key": "fleet-read"}),
+        )
+        .await
+        .unwrap();
+    assert!(receipt["id"].as_str().unwrap().starts_with("offset-receipt/"), "{receipt}");
+    let read: MessageView =
+        n2.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(read.status, "read");
+    let refused = n2
+        .client()
+        .post::<_, Value>(
+            &format!("/v1/messages/{}/claims", subject.trim_start_matches("message/")),
+            &json!({"lifecycle": "read", "actor": "agent/someone-else", "idempotency_key": "fleet-read-other"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("wrong-message-recipient"), "{refused}");
+    assert!(
+        n2.claims().await.iter().all(|claim| claim["subject"] != subject),
+        "a stream item's lifecycle reached the graph"
+    );
+    // The sender's member keeps its own record: the reader's receipt is not replicated.
+    let sent: MessageView =
+        n1.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
+    assert_eq!(sent.status, "sent");
 }
 
 /// The previous release never holds the messages shard: it is never dialed for it, and its

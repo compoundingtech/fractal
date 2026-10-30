@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A member's mail readers also read its messages shard: a recipient's page and a message read include stream items, and a stream item's staged, delivered, read and closed are recorded on the member with an offset receipt instead of a graph claim",
+  "replay": {
+    "status": "none",
+    "detail": "No graph claim, projection or cache changes. The shard gains two derived tables, filled from its own claims when they are created."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The messages shard (shards/messages/claims.sqlite3) gains stream_messages, an index of its message.sent items by recipient, kept by a trigger, and stream_lifecycle, this member's local lifecycle record per message. The graph database and its storage version are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Nothing writes message.sent to the shard yet, so on a real fleet every page and read is what it was. A stream item's lifecycle moves only forward and is never replicated."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "POST /v1/messages/{id}/claims and mailbox receipts answer a stream item with a claim-shaped record whose id starts offset-receipt/; the record shape is unchanged. A stream item's created_index is offset past 2^48 so it sorts after every graph index. No client-v0 field is added or removed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Creating the two tables on an empty shard is immediate."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back to the previous release is safe: earlier builds ignore the shard and its new tables, and no graph claim was written."
+  }
+}

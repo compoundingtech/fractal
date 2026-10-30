@@ -144,9 +144,44 @@ impl Store {
             [subject],
             |row| row.get::<_, Option<u64>>(0),
         )?;
-        created_index
-            .map(|index| self.message_view_cached(&connection, subject, index))
-            .transpose()
+        match created_index {
+            Some(index) => self.message_view_cached(&connection, subject, index).map(Some),
+            // A message the graph has never seen may be a stream item in the messages shard.
+            None if subject.starts_with("message/") => super::messages_shard::message_view(self, subject),
+            None => Ok(None),
+        }
+    }
+
+    /// The stream items to `recipient` that come after `after` in a page: a stream item's index
+    /// is past every graph index, so a page lists the graph's messages first, then the stream's.
+    /// The shard only grows, so a page that has reached the stream misses none that arrive.
+    fn stream_page_tail(
+        &self,
+        connection: &rusqlite::Connection,
+        recipient: &str,
+        bare_recipient: &str,
+        include_closed: bool,
+        after: u64,
+        limit: usize,
+    ) -> Result<(Vec<MessageView>, Option<u64>)> {
+        let names = recipient_names(connection, recipient, bare_recipient)?;
+        let after_stream = after.saturating_sub(super::messages_shard::STREAM_INDEX_BASE);
+        let mut rows = super::messages_shard::recipient_page(self, &names, after_stream, limit.saturating_add(1))?;
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_after = has_more
+            .then(|| rows.last().map(|(_, index)| super::messages_shard::STREAM_INDEX_BASE + index))
+            .flatten();
+        let mut output = Vec::new();
+        for (subject, _) in rows {
+            if let Some(message) = super::messages_shard::message_view(self, &subject)?
+                && message.to == recipient
+                && (include_closed || message.status != "closed")
+            {
+                output.push(message);
+            }
+        }
+        Ok((output, next_after))
     }
 
     pub fn message_view_cached(
@@ -320,6 +355,8 @@ impl Store {
                 .then(|| subjects.last().map(|(_, index, _)| *index))
                 .flatten();
             let mut output = Vec::new();
+            let listed = subjects.len();
+            let last_listed = subjects.last().map(|(_, index, _)| *index);
             for (subject, created_index, remaining) in subjects {
                 let mut message = self.message_view_cached(&connection, &subject, created_index)?;
                 if message.to == recipient && (include_closed || message.status != "closed") {
@@ -331,7 +368,26 @@ impl Store {
                     output.push(message);
                 }
             }
-            return Ok((output, next_after));
+            if has_more {
+                return Ok((output, next_after));
+            }
+            // The graph's messages are all listed; the page goes on into the stream. A page the
+            // graph filled ends at its last graph message, and the next page starts the stream.
+            if listed == limit {
+                let names = recipient_names(&connection, recipient, bare_recipient)?;
+                let more = !super::messages_shard::recipient_page(self, &names, 0, 1)?.is_empty();
+                return Ok((output, last_listed.filter(|_| more)));
+            }
+            let (stream, stream_next) = self.stream_page_tail(
+                &connection,
+                recipient,
+                bare_recipient,
+                include_closed,
+                after.unwrap_or(0),
+                limit - listed,
+            )?;
+            output.extend(stream);
+            return Ok((output, stream_next));
         }
         // Every recipient took the indexed path above. Without one, the message index lists the
         // open messages, or all of them, without reading their lifecycle claims.
@@ -569,4 +625,21 @@ mod mailbox_metrics_tests {
             vec![("pending".into(), 1, 100)],
         );
     }
+}
+
+/// Every name a stream item may address `recipient` by: its identity's names, the name itself,
+/// and its bare form, as a graph message's recipient match accepts them.
+fn recipient_names(
+    connection: &rusqlite::Connection,
+    recipient: &str,
+    bare_recipient: &str,
+) -> Result<Vec<String>> {
+    let mut names = connection
+        .prepare_cached("SELECT name FROM identity_names WHERE identity=?1")?
+        .query_map([recipient], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    names.extend([recipient.to_owned(), bare_recipient.to_owned()]);
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
