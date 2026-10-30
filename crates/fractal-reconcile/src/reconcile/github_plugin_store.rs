@@ -135,7 +135,7 @@ impl GithubPluginStore {
         );
         if mirror < 1 {
             connection.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-h86c3bdebac93 owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */ "BEGIN;
+                /* sqlite-large-value: allow-for-now lv-ha6daa92ac54c owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */ "BEGIN;
                  CREATE TABLE IF NOT EXISTS mirror_repositories(
                      repository TEXT PRIMARY KEY,
                      observer TEXT NOT NULL,
@@ -179,6 +179,11 @@ impl GithubPluginStore {
                      sequence INTEGER NOT NULL
                  ) WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS mirror_events_item ON mirror_events(repository, number, recorded_at_unix_ms);
+                 CREATE TABLE IF NOT EXISTS mirror_event_keys(
+                     subject TEXT PRIMARY KEY,
+                     repository TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS mirror_event_keys_repository ON mirror_event_keys(repository);
                  CREATE INDEX IF NOT EXISTS mirror_events_recorded ON mirror_events(repository, recorded_at_unix_ms);
                  INSERT OR REPLACE INTO plugin_meta(key, value) VALUES ('mirror_version', '1');
                  COMMIT;",
@@ -264,6 +269,8 @@ impl GithubPluginStore {
     /// graph does not have stay. A mirror row is only ever as new as the graph's, since the
     /// poller mirrors what it just recorded, so a different claim means the graph is newer.
     pub fn seed(&self, repository: &str, observer: &str, locator: &str, items: &[MirrorItem]) -> Result<usize> {
+        // A row for the observer now exists, so forgetting it must read again.
+        self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         let at = super::now_ms();
         let mut connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
         let transaction = connection.transaction()?;
@@ -297,6 +304,7 @@ impl GithubPluginStore {
     /// holds, in one transaction. An item the mirror did not hold is a baseline and holds no
     /// event. Returns the events, oldest first, as the read API shows them.
     pub fn mirror(&self, repository: &str, observer: &str, locator: &str, items: &[MirrorItem]) -> Result<Vec<Value>> {
+        self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         let at = super::now_ms();
         let at_text = chrono::DateTime::from_timestamp_millis(at as i64)
             .unwrap_or_default()
@@ -316,22 +324,27 @@ impl GithubPluginStore {
                 .optional()?
                 .and_then(|facts| serde_json::from_str(&facts).ok());
             for event in github_events::derive(old.as_ref(), &item.facts) {
+                // Every key ever handed out stays taken, after its event ages out of the mirror,
+                // so a repeated event never reuses the subject of an earlier one.
                 let key = github_events::occurrence_key(&event.key, |key| {
-                    fractal_schema::github_plugin::event_subject(&item.subject, key).is_some_and(|subject| {
-                        transaction
-                            .query_row("SELECT 1 FROM mirror_events WHERE subject=?1", [&subject], |_| Ok(()))
-                            .optional()
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    })
-                });
+                    let Some(subject) = fractal_schema::github_plugin::event_subject(&item.subject, key) else {
+                        return Ok(false);
+                    };
+                    Ok(transaction
+                        .query_row("SELECT 1 FROM mirror_event_keys WHERE subject=?1", [&subject], |_| Ok(()))
+                        .optional()?
+                        .is_some())
+                })?;
                 let Some(subject) = fractal_schema::github_plugin::event_subject(&item.subject, &key) else {
                     continue;
                 };
                 let event = github_events::Event { key, ..event };
                 transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-h7468a1888dd8 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO mirror_events(subject, repository, number, key, event, head_sha, detail, at, recorded_at_unix_ms, sequence)
+                    /* sqlite-large-value: allow-for-now lv-hec182a81f152 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_event_keys(subject, repository) VALUES (?1, ?2)",
+                    params![subject, repository],
+                )?;
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-hdcadfb13979c owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_events(subject, repository, number, key, event, head_sha, detail, at, recorded_at_unix_ms, sequence)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         subject, repository, number as i64, event.key, event.event, event.head_sha,
@@ -554,7 +567,7 @@ fn write_item(connection: &Connection, repository: &str, number: u64, item: &Mir
 }
 
 fn forget_repository(connection: &Connection, repository: &str) -> Result<()> {
-    for table in ["mirror_items", "mirror_heads", "mirror_events", "mirror_repositories"] {
+    for table in ["mirror_items", "mirror_heads", "mirror_events", "mirror_event_keys", "mirror_repositories"] {
         connection.execute(
             &format!(/* sqlite-large-value: allow-for-now lv-h02b64a65ba01 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE repository=?1"),
             [repository],
@@ -639,6 +652,27 @@ mod tests {
         assert!(store.pulls(REPOSITORY, None, 10).unwrap().is_empty());
         assert!(store.events(REPOSITORY, None, 10).unwrap().is_empty());
         assert!(store.repositories("acme/garden").unwrap().is_empty());
+        // Mirrored again after it was forgotten, it is forgotten again.
+        store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": "open"}), "c4")]).unwrap();
+        store.forget(OBSERVER).unwrap();
+        assert!(store.repositories("acme/garden").unwrap().is_empty());
+    }
+
+    /// A repeated event never reuses an earlier one's key, even after that event aged out of
+    /// the mirror: from step 3b each key is a graph subject written once.
+    #[test]
+    fn a_repeated_event_keeps_a_new_key_after_the_first_ages_out() {
+        let store = GithubPluginStore::memory();
+        let look = |state: &str, claim: &str| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": state}), claim)]).unwrap()
+        };
+        look("open", "c1");
+        assert_eq!(look("closed", "c2")[0]["key"], "closed");
+        store.connection.lock().unwrap().execute("UPDATE mirror_events SET recorded_at_unix_ms=0", []).unwrap();
+        assert_eq!(look("open", "c3")[0]["key"], "reopened");
+        assert!(store.events(REPOSITORY, Some(7), 10).unwrap().iter().all(|event| event["key"] != "closed"), "aged out");
+        assert_eq!(look("closed", "c4")[0]["subject"], "github-event/github/acme/garden/pull-request/7/closed/2");
     }
 
     #[test]

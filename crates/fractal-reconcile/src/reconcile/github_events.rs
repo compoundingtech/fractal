@@ -141,14 +141,17 @@ pub fn derive(old: Option<&Map<String, Value>>, new: &Map<String, Value>) -> Vec
 /// The key an event takes when `taken` says which of its item's keys are already used: the
 /// event's own key the first time, then `KEY/2`, `KEY/3`, and so on. A comment, a head or a
 /// check result on one head happens once, so only a repeated draft, queue, close or reopen moves.
-pub fn occurrence_key(key: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(key) {
-        return key.to_owned();
+pub fn occurrence_key(key: &str, mut taken: impl FnMut(&str) -> anyhow::Result<bool>) -> anyhow::Result<String> {
+    if !taken(key)? {
+        return Ok(key.to_owned());
     }
-    (2..)
-        .map(|n| format!("{key}/{n}"))
-        .find(|candidate| !taken(candidate))
-        .expect("an unused key")
+    for n in 2.. {
+        let candidate = format!("{key}/{n}");
+        if !taken(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("an unbounded search returns")
 }
 
 /// One event as the mirror and the read API show it.
@@ -219,7 +222,8 @@ mod tests {
     #[test]
     fn a_repeated_event_takes_the_next_free_key() {
         let taken = ["closed", "closed/2"];
-        assert_eq!(occurrence_key("closed", |key| taken.contains(&key)), "closed/3");
-        assert_eq!(occurrence_key("reopened", |key| taken.contains(&key)), "reopened");
+        assert_eq!(occurrence_key("closed", |key| Ok(taken.contains(&key))).unwrap(), "closed/3");
+        assert_eq!(occurrence_key("reopened", |key| Ok(taken.contains(&key))).unwrap(), "reopened");
+        assert!(occurrence_key("closed", |_| anyhow::bail!("unreadable")).is_err(), "an error is not a free key");
     }
 }

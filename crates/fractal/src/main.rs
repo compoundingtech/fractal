@@ -6269,7 +6269,7 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
             };
             println!(
                 "{thread}  head {}  checks {}",
-                checks["head_sha"].as_str().map_or("unknown", |sha| &sha[..sha.len().min(12)]),
+                checks["head_sha"].as_str().map_or("unknown", |sha| sha.get(..12).unwrap_or(sha)),
                 checks["checks_state"].as_str().unwrap_or("unknown")
             );
             if let Some(required) = checks.get("required_checks").filter(|value| !value.is_null()) {
@@ -6286,7 +6286,7 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
                     for head in heads.iter().skip(1) {
                         println!(
                             "  {}  {}",
-                            head["head_sha"].as_str().map_or("", |sha| &sha[..sha.len().min(12)]),
+                            head["head_sha"].as_str().map_or("", |sha| sha.get(..12).unwrap_or(sha)),
                             head["required_checks"]["state"].as_str().or(head["checks_state"].as_str()).unwrap_or("unknown")
                         );
                     }
