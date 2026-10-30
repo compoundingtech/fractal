@@ -949,6 +949,14 @@ fn persistent_store_uses_bounded_sqlite_page_caches() {
 #[test]
 fn replication_projection_retries_missing_and_stale_health_only() {
     let store = Store::open_memory("node").unwrap();
+    // A store that holds no claims has projected them all.
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(/* sqlite-large-value: allow-for-now lv-h789522dbacf2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
+        .unwrap();
     assert!(store.replication_projection_needs_recovery().unwrap());
     assert!(store.project_replication_backlog().unwrap());
     assert!(!store.replication_projection_needs_recovery().unwrap());
@@ -1961,7 +1969,7 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
             match reason {
                 "missing-health" => {
                     transaction
-                        .execute(/* sqlite-large-value: allow-for-now lv-h789522dbacf2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
+                        .execute(/* sqlite-large-value: allow-for-now lv-hd3f314493cfd owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
                         .unwrap();
                 }
                 "unhealthy-projection" => {
@@ -2054,8 +2062,8 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         }
         assert_eq!(
             FULL_REPLAYS.with(std::cell::Cell::get),
-            2,
-            "one setup replay and one fallback: {reason}"
+            1,
+            "the fallback alone; a store with no claims sets up without one: {reason}"
         );
         let digest = store
             .replication_status(true, None, &[])
@@ -10574,10 +10582,14 @@ fn a_prompt_names_the_exact_call_its_hook_published() {
         )
     };
     append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-    asked(3);
+    let first = asked(3);
     assert_eq!(call_of_prompt(), None, "not named yet: allowed only in the terminal");
+    assert_eq!(store.native_prompt_call(seat, &first.id).unwrap(), None);
     published(3, "toolu_7");
     assert_eq!(call_of_prompt().as_deref(), Some("toolu_7"));
+    // An answer to this very prompt reads the same call; another episode names none.
+    assert_eq!(store.native_prompt_call(seat, &first.id).unwrap().as_deref(), Some("toolu_7"));
+    assert_eq!(store.native_prompt_call(seat, "claim/elsewhere").unwrap(), None);
     // The next prompt is its own observation: the earlier call is not its call.
     append(
         "harness.observed",
