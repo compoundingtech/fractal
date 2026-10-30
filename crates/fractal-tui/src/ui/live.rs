@@ -729,6 +729,8 @@ pub fn run(context: Context) -> Result<()> {
                     extras.inventory_partial.clear();
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
+                    // Another member's objectives are not this one's: drop them until it answers.
+                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None;
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
@@ -1210,10 +1212,16 @@ pub fn run(context: Context) -> Result<()> {
                     match outcome {
                         Ok(rows) => {
                             extras.slo = Load::Ready(rows);
+                            extras.slo_stale = None;
                             // A chart open now is read again beside the fresh rows.
                             slo_history_asked.clear();
                         }
-                        Err(why) if matches!(extras.slo, Load::Ready(_)) => ui.flash(format!("Could not read objectives and budgets again: {why}")),
+                        Err(why) if matches!(extras.slo, Load::Ready(_)) => {
+                            // The rows stay, marked as the last reading, so a failed refresh is not
+                            // taken for a fresh all clear.
+                            ui.flash(format!("Could not read objectives and budgets again: {why}"));
+                            extras.slo_stale = Some(why);
+                        }
                         Err(why) => extras.slo = Load::Failed(why),
                     }
                 }
@@ -3794,6 +3802,7 @@ mod tests {
             store_index,
             projection_version: "1".into(),
             created_at: "2026-10-16T11:00:00Z".into(),
+            published_at: None,
         }
     }
 

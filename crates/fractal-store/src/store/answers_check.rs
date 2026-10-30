@@ -48,6 +48,7 @@ pub fn fold_reader_answers(
          ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
     )?;
     let mut readers: BTreeMap<String, Vec<smallclaims::answers::AnswerKey>> = BTreeMap::new();
+    let mut moving = Vec::new();
     for prefix in FOLDED_SUBJECTS {
         // Every subject that starts with `prefix` sorts after it and before the prefix with its
         // last character raised.
@@ -69,6 +70,7 @@ pub fn fold_reader_answers(
                 .transpose()?
                 .unwrap_or_default();
             if accepted.parse::<u128>().map_or(true, |accepted| accepted >= cut) {
+                moving.push(subject);
                 continue;
             }
             let Value::Object(answers) = checkpoint_rules::subject_answers(connection, &subject, cut)? else {
@@ -80,9 +82,21 @@ pub fn fold_reader_answers(
                     subject: subject.clone(),
                     origin: String::new(),
                     claim: hex::encode(Sha256::digest(canonical.as_bytes())),
+                    moving: false,
                 });
             }
         }
+    }
+    // A subject that moved past the cut moves in every reader, so a member that computed before
+    // its newer claim arrived is no difference.
+    for keys in readers.values_mut() {
+        keys.extend(moving.iter().map(|subject| smallclaims::answers::AnswerKey {
+            subject: subject.clone(),
+            origin: String::new(),
+            claim: String::new(),
+            moving: true,
+        }));
+        keys.sort();
     }
     Ok(readers)
 }
