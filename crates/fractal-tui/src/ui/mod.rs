@@ -3781,7 +3781,14 @@ impl Ui {
                 ),
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
-                ("ctrl+^", "recent places; Enter opens, typing filters"),
+                (
+                    "ctrl+^",
+                    "recent places when detached; Enter opens, typing filters",
+                ),
+                (
+                    "ctrl+\\ r",
+                    "recent places, including over an attached program",
+                ),
                 (
                     "ctrl+tab",
                     "recent cycle (enhanced); release Ctrl if supported",
@@ -4263,10 +4270,7 @@ impl Ui {
         }
         if !self.leader
             && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
-            && (self.recent_open()
-                || !self.terminal_focused()
-                || (key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('6' | '^'))))
+            && (self.recent_open() || !self.terminal_focused())
             && self.recent_key(key)
         {
             return;

@@ -115,8 +115,10 @@ Tab navigation remains [ and ] (when not typing), and Ctrl+PageUp/PageDown.
 Ctrl+L triages outstanding Inbox items only outside attached programs; inside, it remains
 the program's clear-screen chord. Ctrl+\ then l visits the previous triage item without
 sending either leader key to the program. Enhanced Ctrl+Shift+L is the detached equivalent.
-Ctrl+^ (Ctrl+6, 0x1E) is the recent-place popup shortcut, including over attached programs.
-It preselects the previous destination; Enter opens, Escape cancels, and typing filters.
+Ctrl+^ (Ctrl+6, 0x1E) opens the recent-place popup when detached, on every terminal type.
+While attached it reaches the program unchanged (for example, Vim's alternate-file key).
+Ctrl+\ then r opens the popup over an attached program. It preselects the previous
+destination; Enter opens, Escape cancels, and typing filters.
 Enhanced Ctrl+Tab cycles recent places outside attached programs, not tabs. It commits on
 Control release only after such modifier releases have actually been observed; otherwise
 the same popup requires Enter. Ctrl+Shift+Tab cycles backward. Direct Ctrl+Tab remains

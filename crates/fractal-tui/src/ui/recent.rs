@@ -702,25 +702,43 @@ mod tests {
     }
 
     #[test]
-    fn ui_dispatch_keeps_terminal_tab_passthrough_but_opens_explicit_popup() {
+    fn attached_program_keeps_control_caret_and_tab_while_leader_r_opens_recent() {
         use crate::ui::{Effect, doc::Hit};
-        let mut ui = places();
-        ui.keyboard_enhanced = true;
-        let id = ui.world.agents.items()[0].id.clone();
-        ui.open_in_glass(Pane::Agent(Some(id)), Open::Tab);
-        ui.click(Hit::Attach);
-        ui.effects.clear();
-        let cycle = ctrl_tab(false);
-        ui.key(cycle);
-        assert!(!ui.recent_open());
-        assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(sent)) if *sent == cycle));
-        ui.key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL));
-        assert!(ui.recent_open());
-        ui.key(key(KeyCode::Esc));
-        assert!(ui.terminal_focused());
-        ui.key(KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL));
-        ui.key(key(KeyCode::Enter));
-        assert!(!ui.recent_open());
-        assert!(!ui.terminal_focused());
+        for enhanced in [false, true] {
+            let mut ui = places();
+            ui.keyboard_enhanced = enhanced;
+            let id = ui.world.agents.items()[0].id.clone();
+            ui.open_in_glass(Pane::Agent(Some(id)), Open::Tab);
+            ui.click(Hit::Attach);
+            ui.effects.clear();
+            for chord in [
+                ctrl_tab(false),
+                KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL),
+            ] {
+                for kind in [
+                    KeyEventKind::Press,
+                    KeyEventKind::Repeat,
+                    KeyEventKind::Release,
+                ] {
+                    let sent = KeyEvent { kind, ..chord };
+                    ui.key(sent);
+                    assert!(!ui.recent_open());
+                    assert!(
+                        matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if *key == sent)
+                    );
+                }
+            }
+            ui.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+            ui.key(key(KeyCode::Char('r')));
+            assert!(ui.recent_open());
+            ui.key(key(KeyCode::Esc));
+            assert!(ui.terminal_focused());
+            ui.key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL));
+            ui.key(key(KeyCode::Char('r')));
+            ui.key(key(KeyCode::Enter));
+            assert!(!ui.recent_open());
+            assert!(!ui.terminal_focused());
+        }
     }
 }
