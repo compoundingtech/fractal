@@ -220,6 +220,7 @@ pub mod delegation;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
+pub mod local_trim_fault;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
@@ -238,6 +239,8 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
+#[cfg(test)]
+mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
@@ -675,6 +678,35 @@ impl UsageFold {
     }
 }
 
+
+/// The newest crash-loop raise of each subject in the JSON array ?1 at store index ?2 since its
+/// newest running observation. One seek per subject on (subject, kind, store_index), and only
+/// past that observation: a seat that ran since it was parked has nothing to find. The index is
+/// named because the planner otherwise ranges over every subject's reconcile decisions by kind.
+pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, claims.body, claims.accepted_at_unix_ms
+     FROM json_each(?1) subjects
+     JOIN claims ON claims.id=(
+         SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=subjects.value
+            AND kind='runtime.reconcile-decision' AND store_index<=?2
+            AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                WHERE subject=subjects.value AND kind='runtime.observed'
+                  AND store_index<=?2
+                  AND json_extract(body, '$.fields.status')='running'), 0)
+            AND json_extract(body, '$.fields.decision')='raise'
+            AND (json_extract(body, '$.fields.key') GLOB 'runtime-crash-loop:*'
+              OR json_extract(body, '$.fields.key') GLOB 'codex-crash-loop:*')
+          ORDER BY store_index DESC LIMIT 1)";
+
+/// A seat st stopped restarting after it failed to start: why, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The crash-loop decision that parked it.
+    pub decision: String,
+    /// The first raise since the seat last ran: one park, however many retries failed in it.
+    pub episode: String,
+    pub reason: String,
+    pub parked_at_unix_ms: u128,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentWorkQueue {
@@ -5467,6 +5499,74 @@ impl Store {
         kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
         times.extend(read);
         Ok(times)
+    }
+
+    /// Each of `subjects` that st parked at `at_index` and that has not run since: its newest
+    /// crash-loop raise (after repeated failed starts, or a failed explicit restart) for its
+    /// current launch, with no running observation after it. A new declaration launches afresh,
+    /// so a raise for an earlier launch parks nothing.
+    pub fn parked_seats_for(
+        &self,
+        subjects: &[String],
+        at_index: u64,
+    ) -> Result<BTreeMap<String, ParkedSeat>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he0201008ecc8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ PARKED_SEATS_SQL)?;
+        let mut parked = BTreeMap::new();
+        for chunk in subjects.chunks(256) {
+            let rows = statement
+                .query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (subject, id, body, accepted_at) in rows {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").unwrap_or(&body);
+                let token = fields
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| key.split_once(':'))
+                    .map(|(_, token)| token.to_owned())
+                    .unwrap_or_default();
+                if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
+                    continue;
+                }
+                // Each failed retry raises again; the episode is the first raise since the seat
+                // last ran, so one park is one fault however many retries fail.
+                let episode: String = connection.query_row(
+                    "SELECT id FROM claims INDEXED BY claims_subject_kind_index
+                      WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                        AND store_index<=?2
+                        AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                            WHERE subject=?1 AND kind='runtime.observed' AND store_index<=?2
+                              AND json_extract(body, '$.fields.status')='running'), 0)
+                        AND json_extract(body, '$.fields.decision')='raise'
+                        AND json_extract(body, '$.fields.key')=?3
+                      ORDER BY store_index LIMIT 1",
+                    params![subject, at_index, fields.get("key").and_then(Value::as_str)],
+                    |row| row.get(0),
+                )?;
+                parked.insert(
+                    subject,
+                    ParkedSeat {
+                        episode,
+                        decision: id,
+                        reason: fields
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("st stopped restarting it after repeated failures")
+                            .to_owned(),
+                        parked_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Ok(parked)
     }
 
     /// A seat's harness diagnostics in canonical order, without the Claude channel's

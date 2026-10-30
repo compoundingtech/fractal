@@ -71,6 +71,7 @@ const harness = () => {
         subscribeOrderedMemberships: () => undefined,
         subscribe: () => undefined,
         subscribeAgent: async () => undefined,
+        subscribeAgentsPublication: async () => undefined,
         subscribeTerminal: () => undefined,
         subscribeConversation: () => undefined,
         unsubscribe: () => undefined,

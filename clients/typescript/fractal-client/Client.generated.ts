@@ -127,6 +127,8 @@ export type CollectionStreamOptions = {
 export type CollectionStream = {
     /** Hold a window of up to `limit` (1–200) current items. A held ID is replaced. */
     subscribeGlasses(id: string): void;
+    /** Complete unfiltered version-1 roster. The caller stages chunks and applies deltas atomically. */
+    subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
     subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
@@ -161,6 +163,7 @@ export function applyWindow(window: CollectionWindow<OrderedMembership> | undefi
 export function applyWindow(window: CollectionWindow | undefined, frame: ResourceCollectionFrame): CollectionWindow | undefined;
 export function applyWindow(window: CollectionWindow<{ id: string }> | undefined, frame: CollectionFrame): CollectionWindow<{ id: string }> | CollectionWindow<OrderedMembership> | undefined {
     if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return window;
+    if ('publication' in frame) throw new Error('Revisioned agents frames require atomic chunk/delta application, not applyWindow');
     if (frame.kind === 'changes' && !window) return undefined;
     const rows = new Map<string, { id: string }>(frame.kind === 'snapshot' ? [] : window!.items.map(item => [item.id, item]));
     if (frame.kind === 'changes') for (const id of frame.removes) rows.delete(id);
@@ -620,6 +623,7 @@ export class FractalClient {
         socket.onerror = () => end(new Error('The collections socket failed'));
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
+            subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
             subscribe: (id, collection, limit, filters = {}) => {

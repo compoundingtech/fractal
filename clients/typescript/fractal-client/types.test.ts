@@ -174,6 +174,12 @@ const onFrame: CollectionStreamOptions['onFrame'] = frame => {
 };
 onFrame(membershipSnapshot);
 onFrame(membershipChanges);
+const revisionedCommand: CollectionCommand = { kind: 'subscribe', id: 'roster', collection: 'agents', agents_publication_version: 1 };
+// @ts-expect-error The revisioned branch has no limit or filters.
+const revisionedWindow: CollectionCommand = { kind: 'subscribe', id: 'roster', collection: 'agents', agents_publication_version: 1, limit: 100 };
+// @ts-expect-error Only version one is defined.
+const unsupportedPublication: CollectionCommand = { kind: 'subscribe', id: 'roster', collection: 'agents', agents_publication_version: 2 };
+void [revisionedCommand, revisionedWindow, unsupportedPublication];
 
 // Error metadata remains open alongside the typed terminal-send refusal.
 import type { ErrorEnvelope } from './Models.generated.ts';

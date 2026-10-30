@@ -189,7 +189,17 @@ export type AgentEndReason = {
   ended_at: Timestamp;
   exit_code?: number;
   exit_signal?: string;
-  kind: "completed" | "stopped-by-person" | "stopped-by-agent" | "crashed" | "harness-exited" | "host-lost" | "retired";
+  kind: (
+  "completed"
+  | "stopped-by-person"
+  | "stopped-by-agent"
+  | "stopped-by-mission"
+  | "parked"
+  | "crashed"
+  | "harness-exited"
+  | "host-lost"
+  | "retired"
+ | string);
   reason?: string;
 };
 
@@ -404,6 +414,21 @@ export type AgentWorkspace = {
   workspace: string;
 };
 
+export type AgentsChanges = {
+  base_revision: number;
+  collection: "agents";
+  has_more: false;
+  id: string;
+  kind: "changes";
+  order: Array<Id>;
+  publication: AgentsPublicationMetadata;
+  removes: Array<Id>;
+  snapshot: Snapshot & {
+  published_at: Timestamp;
+};
+  upserts: Array<Agent>;
+};
+
 export type AgentsPublication = {
   has_more: false;
   items: Array<Agent>;
@@ -416,6 +441,29 @@ export type AgentsPublicationMetadata = {
   node_epoch: string;
   revision: number;
   status_watermark: AgentsStatusWatermark;
+};
+
+export type AgentsPublicationSubscribe = {
+  agents_publication_version: 1;
+  collection: "agents";
+  id: string;
+  kind: "subscribe";
+  trace?: SubscribeTraceContext;
+};
+
+export type AgentsSnapshotChunk = {
+  chunk_count: number;
+  chunk_index: number;
+  collection: "agents";
+  has_more: false;
+  id: string;
+  items: Array<Agent>;
+  kind: "snapshot";
+  order: Array<Id>;
+  publication: AgentsPublicationMetadata;
+  snapshot: Snapshot & {
+  published_at: Timestamp;
+};
 };
 
 export type AgentsStatusWatermark = {
@@ -1232,7 +1280,7 @@ export type ClientDiagnosticsBatch = {
   version: 1;
 };
 
-export type CollectionCommand = ({
+export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;
@@ -1243,7 +1291,7 @@ export type CollectionCommand = ({
   status?: null;
   trace?: SubscribeTraceContext;
   until_ms?: number;
-} | {
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; subject?: never; terminal?: never; }) | ({
   actor?: string | null;
   collection: "missions" | "attention" | "work" | "glasses" | "summary";
   id: string;
@@ -1252,7 +1300,7 @@ export type CollectionCommand = ({
   person?: string | null;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} | {
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: string | null;
   agent?: (AgentId | null);
   collection: "agents";
@@ -1262,7 +1310,7 @@ export type CollectionCommand = ({
   person?: string | null;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} | {
+} & { agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   collection: "arrangements";
   id: string;
   kind: "subscribe";
@@ -1270,14 +1318,14 @@ export type CollectionCommand = ({
   person: ArrangementPerson;
   subject?: ArrangementId;
   trace?: SubscribeTraceContext;
-} | {
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; until_ms?: never; }) | ({
   collection: "ordered-memberships";
   id: string;
   kind: "subscribe";
   limit?: number;
   person: ArrangementPerson;
   subject: ArrangementId;
-} | {
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; trace?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1285,18 +1333,18 @@ export type CollectionCommand = ({
   kind: "subscribe";
   terminal: Id;
   trace?: SubscribeTraceContext;
-} | {
+} & { actor?: never; agent?: never; agents_publication_version?: never; conversation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; until_ms?: never; }) | ({
   collection: "conversation";
   conversation: Id;
   id: string;
   kind: "subscribe";
   trace?: SubscribeTraceContext;
-} | {
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   id: string;
   kind: "unsubscribe";
-});
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; trace?: never; until_ms?: never; }));
 
-export type CollectionFrame = ({
+export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
   collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
@@ -1305,7 +1353,7 @@ export type CollectionFrame = ({
   order: Array<Id>;
   snapshot: Snapshot;
   sync?: StreamSync;
-} | {
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; upserts?: never; value?: never; }) | ({
   collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
@@ -1315,7 +1363,7 @@ export type CollectionFrame = ({
   snapshot: Snapshot;
   sync?: StreamSync;
   upserts: Array<Resource>;
-} | {
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; value?: never; }) | ({
   collection: "ordered-memberships";
   has_more: boolean;
   id: string;
@@ -1324,7 +1372,7 @@ export type CollectionFrame = ({
   membership: OrderedMembershipState;
   order: Array<Id>;
   snapshot: Snapshot;
-} | {
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | ({
   collection: "ordered-memberships";
   has_more: boolean;
   id: string;
@@ -1334,13 +1382,13 @@ export type CollectionFrame = ({
   removes: Array<Id>;
   snapshot: Snapshot;
   upserts: Array<OrderedMembership>;
-} | {
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
   collection: "terminal";
   id: string;
   kind: "screen";
   snapshot: Snapshot;
   value: TerminalScreen;
-} | {
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; has_more?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; }) | ({
   collection: "conversation";
   has_more?: boolean;
   header?: ConversationHeader;
@@ -1350,21 +1398,21 @@ export type CollectionFrame = ({
   older_cursor?: string;
   replace: boolean;
   session_id: Id;
-} | {
-  code?: string;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; membership?: never; message?: never; order?: never; publication?: never; removes?: never; retryable?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
+  code?: ErrorCode;
   collection?: string;
   id: string;
   kind: "resync";
   message?: string;
   retryable?: boolean;
-} | {
-  code?: string;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; membership?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
+  code?: ErrorCode;
   collection?: string;
   id?: string;
   kind: "error";
   message: string;
   retryable?: boolean;
-});
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; membership?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }));
 
 export type CollectionName = 
   "missions"
@@ -1621,6 +1669,7 @@ export type Envelope = {
 
 export type ErrorCode = (
   "recipient-retired"
+  | "agents-publication-row-too-large"
   | "identity-cycle"
   | "identity-occupied"
   | "identity-retired-source"

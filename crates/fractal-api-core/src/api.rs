@@ -145,6 +145,7 @@ pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
 mod launch_card;
+mod prompt_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
@@ -867,6 +868,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/waiting-on",
             get(waiting_on::get_run_waiting_on),
         )
+        .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -1768,7 +1770,7 @@ pub fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot 
 }
 
 /// The snapshot at `store_index` when its acceptance time (`projection_time_at`) is already known.
-fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
+pub fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
     let created_at = client_timestamp(unix_ms);
     let fingerprint = hex::encode(Sha256::digest(
         format!(
@@ -1860,6 +1862,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "agents-publication-row-too-large"
         | "identity-cycle"
         | "identity-occupied"
         | "identity-retired-source"
@@ -3589,6 +3592,7 @@ fn client_agent_cards_presented(
         BTreeMap::new()
     };
     let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
+    let parked_seats = store.parked_seats_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3628,7 +3632,10 @@ fn client_agent_cards_presented(
         .filter(|subject| history || subject.projection.layer == "current")
         .map(|mut subject| -> anyhow::Result<(String, Value)> {
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
-            let member_fault = member_faults.get(&subject.subject);
+            // A seat st parked is a fault until it runs again, not a seat someone stopped.
+            let parked = end_reason::holding_park(&subject, parked_seats.get(&subject.subject), retired_subjects.contains(&subject.subject));
+            let member_fault = member_faults.get(&subject.subject)
+                .or_else(|| parked.map(|parked| &parked.reason));
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
@@ -3835,7 +3842,7 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
