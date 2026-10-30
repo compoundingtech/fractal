@@ -82,6 +82,7 @@ pub mod metrics;
 pub mod migrations;
 /// The stdio framing shared by the native channels; crate-internal.
 mod native_channel;
+pub mod native_connector;
 pub mod omp_session;
 pub mod opencode_session;
 pub mod park;

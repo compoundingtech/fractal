@@ -15473,6 +15473,34 @@ impl NativeObservations {
                         event.queued_at_ms
                     };
                     let observed = fractal_drivers::harness_state::read_raw_at(&raw, None, decode_at);
+                    // A queued predecessor is history, not current provider authority. Only
+                    // a runtime-bound snapshot with a strictly newer ownership sequence can
+                    // dispose it; absent, foreign or ambiguous evidence still takes the normal
+                    // fail-closed publication path. Do this before any readiness/deadline effects.
+                    if event.runtime_incarnation == self.runtime
+                        && source_driver == driver
+                        && let Some(current) = fractal_drivers::harness_events::read_runtime_state(&self.dir, &self.runtime)?
+                    {
+                        let current = fractal_drivers::harness_state::read_raw_at(
+                            &current, None, event.queued_at_ms,
+                        );
+                        if current.harness.as_deref() == Some(source_driver)
+                            && current.evidence_incarnation.is_some()
+                            && observed.evidence_incarnation.is_some()
+                            && observed.ownership_sequence.zip(current.ownership_sequence)
+                                .is_some_and(|(old, new)| old > 0 && old < new)
+                        {
+                            fractal_drivers::harness_events::acknowledge(&self.dir, event.sequence)?;
+                            tracing::info!(
+                                sequence = event.sequence,
+                                ownership_sequence = observed.ownership_sequence,
+                                current_ownership_sequence = current.ownership_sequence,
+                                disposition = "superseded",
+                                "acknowledged superseded native state observation"
+                            );
+                            continue;
+                        }
+                    }
                     if event.runtime_incarnation == self.runtime && source_driver == driver {
                         // The wrapper writes its terminal receipt before its blocking task
                         // returns. Publishing it now would fence our mailbox before the task's

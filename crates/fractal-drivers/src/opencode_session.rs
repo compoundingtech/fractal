@@ -215,6 +215,9 @@ pub fn run_with_paths(
             },
         }
     };
+    crate::native_connector::begin(
+        agent_dir, "opencode", &session.adoption.session, session.adoption.seq,
+    )?;
     let child = match spawn_provider(&argv, &password) {
         Ok(child) => child,
         Err(error) => {
@@ -230,6 +233,14 @@ pub fn run_with_paths(
             return Err(error);
         }
     };
+    if let Err(error) = crate::native_connector::spawned(
+        agent_dir, "opencode", &session.adoption.session, session.adoption.seq, child.id(),
+    ) {
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
 
     run_session(session, &mut ProviderProcess::Spawned(child), agent_dir)
 }

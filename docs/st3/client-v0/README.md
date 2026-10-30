@@ -2455,11 +2455,17 @@ An unowned launcher does not confer person ownership.
 Credential-directory references are local to the launcher's host, so helpers must
 launch on that host. Inheritance also requires kernel-authenticated Unix socket
 peer credentials and proof that the peer descends from the launcher's exact
-daemon-recorded harness PID and Linux process-start token. Inheritance requires
-Linux with `SO_PEERPIDFD` (kernel 6.5 or newer). The server retains the original
-connector's kernel pidfd and refuses exited connectors, even when the socket
-remains open or its PID is reused. There is no PID-only or start-token fallback:
-an unavailable socket pidfd refuses inheritance without changing ordinary authentication.
+daemon-recorded harness PID and Linux process-start token. Linux prefers the
+accepted socket's `SO_PEERPIDFD` witness (kernel 6.5 or newer); the server retains
+that exact kernel generation and refuses it after exit, even if its socket
+survives. Older Linux kernels fall back only when that socket option is
+unsupported, using `SO_PEERCRED` plus the live `/proc/<pid>/stat` start token.
+Native connector generation proof on macOS uses `LOCAL_PEERPID` plus
+`proc_pidinfo` start time and process state. These fallback witnesses are
+captured at accept and validated before and after process-derived proof use;
+missing, exited, or changed generations refuse rather than skipping proof.
+They are weaker than a kernel pidfd: PID reuse before the first start-time read,
+or a collision within start-time clock resolution, cannot be excluded.
 Every intermediate ancestor's generation and parent edge is checked
 again before granting. `ST_AGENT`, headers and other environment values cannot
 establish this grant. Old launcher runs without process provenance must be
@@ -2467,7 +2473,7 @@ relaunched. Platforms without verified process ancestry (currently non-Linux),
 missing peer identity, unreadable procfs or unavailable process evidence fail
 closed with a clear refusal; no alternative account or login is selected.
 
-Socket peer credentials and a pidfd identify the original connector, not the
+Socket peer credentials and the captured generation identify the original connector, not the
 current writer of each request. A descriptor handed over by the launcher's
 subtree retains that connector's authority while its identity remains live:
 this is delegation. Ancestry trusts the entire launcher subtree; it is not

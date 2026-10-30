@@ -114,6 +114,7 @@ mod delivery_probes;
 mod end_reason;
 mod github_watch;
 pub mod harness_events;
+pub mod native_role;
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod mailbox_metrics;
@@ -744,6 +745,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
+        .route("/v1/native-connectors/bootstrap", post(native_role::bootstrap))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
         .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
         .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
@@ -6614,11 +6616,12 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
-                            peer_process,
+                            peer_process: peer_process.clone(),
                             ancestor: bound_agent.clone(),
                         });
                     }
-                    if let Some(peer) = delivery_peer {
+                    if let Some(mut peer) = delivery_peer {
+                        peer.peer_process = peer_process;
                         request.extensions_mut().insert(peer);
                     }
                     if let Some(caller) = caller {
@@ -6703,6 +6706,23 @@ pub struct NativeDeliveryPeer {
     pub transport: &'static str,
     pub pid: u32,
     pub archives_inbox: bool,
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
+}
+
+impl NativeDeliveryPeer {
+    /// Authenticate the connector generation captured from the accepted socket.
+    pub fn require_kernel(&self) -> Result<(), St3Error> {
+        let identity = self.peer_process.as_ref().ok_or_else(|| {
+            St3Error::new("native-role-unavailable", "native connector kernel identity is unavailable")
+        })?;
+        if identity.pid() != self.pid {
+            return Err(St3Error::new("native-role-refused", "native connector PID differs from its kernel identity"));
+        }
+        identity.validate().map_err(|error| {
+            St3Error::new("native-role-refused", format!("native connector generation is no longer current: {error:#}"))
+        })?;
+        Ok(())
+    }
 }
 
 fn native_delivery_peer(pid: u32) -> Option<NativeDeliveryPeer> {
@@ -6742,9 +6762,10 @@ fn native_delivery_identity(
         transport,
         pid,
         archives_inbox,
+        peer_process: None,
     })
 }
-/// Capture the kernel connector generation, independently of generic local auth.
+/// Capture the accepted connector generation, independently of generic local auth.
 pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
     #[cfg(target_os = "linux")]
     {
@@ -6768,13 +6789,18 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         } else {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
-                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+                return fractal_runtime::PeerProcessIdentity::capture_generation(pid);
             }
             anyhow::bail!("SO_PEERPIDFD failed: {error}");
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        fractal_runtime::PeerProcessIdentity::capture_generation(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
@@ -6806,7 +6832,8 @@ pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
             &mut size,
         )
     };
-    (result == 0).then(|| u32::try_from(pid).ok()).flatten()
+    (result == 0 && size as usize == std::mem::size_of_val(&pid) && pid > 0)
+        .then(|| u32::try_from(pid).ok()).flatten()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

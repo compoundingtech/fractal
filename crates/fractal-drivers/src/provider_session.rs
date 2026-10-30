@@ -591,6 +591,11 @@ pub(crate) fn run_provider_observed_with_env_removals(
             Ok(())
         });
     }
+    if let Some(observed) = observed.filter(|observer| matches!(observer.harness, "omp" | "pi")) {
+        crate::native_connector::begin(
+            &observed.agent_dir, observed.harness, &observed.session, observed.seq,
+        )?;
+    }
     // The error arms are terminal outcomes too: the claim placeholder must not stand as the
     // visible state after a launch that never ran — while the ordinary nonzero-exit path keeps
     // its real exit and is deliberately not covered here.
@@ -606,6 +611,17 @@ pub(crate) fn run_provider_observed_with_env_removals(
             return Err(error).with_context(|| format!("starting {provider} provider {program}"));
         }
     };
+    if let Some(observed) = observed.filter(|observer| matches!(observer.harness, "omp" | "pi"))
+        && let Err(error) = crate::native_connector::spawned(
+            &observed.agent_dir, observed.harness, &observed.session, observed.seq, child.id(),
+        )
+    {
+        let mut child = child;
+        let _ = child.kill();
+        let _ = child.wait();
+        observed.launch_error();
+        return Err(error);
+    }
     if let Some(observed) = observed.filter(|observer| observer.harness == "claude")
         && let Err(error) = crate::claude_process::spawned(
             &observed.agent_dir, &observed.session, observed.seq, child.id(),

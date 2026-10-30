@@ -68,7 +68,7 @@ impl NativeReplay {
         let agent_dir = crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), &subject, "node");
         harness_events::enable(&agent_dir, &incarnation).unwrap();
         let sequence = harness_state::claim(&agent_dir, name, "codex", "replay-session").unwrap();
-        let peer = NativeDeliveryPeer { agent: subject.clone(), transport: "app-server", pid, archives_inbox: false };
+        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(pid), agent: subject.clone(), transport: "app-server", pid, archives_inbox: false };
         let owner = crate::mailbox::Authority { provider: "codex".into(), session: "replay-session".into(),
             sequence, pid, process_token };
         let fence = state.store.bind_mailbox_with_lease(
@@ -287,6 +287,7 @@ async fn consumed_replay_does_not_authorize_a_changed_epoch_or_replaced_peer() {
     fixture.process = native_peer_process();
     let mut successor_peer = fixture.peer.clone();
     successor_peer.pid = fixture.process.id();
+    successor_peer.peer_process = fixture_direct_peer_process(successor_peer.pid);
     owner.pid = successor_peer.pid;
     owner.process_token = fractal_runtime::process_start_token(owner.pid).unwrap();
     let successor = fixture.state.store.bind_mailbox_with_lease(

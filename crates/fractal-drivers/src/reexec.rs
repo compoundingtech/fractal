@@ -310,13 +310,29 @@ fn decode_state<T: DeserializeOwned>(path: &Path, bytes: &[u8]) -> Result<T> {
 }
 
 static TAKEN: OnceLock<[Option<PathBuf>; 2]> = OnceLock::new();
+static CONNECTOR_BOOTSTRAP_FD: OnceLock<Option<String>> = OnceLock::new();
 
-/// Take both resume variables out of the environment so no child inherits them.
+/// The one-shot startup descriptor, captured before threads and removed from child/reexec env.
+pub(crate) fn native_connector_bootstrap_fd() -> Option<&'static str> {
+    CONNECTOR_BOOTSTRAP_FD.get().and_then(|fd| fd.as_deref())
+}
+
+/// Take resume variables and the connector startup descriptor out of the environment.
 ///
 /// # Safety
 ///
 /// Call this before the process starts a second thread.
 pub unsafe fn take_resume_environment() {
+    let bootstrap = crate::contracts::env("ST_NATIVE_CONNECTOR_BOOTSTRAP_FD");
+    for name in [
+        "ST_NATIVE_CONNECTOR_BOOTSTRAP_FD",
+        "ST2_NATIVE_CONNECTOR_BOOTSTRAP_FD",
+        "FRACTAL_NATIVE_CONNECTOR_BOOTSTRAP_FD",
+    ] {
+        // SAFETY: this function's caller guarantees startup is still single-threaded.
+        unsafe { std::env::remove_var(name) };
+    }
+    let _ = CONNECTOR_BOOTSTRAP_FD.set(bootstrap);
     let mut taken = [None, None];
     for (slot, name) in taken
         .iter_mut()

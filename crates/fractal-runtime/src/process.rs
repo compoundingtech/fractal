@@ -636,6 +636,27 @@ pub fn process_start_token(pid: u32) -> Result<u64> {
     Ok(pid as u64)
 }
 
+// Keep the legacy execution token contract above separate from strict peer
+// authorization: a numeric PID alone is never a connector generation proof.
+#[cfg(target_os = "macos")]
+pub(crate) fn peer_process_identity(pid: u32) -> Result<(char, u64)> {
+    let pid_arg = i32::try_from(pid)?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskallinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_taskallinfo>() as libc::c_int;
+    // SAFETY: the writable buffer has exactly the size passed to proc_pidinfo.
+    let count = unsafe {
+        libc::proc_pidinfo(pid_arg, libc::PROC_PIDTASKALLINFO, 0, info.as_mut_ptr().cast(), size)
+    };
+    anyhow::ensure!(count == size, "Darwin process generation is unavailable");
+    // SAFETY: a full successful result initialized the entire taskallinfo.
+    let info = unsafe { info.assume_init() }.pbsd;
+    anyhow::ensure!(info.pbi_pid == pid, "Darwin process identity differs from requested PID");
+    let token = info.pbi_start_tvsec.checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
+        .context("Darwin process birth overflow")?;
+    Ok((if info.pbi_status == 5 { 'Z' } else { 'R' }, token))
+}
+
 #[cfg(not(target_os = "linux"))]
 fn process_identity(pid: u32) -> Result<(char, u64)> {
     let result = unsafe { libc::kill(pid as i32, 0) };

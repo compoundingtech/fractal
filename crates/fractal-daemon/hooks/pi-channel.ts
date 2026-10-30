@@ -14,6 +14,8 @@
 // the channel environment set — loads this extension and does nothing. A channel that does not
 // answer in time starts the session anyway, without restored context, rather than hanging it.
 import childProcess from "node:child_process";
+import http from "node:http";
+import { Duplex } from "node:stream";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -50,6 +52,45 @@ const IDENTITY = "ST_PI_CHANNEL_IDENTITY";
 const RUNTIME_ID = "ST_PI_CHANNEL_RUNTIME_ID";
 const SESSION = "ST_PI_CHANNEL_SESSION";
 const SEQ = "ST_PI_CHANNEL_SEQ";
+const SOCKET = "ST_PI_CHANNEL_SOCKET";
+const INCARNATION = "ST_PI_CHANNEL_INCARNATION";
+
+// The Unix peer's exact provider generation is the authority, not these readable facts.
+const registerConnector = (
+  child: childProcess.ChildProcess,
+  socket: string,
+  facts: Record<string, unknown> & { subject: string },
+): void => {
+  const startup = child.stdio[3];
+  const fail = () => {
+    if (startup instanceof Duplex) startup.destroy();
+    child.kill();
+  };
+  if (!(startup instanceof Duplex) || child.pid === undefined) return fail();
+  startup.on("error", fail);
+  const subject = facts.subject.startsWith("agent/") ? facts.subject : `agent/${facts.subject}`;
+  const body = JSON.stringify({ ...facts, subject, connector_pid: child.pid });
+  const request = http.request({
+    socketPath: socket,
+    path: "/v1/native-connectors/bootstrap",
+    method: "POST",
+    headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+    agent: false,
+  }, (response) => {
+    response.resume();
+    response.on("error", fail);
+    response.on("end", () => {
+      if (response.statusCode !== undefined && response.statusCode >= 200 &&
+          response.statusCode < 300 && child.exitCode === null && child.signalCode === null) {
+        startup.end(Buffer.from([1]));
+      } else fail();
+    });
+  });
+  request.on("error", fail);
+  request.setTimeout(HELLO_TIMEOUT_MS, () => request.destroy());
+  child.once("exit", () => request.destroy());
+  request.end(body);
+};
 
 // pi starts the session even if st is slow to answer. Restored context is worth a short wait and
 // never worth a hung agent.
@@ -79,6 +120,8 @@ type Stash = {
   runtimeId?: string;
   session?: string;
   seq?: string;
+  socket?: string;
+  incarnation?: string;
   child?: childProcess.ChildProcess;
   reconnectTimer?: ReturnType<typeof setTimeout>;
   reconnectAttempt?: number;
@@ -165,6 +208,8 @@ const stash = (): Stash => {
       runtimeId: readEnv(RUNTIME_ID, true),
       session: readEnv(SESSION, true),
       seq: readEnv(SEQ, true),
+      socket: readEnv(SOCKET, true),
+      incarnation: readEnv(INCARNATION, true),
     };
   }
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -173,6 +218,8 @@ const stash = (): Stash => {
   removeEnv(RUNTIME_ID);
   removeEnv(SESSION);
   removeEnv(SEQ);
+  removeEnv(SOCKET);
+  removeEnv(INCARNATION);
   return globals.__stPiChannel;
 };
 
@@ -249,10 +296,12 @@ export default function (pi: ExtensionAPI) {
     writeEnv(channelEnv, RUNTIME_ID, runtimeId);
     writeEnv(channelEnv, SESSION, session);
     writeEnv(channelEnv, SEQ, seq);
+    const bootstrap = state.socket !== undefined;
+    if (bootstrap) writeEnv(channelEnv, "ST_NATIVE_CONNECTOR_BOOTSTRAP_FD", "3");
     const child = childProcess.spawn(
       bin,
       ["driver", "pi-channel", "--identity", identity],
-      { stdio: ["pipe", "pipe", "inherit"], env: channelEnv },
+      { stdio: ["pipe", "pipe", "inherit", bootstrap ? "pipe" : "ignore"], env: channelEnv },
     );
     state.child = child;
 
@@ -280,6 +329,10 @@ export default function (pi: ExtensionAPI) {
       // host process. Retire the channel instead — frames simply stop, fail-open.
       child.stdin.on("error", retire);
       child.on("exit", retire);
+      if (state.socket !== undefined) registerConnector(child, state.socket, {
+        subject: identity, runtime_incarnation: state.incarnation, harness: "pi",
+        session, sequence: seq === undefined ? undefined : Number(seq),
+      });
 
       const send = (frame: Record<string, unknown>) => {
         if (child.stdin.destroyed) return;

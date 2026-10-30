@@ -32,7 +32,7 @@ pub fn fixture(state: &AppState, name: &str) -> (Fence, NativeDeliveryPeer) {
     let fence = state.store.bind_mailbox_with_lease(
         &request, Some(&owner),
     ).unwrap();
-    let peer = NativeDeliveryPeer { agent: subject, transport: "omp-channel", pid, archives_inbox: true };
+    let peer = NativeDeliveryPeer { peer_process: tests::fixture_direct_peer_process(pid), agent: subject, transport: "omp-channel", pid, archives_inbox: true };
     (fence, peer)
 }
 
@@ -234,4 +234,76 @@ fn revoked_lease_clears_proof_with_the_same_owner_identity() {
     assert!(!proof.is_current(&state, &fence, &peer));
     let report = json!({"transport":peer.transport, "pid":peer.pid, "ready":true}).to_string();
     assert!(authority::admit_report(&state, &fence, &peer, &report).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retained_native_role_survives_store_reopen_without_minting_a_capability() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("claims.sqlite3");
+    let mut state = state(root.path());
+    state.store = Arc::new(Store::open(&database, "node").unwrap());
+    let (fence, peer) = fixture(&state, "eval.rollout-persisted");
+    let owner = state.store.mailbox_lease_authority(&fence).unwrap().unwrap();
+    let dir = authority::source_agent_dir(&state, &fence);
+    assert!(!fractal_drivers::native_connector::recorded(&dir).unwrap());
+    fractal_api_core::api::native_role::capture(&state, &fence, &peer).unwrap().validate().unwrap();
+
+    let closed = std::mem::replace(&mut state.store, Arc::new(Store::open_memory("node").unwrap()));
+    drop(closed);
+    state.store = Arc::new(Store::open(&database, "node").unwrap());
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let bindings = || connection.query_row(
+        "SELECT COUNT(*), MAX(epoch) FROM local_mailbox_bindings", [],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    ).unwrap();
+    let before = bindings();
+    let index = state.store.index().unwrap();
+    assert_eq!(serde_json::to_value(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap()).unwrap(), serde_json::to_value(Some(&fence)).unwrap());
+    assert!(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, "title").unwrap().is_none());
+    fractal_api_core::api::native_role::capture(&state, &fence, &peer).unwrap().validate().unwrap();
+    assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(owner.clone()));
+    assert_eq!(bindings(), before, "lookup and retained admission cannot mint a token or rotate an epoch");
+    assert_eq!(state.store.index().unwrap(), index);
+
+    let mut other_process = std::process::Command::new("sleep").arg("300").spawn().unwrap();
+    let mut copied = peer.clone();
+    copied.pid = other_process.id();
+    copied.peer_process = tests::fixture_direct_peer_process(copied.pid);
+    let copied_role = fractal_api_core::api::native_role::capture(&state, &fence, &copied);
+    other_process.kill().unwrap();
+    other_process.wait().unwrap();
+    assert!(copied_role.is_err(), "copied labels do not transfer an exact admitted lease");
+    assert_eq!(bindings(), before);
+
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hc223c025deb1 owner=fractal_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
+        rusqlite::params![fence.subject, fence.component],
+    ).unwrap();
+    assert!(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap().is_none());
+    assert!(fractal_api_core::api::native_role::capture(&state, &fence, &peer).is_err());
+    assert_eq!(bindings(), before);
+    assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(owner));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retained_native_role_cannot_promote_a_changed_provider_session_or_sequence() {
+    for change_session in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let name = "eval.rollout-provider";
+        let (fence, peer) = fixture(&state, name);
+        let owner = state.store.mailbox_lease_authority(&fence).unwrap().unwrap();
+        let proof = fractal_api_core::api::native_role::capture(&state, &fence, &peer).unwrap();
+        proof.validate().unwrap();
+        let dir = authority::source_agent_dir(&state, &fence);
+        let session = if change_session { "replacement-provider" } else { &owner.session };
+        let sequence = fractal_drivers::harness_state::claim(&dir, name, "omp", session).unwrap();
+        assert!(sequence > owner.sequence);
+        assert!(proof.validate().is_err());
+        assert!(fractal_api_core::api::native_role::capture(&state, &fence, &peer).is_err());
+        assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(owner));
+        assert_eq!(serde_json::to_value(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap()).unwrap(), serde_json::to_value(Some(&fence)).unwrap());
+    }
 }

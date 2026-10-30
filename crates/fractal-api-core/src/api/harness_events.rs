@@ -24,9 +24,25 @@ pub async fn publish(
         )));
     }
     let store = state.store.clone();
+    let role_state = state.clone();
     let kind = request.claim.kind.clone();
-    let (record, changed, transition) =
-        blocking_action(move || store.append_harness_event_publication(&request)).await?;
+    let peer = peer.0;
+    let (record, changed, transition) = blocking_action(move || {
+        // Preserve the canonical stale-runtime refusal before resolving any role evidence
+        // for the requested generation. The append transaction checks this fence again.
+        crate::store::check_harness_event_runtime(
+            &store.readers.get(), &request.claim.subject, Some(&request.runtime_incarnation),
+        )?;
+        let fence = crate::mailbox::Fence::new(
+            &request.claim.subject, &request.runtime_incarnation, "events",
+        );
+        let proof = super::native_role::capture(&role_state, &fence, &peer)?;
+        proof.require_publication(&request)?;
+        store.append_harness_event_publication_checked(&request, &|| {
+            proof.validate()?;
+            proof.require_publication(&request)
+        })
+    }).await?;
     finish_claim_publication(&state, &kind, record, changed, Some(transition)).await
 }
 
@@ -85,7 +101,7 @@ pub async fn prompt_answer(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use axum::{
         body::{Body, to_bytes},
@@ -93,6 +109,47 @@ mod tests {
     };
 
     pub const SEAT: &str = "agent/example/native-wake";
+
+    pub fn peer(agent: &str) -> NativeDeliveryPeer {
+        let (socket, _connector) = tokio::net::UnixStream::pair().unwrap();
+        let identity = local_peer_process(&socket).unwrap();
+        NativeDeliveryPeer {
+            agent: agent.into(),
+            transport: "claude-channel",
+            pid: identity.pid(),
+            archives_inbox: true,
+            peer_process: Some(identity),
+        }
+    }
+
+    /// These publication tests start with an already admitted live connector, not a new launch.
+    pub fn admitted_connector(state: &AppState, subject: &str, incarnation: &str) {
+        use crate::DeliveryStore as _;
+        let source = format!(
+            "version 2\nagent {:?} {{ host {:?}; workspace \"/tmp\"; harness \"claude\" {{}} }}",
+            subject.strip_prefix("agent/").unwrap(), state.node,
+        );
+        let intent = crate::graph::parse_test_intent(&source, state.store.origin()).unwrap();
+        state.store.apply_internal(&intent, "event-connector-fixture").unwrap();
+        let fence = crate::mailbox::Fence::new(subject, incarnation, "delivery");
+        let dir = super::super::native_role::source_agent_dir(state, &fence);
+        fractal_drivers::harness_events::enable(&dir, incarnation).unwrap();
+        let now = client_now_ms() as u64;
+        fractal_drivers::harness_events::write_snapshot(&dir, "harness-state",
+            &serde_json::to_vec(&json!({
+                "schema":"st2.harness-state.v1", "agent":subject, "harness":"claude",
+                "state":"active", "blockedOn":"none", "inputBuffer":"empty",
+                "incarnation":"event-provider", "seq":1,
+                "sinceMs":now, "writtenAtMs":now, "transitions":1
+            })).unwrap(),
+        ).unwrap();
+        let owner = crate::mailbox::Authority {
+            provider: "claude".into(), session: "event-provider".into(), sequence: 1,
+            pid: std::process::id(),
+            process_token: fractal_runtime::process_start_token(std::process::id()).unwrap(),
+        };
+        state.store.bind_mailbox_with_lease(&fence, Some(&owner)).unwrap();
+    }
 
     pub fn runtime(state: &AppState, incarnation: &str) {
         state
@@ -110,6 +167,7 @@ mod tests {
                 idempotency_key: None,
             })
             .unwrap();
+        admitted_connector(state, SEAT, incarnation);
     }
 
     pub fn event(sequence: u64, state: &str) -> Publication {
@@ -124,6 +182,8 @@ mod tests {
                     ("state".into(), json!(state)),
                     ("driver".into(), json!("claude")),
                     ("incarnation_id".into(), json!("native-one")),
+                    ("evidence_incarnation".into(), json!("event-provider")),
+                    ("ownership_sequence".into(), json!(1)),
                 ]),
                 evidence: vec![],
                 expected_subject: None,
@@ -143,12 +203,7 @@ mod tests {
                     .method("POST")
                     .uri("/v1/harness-events")
                     .header("content-type", "application/json")
-                    .extension(NativeDeliveryPeer {
-                        agent: agent.into(),
-                        transport: "claude-channel",
-                        pid: 37,
-                        archives_inbox: true,
-                    })
+                    .extension(peer(agent))
                     .body(Body::from(serde_json::to_vec(event).unwrap()))
                     .unwrap(),
             )
@@ -191,6 +246,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_observation_disposition_does_not_relax_publication_session_freshness() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        runtime(&state, "native-one");
+        for (session, sequence) in [("predecessor", 1), ("event-provider", 2)] {
+            let mut input = event(1, "working");
+            input.claim.fields.insert("evidence_incarnation".into(), json!(session));
+            input.claim.fields.insert("ownership_sequence".into(), json!(sequence));
+            let (code, rejected) = post(&state, &input, SEAT).await;
+            assert!(!code.is_success(), "{rejected}");
+            assert!(rejected.to_string().contains("native-role-refused"), "{rejected}");
+            assert!(state.store.local_observations_tail(100).unwrap().is_empty());
+        }
+        let (code, accepted) = post(&state, &event(1, "idle"), SEAT).await;
+        assert_eq!(code, StatusCode::OK, "{accepted}");
+        assert_eq!(state.store.local_observations_tail(100).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn native_readiness_and_idle_events_wake_reconcile_but_replay_does_not() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(root.path());
@@ -228,6 +302,8 @@ mod tests {
         let mut usage = event(1, "working");
         usage.claim.kind = "harness.usage".into();
         usage.claim.fields.remove("state");
+        usage.claim.fields.remove("evidence_incarnation");
+        usage.claim.fields.remove("ownership_sequence");
         usage
             .claim
             .fields

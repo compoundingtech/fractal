@@ -40,10 +40,23 @@ pub(super) fn with_claude_primary<T>(
     captured: Option<fractal_drivers::claude_process::Process>,
     action: impl FnOnce() -> Result<T, St3Error>,
 ) -> Result<(T, Option<fractal_drivers::claude_process::Process>), St3Error> {
-    use fractal_drivers::claude_process::{self, Caller};
+    use fractal_drivers::claude_process;
     if peer.transport != "claude-channel" {
-        return action().map(|v| (v, None));
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Linux's native/argv admission gates authenticate these operations themselves.
+            // Other platforms cannot inherit that protocol's permissive return path.
+            let role = fractal_api_core::api::native_role::capture(state, fence, peer)?;
+            role.validate()?;
+        }
+        return action().map(|value| (value, None));
     }
+    let role = fractal_api_core::api::native_role::capture(state, fence, peer)?;
+    let action = || {
+        peer.require_kernel()?;
+        role.validate()?;
+        action()
+    };
     let known = primary_bindings()
         .lock()
         .map_err(|_| internal("Claude binding lock poisoned"))?
@@ -65,11 +78,11 @@ pub(super) fn with_claude_primary<T>(
         queue_legacy_shape(state, fence, peer);
         return Ok((value, None));
     }
-    let wrapper = if let Some(wrapper) = captured {
-        wrapper
-    } else {
-        physical_wrapper(state, fence, None)?
-    };
+    let wrapper = role.wrapper()
+        .ok_or_else(|| refused("witnessed Claude wrapper unavailable"))?;
+    if captured.is_some_and(|captured| captured != wrapper) {
+        return Err(refused("admitted Claude physical wrapper changed"));
+    }
     if peer.archives_inbox && fence.component == "title" && peer.pid == wrapper.pid {
         // The exact physical wrapper opens its title stream concurrently with provider startup.
         // This grants no delivery readiness or mailbox delivery epoch.
@@ -86,44 +99,18 @@ pub(super) fn with_claude_primary<T>(
             );
         return Ok((value, Some(wrapper)));
     }
-    let raw = fractal_drivers::harness_events::read_bound_provider_state(&dir)
-        .map_err(internal)?
-        .filter(|(runtime, _)| runtime == &fence.incarnation)
-        .map(|(_, raw)| raw)
-        .ok_or_else(|| refused("Claude provider source unavailable"))?;
-    let owner = provider_authority(&raw)?;
-    let session = owner
-        .evidence_incarnation
-        .ok_or_else(|| refused("Claude session unavailable"))?;
-    let seq = owner
-        .ownership_sequence
-        .ok_or_else(|| refused("Claude ownership unavailable"))?;
-    let role = if peer.archives_inbox {
-        Caller::Wrapper
-    } else {
-        Caller::Channel
-    };
-    claude_process::with_caller(&dir, &session, seq, peer.pid, Some(wrapper), role, |_| {
-        let value = action().map_err(anyhow::Error::new)?;
-        delivery_presence::record_ownership(fence, false);
-        primary_bindings()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Claude binding lock poisoned"))?
-            .insert(
-                (state.state_dir.clone(), fence.subject.clone()),
-                (fence.incarnation.clone(), wrapper),
-            );
-        Ok((value, Some(wrapper)))
-    })
-    .map_err(|e| {
-        e.downcast::<St3Error>().unwrap_or_else(|e| {
-            if claude_process::failure_kind(&e) == Some(claude_process::FailureKind::Unavailable) {
-                unavailable(claude_process::diagnostic(&e))
-            } else {
-                refused(claude_process::diagnostic(&e))
-            }
-        })
-    })
+    // The shared capture already authenticated this exact primary. Its immutable validator
+    // runs at the writer boundary without recursively acquiring process or harness locks.
+    let value = action()?;
+    delivery_presence::record_ownership(fence, false);
+    primary_bindings()
+        .lock()
+        .map_err(|_| internal("Claude binding lock poisoned"))?
+        .insert(
+            (state.state_dir.clone(), fence.subject.clone()),
+            (fence.incarnation.clone(), wrapper),
+        );
+    Ok((value, Some(wrapper)))
 }
 
 /// Physical source selection shared by enforcement and legacy shape observation. A legacy
@@ -397,15 +384,22 @@ fn admit_report_with(
             check(Some(owner))
         });
     }
+    peer.require_kernel()?;
     if owner.pid != peer.pid || process_birth(peer.pid)? != owner.process_token {
         return Err(refused("the admitted process generation disappeared"));
     }
     let agent_dir = source_agent_dir(state, fence);
+    // The existing canonical lease roots this process-only capture. Never repeat PTY
+    // inventory/stats or durable fence reads on an ordinary established report.
+    let process_role = fractal_api_core::api::native_role::capture_admitted_process_role(
+        state, fence, peer, &owner,
+    );
     let result = fractal_drivers::harness_state::with_current_ownership(
         &agent_dir,
         &owner.session,
         owner.sequence,
         || {
+            process_role.as_ref().map_err(|error| refused(error.to_string()))?.validate()?;
             // check_mailbox includes incarnation and declaration checks; do not
             // repeat mailbox_session_active's store reads on the report path.
             current_provider_record(fence, &agent_dir, &owner)?;
@@ -551,7 +545,8 @@ impl ReplayProofInputs {
         fence: &Fence,
         peer: &NativeDeliveryPeer,
     ) -> bool {
-        self.subject == fence.subject
+        peer.require_kernel().is_ok()
+            && self.subject == fence.subject
             && self.component == fence.component
             && self.incarnation == fence.incarnation
             && self.epoch == fence.epoch
@@ -994,13 +989,14 @@ pub fn with_argv_channel<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    action: impl FnOnce(&crate::model::MemberSpec, &(dyn Fn() -> Result<(), St3Error> + Send + Sync)) -> Result<T, St3Error>,
 ) -> Result<Option<T>, St3Error> {
     let desired = state.store.desired_subjects_named(std::slice::from_ref(&fence.subject))
         .map_err(internal)?.into_iter().next()
         .ok_or_else(|| refused("the seat is no longer declared"))?;
     let member = desired.member.ok_or_else(|| refused("the seat is intentionally stopped"))?;
     if member.driver.is_some() { return Ok(None); }
+    peer.require_kernel()?;
     if desired.kind == "stop"
         || member.kind != crate::model::MemberKind::Agent
         || member.host != state.node
@@ -1028,6 +1024,7 @@ pub fn with_argv_channel<T>(
         (peer.pid, process_birth(peer.pid)?),
     ];
     let validate = || {
+        peer.require_kernel()?;
         let stats = terminal_stats(state, &physical.name)?;
         if terminal_identity(&physical.name, stamp, daemon_pid, &stats)? != terminal_pid {
             return Err(refused("the argv terminal process was replaced"));
@@ -1037,7 +1034,9 @@ pub fn with_argv_channel<T>(
                 return Err(refused("the argv process generation was replaced"));
             }
         }
-        if !belongs_to_runtime(terminal_pid, daemon_pid) || !belongs_to_runtime(peer.pid, terminal_pid) {
+        if runtime_parent(terminal_pid) != Some(daemon_pid)
+            || !(peer.pid == terminal_pid || runtime_parent(peer.pid) == Some(terminal_pid))
+        {
             return Err(refused("the channel is outside the exact argv process"));
         }
         Ok(())
@@ -1050,7 +1049,7 @@ pub fn with_argv_channel<T>(
     _state: &AppState,
     _fence: &Fence,
     _peer: &NativeDeliveryPeer,
-    _action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    _action: impl FnOnce(&crate::model::MemberSpec, &(dyn Fn() -> Result<(), St3Error> + Send + Sync)) -> Result<T, St3Error>,
 ) -> Result<Option<T>, St3Error> {
     Ok(None)
 }
@@ -1059,8 +1058,9 @@ pub fn with_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    action: impl FnOnce(&Authority, &(dyn Fn() -> Result<(), St3Error> + Send + Sync)) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
+    let role = fractal_api_core::api::native_role::capture(state, fence, peer)?;
     if fence.epoch != 0 {
         state.store.check_mailbox_custody_fence(fence)?;
     }
@@ -1190,6 +1190,7 @@ pub fn with_authority<T>(
         }
         state.store.mailbox_session_active(fence, &bootstrap)?;
         let validate = || {
+            role.validate()?;
             validate_physical_runtime(state, &runtime, &physical, peer.pid)?;
             witness.validate(state)?;
             // Do not admit a stale bootstrap capture after qualified ownership appeared.
@@ -1261,8 +1262,10 @@ pub fn with_authority<T>(
                     "the channel process generation changed",
                 )));
             }
-            let validate =
-                || validate_physical_runtime(state, &runtime, &physical, peer.pid);
+            let validate = || {
+                role.validate()?;
+                validate_physical_runtime(state, &runtime, &physical, peer.pid)
+            };
             validate()?;
             // Terminal state may be written without changing session/sequence. Recheck
             // it while holding the record lock rather than admitting a completion race.
@@ -1703,12 +1706,10 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
         .unwrap();
         // The startup placeholder owns custody while proving no native activity.
         assert!(provider_authority(&serde_json::to_vec(&record).unwrap()).is_ok());
-        let peer = NativeDeliveryPeer {
-            agent: fence.subject.clone(),
-            transport: "app-server",
-            pid: owner.pid,
-            archives_inbox: true,
-        };
+        let peer = NativeDeliveryPeer { peer_process: super::super::tests::fixture_direct_peer_process(owner.pid), agent: fence.subject.clone(),
+        transport: "app-server",
+        pid: owner.pid,
+        archives_inbox: true, };
         let report = json!({"transport":"app-server","pid":peer.pid}).to_string();
         let assert_report = |raw: &str, admitted: bool| {
             let before = crate::store::mailbox_fence_evaluations();
@@ -1816,12 +1817,10 @@ mod observation_setting_controls {
         let root = tempfile::tempdir().unwrap();
         let state = crate::api::tests_shared::state(root.path());
         let fence = Fence::new("agent/observation-default-off", "fixture", "delivery");
-        let peer = NativeDeliveryPeer {
-            agent: fence.subject.clone(),
-            transport: "claude-channel",
-            pid: 0,
-            archives_inbox: false,
-        };
+        let peer = NativeDeliveryPeer { peer_process: None, agent: fence.subject.clone(),
+        transport: "claude-channel",
+        pid: 0,
+        archives_inbox: false, };
         assert!(!delivery_presence::observation_enabled(&state.state_dir));
         queue_legacy_shape(&state, &fence, &peer);
         assert_eq!(

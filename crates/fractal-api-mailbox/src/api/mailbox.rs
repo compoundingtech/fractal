@@ -65,12 +65,10 @@ pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Rout
 #[cfg(feature = "test-support")]
 pub fn synthetic_mailbox_protocol_router_with(state: AppState, subject: &str, families: &[RouteFamily]) -> Router {
     assert!(subject.starts_with("agent/example/"));
-    admitted_mailbox_protocol_router_with(state, families).layer(Extension(NativeDeliveryPeer {
-        agent: subject.into(),
-        transport: "omp-channel",
-        pid: std::process::id(),
-        archives_inbox: false,
-    }))
+    admitted_mailbox_protocol_router_with(state, families).layer(Extension(NativeDeliveryPeer { peer_process: None, agent: subject.into(),
+    transport: "omp-channel",
+    pid: std::process::id(),
+    archives_inbox: false, }))
 }
 /// Resolve only the requested address. The transport peer remains the immutable
 /// physical principal: a public rename must never create new mailbox custody.
@@ -226,6 +224,9 @@ pub async fn attachment(
                 }
                 store.check_mailbox(&fence)
             })?;
+        } else {
+            fractal_api_core::api::native_role::capture(&checked_state, &fence, &peer)?
+                .validate()?;
         }
         store.check_mailbox(&fence)?;
         Ok(super::claude_channel_attached(
@@ -317,10 +318,25 @@ pub async fn receipt(
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
                 }
-                store.append_native_mailbox_receipt_outcome(&input, &request.fence,
-                    payload.native_receipt.as_ref())
+                store.append_native_mailbox_receipt_outcome_checked(&input, &request.fence,
+                    payload.native_receipt.as_ref(), validate)
             })?
-        } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
+        } else if let Some(outcome) = authority::with_argv_channel(
+            &checked_state, &request.fence, &checked_peer, |_, validate| {
+                store.append_native_mailbox_receipt_outcome_checked(
+                    &input, &request.fence, payload.native_receipt.as_ref(), validate,
+                )
+            },
+        )? {
+            outcome
+        } else {
+            let role = fractal_api_core::api::native_role::capture(
+                &checked_state, &request.fence, &checked_peer,
+            )?;
+            store.append_native_mailbox_receipt_outcome_checked(
+                &input, &request.fence, payload.native_receipt.as_ref(), &|| role.validate(),
+            )?
+        };
         // A message this store cannot read is treated as a work wake.
         let work_wake = store
             .message(&input.subject)
@@ -698,6 +714,7 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         Some(((), timer))
     });
     let mut stream_control = StreamControl::new(native.then(|| peer.clone()));
+    stream_control.outgoing_peer = Some(peer.clone());
     stream_control.primary_peer = (peer.transport == "claude-channel").then(|| (peer.clone(), primary_wrapper));
     let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, stream_control);
     #[cfg(not(feature = "test-support"))]
@@ -795,6 +812,7 @@ impl Drop for StreamProof {
 
 struct StreamControl {
     peer: Option<NativeDeliveryPeer>,
+    outgoing_peer: Option<NativeDeliveryPeer>,
     primary_peer: Option<(NativeDeliveryPeer, Option<fractal_drivers::claude_process::Process>)>,
     #[cfg(any(test, feature = "test-support"))]
     dirty_gate: Option<Arc<FixtureDirtyGate>>,
@@ -808,7 +826,7 @@ struct StreamControl {
 
 impl StreamControl {
     fn new(peer: Option<NativeDeliveryPeer>) -> Self {
-        Self { peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None,
+        Self { outgoing_peer: peer.clone(), peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None,
             #[cfg(test)] report_started: None,
             #[cfg(test)] report_blocking_started: None,
             #[cfg(test)] legacy_report_dispatch: false }
@@ -825,6 +843,29 @@ async fn stream_with_timers_inner<F, S, H>(
 {
     let peer = control.peer;
     let primary_peer = control.primary_peer;
+    let outgoing_proof = if let Some(outgoing_peer) = control.outgoing_peer {
+        let checked_state = state.clone();
+        let checked_fence = fence.clone();
+        let native = peer.is_some();
+        match crate::api::read_deadline::spawn_blocking(move || {
+            outgoing_peer.require_kernel()?;
+            if let Some(owner) = checked_state.store.mailbox_lease_authority(&checked_fence)? {
+                fractal_api_core::api::native_role::capture_admitted_process_role(
+                    &checked_state, &checked_fence, &outgoing_peer, &owner,
+                ).map(OutgoingProof::Native)
+            } else if native {
+                Err(St3Error::new("stale-mailbox-session", "outgoing native stream has no admitted lease"))
+            } else {
+                // Explicit argv channels retain their existing protocol, not native authority.
+                outgoing_peer.peer_process.ok_or_else(|| St3Error::new(
+                    "native-role-unavailable", "outgoing channel kernel identity unavailable",
+                )).map(OutgoingProof::Kernel)
+            }
+        }).await {
+            Ok(Ok(proof)) => Some(Arc::new(proof)),
+            _ => return,
+        }
+    } else { None };
     let _pushed = ForgetPushed(fence.clone());
     futures_util::pin_mut!(safety, heartbeat);
     let since = client_now_ms();
@@ -983,11 +1024,12 @@ async fn stream_with_timers_inner<F, S, H>(
             if let Some(seat) = seat {
                 let bytes = serde_json::to_vec(&seat).unwrap_or_default();
                 if bytes != previous_seat {
-                    if send(
+                    if send_proven(
                         &mut socket,
                         &Frame::Seat {
                             seat: Box::new(seat),
                         },
+                        outgoing_proof.as_ref(),
                     )
                     .await
                     .is_err()
@@ -1010,7 +1052,7 @@ async fn stream_with_timers_inner<F, S, H>(
             crate::silent::release(&mut messages);
             let bytes = serde_json::to_vec(&messages).unwrap_or_default();
             if fence.component == "delivery" && bytes != previous_mailbox {
-                if send(&mut socket, &Frame::Mailbox { messages })
+                if send_proven(&mut socket, &Frame::Mailbox { messages }, outgoing_proof.as_ref())
                     .await
                     .is_err()
                 {
@@ -1019,7 +1061,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 previous_mailbox = bytes;
             }
             if fence.component == "delivery" && replay_supported && !replay_challenge_sent {
-                if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
+                if send_proven(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }, outgoing_proof.as_ref()).await.is_err() { return; }
                 replay_challenge_sent = true;
             }
             if fence.component == "delivery" {
@@ -1031,11 +1073,12 @@ async fn stream_with_timers_inner<F, S, H>(
                     .filter(|o| o.holds_intake() && o.old_incarnation == fence.incarnation)
                     .map(|o| o.id);
                 if drain != previous_drain {
-                    if send(
+                    if send_proven(
                         &mut socket,
                         &Frame::Drain {
                             operation: drain.clone(),
                         },
+                        outgoing_proof.as_ref(),
                     )
                     .await
                     .is_err()
@@ -1088,7 +1131,7 @@ async fn stream_with_timers_inner<F, S, H>(
                             attached: value.0,
                             delivery_epoch: value.1,
                         };
-                        if send(&mut socket, &frame).await.is_err() {
+                        if send_proven(&mut socket, &frame, outgoing_proof.as_ref()).await.is_err() {
                             return;
                         }
                         if attachment_sent.is_none() {
@@ -1211,7 +1254,7 @@ async fn stream_with_timers_inner<F, S, H>(
                             attachment_due = true;
                         }
                         if fence.component == "delivery" && replay_supported && !previous_mailbox.is_empty() && !replay_challenge_sent {
-                            if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
+                            if send_proven(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }, outgoing_proof.as_ref()).await.is_err() { return; }
                             replay_challenge_sent = true;
                         }
                         if recorded && replay_proven.is_none() && replay_challenge_sent
@@ -1354,6 +1397,30 @@ async fn finish_fenced(socket: &mut WebSocket, frame: &Frame) {
     .await;
 }
 
+enum OutgoingProof {
+    Native(fractal_api_core::api::native_role::ProcessRoleProof),
+    Kernel(fractal_runtime::PeerProcessIdentity),
+}
+
+impl OutgoingProof {
+    fn validate(&self) -> Result<(), St3Error> {
+        match self {
+            Self::Native(proof) => proof.validate(),
+            Self::Kernel(kernel) => kernel.validate().map_err(|error| {
+                St3Error::new("stale-mailbox-session", format!("outgoing connector generation ended: {error:#}"))
+            }),
+        }
+    }
+}
+
+async fn send_proven(socket: &mut WebSocket, frame: &Frame, proof: Option<&Arc<OutgoingProof>>) -> anyhow::Result<()> {
+    if let Some(proof) = proof {
+        let proof = Arc::clone(proof);
+        crate::api::read_deadline::spawn_blocking(move || proof.validate()).await??;
+    }
+    send(socket, frame).await
+}
+
 async fn send(socket: &mut WebSocket, frame: &Frame) -> anyhow::Result<()> {
     tokio::time::timeout(
         Duration::from_secs(15),
@@ -1435,19 +1502,163 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
     use fractal_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
+    /// The fixture explicitly selects its live direct process; production accepts
+    /// this identity only from the Unix connector's kernel credentials.
+    pub(super) fn fixture_direct_peer_process(pid: u32) -> Option<fractal_runtime::PeerProcessIdentity> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::{FromRawFd as _, OwnedFd};
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "fixture pidfd_open: {}", std::io::Error::last_os_error());
+            // Successful pidfd_open transfers one fresh descriptor to the fixture.
+            let pidfd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+            Some(fractal_runtime::PeerProcessIdentity::capture(pid, pidfd).unwrap())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            fractal_runtime::PeerProcessIdentity::capture_generation(pid).ok()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = pid;
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn retained_outgoing_stream_cannot_publish_after_its_connector_generation_exits() {
+        struct Connector(std::process::Child);
+        impl Drop for Connector {
+            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+        }
+        let mut connector = Connector(std::process::Command::new("sleep").arg("60").spawn().unwrap());
+        let proof = Arc::new(OutgoingProof::Kernel(
+            fixture_direct_peer_process(connector.0.id()).unwrap(),
+        ));
+        let publish_next = Arc::new(tokio::sync::Notify::new());
+        let next = Arc::clone(&publish_next);
+        let (result, mut results) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route("/stream", get(move |websocket: WebSocketUpgrade| {
+            let proof = Arc::clone(&proof);
+            let next = Arc::clone(&next);
+            let result = result.clone();
+            async move {
+                websocket.on_upgrade(move |mut socket| async move {
+                    send_proven(&mut socket, &Frame::Mailbox { messages: vec![] }, Some(&proof)).await.unwrap();
+                    next.notified().await;
+                    let blocked = send_proven(
+                        &mut socket, &Frame::Replay { nonce: "must-not-publish".into() }, Some(&proof),
+                    ).await.is_err();
+                    let _ = result.send(blocked);
+                })
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        assert!(matches!(first, Message::Text(raw) if matches!(serde_json::from_str::<Frame>(&raw).unwrap(), Frame::Mailbox { .. })));
+        // The transport remains held by the fixture after its authenticated generation exits,
+        // as with an inherited descriptor. No incoming report is required to stop publication.
+        connector.0.kill().unwrap();
+        connector.0.wait().unwrap();
+        publish_next.notify_one();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(5), results.recv()).await.unwrap(), Some(true));
+        let terminal = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap();
+        assert!(!matches!(terminal, Some(Ok(Message::Text(_)))), "no data frame may follow connector exit");
+        server.abort();
+    }
+
+    struct AdmittedPtyFixture {
+        runtime: fractal_runtime::PtyRuntime,
+        name: String,
+        incarnation: String,
+    }
+
+    impl Drop for AdmittedPtyFixture {
+        fn drop(&mut self) {
+            let _ = self.runtime.stop_if(&self.name, Some(&self.incarnation));
+        }
+    }
+
+    /// A real physical generation with an already-admitted title capability.
+    /// No launch witness is synthesized: this exercises exact-lease continuity.
+    fn admitted_title_fixture(state: &mut AppState, subject: &str) -> (AdmittedPtyFixture, Fence, Fence, NativeDeliveryPeer) {
+        let name = subject.strip_prefix("agent/").unwrap();
+        let mut intent = crate::graph::parse_test_intent(
+            &format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"claude\" {{}} }}"),
+            "node",
+        ).unwrap();
+        // These pre-existing attachment tests use synthetic, unqualified subjects.
+        // Keep their address while retaining the parser's real physical runtime member.
+        let declared_subject = intent.subjects.keys().next().unwrap().clone();
+        let mut declaration = intent.subjects.remove(&declared_subject).unwrap();
+        declaration.subject = subject.into();
+        intent.subjects.insert(subject.into(), declaration);
+        state.store.apply_internal(&intent, name).unwrap();
+        let member = state.store.desired_subjects_named(&[subject.into()]).unwrap()
+            .remove(0).member.unwrap();
+        state.pty_binary = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|dir| dir.join("pty")).find(|path| path.is_file())
+            .and_then(|path| fs::canonicalize(path).ok()).expect("pinned devShell pty must exist");
+        let runtime = fractal_runtime::PtyRuntime::new(state.pty_root.clone())
+            .with_binary(state.pty_binary.to_string_lossy());
+        let dir = crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), subject, &state.node);
+        let paths = fractal_drivers::driver_paths::Paths {
+            root: state.state_dir.join("drivers"), agent_dir: dir.clone(),
+            session_dir: state.state_dir.join("sessions"),
+        };
+        let environment: BTreeMap<_, _> = paths.environment(name).into_iter().collect();
+        runtime.spawn(&member.runtime_id,
+            &fractal_runtime::Launch::Argv(vec!["sleep".into(), "300".into()]),
+            &state.state_dir, &environment, None, &BTreeMap::new(), None).unwrap();
+        let physical = runtime.snapshot().unwrap().into_iter()
+            .find(|observation| observation.name == member.runtime_id).unwrap();
+        let incarnation = format!("{}:{}", physical.pid.unwrap(), physical.created_at.unwrap());
+        let fixture = AdmittedPtyFixture { runtime, name: member.runtime_id.clone(), incarnation: incarnation.clone() };
+        let stats = pty_client::query_stats_in_with_timeout(&state.pty_root, &member.runtime_id, pty_client::STATS_TIMEOUT).unwrap();
+        let pid = u32::try_from(stats.process.pid.unwrap()).unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running","runtime_id":member.runtime_id,"incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"idle","driver":"claude","incarnation_id":incarnation})),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        fractal_drivers::harness_events::enable(&dir, &incarnation).unwrap();
+        let session = format!("fixture-{name}");
+        let sequence = fractal_drivers::harness_state::claim(&dir, name, "claude", &session).unwrap();
+        let owner = crate::mailbox::Authority {
+            provider: "claude".into(), session, sequence, pid,
+            process_token: fractal_runtime::process_start_token(pid).unwrap(),
+        };
+        let title = state.store.bind_mailbox_with_lease(&Fence::new(subject, &incarnation, "title"), Some(&owner)).unwrap();
+        let delivery = state.store.bind_mailbox(&Fence::new(subject, &incarnation, "delivery")).unwrap();
+        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(pid),
+            agent: subject.into(), transport: "claude-channel", pid, archives_inbox: true };
+        (fixture, title, delivery, peer)
+    }
+
     #[cfg(all(feature = "test-support", target_os = "linux"))]
     mod replay_native_tests {
         include!("mailbox/replay_native_tests.rs");
     }
 
-    // These snapshot/receipt controls model an already-admitted channel with a synthetic
-    // identity. Their explicit test-only routes do not claim production peer authentication;
-    // isolated native wrapper controls exercise the real kernel/process/provider boundary.
+    // These snapshot/receipt controls model an already-admitted transport for a
+    // live fixture process. Their explicit test-only routes do not claim native
+    // role admission; isolated wrapper controls exercise that production boundary.
     fn admitted_fixture_router(state: AppState, peer: NativeDeliveryPeer) -> Router {
         let bind_state = state.clone();
         let bind_peer = peer.clone();
         let stream_state = state.clone();
         let stream_peer = peer.clone();
+        let receipt_state = state.clone();
+        let receipt_peer = peer.clone();
         Router::new()
             .route("/v1/mailbox/bind", post(move |Json(request): Json<Fence>| {
                 let (state, peer) = (bind_state.clone(), bind_peer.clone());
@@ -1464,6 +1675,46 @@ mod tests {
                     state.store.check_mailbox(&fence).map_err(ApiError::bad)?;
                     signal_local_change(&state);
                     Ok::<_, ApiError>(websocket.on_upgrade(move |socket| stream_with_reader(state, fence, socket, raw_snapshot)))
+                }
+            }))
+            .route("/v1/mailbox/receipts", post(move |Json(request): Json<Receipt>| {
+                let (state, peer) = (receipt_state.clone(), receipt_peer.clone());
+                async move {
+                    authorize(&request.fence, Some(&peer))?;
+                    if request.fence.component != "delivery"
+                        || !matches!(request.lifecycle.as_str(), "staged" | "delivered" | "read")
+                    {
+                        return Err(ApiError::bad(St3Error::new(
+                            "invalid-mailbox-receipt", "invalid admitted fixture receipt",
+                        )));
+                    }
+                    let input = ClaimInput {
+                        subject: request.message.clone(),
+                        kind: format!("message.{}", request.lifecycle),
+                        actor: Some(request.fence.subject.clone()),
+                        fields: if request.lifecycle == "staged" {
+                            BTreeMap::from([
+                                ("status".into(), json!(request.lifecycle)),
+                                ("recipient".into(), json!(request.fence.subject)),
+                                ("transport".into(), json!(peer.transport)),
+                            ])
+                        } else {
+                            BTreeMap::from([("status".into(), json!(request.lifecycle))])
+                        },
+                        evidence: vec![],
+                        expected_subject: None,
+                        idempotency_key: Some(format!("mailbox:{}:{}:{}:{}:{}",
+                            request.fence.subject, request.fence.incarnation, request.fence.epoch,
+                            request.message, request.lifecycle)),
+                    };
+                    let (record, appended) = state.store
+                        .append_mailbox_receipt_outcome(&input, &request.fence).map_err(ApiError::bad)?;
+                    if appended {
+                        let work_wake = state.store.message(&input.subject).ok().flatten()
+                            .is_none_or(|message| super::super::is_work_wake(&message.tags));
+                        super::super::signal_message_changed(&state, &input.kind, work_wake);
+                    }
+                    Ok::<_, ApiError>(Json(json!({"api_version":"st3.v1","value":record})))
                 }
             }))
             .fallback_service(router(state).layer(Extension(peer)))
@@ -1545,9 +1796,21 @@ mod tests {
         let state=crate::api::tests_shared::state(root.path());
         crate::store::mailbox_tests::ready(&state.store,"current");
         let subject="agent/eval.worker";
-        let current=state.store.bind_mailbox(&Fence::new(subject,"current","delivery")).unwrap();
+        state.store.apply_internal(
+            &crate::graph::parse_test_intent(
+                "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"claude\" {} }\n",
+                "node",
+            ).unwrap(),
+            "declare-protected-claude-seat",
+        ).unwrap();
+        let dir = crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), subject, &state.node);
+        fractal_drivers::harness_events::enable(&dir, "current").unwrap();
+        let sequence = fractal_drivers::harness_state::claim(&dir, "eval.worker", "claude", "protected-fixture").unwrap();
+        let owner = crate::mailbox::Authority { provider: "claude".into(), session: "protected-fixture".into(),
+            sequence, pid: std::process::id(), process_token: fractal_runtime::process_start_token(std::process::id()).unwrap() };
+        let current=state.store.bind_mailbox_with_lease(&Fence::new(subject,"current","delivery"), Some(&owner)).unwrap();
         let candidate=Fence::new(subject,"current","delivery");
-        let peer=NativeDeliveryPeer { agent:subject.into(),transport:"claude-channel",
+        let peer=NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent:subject.into(),transport:"claude-channel",
             pid:std::process::id(),archives_inbox:false };
         let physical=fractal_drivers::claude_process::process(std::process::id()).unwrap();
         // This gate is outside the platform switch: Darwin cannot fall through to its old
@@ -1556,36 +1819,24 @@ mod tests {
             state.store.bind_mailbox(&candidate));
         assert!(rejected.is_err());
         state.store.check_mailbox(&current).unwrap();
-        // Explicit legacy admission is a separate compatibility branch, not primary proof.
+        // Without a launch witness, a new legacy candidate cannot replace live custody.
+        // Exact already-bound continuation is exercised separately by retention tests.
         let legacy=authority::with_claude_primary(&state,&candidate,&peer,None,||
-            state.store.bind_mailbox(&candidate)).unwrap();
-        assert!(legacy.1.is_none());
-        state.store.check_mailbox(&legacy.0).unwrap();
-        assert!(state.store.check_mailbox(&current).is_err());
+            state.store.bind_mailbox(&candidate));
+        assert!(legacy.is_err());
+        state.store.check_mailbox(&current).unwrap();
     }
 
     #[tokio::test]
     async fn attachment_checks_both_runtime_and_current_delivery_epoch() {
         let root = tempfile::tempdir().unwrap();
-        let state = crate::api::tests_shared::state(root.path());
+        let mut state = crate::api::tests_shared::state(root.path());
         let subject = "agent/attachment-epoch";
-        for (kind, fields) in [
-            ("runtime.observed", json!({"status":"running","runtime_id":"attachment-epoch","incarnation_id":"current"})),
-            ("harness.observed", json!({"state":"idle","driver":"claude","incarnation_id":"current"})),
-        ] {
-            state.store.append_claim(&ClaimInput {
-                subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
-                fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
-                expected_subject: None, idempotency_key: Some(format!("attachment-epoch:{kind}")),
-            }).unwrap();
-        }
-        let title = state.store.bind_mailbox(&Fence::new(subject, "current", "title")).unwrap();
-        let delivery = state.store.bind_mailbox(&Fence::new(subject, "current", "delivery")).unwrap();
-        let peer = NativeDeliveryPeer { agent: subject.into(), transport: "claude-channel", pid: 7, archives_inbox: true };
+        let (_physical, title, delivery, peer) = admitted_title_fixture(&mut state, subject);
         let ready = json!({"transport":"claude-channel","ready":true,"channel":{"pid":8,"age_ms":0}}).to_string();
         delivery_presence::record_fenced(&delivery, &ready);
         assert!(attachment(State(state.clone()), Query(title.clone()), Some(Extension(peer.clone()))).await.unwrap().0.attached);
-        let replacement = state.store.bind_mailbox(&Fence::new(subject, "current", "delivery")).unwrap();
+        let replacement = state.store.bind_mailbox(&Fence::new(subject, &title.incarnation, "delivery")).unwrap();
         assert!(!attachment(State(state.clone()), Query(title.clone()), Some(Extension(peer.clone()))).await.unwrap().0.attached,
             "a live report from a superseded delivery owner must not prove attachment");
         delivery_presence::record_fenced(&replacement, &ready);
@@ -1867,13 +2118,7 @@ mod tests {
         // contention returns SQLITE_LOCKED at once (Store::open_memory), so use a file store.
         state.store = Arc::new(Store::open(&root.path().join("graph.db"), "node").unwrap());
         let subject = "agent/attachment-push-oracle";
-        let (title, mut delivery) = attachment_seat(&state, subject);
-        let peer = NativeDeliveryPeer {
-            agent: subject.into(),
-            transport: "claude-channel",
-            pid: 7,
-            archives_inbox: true,
-        };
+        let (_physical, title, mut delivery, peer) = admitted_title_fixture(&mut state, subject);
         let mut stream =
             controlled_stream(state.clone(), &title, &root.path().join("daemon.sock")).await;
         report_title(&mut stream, true).await;
@@ -1913,7 +2158,7 @@ mod tests {
                 "rebind" => {
                     delivery = state
                         .store
-                        .bind_mailbox(&Fence::new(subject, "current", "delivery"))
+                        .bind_mailbox(&Fence::new(subject, &title.incarnation, "delivery"))
                         .unwrap();
                 }
                 "lapse" => delivery_presence::backdate(subject, false, Duration::from_secs(11)),
@@ -2008,12 +2253,10 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
         crate::store::mailbox_tests::ready(&state.store, "session-1");
-        let peer = NativeDeliveryPeer {
-            agent: seat.into(),
-            transport,
-            pid: 37,
-            archives_inbox: true,
-        };
+        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: seat.into(),
+        transport,
+        pid: std::process::id(),
+        archives_inbox: true, };
         let app = admitted_fixture_router(state.clone(), peer);
         let path = root.path().join("daemon.sock");
         let server_path = path.clone();
@@ -2209,12 +2452,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(messages.len(), 1);
-        let peer = NativeDeliveryPeer {
-            agent: "agent/example/reader".into(),
-            transport: "codex",
-            pid: 123,
-            archives_inbox: true,
-        };
+        let peer = NativeDeliveryPeer { peer_process: None, agent: "agent/example/reader".into(),
+        transport: "codex",
+        pid: 123,
+        archives_inbox: true, };
         // No boot floor: legacy polling must not synthesize closed for held mail.
         hold_pre_boot_mail(&store, Some(&peer), Some(&peer.agent), &mut messages).unwrap();
         assert_eq!(messages[0].status, "sent");
@@ -2310,12 +2551,10 @@ mod tests {
                     .unwrap();
             }
         }
-        let peer = NativeDeliveryPeer {
-            agent: seat.into(),
-            transport,
-            pid: 37,
-            archives_inbox: true,
-        };
+        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: seat.into(),
+        transport,
+        pid: std::process::id(),
+        archives_inbox: true, };
         let app = admitted_fixture_router(state.clone(), peer);
         let path = root.path().join("daemon.sock");
         let start = || {
@@ -2550,12 +2789,10 @@ mod tests {
             "active"
         );
 
-        let peer = NativeDeliveryPeer {
-            agent: seat.into(),
-            transport: "claude-channel",
-            pid: 37,
-            archives_inbox: false,
-        };
+        let peer = NativeDeliveryPeer { peer_process: None, agent: seat.into(),
+        transport: "claude-channel",
+        pid: 37,
+        archives_inbox: false, };
         let app = admitted_fixture_router(state.clone(), peer);
         let path = root.path().join("daemon.sock");
         let server_path = path.clone();
@@ -2616,12 +2853,10 @@ mod tests {
             .mission(&intent, IntentInput { kdl: kdl.into(), source_name: None })
             .unwrap();
         state.store.apply(&intent, &planned.subject_tokens, "seat").unwrap();
-        let peer = NativeDeliveryPeer {
-            agent: "agent/eval.worker".into(),
-            transport: "claude-channel",
-            pid: 37,
-            archives_inbox: false,
-        };
+        let peer = NativeDeliveryPeer { peer_process: None, agent: "agent/eval.worker".into(),
+        transport: "claude-channel",
+        pid: 37,
+        archives_inbox: false, };
         let path = root.path().join("daemon.sock");
         let server_path = path.clone();
         let app = admitted_fixture_router(state.clone(), peer);
@@ -2862,12 +3097,10 @@ mod tests {
                 .store
                 .apply(&intent, &planned.subject_tokens, "seat")
                 .unwrap();
-            let peer = NativeDeliveryPeer {
-                agent: "agent/eval.worker".into(),
-                transport,
-                pid: 37,
-                archives_inbox: false,
-            };
+            let peer = NativeDeliveryPeer { peer_process: None, agent: "agent/eval.worker".into(),
+            transport,
+            pid: 37,
+            archives_inbox: false, };
             let lose_response = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let injection = lose_response.clone();
             let app =
@@ -3325,7 +3558,7 @@ mod tests {
                                             receiver.recv().await.map(|()| ((), receiver))
                                         },
                                     ),
-                                    StreamControl { peer, primary_peer: None, dirty_gate: Some(fixture_gate),
+                                    StreamControl { outgoing_peer: peer.clone(), peer, primary_peer: None, dirty_gate: Some(fixture_gate),
                                         report_started: None, report_blocking_started: None, legacy_report_dispatch: false },
                                 )
                             })
@@ -3395,7 +3628,7 @@ mod tests {
             let dir = authority::source_agent_dir(&state, &request);
             harness_events::enable(&dir, "current").unwrap();
             let sequence = harness_state::claim(&dir, "eval.worker", "omp", "report-lock").unwrap();
-            let peer = NativeDeliveryPeer { agent: request.subject.clone(), transport: "omp-channel",
+            let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: request.subject.clone(), transport: "omp-channel",
                 pid: std::process::id(), archives_inbox: true };
             let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-lock".into(),
                 sequence, pid: peer.pid, process_token: fractal_runtime::process_start_token(peer.pid).unwrap() };
@@ -3549,7 +3782,7 @@ mod tests {
         harness_events::enable(&agent_dir, "current").unwrap();
         let sequence = harness_state::claim(&agent_dir, name, "omp", "report-session").unwrap();
         let raw = harness_events::read_runtime_state(&agent_dir, "current").unwrap().unwrap();
-        let peer = NativeDeliveryPeer { agent: subject.clone(), transport: "omp-channel",
+        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: subject.clone(), transport: "omp-channel",
             pid: std::process::id(), archives_inbox: true };
         // An explicitly already-admitted fixture lease isolates report consumption.
         // This is not a physical bind/launch authentication certificate.
@@ -4585,12 +4818,10 @@ mod tests {
     fn mailbox_authority_refuses_remote_and_foreign_subscriptions() {
         let fence = Fence::new("agent/eval.worker", "session-1", "delivery");
         assert!(authorize(&fence, None).is_err());
-        let peer = NativeDeliveryPeer {
-            agent: "agent/eval.other".into(),
-            transport: "omp-channel",
-            pid: 37,
-            archives_inbox: false,
-        };
+        let peer = NativeDeliveryPeer { peer_process: None, agent: "agent/eval.other".into(),
+        transport: "omp-channel",
+        pid: 37,
+        archives_inbox: false, };
         assert!(authorize(&fence, Some(&peer)).is_err());
     }
 }
