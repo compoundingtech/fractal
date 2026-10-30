@@ -321,7 +321,6 @@ mod tests {
         ui.open_in_glass(Pane::Documents(Some("recent-gamma".into())), Open::Tab);
         ui
     }
-    }
 
     fn live_places() -> Ui {
         let mut world = demo::world();
@@ -502,6 +501,7 @@ mod tests {
             assert!(!ui.recent_open());
             assert!(!ui.terminal_focused());
         }
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -553,7 +553,6 @@ mod tests {
             ui.focused_pane(),
             Some(Pane::Documents(Some("recent-alpha".into())))
         );
-    }
     }
 
     #[test]
@@ -646,6 +645,7 @@ mod tests {
         );
         ui.recent_key(key(KeyCode::Enter));
         assert_eq!(ui.focused_pane().unwrap().key(), oldest);
+    }
 
     #[test]
     fn popup_uses_shared_history_and_labels_across_spaces_without_duplicate_panes() {
