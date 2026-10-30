@@ -120,7 +120,7 @@ def first_break(checkpoints, probe):
     return high
 
 def swap_server(cleanenv):
-    # Replacement requires a Ready registration; clear one that is not serving.
+    # Replacement requires a Ready registration; clear only a confirmed non-Ready one.
     subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
 
 def generated(path):
@@ -633,6 +633,19 @@ def current_server_url(cleanenv, expected_sha=None):
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         pass
     return None
+def registration_not_ready(cleanenv):
+    """An inconclusive observation must never authorize stopping a server."""
+    try:
+        status=subprocess.run(['devnet','status',purpose],cwd=C/'apps/fractal-web',env=cleanenv,text=True,capture_output=True,timeout=30)
+        if status.returncode: return False
+        row=json.loads(status.stdout)
+        if isinstance(row.get('status'),str) and row['status']!='running':
+            return True
+        lifecycle=json.loads(row['tags']['run.lifecycle'])
+        return lifecycle['_tag'] in ('starting','terminal')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return False
+
 def activate(previous):
     current=os.path.realpath(P/'current')
     sha=json.loads(candidate_sandbox.read_regular(P/'current/build-receipt.json'))['buildIdentity']['rev']
@@ -647,7 +660,7 @@ def activate(previous):
     # An old healthy generation is not publication success for this candidate.
     replacement_completed=False
     try:
-        if previous and not current_server_url(cleanenv):
+        if previous and registration_not_ready(cleanenv):
             swap_server(cleanenv)
         subprocess.run(['devnet','up','--replace',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
         replacement_completed=True
@@ -656,16 +669,18 @@ def activate(previous):
         if not url:
             raise RuntimeError('published edge does not serve candidate build identity')
     except Exception:
-        # A failed replace owns its recovery, including held generations.
-        if replacement_completed:
-            subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=False)
+        # Failed replacement may already have committed; reconcile before moving the pointer.
+        if not replacement_completed:
+            if not current_server_url(cleanenv,sha) and previous and previous!=current:
+                rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
+                if current_server_url(cleanenv,rollback_sha):
+                    recovery_select_build(rollback_sha)
+            raise
+        subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=False)
         if previous and previous!=current:
             rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
             recovery_select_build(rollback_sha)
-            if replacement_completed:
-                subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
-        if not replacement_completed:
-            raise
+            subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
         raise RuntimeError('devnet activation failed; previous build rolled back if available')
     recovery_retain_builds(previous)
     return url

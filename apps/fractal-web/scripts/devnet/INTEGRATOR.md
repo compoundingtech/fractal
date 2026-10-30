@@ -146,10 +146,14 @@ record the SHA that actually built successfully, including the ejected PR result
 
 Activation uses `devnet up --replace` so a serving generation stays published
 until its replacement is Ready and the edge cuts over. A previous registration
-that is not serving is stopped first because replacement requires a Ready route.
-If replacement fails, Devnet owns server recovery; the integrator restores the
-previous build pointer without stopping or relaunching either generation and
-propagates the error. In particular, `ReplacementRecoveryRequired` needs operator
+is stopped first only when Devnet status positively reports it is not running
+or its lifecycle is starting/terminal. Missing or failed observations never
+authorize stopping a server; Devnet decides whether replacement can proceed.
+If replacement fails, Devnet owns server recovery. The integrator restores the
+previous build pointer only if the edge confirms that previous revision serves;
+if the candidate serves or the observation is inconclusive, the pointer stays
+unchanged. Neither generation is stopped or relaunched, and the original error
+is propagated. In particular, `ReplacementRecoveryRequired` needs operator
 recovery: the integrator never runs `--abandon-replace`. If replacement succeeds
 but subsequent publication verification fails, the integrator stops the new
 server and relaunches the previous build as before.
