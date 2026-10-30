@@ -111,6 +111,7 @@
     "crates/fractal-client/src/contract.rs",
     "crates/fractal-client/src/generated.rs",
     "crates/fractal-client/src/lib.rs",
+    "crates/st3",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json"
    ]
@@ -187,7 +188,9 @@
    ]
   },
   "fractal-fabric-adapter": {
-   "extra": []
+   "extra": [
+    "crates/st3"
+   ]
   },
   "fractal-feed": {
    "extra": [
@@ -257,6 +260,7 @@
   "fractal-missions": {
    "extra": [
     "crates/fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz",
+    "crates/st3",
     "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
@@ -364,7 +368,9 @@
    ]
   },
   "fractal-terminal-direct": {
-   "extra": []
+   "extra": [
+    "crates/st3"
+   ]
   },
   "fractal-tiles-registry": {
    "extra": []
@@ -399,7 +405,9 @@
    "extra": []
   },
   "smallclaims": {
-   "extra": []
+   "extra": [
+    "crates/st3"
+   ]
   },
   "st3": {
    "extra": [
