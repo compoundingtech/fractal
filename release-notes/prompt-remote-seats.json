@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A prompt card on a member other than the seat's host reads and follows the seat's conversation through the client-read relay, so it can offer allow there",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "presentation.prompt on a harness-prompt card for a seat another member runs now carries its named call and allow, read through the client-read relay as the seat's person, instead of calls null with unknown_reason. Until the first relayed read arrives, and while the host can't be read, the card has unknown_reason and no allow. A member that reaches no peer for that host still says why. The host must answer relayed Timeline and ConversationChanges reads, as it already does for clients."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work. For each prompt card whose seat another member runs, one background follower reads the seat's newest page through the relay, holds one relayed changes wait (at most 10 s per read) on that host and reads again when it changes; a failed read is retried after 1 s, doubling to 30 s. The attention refresher only takes the follower's latest read, so a slow or unreachable host delays no other card."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions, client re-pairing or configuration changes required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes; an older daemon shows such a card as unknown again."
+  }
+}

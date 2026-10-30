@@ -358,6 +358,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Delivery and mailbox `st.agent` | Full declared subject of each managed agent owned by the local host |
 | Delivery `st.delivery.state` | `live`, `stale`, `refused` |
 | Delivery `st.delivery.reason` | Empty unless refused; the fixed refusal-code vocabulary below |
+| Delivery `st.agent.desired` | `running`, `suspended`; selected from authoritative lifecycle, not observed liveness |
 | Mailbox `st.mailbox.state` | `pending`, `delivered`, `held` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
@@ -646,8 +647,8 @@ ping sidecar queues.
 ## Per-agent delivery health
 
 The daemon's existing `st3` meter exports observable f64 gauge
-`st.delivery.state_age`, unit `s`, with exactly three point attributes:
-`st.agent`, `st.delivery.state`, and `st.delivery.reason`. Host identity stays in
+`st.delivery.state_age`, unit `s`, with exactly four point attributes:
+`st.agent`, `st.delivery.state`, `st.delivery.reason`, and `st.agent.desired`. Host identity stays in
 the daemon resource, not an additional point attribute.
 
 Membership comes exclusively from
@@ -655,13 +656,24 @@ Membership comes exclusively from
 whose kind is `agent` and whose member host equals `store.origin()`. The full
 subject is used unchanged as `st.agent`, so this series joins the mailbox
 backlog gauges without display-name aliases or duplicate remote-host reporting.
-Every member contributes one series, including stopped agents, agents that have
-never bound, and members not yet in the cached agents publication. Only removing
-an agent from locally owned declarations removes its series.
+Every member contributes one series, including agents that have never bound
+and members not yet in the cached agents publication. Stopped declarations
+(kind `stop`), retired/undeclared agents and agents owned by another host are not exported.
+Stopping an agent therefore removes its series; it cannot page for stale delivery.
+
+`st.agent.desired` is `suspended` exactly when
+`suspension::current(&Store, agent)?.holds_seat()` holds, using the same authoritative
+suspend/resume fold as the reconciler. This includes quiescing, snapshotting,
+suspended, fencing-source, transferring, restoring and verifying phases; it stays
+suspended until resume completes, including failed resumes that retain the hold.
+Otherwise an exported declared agent is `running`, even if its harness never
+started or crashed. No `stopped` or `unknown` attribute value is exported because
+membership already proves an active agent declaration. The off-scrape worker
+updates this attribute; desired-state changes do not reset the delivery-state age.
 
 The cached delivery projection maps `current`, `outdated`, and `legacy` to
 `live`; an explicit bind refusal maps to `refused`. Every other case maps to
-`stale`, including startup `unknown`, a never-bound seat, an inactive seat, or
+`stale`, including startup `unknown`, a never-bound seat, a suspended seat, or
 missing publication data. This is deliberately stricter than the UI's startup
 grace: absence of confirmed delivery evidence is explicit rather than an absent
 time series.
@@ -696,11 +708,12 @@ A single off-scrape worker refreshes membership and cached projection data, with
 Failures retain the last complete summary. Collection only reads this summary
 and advances ages; it does no store, graph, process, or filesystem reads.
 
-Alert on `st.delivery.state` equal to `stale` or `refused` and
-`st.delivery.state_age > 600`. This detects channel health independently of
-whether the mailbox happens to contain unread messages. Daemon disappearance
-requires the separate exporter/host-availability alert; an unbound or stopped
-managed seat continues to emit `stale`.
+Alert on `st.delivery.state=stale` AND `st.agent.desired=running` AND
+`st.delivery.state_age > 600`. Add a corresponding `refused` rule if refused
+delivery should page too, retaining the desired-running filter. This detects
+channel health independently of unread messages and excludes intentional
+suspension. Daemon disappearance requires a separate exporter/host-availability
+alert; stopped declarations emit no series.
 
 ## Durable mailbox gauges (contract v1)
 

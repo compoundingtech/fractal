@@ -174,3 +174,100 @@ async fn a_streamed_export_failure_names_the_cause_and_never_publishes_a_cli_bac
     }), "the failed download must also remove its private temporary file");
     server.abort();
 }
+
+#[tokio::test]
+async fn configured_store_directory_backup_roundtrip_keeps_bodies_in_product_state() {
+    configured_store_directory_roundtrip(false).await;
+    #[cfg(unix)]
+    configured_store_directory_roundtrip(true).await;
+}
+
+async fn configured_store_directory_roundtrip(database_alias: bool) {
+    use fractal_daemon::message_body;
+    use sha2::{Digest as _, Sha256};
+
+    let root = tempfile::tempdir().unwrap();
+    let source_root = root.path().join("source");
+    let source_state = source_root.join("state/st3");
+    let source_database_dir = root.path().join("source-database");
+    let source_database = source_database_dir.join("claims.sqlite3");
+    std::fs::create_dir_all(source_root.join("config/st3")).unwrap();
+    std::fs::create_dir_all(&source_database_dir).unwrap();
+    std::fs::write(
+        source_root.join("config/st3/config.toml"),
+        format!("node = \"alder\"\nstore_dir = {:?}\n", source_database_dir),
+    ).unwrap();
+    let text = "long message body\n".repeat(1024);
+    let subject = "message/separate-store";
+    let hash = hex::encode(Sha256::digest(text.as_bytes()));
+    let source = Store::open(&source_database, "alder").unwrap();
+    source.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/alex")),
+            ("to".into(), json!("agent/worker")),
+            ("content".into(), json!(message_body::preview(&text))),
+            ("status".into(), json!("sent")),
+            ("attachments".into(), json!([{
+                "sha256": hash, "media_type": "text/plain",
+                "size": text.len(), "origin": "host/alder"
+            }])),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: Some("separate-store-body".into()),
+    }).unwrap();
+    message_body::bodies(&source_state).put("person/alex", subject, text.as_bytes()).unwrap();
+    let message = source.message(subject).unwrap().unwrap();
+    assert_eq!(message.body_bytes, Some(text.len() as u64));
+    assert_eq!(message.body_origin.as_deref(), Some("host/alder"));
+    drop(source);
+    let archive = root.path().join("separate-store.jsonl");
+    let socket = root.path().join("unused.sock");
+    let source_database_argument = if database_alias {
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("source-database-alias");
+            std::os::unix::fs::symlink(&source_database_dir, &alias).unwrap();
+            alias.join("claims.sqlite3")
+        }
+        #[cfg(not(unix))]
+        {
+            unreachable!("database alias coverage requires Unix symlinks")
+        }
+    } else {
+        source_database.clone()
+    };
+    let output = backup_cli(&source_root, &socket)
+        .args(["backup", "create"]).arg(&archive)
+        .arg("--database").arg(&source_database_argument)
+        .output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!source_database_dir.join("message-bodies").exists());
+    assert_eq!(message_body::bodies(&source_state).read("person/alex", subject).unwrap().unwrap(), text.as_bytes());
+
+    let restored_root = root.path().join("restored");
+    let restored_state = restored_root.join("state/st3");
+    let restored_database_dir = root.path().join("restored-database");
+    std::fs::create_dir_all(restored_root.join("config/st3")).unwrap();
+    std::fs::write(
+        restored_root.join("config/st3/config.toml"),
+        format!("node = \"unused\"\nstore_dir = {:?}\n", restored_database_dir),
+    ).unwrap();
+    let output = backup_cli(&restored_root, &socket)
+        .args(["backup", "restore"]).arg(&archive)
+        .output().await.unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report: backup::RestoreReport = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report.projections_match);
+    assert_eq!(report.message_bodies_restored, 1);
+    assert_eq!(report.message_bodies_referenced, 1);
+    assert_eq!(report.message_bodies_unmatched, 0);
+    assert_eq!(message_body::bodies(&restored_state).read("person/alex", subject).unwrap().unwrap(), text.as_bytes());
+    assert!(!restored_database_dir.join("message-bodies").exists());
+    assert!(!restored_state.join("claims.sqlite3").exists());
+    let restored = Store::open(&restored_database_dir.join("claims.sqlite3"), &report.writer).unwrap();
+    assert_eq!(restored.message(subject).unwrap().unwrap().body_bytes, Some(text.len() as u64));
+}

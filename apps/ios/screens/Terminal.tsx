@@ -7,7 +7,7 @@ import type { TerminalScreen as Screen } from '../../../clients/typescript/fract
 import { Banners } from '../chrome';
 import type { RootScreen } from '../navigation';
 import { errorText, useStore } from '../store';
-import { InputQueue, controlBytes, keyBytes, plainTyping, rawInput, wheelBytes, type TerminalKey } from '../terminalKeys';
+import { InputQueue, controlBytes, fieldTyping, keyBytes, plainTyping, rawInput, wheelBytes, type TerminalKey } from '../terminalKeys';
 import { terminalRunStyle, withCursor } from '../terminalStyle';
 import { fonts, theme } from '../theme';
 import { Note, T } from '../ui';
@@ -42,10 +42,14 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
   const qualityOpen = useRef(0), qualityDirect = useRef(false);
   const qualityRoute = useRef(carrierInfo); qualityRoute.current = carrierInfo;
   const incarnation = useRef(''), keyboard = useRef<TextInput>(null), scroller = useRef<ScrollView>(null);
+  // What the keyboard field holds, all of it already sent.
+  const field = useRef('');
   const live = useRef({ screen, status, ctrl });
   live.current = { screen, status, ctrl };
   const headerHeight = useHeaderHeight();
   const canType = canControlTerminal && status === 'online' && !issue;
+  // The keyboard field is mounted afresh, and empty, whenever terminal control comes back.
+  useEffect(() => { field.current = ''; }, [canControlTerminal]);
 
   // The store's actions change identity on every render; one queue serves the screen's life,
   // so keys stay in order.
@@ -217,8 +221,8 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
       inputAccessoryViewID={BAR}
       onFocus={() => setTyping(true)}
       onBlur={() => setTyping(false)}
-      // The field stays empty: each change is what was just typed.
-      onChangeText={text => { if (text) { type(text); keyboard.current?.clear(); } }}
+      // Only what a change adds is typed: the field keeps its text, since clearing it is unreliable on iOS.
+      onChangeText={text => { const typed = fieldTyping(field.current, text); field.current = text; if (typed) type(typed); }}
       onKeyPress={event => { quality.key(); if (event.nativeEvent.key === 'Backspace') press({ label: '⌫', key: 'backspace' }); }}
       onSubmitEditing={() => press({ label: '⏎', key: 'enter' })}
     /> : null}

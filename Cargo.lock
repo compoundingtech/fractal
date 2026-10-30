@@ -2438,6 +2438,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
+ "smallclaims",
  "tempfile",
  "tokio",
  "uuid",
@@ -2641,6 +2642,7 @@ name = "fractal-ui-model"
 version = "0.1.0"
 dependencies = [
  "fractal-client",
+ "fractal-schema",
  "serde",
  "serde_json",
 ]
