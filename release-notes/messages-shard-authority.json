@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "none",
-    "detail": "The default store signs, verifies and admits envelopes exactly as before. A named shard, which no daemon opens yet, signs st3-shard-envelope-v1 over its shard ID and admits a peer's envelope only with a signature by a key of that writer's non-removed incarnations in the default store's membership."
+    "detail": "The default store signs, verifies and admits envelopes exactly as before. A named shard, which no daemon opens yet, signs st3-shard-envelope-v1 over its shard ID. It admits a keyed member's envelope only with a signature in that domain by a key of one of the writer's non-removed incarnations in the default store's membership, and judges a writer without membership as the default store does."
   },
   "compatibility": {
     "status": "none",

@@ -428,14 +428,13 @@ mod tests {
     }
 
     /// A shard holds no fleet claims. It signs its envelopes for its authority's fleet in a
-    /// domain that names the shard, and admits a peer's envelopes only when the authority knows
-    /// that peer's key: a signature made in the default store's domain does not count.
+    /// domain that names the shard, and admits a keyed member's envelopes only with a signature
+    /// in that domain by a key the authority knows: one made for the default store does not count.
     #[test]
     fn a_shard_takes_its_fleet_from_the_default_store_and_signs_in_its_own_domain() {
         const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
         let a_root = tempfile::tempdir().unwrap();
         let b_root = tempfile::tempdir().unwrap();
-        let c_root = tempfile::tempdir().unwrap();
         let a_key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
         let a_graph = founded_graph(&a_root.path().join("claims.sqlite3"), "a", &a_key);
         a_graph.set_member_key(Some(a_key.clone())).unwrap();
@@ -529,15 +528,34 @@ mod tests {
         assert_eq!(b_shard.claims_for("note/one", None).unwrap().len(), 1);
         assert!(b_shard.fleet_membership().unwrap().state("a") == b_graph.fleet_membership().unwrap().state("a"));
 
-        // A member whose default store has not admitted a holds a's shard envelopes.
-        let c_graph = founded_graph(&c_root.path().join("claims.sqlite3"), "c", &a_key);
-        let c_shard = messages_shard(c_root.path(), "c", &c_graph);
-        c_shard
-            .receive_replication_exchange("a", FLEET, &exchange)
+    }
+
+    /// A fleet of configured peers has no membership. Its shards admit each other's envelopes
+    /// as its default stores do, or the shard would never replicate there.
+    #[test]
+    fn shards_of_a_fleet_without_membership_admit_their_peers() {
+        const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        let graph = |root: &Path, origin: &str| {
+            let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), origin, Arc::new(Plain)).unwrap());
+            graph.bind_fleet(FLEET).unwrap();
+            graph
+        };
+        let a_graph = graph(a_root.path(), "a");
+        let b_graph = graph(b_root.path(), "b");
+        let a_shard = messages_shard(a_root.path(), "a", &a_graph);
+        let b_shard = messages_shard(b_root.path(), "b", &b_graph);
+        a_shard.append_claim(&note("note/legacy")).unwrap();
+        let exchange = a_shard
+            .export_replication_exchange(FLEET, &b_shard.replication_inventory().unwrap())
             .unwrap();
-        c_shard.validate_replication_backlog().unwrap();
-        c_shard.project_replication_backlog().unwrap();
-        assert!(c_shard.claims_for("note/one", None).unwrap().is_empty());
+        b_shard.receive_replication_exchange("a", FLEET, &exchange).unwrap();
+        b_shard.validate_replication_backlog().unwrap();
+        b_shard.apply_replication_repairs().unwrap();
+        b_shard.project_replication_backlog().unwrap();
+        assert_eq!(b_shard.claims_for("note/legacy", None).unwrap().len(), 1);
+        assert!(b_graph.claims_for("note/legacy", None).unwrap().is_empty());
     }
 
     #[test]
