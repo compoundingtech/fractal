@@ -566,8 +566,10 @@ fn write_item(connection: &Connection, repository: &str, number: u64, item: &Mir
     Ok(())
 }
 
+/// Drop a repository's mirror. Its handed-out event keys stay, so polling it again never reuses
+/// one: from step 3b each is a graph subject written once.
 fn forget_repository(connection: &Connection, repository: &str) -> Result<()> {
-    for table in ["mirror_items", "mirror_heads", "mirror_events", "mirror_event_keys", "mirror_repositories"] {
+    for table in ["mirror_items", "mirror_heads", "mirror_events", "mirror_repositories"] {
         connection.execute(
             &format!(/* sqlite-large-value: allow-for-now lv-h02b64a65ba01 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE repository=?1"),
             [repository],
@@ -673,6 +675,11 @@ mod tests {
         assert_eq!(look("open", "c3")[0]["key"], "reopened");
         assert!(store.events(REPOSITORY, Some(7), 10).unwrap().iter().all(|event| event["key"] != "closed"), "aged out");
         assert_eq!(look("closed", "c4")[0]["subject"], "github-event/github/acme/garden/pull-request/7/closed/2");
+        // Forgotten and polled again, the repository starts over from a baseline, and a repeat
+        // still takes a new key.
+        store.forget(OBSERVER).unwrap();
+        look("open", "c5");
+        assert_eq!(look("closed", "c6")[0]["key"], "closed/3");
     }
 
     #[test]
