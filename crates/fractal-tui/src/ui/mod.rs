@@ -47,6 +47,7 @@ pub mod pane;
 pub mod playback;
 mod drafts_store;
 mod prefs;
+mod recent;
 mod resource_sidebar;
 mod arrangement_keys;
 mod observed_resources;
@@ -393,6 +394,7 @@ pub struct Ui {
     /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
     pub(super) keyboard_enhanced: bool,
     triage: triage::Cursor,
+    recent: recent::RecentState,
     /// Each list's selection, by the section it lists (Now, Agents, Missions, Fleet, Usage,
     /// Worktrees). Which list has the keys is never stored: `tab()` reads it off the screen.
     selected: [usize; 6],
@@ -778,6 +780,7 @@ impl Ui {
             selected: [0; 6],
             keyboard_enhanced: false,
             triage: triage::Cursor::default(),
+            recent: recent::RecentState::default(),
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
             conversation_state: fractal_conversation_ui::State::default(),
@@ -1857,6 +1860,7 @@ impl Ui {
         if self.help {
             self.draw_help(buf, area);
         }
+        self.draw_recent(buf, area);
         if self.leader {
             self.draw_leader(buf, area);
         }
@@ -3777,6 +3781,14 @@ impl Ui {
                 ),
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
+                (
+                    "ctrl+^",
+                    "recent places when detached; Enter opens, typing filters",
+                ),
+                (
+                    "ctrl+\\ r",
+                    "recent places, including over an attached program",
+                ),
                 ("q", "quit"),
             ],
         );
@@ -4249,6 +4261,13 @@ impl Ui {
                 }
             }
         }
+        if !self.leader
+            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+            && (self.recent_open() || !self.terminal_focused())
+            && self.recent_key(key)
+        {
+            return;
+        }
         if self.leader {
             if key.kind == KeyEventKind::Press {
                 self.leader_key(key);
@@ -4286,6 +4305,9 @@ impl Ui {
             && matches!(key.code, KeyCode::Char('\\' | '4'))
         {
             self.terminal_hold = None;
+            if self.recent_open() {
+                self.recent_key(KeyCode::Esc.into());
+            }
             self.leader = true;
             return;
         }
