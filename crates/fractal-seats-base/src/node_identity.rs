@@ -241,13 +241,13 @@ fn validate_store_location(config: &Config) -> Result<bool> {
     let directory = store_dir(config);
     let metadata = fs::metadata(&directory).with_context(|| {
         format!(
-            "configured store directory {} must already exist and be a directory",
+            "configured store directory (store_dir) {} must already exist and be a directory",
             directory.display()
         )
     })?;
     anyhow::ensure!(
         metadata.is_dir(),
-        "configured store directory {} is not a directory",
+        "configured store directory (store_dir) {} is not a directory",
         directory.display()
     );
     let configured = fs::canonicalize(&directory)?;
@@ -354,7 +354,7 @@ fn configured_writer_from(connection: &Connection, requested: &str) -> Result<Op
     if let Some(writer) = restored.as_deref() {
         anyhow::ensure!(
             requested == writer,
-            "restored database requires fresh writer `{writer}`; configure node to that identity before starting"
+            "restored database requires fresh writer `{writer}`, but the configured store expects local writer `{requested}`; restore the matching database and node-identity.json before starting"
         );
     }
     let receipt = previous_local_receipts(connection)?;
