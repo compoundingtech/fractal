@@ -370,7 +370,6 @@ mod tests {
     use crate::github_watch::ThreadRef;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
-    use tower::ServiceExt as _;
 
     async fn get(state: &AppState, path: &str) -> (StatusCode, Value) {
         let response = super::super::router(state.clone())

@@ -304,11 +304,11 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     preparation::flush(transaction)
 }
 
-/// The newest `vcs.item.state` of `subject`: its claim, compact fields and accepted time.
-pub fn newest_item_state(
-    connection: &Connection,
-    subject: &str,
-) -> Result<Option<(String, serde_json::Map<String, Value>, String)>> {
+/// A `vcs.item.state` claim: its ID, compact fields and accepted time.
+pub type ItemState = (String, serde_json::Map<String, Value>, String);
+
+/// The newest `vcs.item.state` of `subject`.
+pub fn newest_item_state(connection: &Connection, subject: &str) -> Result<Option<ItemState>> {
     let row = connection.query_row(/* sqlite-large-value: allow-for-now lv-h618ad247dea0 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
          WHERE subject=?1 AND kind='vcs.item.state'
@@ -428,7 +428,7 @@ impl Store {
                 })))
             })
             .collect::<Vec<_>>();
-        events.sort_by(|left, right| right.0.cmp(&left.0));
+        events.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
         events.truncate(limit);
         Ok(events.into_iter().map(|(_, event)| event).collect())
     }
