@@ -267,3 +267,56 @@ impl Manager for Native {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn linux_plan(installed: &[&str], running: &[&str]) -> Result<Services> {
+        linux_services(|name| Ok(Unit {
+            name: name.into(),
+            file: Path::new("/home/example/.config/systemd/user").join(name),
+            installed: installed.contains(&name),
+            running: running.contains(&name),
+            enabled: installed.contains(&name) && !name.starts_with("fractal"),
+        }))
+    }
+
+    #[test]
+    fn discovers_smalltalk_replication_through_native_linux_plan() -> Result<()> {
+        let services = linux_plan(
+            &["smalltalk.service", "smalltalk-replication.service", "fractal.service", "fractal-replication.service"],
+            &["smalltalk.service", "smalltalk-replication.service"],
+        )?;
+        assert_eq!(services.legacy.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>(),
+            ["smalltalk.service", "smalltalk-replication.service"]);
+        assert_eq!(services.target.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>(),
+            ["fractal.service", "fractal-replication.service"]);
+        Ok(())
+    }
+
+    #[test]
+    fn installed_legacy_replication_aliases_are_ambiguous_even_when_stopped() {
+        let error = linux_plan(
+            &["smalltalk.service", "st3-replication.service", "smalltalk-replication.service", "fractal.service"],
+            &[],
+        ).unwrap_err();
+        assert_eq!(error.to_string(),
+            "multiple legacy definitions exist for fractal-replication.service; resolve which owns the worker before host cutover");
+    }
+
+    #[test]
+    fn running_target_replication_is_retained_once_without_legacy_worker() -> Result<()> {
+        let services = linux_plan(&["smalltalk.service", "fractal-replication.service"], &["fractal-replication.service"])?;
+        assert_eq!(services.target.iter().filter(|unit| unit.name == "fractal-replication.service").count(), 1);
+        assert!(services.target.iter().find(|unit| unit.name == "fractal-replication.service").unwrap().running);
+        Ok(())
+    }
+
+    #[test]
+    fn both_legacy_daemon_aliases_remain_a_hard_error() {
+        let error = linux_plan(&["st3.service", "smalltalk.service"], &[]).unwrap_err();
+        assert_eq!(error.to_string(),
+            "multiple legacy daemon definitions exist; resolve which owns the default state before host cutover");
+    }
+}

@@ -954,3 +954,5 @@ fn retained_generation_array_mutations_refuse_with_generation_number() -> Result
     }
     Ok(())
 }
+
+mod worker_control;
