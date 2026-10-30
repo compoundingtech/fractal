@@ -49,6 +49,74 @@ class SelectionTest(unittest.TestCase):
     def cache_entries(self):
         return list((self.module.L / 'metadata-cache' / 'pr-files').glob('*.json'))
 
+    def activation_builds(self):
+        for sha in ('a' * 40, 'b' * 40):
+            build = self.module.P / 'builds' / sha
+            build.mkdir(parents=True)
+            (build / 'build-receipt.json').write_text(json.dumps({'buildIdentity': {'rev': sha}}))
+        self.module.recovery_select_build('b' * 40)
+        return str(self.module.P / 'builds' / ('a' * 40))
+
+    def test_activation_replaces_serving_generation_without_down(self):
+        previous = self.activation_builds()
+        for rollback, observations in (
+                (previous, [None, 'https://old.invalid', 'https://new.invalid']),
+                (None, [None, 'https://new.invalid'])):
+            with self.subTest(previous=rollback), \
+                    patch.object(self.module, 'current_server_url', side_effect=observations), \
+                    patch.object(self.module.subprocess, 'run') as run, \
+                    patch.object(self.module, 'recovery_retain_builds') as retain:
+                self.assertEqual(self.module.activate(rollback), 'https://new.invalid')
+                commands = [call.args[0] for call in run.call_args_list]
+                self.assertEqual(commands, [
+                    ['devnet', 'up', '--replace', 'test', '--ready-path', '/', '--',
+                     str(self.module.P / 'current/launch.sh'), 'test', str(self.module.P / 'current')],
+                    ['devnet', 'url', 'test', '--remote', '--wait']])
+                retain.assert_called_once_with(rollback)
+
+    def test_activation_clears_nonserving_registration_before_replace(self):
+        previous = self.activation_builds()
+        with patch.object(self.module, 'current_server_url',
+                          side_effect=[None, None, 'https://new.invalid']), \
+                patch.object(self.module.subprocess, 'run') as run, \
+                patch.object(self.module, 'recovery_retain_builds'):
+            self.module.activate(previous)
+        self.assertEqual([call.args[0][:3] for call in run.call_args_list],
+                         [['devnet', 'down', 'test'], ['devnet', 'up', '--replace'],
+                          ['devnet', 'url', 'test']])
+
+    def test_failed_replace_preserves_devnet_recovery_and_restores_build_pointer(self):
+        previous = self.activation_builds()
+        for message in ('candidate readiness failed', 'ReplacementRecoveryRequired'):
+            self.module.recovery_select_build('b' * 40)
+            error = subprocess.CalledProcessError(1, ['devnet', 'up', '--replace'], stderr=message)
+            with self.subTest(error=message), \
+                    patch.object(self.module, 'current_server_url',
+                                 side_effect=[None, 'https://old.invalid']), \
+                    patch.object(self.module.subprocess, 'run', side_effect=error) as run, \
+                    patch.object(self.module, 'recovery_retain_builds') as retain:
+                with self.assertRaises(subprocess.CalledProcessError) as raised:
+                    self.module.activate(previous)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0][:3], ['devnet', 'up', '--replace'])
+                self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
+                retain.assert_not_called()
+
+    def test_publication_failure_after_replace_still_relaunches_previous_build(self):
+        previous = self.activation_builds()
+        with patch.object(self.module, 'current_server_url',
+                          side_effect=[None, 'https://old.invalid', None]), \
+                patch.object(self.module.subprocess, 'run') as run, \
+                patch.object(self.module, 'recovery_retain_builds') as retain:
+            with self.assertRaisesRegex(RuntimeError, 'previous build rolled back'):
+                self.module.activate(previous)
+        self.assertEqual([call.args[0][:3] for call in run.call_args_list],
+                         [['devnet', 'up', '--replace'], ['devnet', 'url', 'test'],
+                          ['devnet', 'down', 'test'], ['devnet', 'up', 'test']])
+        self.assertEqual((self.module.P / 'current').resolve(), Path(previous))
+        retain.assert_not_called()
+
     def test_miss_fetches_complete_paths_then_hit_does_not_call_api(self):
         with patch.object(self.module, 'run', side_effect=self.responses()) as run:
             self.module.load_pr_files(self.pr)
