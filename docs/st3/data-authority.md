@@ -57,7 +57,13 @@ may drop the claims each newer one replaced. `harness.observed` replicates when 
 than `observed_at_ms` changes. `harness.usage` replicates the first reading of each incarnation and
 semantics, a compaction or model change, a reading at least five minutes after the last replicated
 one while the harness works, and any reading while it does not. The newest pending reading
-replicates when the harness stops working. Response rollups are the exception: below.
+replicates when the harness stops working. Response rollups are an exception, below. Context
+occupancy that says how full the window is (a percent, or used and window tokens) is the other:
+it replicates its first reading, a reading at least 5 points of the window from the replicated
+one, a compaction or model change, and the last reading when the seat ends or its step completes,
+fails or is released; a reading after the seat ended replicates at once. The readings
+between stay pending in the host's local log, and the host's agent cards fold them, so its own
+cards stay exact; other members' cards stay within 5 points.
 
 A node can also send every local observation to an OpenTelemetry collector. The exporter is off
 unless the config names a collector:
