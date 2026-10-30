@@ -35,7 +35,7 @@ const schedule = {
     work: { mission, revision, workspace: '.' },
 };
 
-test('PR A daily review uses object references and matches the canonical KDL fixture exactly', () => {
+test('the st validate daily review uses object references and matches the canonical KDL fixture exactly', () => {
     const expected = fs.readFileSync(path.join(__dirname, 'fixtures/daily-review.kdl'), 'utf8');
     assert.equal(encodeKdl({ agents: [editor, writer], missions: [mission], schedules: [schedule] }), expected);
 });
