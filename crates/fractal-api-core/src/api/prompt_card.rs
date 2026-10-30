@@ -231,8 +231,10 @@ impl RemoteConversation {
         }
     }
 
-    fn key(&self) -> (String, String) {
-        (self.host.clone(), self.session_id.clone())
+    /// A follower reads as the person it was made for: when the seat's person changes, a new
+    /// follower reads as the new one, and the old one, read by no card, is stopped.
+    fn key(&self) -> RemoteKey {
+        (self.host.clone(), self.session_id.clone(), self.person.clone())
     }
 }
 
@@ -317,10 +319,10 @@ pub struct PromptWatch {
     /// The transcripts followed, and those the refresh in progress read.
     followed: HashSet<PathBuf>,
     read: HashSet<PathBuf>,
-    /// The conversations other members keep that are followed, by host and session, and those
-    /// the refresh in progress read.
-    remote: std::collections::HashMap<(String, String), RemoteFollower>,
-    remote_read: HashSet<(String, String)>,
+    /// The conversations other members keep that are followed, by host, session and the person
+    /// read as, and those the refresh in progress read.
+    remote: std::collections::HashMap<RemoteKey, RemoteFollower>,
+    remote_read: HashSet<RemoteKey>,
     /// How many times the watcher was made again after a delivery failure.
     rebuilds: usize,
 }
@@ -339,6 +341,9 @@ struct Delivery {
 
 /// The calls a follower read last from a conversation another member keeps, or why it could not.
 type RemoteRead = Result<Vec<Value>, String>;
+
+/// A followed conversation another member keeps: its host, session and the person read as.
+type RemoteKey = (String, String, String);
 
 /// A task following a conversation another member keeps, and the calls it read last or why it
 /// could not.
@@ -559,6 +564,53 @@ impl PromptWatch {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A follower reads as the person it was made for. When the seat's person changes, the card
+    /// reads from a new follower as the new person, with nothing the old one read, and the old
+    /// one stops once no card reads it.
+    #[tokio::test]
+    async fn a_remote_follower_reads_as_the_seats_person_now() {
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        std::fs::write(&secret, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&secret, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+            node: "prompt-gateway".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            // Nothing listens: every read fails.
+            peers: vec![crate::config::PeerConfig { name: "prompt-host".into(), url: "http://127.0.0.1:9".into() }],
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let conversation = |person: &str| RemoteConversation {
+            relay: relay.clone(),
+            host: "host/prompt-host".into(),
+            session_id: "session-prompt".into(),
+            person: person.into(),
+        };
+        let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        let first = loop {
+            watch.begin();
+            let read = watch.follow_remote(&conversation("person/first")).unwrap_err();
+            watch.finish();
+            if !read.contains("still reading") {
+                break read;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the first follower never read");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert!(first.contains("on host/prompt-host"), "{first}");
+
+        watch.begin();
+        let read = watch.follow_remote(&conversation("person/second")).unwrap_err();
+        watch.finish();
+        assert!(read.contains("still reading"), "{read}");
+        let persons = watch.remote.keys().map(|(_, _, person)| person.as_str()).collect::<Vec<_>>();
+        assert_eq!(persons, ["person/second"]);
+    }
 
     fn row(answers: Value, call: Value) -> Value {
         json!({"action_parameters": {"prompt.respond": {"answers": answers, "call_id": call}}})
