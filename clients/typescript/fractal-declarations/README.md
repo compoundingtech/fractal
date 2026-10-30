@@ -50,8 +50,8 @@ const kdl = encodeKdl({ agents: [editor, writer], missions: [review], schedules:
 
 ## Contract
 
-- IDs are bare declaration IDs, such as `docs/editor` and `docs/daily-review`.
-- Agent references accept an `Agent` object or a qualified string such as `agent/docs/editor`. Schedule work accepts a `Mission` object or its **bare** ID string, plus a separate explicit revision. Object references encode their ID; they do not implicitly emit the referenced declaration or compute revisions.
+- IDs are bare declaration IDs, such as `docs/editor` and `docs/daily-review`. An `AgentId` must contain `.` or `/`, such as `remote.editor` or `docs/editor`: the parser preserves exactly those identities. Simple agent IDs such as `editor` are host-folded by the parser and are deliberately unsupported, because this SDK does not know or guess the default host.
+- Agent references accept an `Agent` object or a qualified string such as `agent/docs/editor` or `agent/remote.editor`; the same ID rule applies to declarations, `under`, mission `reportTo` and step `assignedTo`. The encoder throws an `Error` before returning KDL if an untyped caller supplies a host-folded agent ID/reference. Schedule work accepts a `Mission` object or its **bare** ID string, plus a separate explicit revision. Mission IDs are never host-folded, so simple mission IDs remain supported. Object references encode their ID; they do not implicitly emit the referenced declaration or compute revisions.
 - Launch is exactly one of `command: string` or a nonempty readonly `argv` tuple. Use `as const` to preserve tuple inference.
 - Mission states are `draft`, `ready` and `retired`; completion is `all-steps-exhausted`. Schedule catch-up is a discriminated union: `all` requires `maxCatchUp`, while `latest` and `skip` forbid it. The bound must be a positive u32, as checked by daemon validation.
 - Mission goals are readonly tuples of 1–3 strings; step goals are readonly tuples of 0–3 strings. A mission's step list has no parser-imposed minimum or maximum, so an empty step list is supported.

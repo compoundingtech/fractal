@@ -2,10 +2,12 @@
 
 export type Launch = { readonly command: string; readonly argv?: never } | { readonly argv: readonly [string, ...string[]]; readonly command?: never }
 
-export type AgentReference = Agent | `agent/${string}`
+export type AgentId = `${string}.${string}` | `${string}/${string}`
+
+export type AgentReference = Agent | `agent/${AgentId}`
 
 export interface Agent {
-  readonly id: string
+  readonly id: AgentId
   readonly workspace: string
   readonly launch: Launch
   readonly under?: Under
@@ -72,14 +74,27 @@ const quote = (value: string): string => `"${value.replace(
   },
 )}"`
 
-const agentSubject = (agent: AgentReference): string =>
-  typeof agent === 'string' ? agent : `agent/${agent.id}`
+// The parser folds simple IDs through the ambient default host. This SDK never guesses it.
+const canonicalAgentId = (id: string): string => {
+  if (!id.includes('.') && !id.includes('/')) {
+    throw new Error(`Agent ID ${JSON.stringify(id)} would be host-folded; use an ID containing "." or "/"`)
+  }
+  return id
+}
+
+const agentSubject = (agent: AgentReference): string => {
+  if (typeof agent === 'string') {
+    if (!agent.startsWith('agent/')) throw new Error('Agent references must start with "agent/"')
+    return `agent/${canonicalAgentId(agent.slice('agent/'.length))}`
+  }
+  return `agent/${canonicalAgentId(agent.id)}`
+}
 
 /** Encode authoring data. Mission revisions must come from `st validate`. */
 export const encodeKdl = (declarations: Declarations): string => {
   const lines: string[] = ['version 2']
   for (const agent of declarations.agents ?? []) {
-    lines.push('', `agent ${quote(agent.id)} {`, `  workspace ${quote(agent.workspace)}`)
+    lines.push('', `agent ${quote(canonicalAgentId(agent.id))} {`, `  workspace ${quote(agent.workspace)}`)
     if (agent.under !== undefined) {
       lines.push(`  under ${quote(agentSubject(agent.under.agent))} reason=${quote(agent.under.reason)}`)
     }

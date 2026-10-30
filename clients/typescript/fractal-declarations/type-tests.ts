@@ -32,6 +32,8 @@ export const catchUpAll = {
 
 export const maxGoalsMission = { ...mission, goals: ['one', 'two', 'three'], steps: [] } as const satisfies Mission
 export const maxGoalsStep = { ...externalStep, goals: ['one', 'two', 'three'] } as const satisfies Step
+export const dottedAgent = { ...editor, id: 'remote.editor' } as const satisfies Agent
+export const dottedReference = 'agent/remote.editor' satisfies AgentReference
 
 // Negative contracts fail compilation if an unsupported form becomes assignable.
 // Type-level assertions avoid suppressing diagnostics on invalid runtime examples.
@@ -53,6 +55,9 @@ export type NoUndefinedArgv = Assert<Rejects<{ command: string; argv: undefined 
 export type NoUndefinedCommand = Assert<Rejects<{ argv: readonly ['tool']; command: undefined }, Agent['launch']>>
 export type NoBareAgentReference = Assert<Rejects<'docs/editor', AgentReference>>
 export type NoMissionAgentReference = Assert<Rejects<'mission/docs/editor', AgentReference>>
+export type NoHostFoldedAgentId = Assert<Rejects<'editor', Agent['id']>>
+export type NoHostFoldedStringReference = Assert<Rejects<'agent/editor', AgentReference>>
+export type NoHostFoldedObjectReference = Assert<Rejects<Omit<Agent, 'id'> & { id: 'editor' }, AgentReference>>
 export type NoDynamicLaunch = Assert<Rejects<{ argv: readonly string[] }, Agent['launch']>>
 export type NoActiveState = Assert<Rejects<'active', Mission['state']>>
 export type NoPausedState = Assert<Rejects<'paused', Mission['state']>>

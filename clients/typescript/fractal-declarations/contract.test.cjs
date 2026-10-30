@@ -40,21 +40,49 @@ test('the st validate daily review uses object references and matches the canoni
     assert.equal(encodeKdl({ agents: [editor, writer], missions: [mission], schedules: [schedule] }), expected);
 });
 
+test('dotted and slash-qualified agent identities match the canonical golden without a host guess', () => {
+    const dotted = { ...editor, id: 'remote.editor' };
+    const expected = fs.readFileSync(path.join(__dirname, 'fixtures/daily-review.kdl'), 'utf8')
+        .replaceAll('docs/editor', 'remote.editor');
+    const declarations = {
+        agents: [dotted, { ...writer, under: { ...writer.under, agent: dotted } }],
+        missions: [{ ...mission, reportTo: dotted }],
+        schedules: [schedule],
+    };
+    assert.equal(encodeKdl(declarations), expected);
+});
+
+test('host-folded declarations and object/string references throw instead of guessing a host', () => {
+    const simple = { ...editor, id: 'editor' };
+    assert.throws(() => encodeKdl({ agents: [simple] }), /would be host-folded/);
+    for (const reference of [simple, 'agent/editor']) {
+        const declarations = [
+            { agents: [{ ...writer, under: { agent: reference, reason: 'Review' } }] },
+            { missions: [{ ...mission, reportTo: reference }] },
+            { missions: [{ ...mission, steps: [{ ...mission.steps[0], assignedTo: reference }] }] },
+        ];
+        for (const document of declarations) {
+            assert.throws(() => encodeKdl(document), /would be host-folded/);
+        }
+    }
+});
+
 test('empty and omitted optional collections add no declarations beside a nonempty collection', () => {
     assert.equal(encodeKdl({ agents: [editor], missions: [], schedules: [] }), encodeKdl({ agents: [editor] }));
 });
 
 test('argv preserves argument boundaries, order and empty arguments', () => {
     assert.equal(encodeKdl({ agents: [{
-        id: 'argv', workspace: '/work tree', launch: { argv: ['tool', '', 'two words', '--flag=✓'] },
-    }] }), 'version 2\n\nagent "argv" {\n  workspace "/work tree"\n  argv "tool" "" "two words" "--flag=✓"\n}\n');
+        id: 'tools/argv', workspace: '/work tree', launch: { argv: ['tool', '', 'two words', '--flag=✓'] },
+    }] }), 'version 2\n\nagent "tools/argv" {\n  workspace "/work tree"\n  argv "tool" "" "two words" "--flag=✓"\n}\n');
 });
 
 test('strings escape quotes, backslashes and controls using KDL-compatible quoting', () => {
     const value = 'quote" slash\\ literal\\b\\f newline\n return\r tab\t backspace\b formfeed\f nul\u0000 unicode ✓';
     const quoted = '"quote\\" slash\\\\ literal\\\\b\\\\f newline\\n return\\r tab\\t backspace\\u{8} formfeed\\u{c} nul\\u{0} unicode ✓"';
-    assert.equal(encodeKdl({ agents: [{ id: value, workspace: value, launch: { command: value } }] }),
-        `version 2\n\nagent ${quoted} {\n  workspace ${quoted}\n  command ${quoted}\n}\n`);
+    const quotedId = `"tests/${quoted.slice(1)}`;
+    assert.equal(encodeKdl({ agents: [{ id: `tests/${value}`, workspace: value, launch: { command: value } }] }),
+        `version 2\n\nagent ${quotedId} {\n  workspace ${quoted}\n  command ${quoted}\n}\n`);
 });
 
 test('qualified string references match object references without adding declarations', () => {
@@ -90,9 +118,9 @@ test('all catch-up policies serialize a bare mission ID with its explicit revisi
 });
 
 test('encoding neither mutates nor requires mutable declaration objects', () => {
-    const agent = Object.freeze({ id: 'frozen', workspace: '.', launch: Object.freeze({ argv: Object.freeze(['true']) }) });
+    const agent = Object.freeze({ id: 'tools/frozen', workspace: '.', launch: Object.freeze({ argv: Object.freeze(['true']) }) });
     const declarations = Object.freeze({ agents: Object.freeze([agent]) });
-    const expected = 'version 2\n\nagent "frozen" {\n  workspace "."\n  argv "true"\n}\n';
+    const expected = 'version 2\n\nagent "tools/frozen" {\n  workspace "."\n  argv "true"\n}\n';
     assert.equal(encodeKdl(declarations), expected);
     assert.equal(encodeKdl(declarations), expected);
 });
