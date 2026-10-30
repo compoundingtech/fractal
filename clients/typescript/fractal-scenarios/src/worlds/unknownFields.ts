@@ -58,6 +58,7 @@ export const unknownFields: WorldDefinition = {
         { pointer: '/timeline/0/upserts/0', known_value: built.agent },
       ],
       state: {
+        sessions: [], devices: [],
         agents: [futureAgent], runtimes: built.runtime === null ? [] : [built.runtime],
         machines: [resources.machine(ctx, member.host, [member.runtime], [mission.steps[0]!.work])],
         resources: [probe], order: [member.id],
@@ -108,6 +109,7 @@ export const unknownFields: WorldDefinition = {
       details: {
         ...common, kind: 'details', decode: 'strict',
         state: {
+          launches: [], launch_variants: [],
           missions: [resources.mission(ctx, mission, 'running', -120_000)],
           work: [resources.work(ctx, { mission, step: 0, state: 'claimed', updatedMs: -120_000, claimant: member, goals: ['Unknown values survive HTTP and socket replay', 'Only declared contaminants fail strict decoding'] })],
         },

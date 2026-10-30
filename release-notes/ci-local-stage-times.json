@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local prints the setup and each stage's start, end and seconds, and the time each stage waited in the build admission queue, in a table at the end, and keeps each stage's output under ~/.cache/ci-local-logs/run-TIME-PID/ (latest 10 runs); the stage output is now one merged stream passed through unchanged apart from stamped queue lines.",
+  "replay": {
+    "status": "none",
+    "detail": "scripts/ci-local (a local pre-sign script) output and kept logs only; no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "scripts/ci-local (a local pre-sign script) output and kept logs only; no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "scripts/ci-local (a local pre-sign script) output and kept logs only; no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "scripts/ci-local (a local pre-sign script) output and kept logs only; no protocol, schema, policy, workflow or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "scripts/ci-local (a local pre-sign script) output and kept logs only; no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit; the logs are plain files and can be deleted."
+  }
+}

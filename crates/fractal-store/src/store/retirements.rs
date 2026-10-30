@@ -171,6 +171,44 @@ pub fn admit_recipient(
     Ok(())
 }
 
+/// A read or close is admitted against the recipient's terminal claim in the same writer
+/// transaction that stores the signed lifecycle claim. A stale OLD process cannot race retire.
+pub fn admit_mail_claim(connection: &Connection, input: &ClaimInput) -> Result<(), St3Error> {
+    if !matches!(input.kind.as_str(), "message.staged" | "message.delivered" | "message.read" | "message.closed") {
+        return Ok(());
+    }
+    let created: Option<u64> = connection.query_row(
+        "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND kind='message.sent'",
+        [&input.subject], |row| row.get(0),
+    ).map_err(internal)?;
+    let Some(created) = created else { return Ok(()); };
+    let message = message_view_tx(connection, &input.subject, created).map_err(internal)?;
+    let actor = input.actor.as_deref().unwrap_or("");
+    let Some(retirement) = record(connection, &message.to, None)? else {
+        if input.fields.contains_key("acting_for") {
+            return Err(St3Error::new("wrong-message-recipient", "mail has no custody grant"));
+        }
+        return Ok(());
+    };
+    if !matches!(input.kind.as_str(), "message.read" | "message.closed") {
+        return Err(St3Error::new("wrong-message-recipient", format!(
+            "retired `{}` cannot acknowledge mail", message.to,
+        )));
+    }
+    let successor = retirement.body["fields"]["successor"].as_str();
+    if successor != Some(actor)
+        || input.fields.get("acting_for").and_then(Value::as_str) != Some(message.to.as_str())
+        || !input.evidence.iter().any(|id| id == &retirement.id)
+        || record(connection, actor, None)?.is_some()
+    {
+        return Err(St3Error::new("wrong-message-recipient", format!(
+            "message `{}` belongs to retired `{}`; `{actor}` has no current mail custody",
+            input.subject, message.to,
+        )));
+    }
+    Ok(())
+}
+
 /// Runtime selection lowers terminal identity to a stop, retaining the declaration token and
 /// ownership history. The terminal claim remains separate and can never be overwritten by KDL.
 pub fn project_subject(connection: &Connection, subject: &str) -> Result<(), St3Error> {

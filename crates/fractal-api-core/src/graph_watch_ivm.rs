@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn borrowed_st3_store_shares_publisher_and_keeps_post_capture_commit() {
+    async fn borrowed_fractal_store_shares_publisher_and_keeps_post_capture_commit() {
         let fixture = Fixture::new(32);
         let authorized = AtomicUsize::new(0);
         let open = fixture

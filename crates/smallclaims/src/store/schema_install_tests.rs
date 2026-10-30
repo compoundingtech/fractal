@@ -1,4 +1,5 @@
 use super::runtime::Plain;
+use super::contents::{differences, each_in_parallel, scratch_root, stored};
 use super::{FRESH_SCHEMA, SCHEMA, Store};
 use rusqlite::Connection;
 use std::sync::{
@@ -370,4 +371,102 @@ fn fresh_auxiliary_schema_families_share_durable_commits() {
             .unwrap(),
         1
     );
+}
+
+fn writer_synchronous(store: &Store) -> u32 {
+    store
+        .connection
+        .write()
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_fresh_open_with_deferred_durability_stores_what_committing_each_step_stores() {
+    let directory = tempfile::tempdir_in(scratch_root()).unwrap();
+    let deferred = directory.path().join("deferred.sqlite");
+    let each = directory.path().join("each.sqlite");
+    let store = Store::open(&deferred, "node", Arc::new(Plain)).unwrap();
+    assert_eq!(writer_synchronous(&store), 2, "a fresh open leaves the writer at FULL");
+    drop(store);
+    drop(Store::open_for_initialization_test(&each, "node", Arc::new(Plain), false, |_| {}).unwrap());
+    let difference = differences(&stored(&deferred), &stored(&each));
+    assert!(difference.is_empty(), "{difference:#?}");
+    let reopened = Store::open(&deferred, "node", Arc::new(Plain)).unwrap();
+    assert_eq!(writer_synchronous(&reopened), 2, "an existing store opens at FULL");
+}
+
+/// How a fresh open stopped after its first `kept` commits reopens: the store it then holds,
+/// or why it does not open. `defer` picks deferred durability or a commit per step.
+fn cut_and_reopen(directory: &std::path::Path, defer: bool, kept: usize) -> Result<(Vec<String>, Vec<String>), String> {
+    let path = directory.join(format!("cut-{defer}-{kept}.sqlite"));
+    let seen = Arc::new(AtomicUsize::new(0));
+    // Every commit after the first `kept` rolls back, as if the process stopped there.
+    let opened = Store::open_for_initialization_test(&path, "node", Arc::new(Plain), defer, move |connection| {
+        connection.commit_hook(Some(move || seen.fetch_add(1, Ordering::Relaxed) >= kept));
+    });
+    assert!(opened.is_err(), "the open cut after {kept} commits still succeeded");
+    drop(opened);
+    let reopened = Store::open(&path, "node", Arc::new(Plain)).map_err(|error| format!("{error:#}"))?;
+    assert_eq!(writer_synchronous(&reopened), 2);
+    drop(reopened);
+    Ok(stored(&path))
+}
+
+fn fresh_commits(path: &std::path::Path, defer: bool) -> usize {
+    let commits = Arc::new(AtomicUsize::new(0));
+    let counted = commits.clone();
+    drop(
+        Store::open_for_initialization_test(path, "node", Arc::new(Plain), defer, move |connection| {
+            connection.commit_hook(Some(move || {
+                counted.fetch_add(1, Ordering::Relaxed);
+                false
+            }));
+        })
+        .unwrap(),
+    );
+    commits.load(Ordering::Relaxed)
+}
+
+#[test]
+fn a_fresh_open_cut_after_any_commit_reopens_as_committing_each_step_did() {
+    // Deferring durability skips fsyncs, not commits: the same commits happen in the same order,
+    // so any prefix a crash leaves is one the old sequence could leave too, and reopens alike.
+    let directory = tempfile::tempdir_in(scratch_root()).unwrap();
+    let commits = fresh_commits(&directory.path().join("deferred.sqlite"), true);
+    assert_eq!(commits, fresh_commits(&directory.path().join("each.sqlite"), false));
+    assert!(commits > 2, "a fresh open commits more than once: {commits}");
+    each_in_parallel(commits, |kept| {
+        // Each cut's stores go once it is checked, so the scratch holds a few at a time.
+        let cut = tempfile::tempdir_in(directory.path()).unwrap();
+        let deferred = cut_and_reopen(cut.path(), true, kept);
+        let each = cut_and_reopen(cut.path(), false, kept);
+        match (&deferred, &each) {
+            (Ok(deferred), Ok(each)) => {
+                let difference = differences(deferred, each);
+                assert!(difference.is_empty(), "cut after {kept} of {commits}: {difference:#?}");
+            }
+            (Err(deferred), Err(each)) => assert_eq!(deferred, each, "cut after {kept} of {commits}"),
+            _ => panic!("cut after {kept} of {commits}: deferred {:?} but each step {:?}",
+                deferred.as_ref().map(|_| "reopens"), each.as_ref().map(|_| "reopens")),
+        }
+    });
+}
+
+#[test]
+fn a_fresh_open_cut_after_any_commit_reopens_to_the_store_a_whole_open_makes() {
+    // The schema version commits with the first tables, so no cut leaves tables at version 0,
+    // which a reopen refuses as an old store (#3777); the reopen completes the store instead.
+    // The test above shows that committing each step reopens alike.
+    let directory = tempfile::tempdir_in(scratch_root()).unwrap();
+    let whole = directory.path().join("whole.sqlite");
+    let commits = fresh_commits(&whole, true);
+    let expected = stored(&whole);
+    each_in_parallel(commits, |kept| {
+        let cut = tempfile::tempdir_in(directory.path()).unwrap();
+        let reopened = cut_and_reopen(cut.path(), true, kept)
+            .unwrap_or_else(|error| panic!("cut after {kept} of {commits}: {error}"));
+        let difference = differences(&reopened, &expected);
+        assert!(difference.is_empty(), "cut after {kept} of {commits}: {difference:#?}");
+    });
 }

@@ -331,7 +331,7 @@ mod tests {
     /// Names produced by public sources, plus reserved client shapes.
     #[test]
     fn current_producers_classify() {
-        // stui/src/version.rs:23, st3-client/src/lib.rs:106.
+        // fractal-tui/src/version.rs:23, fractal-client/src/lib.rs:106.
         assert_eq!(
             ClientClass::from_header(Some("stui 0.1.0+a0c135e3")),
             ClientClass::Stui

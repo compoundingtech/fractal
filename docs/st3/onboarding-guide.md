@@ -1,6 +1,6 @@
 # The Fractal guide
 
-Fractal runs agents as durable seats and records missions, messages and decisions in a
+Fractal runs agents as durable agents and records missions, messages and decisions in a
 graph. This guide is bundled into the executable so the Fractal Assistant can run
 first-run onboarding and answer questions on a machine without a source checkout. The
 onboarding mission pins its version.
@@ -15,10 +15,10 @@ person, and never an example name.
   configuration", no "I need their name", no "Still working through the mission". Work
   quietly, then speak once, to them, with what they need to know.
 - Never refer to the person in the third person, and never to steps, gates, runs, checks,
-  the graph or your own bookkeeping. If work needs recording, record it with the st skill and
+  the graph or your own bookkeeping. If work needs recording, record it with the fractal skill and
   say nothing about it.
 - Ask one question at a time and say the default you will use if they stay quiet.
-- Run every st command yourself. Do not ask them to run one, to open Home, to look at an
+- Run every fractal command yourself. Do not ask them to run one, to open Home, to look at an
   attention item or to switch terminals.
 - Say once, early, that you run on their own Claude or Codex account and use its usage.
 - Never ask for or type a password. A provider login belongs in the provider's own terminal.
@@ -88,7 +88,7 @@ result that is recorded.
    reply`, say in one short line that it stays there until they dismiss it, and carry on.
 2. Ask: "What do you want to accomplish in Fractal today?" Wait the same way. Listen, then ask short
    follow-ups, one at a time, to learn the kind of work, the project folder and the harness. Offer to plan
-   it. When they say yes, create their seat with `st agents new` in the folder they named (the work folder
+   it. When they say yes, create their agent with `st agents new` in the folder they named (the work folder
    when they name none), send it a first message, and tell them where to find it. Or write and start a
    mission for it. This is the real beginning of their work, and the end of onboarding.
 3. If they stay silent, say what is ready, that you stay here for questions, and stop. Close with one line:
@@ -116,7 +116,7 @@ them staring at a stuck screen.
 ## Check the installation
 
 Read `st --json doctor`, `st machines`, `st service status` and `st agents ls` before
-describing what is running. Setup stores the person and machine names, installs st
+describing what is running. Setup stores the person and machine names, installs fractal
 and pty when needed, and offers a user service. Providers use their own accounts;
 being installed does not prove that a provider is logged in. A login request belongs
 in the person's own provider terminal. Never ask for or type a password.
@@ -126,16 +126,16 @@ harness names are claude, codex, opencode, pi and omp. `st agents new --help` de
 provider and workspace options. OpenCode also needs the person's provider/model
 choice. Follow the installed command's help rather than inventing a model name.
 
-Claude seats use the user-owned st channel. Machine approval policy is optional:
-without it st uses the development-channel flag and admits its startup dialog.
+Claude agents use the user-owned fractal channel. Machine approval policy is optional:
+without it fractal uses the development-channel flag and admits its startup dialog.
 Provider or organization channel restrictions can still prevent delivery. MCP
-initialization alone is not proof that a message reached a seat; check the read
-receipt. An idle unscoped Claude session exposes no st tools or notifications.
+initialization alone is not proof that a message reached an agent; check the read
+receipt. An idle unscoped Claude session exposes no fractal tools or notifications.
 
-## Seats and messages
+## Agents and messages
 
-A seat is a named agent with a workspace and harness. Work and messages survive
-daemon restarts. New seats are made through `st agents new`; inspect that command's
+An agent is a named agent with a workspace and harness. Work and messages survive
+daemon restarts. New agents are made through `st agents new`; inspect that command's
 help and let the person choose the project directory and harness. Examples use
 invented names such as person/ada and agent/garden/worker.
 
@@ -145,11 +145,11 @@ reply in the same conversation. Put long text in a graph document and send its
 immutable reference. A tool invocation or a running process does not prove that
 the agent read the message; use the recorded receipt.
 
-`st agents show`, `st agents queue` and `st agents workspace` answer what a seat is
+`st agents show`, `st agents queue` and `st agents workspace` answer what an agent is
 doing and where it works. `st agents restart` recovers a stuck harness while keeping
 its declaration. `st agents stop` leaves it stopped until explicitly started.
-Suspend and resume preserve a quiet seat's native conversation on the same machine;
-they refuse busy seats. The built-in Fractal Assistant stays available after onboarding, and
+Suspend and resume preserve a quiet agent's native conversation on the same machine;
+they refuse busy agents. The built-in Fractal Assistant stays available after onboarding, and
 setup does not resurrect it after the person stops it. `st setup --onboarding`
 explicitly starts another onboarding run.
 
@@ -159,7 +159,7 @@ Plain `st` opens the terminal interface. Now shows decisions, approvals, questio
 and failures that need the person. Agents shows conversations and transcripts;
 Missions shows work and its results. Ctrl+K opens the palette, Ctrl+H opens Now,
 Ctrl+Q quits the interface while work keeps running. Ctrl+] attaches to a selected
-seat's terminal and Ctrl+\ detaches. Raw terminal keys belong to the harness while
+agent's terminal and Ctrl+\ detaches. Raw terminal keys belong to the harness while
 attached. Use a choice or decision on Now for a person-only answer; do not leave
 questions solely in a harness terminal.
 
@@ -171,7 +171,7 @@ has open on this machine, in a new tab. `--split` puts it in a split on the righ
 open and follows the mission from step to step, so the person can watch it beside the
 conversation. The pane takes the person's focus unless they are typing a message or you add
 `--keep-focus`. Asking again for something already open shows it rather than opening it twice.
-The command says whether the pane opened, whether st has no such agent or mission, or that no
+The command says whether the pane opened, whether fractal has no such agent or mission, or that no
 terminal interface answered, in which case nothing was queued and nothing will open later.
 Tell the person in your reply what you opened and why; the pane is not a message.
 
@@ -210,7 +210,7 @@ ask the person for a decision before starting sample work. The sample stays priv
 in the onboarding scratch workspace. It should include a review the person answers
 from Now. Check its completed run and review rather than taking completion on faith.
 
-The installed st skill explains claiming steps, storing evidence, asking for human
+The installed fractal skill explains claiming steps, storing evidence, asking for human
 answers and finishing work. Use it for exact command syntax. The graph is authority:
 read current claims, steps, run history and immutable documents instead of guessing
 or keeping a second local checklist. Optional phone, second-machine and GitHub steps
@@ -225,7 +225,7 @@ permissions the person must grant. A detached daemon fallback stops on reboot.
 Never run sudo or try to automate a password or operating-system permission prompt.
 
 The phone pairs through `st devices`; it reads and acts through a paired machine,
-and runs no seat or replica itself. A second machine joins through a fleet invite
+and runs no agent or replica itself. A second machine joins through a fleet invite
 only when the person asks. GitHub integration is optional; absent gh or missing
 authentication must not block any other onboarding work.
 
@@ -240,5 +240,5 @@ device, a successful installation, or a completed mission from a command attempt
 
 Message agent/st/assistant for later questions, and use `st --help` and nested command
 help for the installed build's current syntax. This curated guide draws on the
-repository's getting-started, talking-to-agents, seat-lifecycle, mission graph runtime
+repository's getting-started, talking-to-agents, agent-lifecycle, mission graph runtime
 and troubleshooting guides; it does not require a checkout to read them.

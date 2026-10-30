@@ -1,5 +1,53 @@
 use super::*;
 
+#[test]
+fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("app-server.log");
+    let previous = "previous incarnation diagnostic\n";
+    let current = (0..30).map(|i| format!("stderr line {i}\n")).collect::<String>();
+    fs::write(&path, format!("{previous}{current}")).unwrap();
+    let tail = app_server_log_tail(&path, previous.len() as u64).unwrap();
+    assert_eq!(tail.lines().count(), 20);
+    assert!(tail.starts_with("stderr line 10\n"));
+    assert!(tail.ends_with("stderr line 29"));
+    assert!(!tail.contains("previous"));
+    assert_eq!(app_server_log_tail(&path, fs::metadata(&path).unwrap().len()).unwrap(), "");
+}
+
+#[test]
+fn launch_diagnostic_bounds_lossy_utf8_at_a_character_boundary() {
+    let multibyte = "é".repeat(6_000);
+    let tail = diagnostic_output_tail(multibyte.as_bytes());
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.ends_with('é'));
+    assert!(tail.chars().all(|c| c == 'é'));
+
+    let mut invalid = vec![0xff; 8 * 1024];
+    invalid.extend_from_slice("final é".as_bytes());
+    let tail = diagnostic_output_tail(&invalid);
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.contains('\u{fffd}'));
+    assert!(tail.ends_with("final é"));
+}
+
+#[test]
+fn protocol_schema_gate_accepts_codex_0164_error_union() {
+    let mut schemas = compatible_protocol_schemas();
+    let error = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo").unwrap();
+    let mut arms = error.as_object_mut().unwrap().remove("oneOf").unwrap();
+    // 0.164.0 also includes a forward-compatible string/object catch-all. It must
+    // not erase the explicitly declared authentication and capacity words.
+    arms.as_array_mut().unwrap().push(json!({"type": ["string", "object"]}));
+    error["anyOf"] = arms;
+    verify_codex_protocol_schemas(&schemas).unwrap();
+    let words = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo/anyOf/0/enum")
+        .unwrap().as_array_mut().unwrap();
+    words.retain(|word| word != "unauthorized");
+    assert!(format!("{:#}", verify_codex_protocol_schemas(&schemas).unwrap_err())
+        .contains("CodexErrorInfo has no 'unauthorized' word"));
+}
+
 // Shared CI runs several workspace suites at once; these waits test event ordering,
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -413,14 +461,14 @@ fn write_fake_codex(
     path
 }
 
-/// The boot canaries' stand-in `codex` (scripts/st3-boot-canaries/stub-codex.py) answers
+/// The boot canaries' stand-in `codex` (scripts/fractal-boot-canaries/stub-codex.py) answers
 /// `generate-json-schema` with these files. They must stay what this gate admits, so a change to
 /// the required methods fails here, with the command that rewrites them.
 #[test]
 fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
     let schemas = compatible_protocol_schemas();
     let directory =
-        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3-boot-canaries/codex-schemas");
+        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/fractal-boot-canaries/codex-schemas");
     for (filename, schema) in [
         (
             "codex_app_server_protocol.v2.schemas.json",
@@ -446,7 +494,7 @@ fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
             stored.as_ref(),
             Some(schema),
             "{filename} is stale: run `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p fractal-drivers \
-             the_boot_canary_codex_stub_schemas` and commit scripts/st3-boot-canaries/codex-schemas"
+             the_boot_canary_codex_stub_schemas` and commit scripts/fractal-boot-canaries/codex-schemas"
         );
     }
 }
@@ -1545,11 +1593,11 @@ fn offer_round(delivery: &mut CodexInboxDelivery, state: &CodexControlState) -> 
     offers
 }
 
-/// Per-PR contract for the `idle-hold` boot canary (scripts/st3-boot-canaries/run,
+/// Per-PR contract for the `idle-hold` boot canary (scripts/fractal-boot-canaries/run,
 /// `idle_delivery_control`): after an idle period, under a hold, at its release and at its expiry,
 /// the native pump admits exactly one offer for each message and replays none. The gate is fed
 /// what the daemon's hold view reports at each instant of a test clock (`active` is
-/// `held && now < until`, which st3-api-core's
+/// `held && now < until`, which fractal-api-core's
 /// `expiry_release_restart_and_adoption_preserve_graph_authority` proves on the real claim store),
 /// so nothing sleeps. That an idle tick reads no hold at all is
 /// driver_cli's `native_delivery_control_reads_hold_only_while_mail_waits`.
@@ -3076,6 +3124,34 @@ fn control_initializes_before_recording_the_first_thread_only() {
     assert!(state.subscribed());
 }
 
+/// Waits until the persisted control state matches, reading it after each pump event. The pump
+/// persists before it sends, but it can run several frames ahead of the test thread on a loaded
+/// host, so a fixed number of events can all be ones sent before the state the caller waits for.
+fn wait_for_observed_state(
+    state_path: &Path,
+    events: &mpsc::Receiver<ControlEvent>,
+    wanted: impl Fn(&CodexObservedState) -> bool,
+) -> bool {
+    let matches = || {
+        fs::read(state_path).ok().is_some_and(|bytes| {
+            serde_json::from_slice::<CodexControlState>(&bytes)
+                .ok()
+                .is_some_and(|state| wanted(state.observed()))
+        })
+    };
+    let deadline = Instant::now() + TEST_EVENT_TIMEOUT;
+    loop {
+        if matches() {
+            return true;
+        }
+        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return matches(),
+            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+        }
+    }
+}
+
 #[test]
 fn live_control_request_blocks_until_the_bound_thread_resolves_it() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3153,45 +3229,23 @@ fn live_control_request_blocks_until_the_bound_thread_resolves_it() {
             events_tx,
         )
     });
-    let mut blocked = false;
-    for _ in 0..4 {
-        events_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
-        if let Ok(bytes) = fs::read(&state_path)
-            && serde_json::from_slice::<CodexControlState>(&bytes)
-                .ok()
-                .is_some_and(|state| {
-                    matches!(
-                        state.observed(),
-                        CodexObservedState::Held {
-                            reason: CodexHoldReason::WaitingOnApproval,
-                            ..
-                        }
-                    )
-                })
-        {
-            blocked = true;
-            break;
-        }
-    }
+    let blocked = wait_for_observed_state(&state_path, &events_rx, |observed| {
+        matches!(
+            observed,
+            CodexObservedState::Held {
+                reason: CodexHoldReason::WaitingOnApproval,
+                ..
+            }
+        )
+    });
     assert!(
         blocked,
         "the control stream did not publish the approval hold"
     );
     release_tx.send(()).unwrap();
-    let mut released = false;
-    for _ in 0..3 {
-        if events_rx.recv_timeout(TEST_EVENT_TIMEOUT).is_err() {
-            break;
-        }
-        if let Ok(bytes) = fs::read(&state_path)
-            && serde_json::from_slice::<CodexControlState>(&bytes)
-                .ok()
-                .is_some_and(|state| matches!(state.observed(), CodexObservedState::Active { .. }))
-        {
-            released = true;
-            break;
-        }
-    }
+    let released = wait_for_observed_state(&state_path, &events_rx, |observed| {
+        matches!(observed, CodexObservedState::Active { .. })
+    });
     assert!(
         released,
         "the matching status did not release the approval hold"
@@ -8740,6 +8794,149 @@ fn the_control_pump_keeps_a_retryable_disconnect_alive_for_the_next_turn() {
     );
 }
 
+/// Codex 0.160.1 retries a sampling request a few times within seconds, then fails the turn with
+/// "exceeded retry limit, last status: 429 Too Many Requests" (seen on 2026-10-26). The
+/// frames below are in the order that night's app-server log shows: the thread's `systemError`,
+/// the typed `error` with `willRetry: false`, then the failed `turn/completed`. The seat must stay
+/// up, read `rateLimited`, and take the turn st sends when its backoff resumes the session.
+#[test]
+fn a_429_past_codexs_retries_keeps_the_seat_up_rate_limited_for_st_to_resume() {
+    let tmp = crate::canonical_tempdir();
+    let _stop_exclusive = stop_flag_tests();
+    let config = delivery_config(tmp.path());
+    let agent_dir = config.agent_dir.clone();
+    let server_config = config.clone();
+    let socket = tmp.path().join("server.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let limited = json!({"responseTooManyFailedAttempts":{"httpStatusCode":429}});
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TEST_EVENT_TIMEOUT)).unwrap();
+        let mut websocket = tungstenite::accept(stream).unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialize"
+        );
+        write_json_message(
+            &mut websocket,
+            &json!({"id": 0, "result": {"userAgent": "fake"}}),
+        )
+        .unwrap();
+        assert_eq!(
+            read_json_message(&mut websocket).unwrap().unwrap()["method"],
+            "initialized"
+        );
+        for frame in [
+            json!({"method":"thread/started", "params":{"thread":{"id":"thread-main", "status":{"type":"idle"}}}}),
+            json!({"method":"turn/started", "params":{"threadId":"thread-main", "turn":{"id":"turn-limited"}}}),
+            json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"systemError"}}}),
+            error_frame("turn-limited", limited.clone(), false),
+            json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-limited", "status":"failed", "error":{"message":"exceeded retry limit, last status: 429 Too Many Requests", "codexErrorInfo":limited}}}}),
+        ] {
+            write_json_message(&mut websocket, &frame).unwrap();
+        }
+        // Wait for the test to read the rate-limited record, then resume as st's backoff does.
+        finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
+        let filename = message::send_to_inbox(
+            &server_config.inbox,
+            "daemon/runtime",
+            None,
+            None,
+            &[],
+            "The rate-limit (429 Too Many Requests) backoff elapsed. Resume in this existing session; do not create a replacement worker.",
+        )
+        .unwrap();
+        loop {
+            let request = read_json_message(&mut websocket).unwrap().unwrap();
+            match request["method"].as_str().unwrap() {
+                "account/read" => write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"account":{"type":"apiKey"}}})).unwrap(),
+                "thread/read" => write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"thread":{"id":"thread-main", "status":{"type":"systemError"}, "turns":[]}}})).unwrap(),
+                "turn/start" => {
+                    assert_eq!(request["params"]["threadId"], "thread-main", "the same session");
+                    write_json_message(&mut websocket, &json!({"id":request["id"], "result":{"turn":{"id":"turn-resumed"}}})).unwrap();
+                    for frame in [
+                        json!({"method":"turn/started", "params":{"threadId":"thread-main", "turn":{"id":"turn-resumed"}}}),
+                        json!({"method":"item/completed", "params":{"threadId":"thread-main", "turnId":"turn-resumed", "item":{"type":"userMessage", "id":"item-resumed", "clientId":request["params"]["clientUserMessageId"], "content":[]}}}),
+                        json!({"method":"thread/status/changed", "params":{"threadId":"thread-main", "status":{"type":"idle"}}}),
+                        json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-resumed", "status":"completed"}}}),
+                    ] {
+                        write_json_message(&mut websocket, &frame).unwrap();
+                    }
+                    finished_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
+                    return filename;
+                }
+                other => panic!("unexpected request: {other}"),
+            }
+        }
+    });
+    let stream = UnixStream::connect(&socket).unwrap();
+    let shutdown = stream.try_clone().unwrap();
+    let websocket = initialize_control(stream).unwrap().unwrap();
+    let control_path = tmp.path().join("state/control-state.json");
+    let pump_path = control_path.clone();
+    let binding_path = tmp.path().join("state/binding.json");
+    let runtime = CodexRuntime::fresh("h.worker".into(), "h.worker".into()).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let pump = thread::spawn(move || {
+        pump_control(
+            websocket,
+            &binding_path,
+            &pump_path,
+            &runtime,
+            None,
+            Some(config),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        )
+    });
+    assert!(matches!(
+        rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap(),
+        ControlEvent::Bound
+    ));
+    // The record is published before each event: read it as events arrive, until it settles.
+    let record_once = |wanted: &dyn Fn(&harness_state::Observed) -> bool| {
+        let deadline = Instant::now() + TEST_EVENT_TIMEOUT;
+        loop {
+            let record = harness_state::read(&harness_state::harness_state_path(&agent_dir), None);
+            if record.as_ref().is_some_and(wanted) || Instant::now() > deadline {
+                return record.expect("an observed record must exist");
+            }
+            let _ = rx.recv_timeout(Duration::from_millis(50));
+        }
+    };
+    assert!(wait_for_observed_state(&control_path, &rx, |observed| matches!(
+        observed,
+        CodexObservedState::TerminalError { .. }
+    )));
+    let limited = record_once(&|record| record.reason.as_deref() == Some("rateLimited"));
+    let limited_diagnostic = turn_diagnostic(&agent_dir);
+    finished_tx.send(()).unwrap();
+    let resumed = record_once(&|record| {
+        record.state == harness_state::Activity::Idle && record.reason.is_none()
+    });
+    finished_tx.send(()).unwrap();
+    let filename = server.join().unwrap();
+    let _ = shutdown.shutdown(Shutdown::Both);
+    pump.join().unwrap();
+    assert_eq!(
+        limited.state,
+        harness_state::Activity::Idle,
+        "a 429 past Codex's retries must not end the incarnation"
+    );
+    assert_eq!(limited.reason.as_deref(), Some("rateLimited"));
+    let driver_diagnostic::Observed::Failure(failure) = limited_diagnostic else {
+        panic!("the rate-limited turn must keep its diagnostic")
+    };
+    assert_eq!(failure.reason, driver_diagnostic::Reason::TurnConnection);
+    assert_eq!(resumed.state, harness_state::Activity::Idle);
+    assert_eq!(resumed.reason, None, "the resumed turn went through");
+    assert_eq!(
+        ledger_entry(tmp.path(), &filename).unwrap().phase,
+        delivery_ledger::Phase::Consumed
+    );
+}
+
 #[test]
 fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence() {
     for final_error in [
@@ -8792,7 +8989,11 @@ fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence(
             &json!({"method":"turn/completed", "params":{"threadId":"thread-main", "turn":{"id":"turn-a", "status":"failed"}}}),
         );
         let observation = observed_record(&agent_dir);
-        let retryable = final_error.is_none() || final_error == Some(json!("other"));
+        // A connection cause, Codex's own retries spent or not, leaves a thread that takes the
+        // next turn: the seat stays idle and st backs off. Any other final cause ends it.
+        let retryable = final_error.is_none()
+            || final_error == Some(json!("other"))
+            || final_error == Some(json!("responseStreamDisconnected"));
         assert_eq!(
             observation.state,
             if retryable {
@@ -8807,8 +9008,6 @@ fn retryable_connection_projection_requires_a_completed_turn_and_typed_evidence(
                 "connection"
             } else if final_error == Some(json!("internalServerError")) {
                 "internal"
-            } else if final_error == Some(json!("responseStreamDisconnected")) {
-                "connection"
             } else {
                 "unclassified"
             })
@@ -9216,7 +9415,7 @@ fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
 }
 
 /// Per-PR contract for the `access-auto` and `access-bypass` boot canaries
-/// (scripts/st3-boot-canaries/run, the `access-` block after `scenario`): every managed provider
+/// (scripts/fractal-boot-canaries/run, the `access-` block after `scenario`): every managed provider
 /// launch, fresh and restarted on its saved thread, carries exactly the access-mode flags the
 /// canary reads from the stub providers' `started` receipts. The Codex argv is composed as a
 /// controlled launch composes it: install defaults, the app-server/TUI split, then the TUI's own

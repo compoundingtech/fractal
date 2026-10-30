@@ -137,6 +137,7 @@ const styles = stylex.create({
   comparison: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' },
 })
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Data',
   component: DetailsPane,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact TraceSeries matrix pins independent spend/token windows, 0.9949/0.995 and invalid attribution fractions, missing versus zero subagent counts, and first-read resource/timing skeletons. Catalog details slices contain missions and work, not these trace facts or pending-field contracts.' }, layout: 'fullscreen' },
@@ -158,6 +159,20 @@ const meta = {
   </section>,
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'ContextPercentStates:contract-fixture',
+  'ContextSamplesPercentOnly:contract-fixture',
+  'FirstReadResourceStates:contract-fixture',
+  'PartialActivity:contract-fixture',
+  'ReportedWindowNarrow:contract-fixture',
+  'SettledResourceAndTimingStates:contract-fixture',
+  'SpendMatchingStates:contract-fixture',
+  'SpendScopeAndSubagentStates:contract-fixture',
+  'SpendWindowAndInvalidCoverageStates:contract-fixture',
+  'SubagentCountStates:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 function requireContract(condition: unknown, cause: string): asserts condition { if (!condition) throw new Error(cause) }
@@ -418,7 +433,7 @@ function assertScenarioPanes(root:HTMLElement,names:readonly ScenarioName[]) {
  mounted.forEach(element=>requireContract(!/\bUnknown\b/.test(element.textContent??''), 'Literal Unknown escaped the fact boundary'))
 }
 function assertTracedDescendantTitle(root:HTMLElement) {
- // Observed st rows precede the traced breakdown, so select the traced card by its session identity.
+ // Observed Fractal rows precede the traced breakdown, so select the traced card by its session identity.
  const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('subagent-session'))
  requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
 }

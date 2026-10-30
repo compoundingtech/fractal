@@ -210,6 +210,9 @@ impl Default for ExchangeJobs {
 
 use crate::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
 
+mod answers_check;
+pub use answers_check::{daily_cut, fetch_answers};
+
 fn exchange_failure(
     error: anyhow::Error,
     phase: ReplicationFailurePhase,
@@ -237,6 +240,9 @@ const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Recently working HTTP routes can return without any transport presence event. Probe
 /// briefly without exporting inventories or writing failures; long absences stay quiet.
 const PEER_PROBE_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// How long a fallback route a member's Fabric grants refused is left out of route selection.
+/// Grants change by hand, so the refusal is asked again about as often as its words promise.
+const REFUSED_ROUTE_HOLD: Duration = Duration::from_secs(30 * 60);
 
 /// What every route on the peer listener shares: the store, this node, its fleet auth, and
 /// what it knows of the fleet. A runtime adds its own routes with this as their state.
@@ -753,7 +759,7 @@ pub async fn run<B: Backend>(
         notify,
     );
     let endpoints = Endpoints::default();
-    let app = peer_router(state, routes);
+    let app = peer_router(state.clone(), routes);
     let listening = config
         .fleet
         .as_ref()
@@ -832,7 +838,10 @@ pub async fn run<B: Backend>(
             let fleet_id = leave_fleet_id.clone();
             async move { axum::Json(fleet.leave_snapshot(Some(fleet_id)).await) }
         }),
-    );
+    ).route(
+        "/v1/internal/fleet/pairing-admission",
+        post(receive_pairing_admission::<B>).layer(DefaultBodyLimit::max(MAX_JOIN_BYTES)),
+    ).with_state(state);
     let serving_leave = async move { axum::serve(leave_listener, leave_app).await };
     let serving = async move {
         // A dial-out member accepts no connections, but still supervises publication.
@@ -1503,7 +1512,10 @@ async fn keep_fleet_view_current<B: Backend>(
 /// The sync routes beside `routes`, served with `state`.
 pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>) -> Router {
     Router::new()
-        .route(EXCHANGE_PATH, post(receive_exchange))
+        .route(
+            EXCHANGE_PATH,
+            post(receive_exchange).layer(axum::middleware::from_fn(observe_exchange_body)),
+        )
         .route(
             LEAVE_RECEIPT_PATH,
             post(receive_leave_receipt).layer(DefaultBodyLimit::max(16_384)),
@@ -1511,6 +1523,10 @@ pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>
         .route(
             CHECKPOINT_PATH,
             post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
+        )
+        .route(
+            super::ANSWERS_PATH,
+            post(answers_check::receive_answers_request).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(
             JOIN_PATH,
@@ -1629,6 +1645,11 @@ async fn dial_peer<B: Backend>(
     // Routes whose one early attempt after an outage is spent, until a probe sees them down again
     // or an exchange over them succeeds. See `wait_peer_retry`.
     let mut early_spent = BTreeSet::new();
+    // Routes that answered for another shard than the one asked for, until the route set changes.
+    let mut misconfigured = Vec::<Route>::new();
+    // Fallback routes the member's Fabric grants refused, each until its hold ends or the route
+    // set changes. A refused preferred route is never held: see the refusal below.
+    let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1696,6 +1717,10 @@ async fn dial_peer<B: Backend>(
                 continue;
             }
         }
+        if routes.has_changed().unwrap_or(false) {
+            misconfigured.clear();
+            refused.clear();
+        }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
         let attempt_started = tokio::time::Instant::now();
@@ -1707,8 +1732,26 @@ async fn dial_peer<B: Backend>(
                 route = 0;
                 preferred_retry = None;
             }
-            (!routes.is_empty()).then(|| routes[route % routes.len()].clone())
+            refused.retain(|(_, until)| now < *until);
+            let candidates = || {
+                (0..routes.len())
+                    .map(|offset| routes[route.wrapping_add(offset) % routes.len()].clone())
+                    .filter(|candidate| !misconfigured.contains(candidate))
+            };
+            candidates()
+                .find(|candidate| !refused.iter().any(|(held, _)| held == candidate))
+                .or_else(|| candidates().next())
         };
+        if selected.is_none() && !misconfigured.is_empty() {
+            // Every route answered for another shard. There is nothing to dial until the
+            // routes change.
+            record_worker(&backend, &name, "misconfigured", attempt_unix_ms, None, None).await;
+            if routes.changed().await.is_err() {
+                return;
+            }
+            misconfigured.clear();
+            continue;
+        }
         let preferred_route = selected
             .as_ref()
             .map(|selected| routes.borrow().first() == Some(selected));
@@ -1722,6 +1765,7 @@ async fn dial_peer<B: Backend>(
         )
         .await;
         let carrier = selected.as_ref().map(Route::carrier).unwrap_or_default();
+        let selected_route = selected.clone();
         let is_http = matches!(selected, Some(Route::Http(_)));
         let fabric_route = selected
             .clone()
@@ -1785,6 +1829,8 @@ async fn dial_peer<B: Backend>(
                     notify.borrow_and_update();
                     moving = true;
                 } else {
+                    // Nothing moved, so both hold what the other wrote before today's cut.
+                    answers_check::check_answers(&http, &backend, &node, &peer, &auth, &fleet).await;
                     // A busy harness can write several observations while one exchange is in
                     // flight. Keep the first exchange immediate, then coalesce the resulting
                     // wake burst without disabling the 30-second retry path. The window stays
@@ -1805,6 +1851,29 @@ async fn dial_peer<B: Backend>(
                     fleet.mark_removed(&peer.name, removed).await;
                     continue;
                 }
+                if error.is::<PeerShardMismatch>() {
+                    // A shard route pointing at another store is a configuration error.
+                    // Repeating the same exchange cannot repair it. Keep the reason visible
+                    // until the route changes, without sending any shard envelopes.
+                    let mut failure = ReplicationExchangeFailure::from_error(
+                        &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
+                    );
+                    failure.attempt_elapsed_ms = Some(u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX));
+                    let _ = backend
+                        .record_failure(
+                            &peer.name,
+                            "shard-mismatch",
+                            &error.to_string(),
+                            Some(carrier),
+                            Some(&failure),
+                        )
+                        .await;
+                    if let Some(selected_route) = selected_route {
+                        misconfigured.push(selected_route);
+                    }
+                    route = route.wrapping_add(1);
+                    continue;
+                }
                 // `fabric dial` never connects, so the member's refusal reaches us only as a
                 // tunnel that closed. Ask Fabric whether that is what happened.
                 if let (Some(fabric_route), Some(fabric)) = (&fabric_route, &fleet.fabric)
@@ -1823,6 +1892,25 @@ async fn dial_peer<B: Backend>(
                     // A stalled or broken stream must not be reused on the next attempt.
                     http = replication_http_client();
                 }
+                // The worker reached this route only by failing over from the preferred one,
+                // and the member's grants answered for this route alone. Hold it, and go back
+                // to the preferred route now on that route's own backoff: the refusal is not
+                // a network fault and adds nothing to it. A refused preferred route stays
+                // selected instead, so a refusal never selects a fallback around it.
+                let mut refused_fallback = false;
+                if error.is::<FabricGrantRefusal>()
+                    && preferred_route == Some(false)
+                    && let Some(selected_route) = selected_route
+                {
+                    refused.push((selected_route, tokio::time::Instant::now() + REFUSED_ROUTE_HOLD));
+                    route = 0;
+                    preferred_retry = None;
+                    // With no other usable route the peer keeps its normal backoff.
+                    refused_fallback = routes.borrow().iter().any(|candidate| {
+                        !misconfigured.contains(candidate)
+                            && !refused.iter().any(|(held, _)| held == candidate)
+                    });
+                }
                 let overloaded = error.is::<PeerOverloaded>();
                 let status = if overloaded {
                     "overloaded"
@@ -1838,11 +1926,15 @@ async fn dial_peer<B: Backend>(
                 let mut failure = ReplicationExchangeFailure::from_error(
                     &error, ReplicationFailurePhase::Verify, attempt_started.elapsed(), None,
                 );
+                failure.attempt_elapsed_ms = Some(u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX));
                 if overloaded {
                     failure.code = "replication-overloaded".into();
                 }
                 let _ = backend.record_failure(&peer.name, status, &error.to_string(), Some(carrier), Some(&failure))
                     .await;
+                if refused_fallback {
+                    continue;
+                }
                 let delay = retry_delay(backoff.next(), &fleet, &name);
                 record_worker(
                     &backend,
@@ -2198,14 +2290,334 @@ pub fn replication_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(REPLICATION_EXCHANGE_TIMEOUT)
+        // Bound idle reuse independently of carrier tunnel and TCP liveness.
+        // Axum's listener has no configured finite idle deadline.
+        .pool_idle_timeout(Duration::from_secs(10))
+        .connector_layer(ExchangeConnectLayer)
         .build()
         .expect("the replication HTTP client configuration is valid")
 }
 
+/// Only exchanges are replay-safe here: the signed digest reuses an active job,
+/// and envelope receipt is idempotent even if the original answer was lost.
+/// `execute` failing means no complete response headers, not zero received bytes.
+async fn send_exchange_request(
+    http: &reqwest::Client,
+    request: reqwest::Request,
+    path: &str,
+    timing: &ExchangeTiming,
+) -> Result<reqwest::Response> {
+    // Buffered reqwest bodies clone their bytes without duplicating the payload.
+    let retry = (path == EXCHANGE_PATH).then(|| {
+        request.try_clone().expect("signed exchanges have buffered request bodies")
+    });
+    // These are typed HTTP sends, conservatively inventoried by the SQL lexical scanner.
+    match http.execute(/* sqlite-large-value: allow-for-now lv-hd3bc6cc6cb80 owner=smallclaims::sync::worker TODO=trace-statement-and-value-representation */ request).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let error = request_route_failure(error);
+            if route_failure(&error) == RouteFailure::Application {
+                return Err(error);
+            }
+            let Some(retry) = retry else {
+                return Err(error);
+            };
+            timing.record("client-fresh-retry");
+            // A private, newly constructed client has an empty pool. Cloning the
+            // original client or Connection: close would not guarantee fresh dial.
+            replication_http_client().execute(/* sqlite-large-value: allow-for-now lv-h81e5bb57a7a9 owner=smallclaims::sync::worker TODO=trace-statement-and-value-representation */ retry).await.map_err(request_route_failure)
+        }
+    }
+}
+
+const EXCHANGE_CORRELATION_HEADER: &str = "x-fractal-exchange-id";
+
+/// Captures the wire body before Axum's `Bytes` extractor can wait on an upload.
+struct ExchangeRequestBody {
+    inner: axum::body::Body,
+    timing: Arc<ExchangeTiming>,
+    bytes: u64,
+    complete: bool,
+    failed: bool,
+}
+
+impl hyper::body::Body for ExchangeRequestBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, axum::Error>>> {
+        let result = std::pin::Pin::new(&mut self.inner).poll_frame(cx);
+        match &result {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    self.bytes = self.bytes.saturating_add(data.len() as u64);
+                }
+            }
+            std::task::Poll::Ready(Some(Err(_))) => self.failed = true,
+            std::task::Poll::Ready(None) => {
+                self.complete = true;
+                self.timing.record("body-read-complete");
+            }
+            std::task::Poll::Pending => {}
+        }
+        result
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        hyper::body::Body::size_hint(&self.inner)
+    }
+}
+
+impl Drop for ExchangeRequestBody {
+    fn drop(&mut self) {
+        if !self.complete {
+            let head = self.timing.boundary("head-received");
+            tracing::info!(
+                target: "smallclaims::replication",
+                correlation_id = %self.timing.id,
+                head_received_unix_ms = head.map(|event| event.unix_ms),
+                request_body_bytes = self.bytes,
+                body_read_error = self.failed,
+                "replication exchange request body incomplete"
+            );
+        }
+    }
+}
+
+async fn observe_exchange_body(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let timing = Arc::new(ExchangeTiming::server(request.headers()));
+    timing.record("head-received");
+    request.extensions_mut().insert(Arc::clone(&timing));
+    let (parts, body) = request.into_parts();
+    let complete = hyper::body::Body::is_end_stream(&body);
+    if complete {
+        timing.record("body-read-complete");
+    }
+    let body = axum::body::Body::new(ExchangeRequestBody {
+        inner: body,
+        timing,
+        bytes: 0,
+        complete,
+        failed: false,
+    });
+    next.run(axum::extract::Request::from_parts(parts, body)).await
+}
+
+struct ExchangeTiming {
+    id: String,
+    started: std::time::Instant,
+    server: bool,
+    // Clients promote retained DEBUG boundaries on failure/slowness; servers
+    // retain them for one always-INFO summary at response handoff.
+    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 8], bool)>,
+}
+
+#[derive(Clone, Copy)]
+struct ExchangeBoundary {
+    stage: &'static str,
+    unix_ms: u64,
+    elapsed_us: u64,
+}
+
+impl ExchangeTiming {
+    fn server(headers: &HeaderMap) -> Self {
+        Self {
+            // Unauthenticated diagnostic input, never an authorization decision.
+            id: headers.get(EXCHANGE_CORRELATION_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .map_or_else(|| uuid::Uuid::now_v7().to_string(), |id| id.to_string()),
+            started: std::time::Instant::now(),
+            server: true,
+            boundaries: Default::default(),
+        }
+    }
+
+    fn boundary(&self, stage: &str) -> Option<ExchangeBoundary> {
+        self.boundaries.lock().expect("exchange timing lock poisoned")
+            .0.iter().flatten().find(|event| event.stage == stage).copied()
+    }
+
+    fn record(&self, stage: &'static str) {
+        let boundary = ExchangeBoundary {
+            stage,
+            unix_ms: u64::try_from(crate::store::now_ms()).unwrap_or(u64::MAX),
+            elapsed_us: u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        };
+        let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        // A retained backend job and its waiter can both observe completion.
+        if self.server && boundaries.0.iter().flatten().any(|event| event.stage == stage) {
+            return;
+        }
+        if boundaries.1 {
+            self.emit_info(boundary);
+            return;
+        }
+        tracing::debug!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage,
+            unix_ms = %boundary.unix_ms,
+            elapsed_us = %boundary.elapsed_us,
+            "replication exchange boundary"
+        );
+        if let Some(slot) = boundaries.0.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(boundary);
+        } else {
+            // Bounded storage even if a future caller adds more boundaries.
+            if !self.server {
+                self.emit_info(boundary);
+            }
+            drop(boundaries);
+            self.promote();
+            return;
+        }
+        drop(boundaries);
+        if stage == "client-failed" || self.started.elapsed() >= Duration::from_secs(5) {
+            self.promote();
+        }
+    }
+
+    fn promote(&self) {
+        if self.server {
+            return;
+        }
+        let mut boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        boundaries.1 = true;
+        for boundary in boundaries.0.iter_mut().filter_map(Option::take) {
+            self.emit_info(boundary);
+        }
+    }
+
+    fn emit_info(&self, boundary: ExchangeBoundary) {
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage = boundary.stage,
+            unix_ms = %boundary.unix_ms,
+            elapsed_us = %boundary.elapsed_us,
+            "replication exchange boundary"
+        );
+    }
+
+    fn server_boundaries(&self) -> [Option<ExchangeBoundary>; 3] {
+        let boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        ["server-ingress", "backend-done", "response-headers-ready"]
+            .map(|stage| boundaries.0.iter().flatten().find(|event| event.stage == stage).copied())
+    }
+
+    fn summarize_server(&self, status: StatusCode, body_bytes: usize) {
+        let [ingress, backend, headers] = self.server_boundaries();
+        let head = self.boundary("head-received");
+        let body = self.boundary("body-read-complete");
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            status = status.as_u16(),
+            head_received_unix_ms = head.map(|event| event.unix_ms),
+            body_read_complete_unix_ms = body.map(|event| event.unix_ms),
+            request_body_bytes = body_bytes,
+            server_ingress_unix_ms = ingress.map(|event| event.unix_ms),
+            server_ingress_elapsed_us = ingress.map(|event| event.elapsed_us),
+            backend_done = backend.is_some(),
+            backend_done_unix_ms = backend.map(|event| event.unix_ms),
+            backend_done_elapsed_us = backend.map(|event| event.elapsed_us),
+            response_headers_ready_unix_ms = headers.map(|event| event.unix_ms),
+            response_headers_ready_elapsed_us = headers.map(|event| event.elapsed_us),
+            "replication exchange server summary"
+        );
+    }
+}
+
+struct ClientConnectObservation {
+    timing: ExchangeTiming,
+    state: std::sync::atomic::AtomicU8,
+}
+
+tokio::task_local! {
+    static EXCHANGE_CONNECT: Arc<ClientConnectObservation>;
+}
+
+#[derive(Clone)]
+struct ExchangeConnectLayer;
+
+impl<S> tower::Layer<S> for ExchangeConnectLayer {
+    type Service = ExchangeConnectService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        ExchangeConnectService(inner)
+    }
+}
+
+#[derive(Clone)]
+struct ExchangeConnectService<S>(S);
+
+impl<S, R> tower::Service<R> for ExchangeConnectService<S>
+where
+    S: tower::Service<R>,
+    S::Future: Send + 'static,
+    S::Response: 'static,
+    S::Error: 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = std::pin::Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        self.0.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: R) -> Self::Future {
+        // Only attribute a connect invoked in this request's task-local scope. No
+        // endpoint/global map can safely attribute concurrent requests or pool reuse.
+        let observation = EXCHANGE_CONNECT.try_with(Arc::clone).ok();
+        if let Some(observation) = &observation {
+            observation.state.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let future = self.0.call(request);
+        Box::pin(async move {
+            let result = future.await;
+            if result.is_ok()
+                && let Some(observation) = observation
+            {
+                observation.state.store(2, std::sync::atomic::Ordering::Relaxed);
+                observation.timing.record("connect-done");
+            }
+            result
+        })
+    }
+}
+
 async fn receive_exchange<B: Backend>(
+    timing: Option<axum::Extension<Arc<ExchangeTiming>>>,
     State(state): State<PeerState<B>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    let timing = timing.map_or_else(
+        || Arc::new(ExchangeTiming::server(&headers)),
+        |axum::Extension(timing)| timing,
+    );
+    let body_bytes = body.len();
+    timing.record("server-ingress");
+    let response = receive_exchange_inner(State(state), headers, body, &timing).await;
+    // Axum owns socket writes. This is the handoff boundary, not a wire-write timestamp.
+    timing.record("response-headers-ready");
+    timing.summarize_server(response.status(), body_bytes);
+    response
+}
+
+async fn receive_exchange_inner<B: Backend>(
+    State(state): State<PeerState<B>>,
+    headers: HeaderMap,
+    body: Bytes,
+    timing: &Arc<ExchangeTiming>,
 ) -> Response {
     let body = if deflated(&headers) {
         match inflate(&body, "an exchange request") {
@@ -2303,6 +2715,7 @@ async fn receive_exchange<B: Backend>(
             );
             let state = state.clone();
             let relay = relay.clone();
+            let backend_timing = Arc::clone(timing);
             tokio::spawn(crate::task_cpu::account(
                 "replication.exchange",
                 async move {
@@ -2343,6 +2756,7 @@ async fn receive_exchange<B: Backend>(
                     .map_err(|error| ReplicationExchangeFailure::from_error(
                         &error, ReplicationFailurePhase::LocalReceive, started.elapsed(), None,
                     ));
+                    backend_timing.record("backend-done");
                     done.send_replace(Some(result));
                 },
             ));
@@ -2360,6 +2774,11 @@ async fn receive_exchange<B: Backend>(
         }
     })
     .await;
+    if matches!(&ready, Ok(Some(_))) {
+        // A poll may reuse a previously completed job; record when this request
+        // observed its answer if the originating job did not record it here.
+        timing.record("backend-done");
+    }
     match ready {
         Ok(Some(Ok(export))) => {
             finish_exchange_job(&state.fleet, &relay, &answer);
@@ -2601,6 +3020,39 @@ async fn fetch_checkpoint_manifest_page(
     Ok(response.value)
 }
 
+/// Local adapter boundary. This reuses the ordinary sealed handshake; Fabric policy
+/// remains entirely outside st. The proxy pins this worker's fleet incarnation.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingAdmissionRequest {
+    request: crate::fleet::handshake::JoinRequest,
+    node_id: String,
+    expected_fleet_id: String,
+    expected_sponsor_key: String,
+}
+
+async fn receive_pairing_admission<B: Backend>(
+    State(state): State<PeerState<B>>,
+    body: Bytes,
+) -> Response {
+    let Ok(admission) = serde_json::from_slice::<PairingAdmissionRequest>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if admission.expected_fleet_id != state.auth.fleet_id()
+        || state.auth.member.as_ref().map(|key| key.public())
+            != Some(admission.expected_sponsor_key.as_str())
+        || admission.request.node_id.as_deref() != Some(admission.node_id.as_str())
+        || admission.node_id.len() != 64
+        || !admission.node_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Ok(request) = serde_json::to_vec(&admission.request) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    receive_join(State(state), Bytes::from(request)).await
+}
+
 /// The join route. It exists only while this node sponsors an open invite; otherwise it answers
 /// 404 like any unknown path. Every refusal looks the same to the caller.
 ///
@@ -2644,6 +3096,12 @@ async fn receive_join<B: Backend>(State(state): State<PeerState<B>>, body: Bytes
         writer_floor: answer["writer_floor"].as_u64(),
         fabric_protocol: text("fabric_protocol"),
         admitted_claim: text("admitted_claim"),
+        sponsor_node_id: request.node_id.as_ref().and_then(|_| text("sponsor_node_id")),
+        sponsor_endpoints: if request.node_id.is_some() {
+            answer["sponsor_endpoints"].as_array().cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        },
     };
     match crate::fleet::handshake::seal_response(&request, &token, &state.node, &member, &payload) {
         Ok(response) => {
@@ -2804,6 +3262,41 @@ pub async fn exchange<B: Backend>(
     exchange_via(http, backend, node, peer, auth, fleet, Default::default()).await
 }
 
+#[derive(Debug)]
+struct PeerShardMismatch {
+    peer: String,
+    expected: Option<String>,
+    actual: Option<String>,
+}
+
+impl std::fmt::Display for PeerShardMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "peer {} answered for shard {:?}, expected {:?}",
+            self.peer, self.actual, self.expected
+        )
+    }
+}
+
+impl std::error::Error for PeerShardMismatch {}
+
+fn ensure_peer_exchange_shard(
+    peer: &str,
+    sent: &ReplicationExchange,
+    answer: &ReplicationExchange,
+) -> Result<()> {
+    if answer.shard_id != sent.shard_id {
+        return Err(PeerShardMismatch {
+            peer: peer.into(),
+            expected: sent.shard_id.clone(),
+            actual: answer.shard_id.clone(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 async fn finish_leave_receipt(
     http: &reqwest::Client,
     peer: &PeerConfig,
@@ -2909,6 +3402,7 @@ async fn exchange_inner<B: Backend>(
     let started = std::time::Instant::now();
     let (remote, peer_inflates) =
         post_signed(http, backend, peer, node, auth, fleet, &query, false).await?;
+    ensure_peer_exchange_shard(&peer.name, &query, &remote)?;
     let round_trip = started.elapsed();
     let different = remote.inventory.digest != query.inventory.digest;
     let received = receive_from_peer(
@@ -2944,6 +3438,7 @@ async fn exchange_inner<B: Backend>(
         // A peer that says it takes compressed requests gets a large push compressed.
         let (response, _) =
             post_signed(http, backend, peer, node, auth, fleet, &push, peer_inflates).await?;
+        ensure_peer_exchange_shard(&peer.name, &push, &response)?;
         let round_trip = started.elapsed();
         // The peer stores a push before it answers, so its inventory moved if the push landed.
         pushed = !push.envelopes.is_empty() && response.inventory.digest != remote.inventory.digest;
@@ -2984,7 +3479,7 @@ async fn exchange_inner<B: Backend>(
     let mut progressed = pulled || pulled_follow_up || pushed || adopted;
     // Walking differing claim ranges is the lowest-priority sync work: it runs only once
     // envelope transport has nothing left to move.
-    if let Some(comparison) = claim_ranges.filter(|comparison| !comparison.same && !progressed) {
+    if let Some(comparison) = claim_ranges.filter(|comparison| !all_same(comparison) && !progressed) {
         progressed = walk_claim_ranges(
             http, backend, node, peer, auth, fleet, telemetry, carrier, attempt, &query, &comparison,
         )
@@ -3001,11 +3496,19 @@ static CLAIM_WALKS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<(String, Strin
 /// the next exchange.
 const CLAIM_WALK_ROUND_TRIPS: usize = 4;
 
+/// Whether a comparison found both the retained claims and, where compared, the retired claim
+/// IDs the same.
+fn all_same(comparison: &crate::replication::ClaimRangeComparison) -> bool {
+    comparison.same && comparison.retired.as_ref().is_none_or(|retired| retired.same)
+}
+
 /// One walk over the claim ranges that differ between this node and a peer, for one pair of
 /// whole-set digests: the tops, then the leaves of differing tops, then the IDs of differing
 /// leaves, then the claims this node lacks. A walk that finishes is not repeated until either
 /// side's claims change, so claims this node retired, or holds that the peer lacks, cost one
-/// walk, not one per exchange.
+/// walk, not one per exchange. Between members that trim locally, a second walk over the
+/// retired claim IDs rides in the same queries; what it finds missing is recorded as retired
+/// when the answer is received, so it fetches nothing.
 #[derive(Debug, Default)]
 pub(crate) struct ClaimWalk {
     pair: String,
@@ -3013,6 +3516,7 @@ pub(crate) struct ClaimWalk {
     tops: std::collections::VecDeque<u32>,
     leaves: std::collections::VecDeque<u32>,
     missing: BTreeSet<String>,
+    retired: Option<Box<ClaimWalk>>,
 }
 
 impl ClaimWalk {
@@ -3020,8 +3524,36 @@ impl ClaimWalk {
         Self { pair: pair.to_owned(), ..Default::default() }
     }
 
-    /// The next question for the peer: fetch what was found missing first, then descend.
+    /// Start, continue or drop the retired walk for a comparison's retired part. Recording what
+    /// it finds changes this node's retired digest, so an unfinished walk continues under the
+    /// new pair rather than starting again from the tops.
+    pub(crate) fn follow_retired(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
+        self.retired = match comparison.retired.as_deref() {
+            Some(retired) if !retired.same => Some(
+                self.retired
+                    .take()
+                    .filter(|walk| walk.pair == retired.pair || walk.unfinished())
+                    .unwrap_or_else(|| Box::new(ClaimWalk::new(&retired.pair))),
+            ),
+            _ => None,
+        };
+    }
+
+    fn unfinished(&self) -> bool {
+        !self.asked_tops || !self.tops.is_empty() || !self.leaves.is_empty() || !self.missing.is_empty()
+    }
+
+    /// The next question for the peer: this walk's step, with the retired walk's step beside it.
     pub(crate) fn next_query(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
+        let mut query = self.next_step();
+        if let Some(retired) = self.retired.as_mut().and_then(|walk| walk.next_step()) {
+            query.get_or_insert_with(Default::default).retired = Some(Box::new(retired));
+        }
+        query
+    }
+
+    /// This walk's next question: fetch what was found missing first, then descend.
+    fn next_step(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
         use crate::replication::*;
         let mut query = ClaimRangeQuery::default();
         if !self.missing.is_empty() {
@@ -3049,9 +3581,19 @@ impl ClaimWalk {
         Self { pair: pair.to_owned(), asked_tops: true, ..Default::default() }
     }
 
+    fn finish(&mut self) {
+        self.asked_tops = true;
+        self.tops.clear();
+        self.leaves.clear();
+        self.missing.clear();
+    }
+
     /// Ask `query` again later: an index was still folding claims in, so the answer showed
     /// nothing.
     pub(crate) fn retry(&mut self, query: crate::replication::ClaimRangeQuery) {
+        if let (Some(walk), Some(retired)) = (self.retired.as_mut(), query.retired) {
+            walk.retry(*retired);
+        }
         self.asked_tops &= !query.tops;
         for top in query.leaves_of.into_iter().rev() {
             self.tops.push_front(top);
@@ -3062,11 +3604,33 @@ impl ClaimWalk {
         self.missing.extend(query.claims);
     }
 
-    /// Take in what one answer showed.
-    pub(crate) fn absorb(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
-        self.tops.extend(&comparison.tops);
-        self.leaves.extend(&comparison.leaves);
-        self.missing.extend(comparison.missing.iter().cloned());
+    /// Take in what the answer to `query` showed. A retired step the answer left out, because
+    /// the peer's retired ranges were still folding, is asked again.
+    pub(crate) fn absorb(
+        &mut self,
+        query: crate::replication::ClaimRangeQuery,
+        comparison: &crate::replication::ClaimRangeComparison,
+    ) {
+        if comparison.same {
+            self.finish();
+        } else {
+            self.tops.extend(&comparison.tops);
+            self.leaves.extend(&comparison.leaves);
+            self.missing.extend(comparison.missing.iter().cloned());
+        }
+        match (self.retired.as_mut(), comparison.retired.as_deref()) {
+            (Some(walk), Some(retired)) if retired.same => walk.finish(),
+            (Some(walk), Some(retired)) => {
+                walk.tops.extend(&retired.tops);
+                walk.leaves.extend(&retired.leaves);
+            }
+            (Some(walk), None) => {
+                if let Some(asked) = query.retired {
+                    walk.retry(*asked);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3093,7 +3657,10 @@ async fn walk_claim_ranges<B: Backend>(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&key)
         .filter(|walk| walk.pair == comparison.pair)
-        .unwrap_or_else(|| ClaimWalk::new(&comparison.pair));
+        .unwrap_or_else(|| {
+            if comparison.same { ClaimWalk::finished(&comparison.pair) } else { ClaimWalk::new(&comparison.pair) }
+        });
+    walk.follow_retired(comparison);
     let mut fetched = false;
     let mut result = Ok(());
     for _ in 0..CLAIM_WALK_ROUND_TRIPS {
@@ -3133,11 +3700,7 @@ async fn walk_claim_ranges<B: Backend>(
                 walk.retry(query);
                 break;
             }
-            Some(comparison) if comparison.same => {
-                walk = ClaimWalk::finished(&walk.pair);
-                break;
-            }
-            Some(comparison) => walk.absorb(comparison),
+            Some(comparison) => walk.absorb(query, comparison),
         }
     }
     CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);
@@ -3253,7 +3816,13 @@ fn overloaded_error(
             ReplicationFailurePhase::RequestHeaders
         },
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        attempt_elapsed_ms: None,
+        preparation_ms: None,
+        request_body_bytes: None,
+        request_body_uncompressed_bytes: None,
         http_status,
+        correlation_id: None,
+        client_stage: None,
         cause: if http_status.is_some() {
             "authenticated peer is overloaded"
         } else {
@@ -3365,6 +3934,12 @@ fn unsigned_refusal(peer: &str, status: StatusCode, body: &[u8]) -> String {
     }
 }
 
+struct RequestPreparation {
+    elapsed_ms: u64,
+    body_bytes: u64,
+    uncompressed_body_bytes: u64,
+}
+
 /// Send one signed request to a peer path and return the peer's verified answer, as
 /// `post_signed` does for an exchange.
 #[allow(clippy::too_many_arguments)]
@@ -3378,28 +3953,89 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
     request: &B,
     compress: bool,
 ) -> Result<(R, bool)> {
+    let observation = Arc::new(ClientConnectObservation {
+        timing: ExchangeTiming {
+            id: uuid::Uuid::now_v7().to_string(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        },
+        state: std::sync::atomic::AtomicU8::new(0),
+    });
+    let timing = &observation.timing;
+    let mut stage = crate::replication::ReplicationClientStage::PooledOrUnknown;
+    let mut preparation = None;
+    EXCHANGE_CONNECT.scope(Arc::clone(&observation),
+        post_signed_to_timed(http, peer, node, auth, fleet, path, request, compress, timing, &mut stage, &mut preparation))
+        .await
+        .map_err(|error| {
+            let mut failure = ReplicationExchangeFailure::from_error(
+                &error, ReplicationFailurePhase::RequestHeaders, timing.started.elapsed(), None,
+            );
+            failure.correlation_id = Some(timing.id.clone());
+            if stage != crate::replication::ReplicationClientStage::HeadersReceived {
+                stage = match observation.state.load(std::sync::atomic::Ordering::Relaxed) {
+                    1 => crate::replication::ReplicationClientStage::SendStarted,
+                    2 => crate::replication::ReplicationClientStage::Connected,
+                    _ => crate::replication::ReplicationClientStage::PooledOrUnknown,
+                };
+            }
+            failure.client_stage = Some(stage);
+            if let Some(preparation) = preparation {
+                failure.preparation_ms = Some(preparation.elapsed_ms);
+                failure.request_body_bytes = Some(preparation.body_bytes);
+                failure.request_body_uncompressed_bytes = Some(preparation.uncompressed_body_bytes);
+            }
+            timing.record("client-failed");
+            let display = error.to_string();
+            error.context(failure).context(display)
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn post_signed_to_timed<B: Serialize, R: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    peer: &PeerConfig,
+    node: &str,
+    auth: &FleetAuth,
+    fleet: &FleetContext,
+    path: &str,
+    request: &B,
+    compress: bool,
+    timing: &ExchangeTiming,
+    client_stage: &mut crate::replication::ReplicationClientStage,
+    preparation: &mut Option<RequestPreparation>,
+) -> Result<(R, bool)> {
     let body = serde_json::to_vec(request)?;
+    let uncompressed_body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
     let request_digest = FleetAuth::body_digest(&body);
     let headers = auth.request_headers_for(path, node, &body)?;
     let endpoint = format!("{}{}", peer.url.trim_end_matches('/'), path);
-    let started = std::time::Instant::now();
     let mut request = http
         .post(&endpoint)
         .headers(headers)
         .header("content-type", "application/json")
-        .header("accept-encoding", EXCHANGE_ENCODING);
-    request = if compress && body.len() >= DEFLATE_MIN_BYTES {
-        request
-            .header("content-encoding", EXCHANGE_ENCODING)
-            .body(deflate(&body)?)
+        .header("accept-encoding", EXCHANGE_ENCODING)
+        .header(EXCHANGE_CORRELATION_HEADER, &timing.id);
+    let body = if compress && body.len() >= DEFLATE_MIN_BYTES {
+        request = request.header("content-encoding", EXCHANGE_ENCODING);
+        deflate(&body)?
     } else {
-        request.body(body)
+        body
     };
-    let response = request
-        .send()
-        .await
-        .map_err(request_route_failure)
+    let body_bytes = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    let request = request.body(body).build().map_err(request_route_failure)?;
+    let started = std::time::Instant::now();
+    *preparation = Some(RequestPreparation {
+        elapsed_ms: u64::try_from(started.duration_since(timing.started).as_millis()).unwrap_or(u64::MAX),
+        body_bytes,
+        uncompressed_body_bytes,
+    });
+    timing.record("client-send-start");
+    let response = send_exchange_request(http, request, path, timing).await
         .map_err(|error| exchange_failure(error, ReplicationFailurePhase::RequestHeaders, started, None))?;
+    *client_stage = crate::replication::ReplicationClientStage::HeadersReceived;
+    timing.record("client-headers-received");
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response
@@ -3556,8 +4192,14 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                     .unwrap_or(ReplicationFailurePhase::ResponseBody)
             },
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            attempt_elapsed_ms: None,
+            preparation_ms: None,
+            request_body_bytes: None,
+            request_body_uncompressed_bytes: None,
             http_status: Some(status.as_u16()),
             cause: "authenticated peer rejected the exchange; body withheld".into(),
+            correlation_id: None,
+            client_stage: None,
         }.into());
     }
     let response: PeerResponse<R> =

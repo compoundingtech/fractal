@@ -3,7 +3,9 @@
 //! The live client and the demo fixtures both produce a `World`. Anything the graph cannot
 //! answer yet is an `Option` or a `Load`, so a screen can say "unknown" instead of guessing.
 
-pub use fractal_ui_model::missions::{Mission, Step, StepState, Word};
+pub use fractal_ui_model::missions::{Mission, StepState, Word};
+#[cfg(test)]
+pub use fractal_ui_model::missions::Step;
 use std::collections::BTreeMap;
 
 /// Something that arrives later. `Loading` is never drawn as empty.
@@ -39,13 +41,17 @@ pub enum Link {
     Offline(String),
 }
 
-/// A tool call a seat's harness recorded and has no result for yet: its tool and its whole input.
+/// A tool call a seat's harness recorded and has no result for yet, as st serves it beside a
+/// prompt (`presentation.prompt.calls`): its tool and its input.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingCall {
     /// Its tool use (or Codex item) id, which a prompt names as the call it asks about.
     pub id: String,
     pub tool: String,
+    /// Its arguments, read back from the JSON text st serves; the text itself when st cut it.
     pub input: serde_json::Value,
+    /// False when st cut the input to its bound: no one allows what they cannot read whole.
+    pub complete: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -54,7 +60,7 @@ pub struct World {
     pub host: String,
     pub link: Link,
     /// Peers this host's graph has diverged from: the same envelopes project a different graph
-    /// here, so what stui shows can be wrong until the host is repaired.
+    /// here, so what Fractal TUI shows can be wrong until the host is repaired.
     pub diverged: Vec<String>,
     /// Lists st stopped serving after they loaded, each with st's reason: the rows shown are the
     /// last it sent, and may be out of date until it serves them again. Left out of the shared
@@ -85,10 +91,6 @@ pub struct World {
     /// The person's paired devices.
     pub devices: Load<Vec<Device>>,
     pub conversations: BTreeMap<String, Load<Vec<Entry>>>,
-    /// Each loaded conversation's tool calls with no result yet, in full, oldest first: a native
-    /// prompt asks about one of them, and a person answers only what they can read.
-    #[serde(skip)]
-    pub pending_calls: BTreeMap<String, Vec<PendingCall>>,
     /// Missions nobody needs the person for, counted so Home can say what it is not showing.
     pub quiet_missions: usize,
     /// Token spend over the Usage tab's period: one row per agent, mission run, step, model,
@@ -99,6 +101,9 @@ pub struct World {
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
     pub usage_limits: Vec<fractal_client::UsageLimit>,
+    /// Every declared account, so the Usage tab lists the same accounts on every screen.
+    #[serde(skip)]
+    pub usage_accounts: Vec<fractal_client::UsageAccount>,
     #[serde(skip)]
     pub agent_messages: Option<fractal_client::AgentMessageEstimate>,
     /// Objectives and budgets, from st's `slo.list` read: the same rows the phone and the web
@@ -108,6 +113,10 @@ pub struct World {
     /// What was left of each objective or budget across the chart period, by its id.
     #[serde(skip)]
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
+    /// Why the last refresh of the objectives and budgets failed, while the rows shown are
+    /// from an earlier read.
+    #[serde(skip)]
+    pub slo_stale: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
@@ -170,6 +179,9 @@ pub struct Attention {
     /// Who is waiting, e.g. "Atlas Builder on harbor".
     pub waiting: Option<String>,
     pub age: String,
+    /// When an ask resolves by itself and what then applies, e.g. `answer within 3h, or “Hold”
+    /// applies`. None on an item with no deadline.
+    pub deadline: Option<String>,
     pub mission: Option<String>,
     /// The agent that did the work or raised the item: who to talk to about it.
     pub agent: Option<String>,
@@ -262,15 +274,25 @@ pub enum AttentionKind {
         seat_id: String,
         /// What st says it is about; the call it would make is in the seat's conversation.
         text: String,
+        /// Native question identity, independent of whether a client may submit an answer.
+        #[serde(skip)]
+        question: bool,
         /// Answers a client may send (`allow`, `deny`); empty when the prompt is answered in
         /// the seat's terminal.
         answers: Vec<String>,
         /// The harness observation that opened it, which an answer names.
         episode: String,
-        /// The exact call it asks about, as st names it: `Some(None)` when its harness named
-        /// none, `None` from a daemon that predates naming it. Allow is offered only beside it.
+        /// The exact call it asks about, as st names it; none when it names none. Allow is
+        /// offered only beside it.
         #[serde(skip)]
-        call: Option<Option<String>>,
+        call: Option<String>,
+        /// The calls without a result st serves beside it, oldest first, or why it serves none:
+        /// it cannot read the seat's conversation, or it is too old to serve them.
+        #[serde(skip)]
+        calls: Result<Vec<PendingCall>, String>,
+        /// st's word that a client may allow or answer the one call it serves.
+        #[serde(skip)]
+        allow: bool,
     },
     /// A harness not signed in to its provider; one sign-in answers every seat that shares it.
     Login {
@@ -289,6 +311,14 @@ pub enum AttentionKind {
         /// The images it carries, read from st through the ask.
         images: Vec<fractal_conversation_ui::MailImage>,
     },
+    /// A row st did not place in a way this client knows: an older st presents nothing, and a
+    /// newer one may name a group or card this client does not know. It shows st's text and
+    /// why, keeps st's alert flag, and offers no answer of its own.
+    Unplaced {
+        text: String,
+        why: String,
+        alert: bool,
+    },
     /// Information the person asked an agent for (`st work update`): it asks nothing, and it
     /// clears once they read it.
     Update {
@@ -304,7 +334,11 @@ pub enum AttentionKind {
 impl AttentionKind {
     /// Whether a card of this kind blocks or waits on the person.
     pub fn is_alert(&self) -> bool {
-        !matches!(self, AttentionKind::Update { .. } | AttentionKind::Message { .. })
+        match self {
+            AttentionKind::Update { .. } | AttentionKind::Message { .. } => false,
+            AttentionKind::Unplaced { alert, .. } => *alert,
+            _ => true,
+        }
     }
 
     pub fn word(&self) -> &'static str {
@@ -319,6 +353,7 @@ impl AttentionKind {
             AttentionKind::Login { .. } => "login",
             AttentionKind::Request { .. } => "request",
             AttentionKind::Update { .. } => "update",
+            AttentionKind::Unplaced { .. } => "unplaced",
         }
     }
 }
@@ -349,7 +384,7 @@ pub struct PreviewAgent {
 
 // --------------------------------------------------------------------- agents
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Harness {
     Claude,
@@ -399,6 +434,9 @@ pub struct Agent {
     /// The graph path, a stable id.
     pub id: String,
     pub name: String,
+    /// Declared seat intent; absence is unknown, never inferred from activity or ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<fractal_client::AgentLifecycle>,
     pub harness: Harness,
     pub state: AgentState,
     pub host: String,
@@ -448,6 +486,8 @@ impl Subagent {
 /// What the details pane shows about an agent. Every field is optional: st may not say.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct AgentDetails {
+    /// Pending mailbox custody shown on retired agents.
+    pub mail_custody: Option<String>,
     /// The goal of the step it holds now.
     pub goal: Option<String>,
     pub claimed: Option<String>,
@@ -477,7 +517,7 @@ pub struct AgentDetails {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reach {
-    /// The machine stui is talking to.
+    /// The machine Fractal TUI is talking to.
     Here,
     /// It replicates with this machine directly.
     Direct,
@@ -499,7 +539,7 @@ impl Reach {
             Reach::Direct => "connected",
             Reach::Indirect => "online via others",
             Reach::Offline => "offline",
-            Reach::Unknown => "st cannot tell",
+            Reach::Unknown => "Fractal cannot tell",
         }
     }
 }
@@ -540,4 +580,6 @@ pub struct Device {
 
 // -------------------------------------------------------------- conversations
 
-pub use fractal_conversation_ui::{Body, Entry, ToolState};
+pub use fractal_conversation_ui::{Body, Entry};
+#[cfg(test)]
+pub use fractal_conversation_ui::ToolState;

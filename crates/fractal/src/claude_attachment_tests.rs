@@ -10,7 +10,7 @@ use axum::{
 };
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
 struct Control {
@@ -26,6 +26,8 @@ struct Control {
     reports: Mutex<Vec<Value>>,
     report_changed: Notify,
     attachment: AtomicU8,  // 0: absent, 1: admitted, 2: failed check
+    /// How long the attachment endpoint takes to answer, as a loaded daemon does.
+    attachment_delay_ms: AtomicU64,
     publication: AtomicU8, // 0: acknowledged, 1: no commit, 2: commit without acknowledgement
     requests: Mutex<Vec<Value>>,
     /// The attachment the mailbox stream pushes once the driver offers `attachment_push`;
@@ -42,6 +44,10 @@ async fn attachment(
     Query(fence): Query<fractal_daemon::mailbox::Fence>,
 ) -> Response {
     control.attachment_checks.fetch_add(1, Ordering::SeqCst);
+    let delay = control.attachment_delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
     let mode = control.attachment.load(Ordering::SeqCst);
     if !control.binding_live.load(Ordering::SeqCst) {
         return (
@@ -203,6 +209,7 @@ impl Fixture {
             reports: Mutex::new(vec![]),
             report_changed: Notify::new(),
             attachment: AtomicU8::new(1),
+            attachment_delay_ms: AtomicU64::new(0),
             publication: AtomicU8::new(0),
             requests: Mutex::new(vec![]),
             push: tokio::sync::watch::channel(None).0,
@@ -234,6 +241,8 @@ impl Fixture {
         Self {
             state: NativeLoopState {
                 mailbox_fence: Some(owner.clone()),
+                // The daemon has answered for as long as `check`'s attach window has run.
+                claude_attachment_answered: Some(Instant::now() - Duration::from_secs(30)),
                 ..Default::default()
             },
             mailbox: NativeMailbox {
@@ -388,6 +397,16 @@ impl Fixture {
 
     fn reports(&self) -> usize {
         self.control.reports.lock().unwrap().len()
+    }
+
+    fn phases(&self) -> Vec<String> {
+        self.control
+            .store
+            .claims_for(&self.control.owner.subject, Some("harness.diagnostic"))
+            .unwrap()
+            .into_iter()
+            .map(|r| r.body["fields"]["status"].as_str().unwrap().into())
+            .collect()
     }
 
     fn codes(&self) -> Vec<String> {
@@ -811,6 +830,7 @@ async fn claude_attachment_publication_transient_api_errors_retain_the_identical
         (409, "idempotency-conflict"),
         (429, "rate-limited"),
         (422, "mailbox-session-starting"), // Actual store::check_mailbox_incarnation code.
+        (422, "mailbox-runtime-indeterminate"),
         (422, "unbound-mailbox"),
         (503, "internal"),
     ] {
@@ -1392,6 +1412,54 @@ async fn attachment_push_replaces_the_per_tick_poll() {
     assert_eq!(f.codes(), vec!["claude-channel-attached"]);
 }
 
+// A daemon that never pushes (or a reconnect still waiting for its first frame) no longer gets a
+// GET every one-second tick once the phase is settled: one per ten seconds, and a change is still
+// seen and published at the next recheck.
+#[tokio::test]
+async fn an_unpushed_settled_phase_is_rechecked_every_ten_seconds_not_every_tick() {
+    let mut f = Fixture::new().await;
+    let start = 1_000_000_u64;
+    // A minute of one-second control ticks, as driver_cli runs them.
+    async fn ticks(f: &mut Fixture, from: u64, seconds: u64) {
+        for second in 0..seconds {
+            if claude_attachment_check_due(&f.mailbox, &mut f.state, from + second * 1_000) {
+                f.check().await.unwrap();
+            }
+        }
+    }
+    ticks(&mut f, start, 1).await;
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    let settled = f.gets();
+    ticks(&mut f, start + 1_000, 59).await;
+    // The old loop made 59 more GETs here; now one at 10, 20, 30, 40 and 50 seconds.
+    assert_eq!(f.gets() - settled, 5, "an attached unpushed seat was checked {} times in 59 ticks", f.gets() - settled);
+    assert_eq!(f.codes(), vec!["claude-channel-attached"]);
+
+    // The channel detaches: the next recheck, at most ten seconds later, sees and publishes it.
+    f.control.attachment.store(0, Ordering::SeqCst);
+    let gets = f.gets();
+    ticks(&mut f, start + 60_000, 10).await;
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(
+        f.codes(),
+        vec!["claude-channel-attached", "claude-channel-unattached"]
+    );
+    // Blocked is settled too.
+    ticks(&mut f, start + 70_000, 60).await;
+    assert!(f.gets() <= gets + 8, "{} checks in 70 blocked ticks", f.gets() - gets);
+
+    // A replacement binding is never held back by its predecessor's poll.
+    let now = start + 125_000;
+    assert!(!claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    f.state.claude_attachment_polled.as_mut().unwrap().0.2 = "previous-token".into();
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+    // Nor is a pushed connection: it reads the pushed value and rations its own admissions.
+    f.control.push.send_replace(Some(false));
+    f.check().await.unwrap();
+    f.wait_pushed(Some(false)).await;
+    assert!(claude_attachment_check_due(&f.mailbox, &mut f.state, now));
+}
+
 // Planned T12: a pushed value never authorizes a write. The admission GET before the write can
 // contradict it or refuse it; either way nothing is posted, and the phase never comes from it.
 #[tokio::test]
@@ -1494,4 +1562,54 @@ async fn attachment_frames_never_take_mail_queue_slots() {
         matches!(frame, Some(fractal_daemon::mailbox::Frame::Mailbox { .. })),
         "{frame:?}"
     );
+}
+
+/// A restarting daemon answers "API is not ready" until it serves, then answers before the
+/// driver's channel report reaches it. Neither is a lost channel: the attached seat publishes
+/// nothing while the checks fail, and its attach window counts from the daemon's first answer.
+#[tokio::test]
+async fn a_daemon_that_cannot_answer_yet_never_blocks_an_attached_channel() {
+    let mut f = Fixture::new().await;
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    f.control.attachment.store(2, Ordering::SeqCst);
+    for _ in 0..3 {
+        f.check().await.unwrap();
+    }
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert_eq!(f.phases(), ["recovered"]);
+
+    f.control.attachment.store(0, Ordering::SeqCst);
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "starting");
+    // Only a whole window of answers without the channel blocks it.
+    let answered = f.state.claude_attachment_answered.unwrap();
+    f.state.claude_attachment_answered = Some(answered - claude_attachment_window());
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "blocked");
+    assert_eq!(f.phases(), ["recovered", "starting", "blocked"]);
+    f.unchanged_owner();
+}
+
+/// A loaded daemon that takes longer than the check's two seconds says nothing about the channel,
+/// however long the seat has run. The diagnostic waits, as any unadmitted publication does, and
+/// goes out once the daemon answers.
+#[tokio::test]
+async fn a_check_the_daemon_is_too_slow_to_answer_does_not_block_the_channel() {
+    let mut f = Fixture::new().await;
+    f.control.attachment_delay_ms.store(2_200, Ordering::SeqCst);
+    assert!(f.check().await.is_err(), "the publication's own check timed out too");
+    let pending = f.state.claude_attachment_pending.as_ref().unwrap();
+    assert_eq!(pending.phase, "starting");
+    let reason = pending.input.fields["reason"].as_str().unwrap();
+    assert!(reason.contains("exceeded two seconds"), "{reason}");
+    assert_eq!(f.posts(), 0);
+
+    f.control.attachment_delay_ms.store(0, Ordering::SeqCst);
+    f.check().await.unwrap();
+    assert_eq!(f.state.claude_attachment_phase, "attached");
+    assert_eq!(f.phases(), ["starting", "recovered"]);
+    f.unchanged_owner();
 }

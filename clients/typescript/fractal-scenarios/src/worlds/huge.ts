@@ -52,6 +52,7 @@ export const huge: WorldDefinition = {
       ...inherited.details,
       source,
       state: {
+        launches: [], launch_variants: [],
         missions: ctx.cast.missions.map((mission) => resources.mission(ctx, mission, 'running', -60_000)),
         work: ctx.cast.missions.flatMap((mission, missionIndex) => mission.steps.map((_step, step) => resources.work(ctx, {
           mission, step, state: 'claimed', updatedMs: -60_000,

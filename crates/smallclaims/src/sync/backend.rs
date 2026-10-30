@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::answers::{AnswersCheck, AnswersReply, AnswersRequest};
 use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
@@ -106,6 +107,22 @@ pub trait Backend: Clone + Send + Sync + 'static {
         failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> impl Future<Output = Result<()>> + Send;
 
+    /// This node's answers per claim kind (see [`crate::answers`]), or `None` when it keeps
+    /// none, which a peer reads as a build without them. A store this process holds itself keeps
+    /// none: a pass over every claim on request is what a daemon's answers cache avoids. A member
+    /// without answers asks no peer for theirs.
+    fn answers(
+        &self,
+        _request: &AnswersRequest,
+    ) -> impl Future<Output = Result<Option<AnswersReply>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Record what a daily answers check found.
+    fn record_answers_check(&self, _check: &AnswersCheck) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
+
     /// Publish host-local worker progress without adding replicated claims.
     fn record_worker(
         &self,
@@ -139,6 +156,14 @@ impl<S: Borrow<Store>> Local<S> {
 
 /// A redemption as the join route reads it.
 pub fn redemption_answer(store: &Store, redemption: FleetRedemption) -> Result<Value> {
+    let membership = store.fleet_membership()?;
+    let sponsor_endpoints = match membership.state(store.origin()) {
+        crate::fleet::MemberState::Current(member) => member.endpoints.clone(),
+        _ => Vec::new(),
+    };
+    let sponsor_node_id = sponsor_endpoints.iter().find_map(|endpoint| {
+        (endpoint["transport"] == "fabric").then(|| endpoint["node"].as_str()).flatten()
+    });
     Ok(match redemption {
         FleetRedemption::Closed => serde_json::json!({"status": "closed"}),
         FleetRedemption::Refused(reason) => {
@@ -157,6 +182,8 @@ pub fn redemption_answer(store: &Store, redemption: FleetRedemption) -> Result<V
             "anchor_key": store.fleet_anchor()?,
             "fleet_id": store.bound_fleet()?,
             "fabric_protocol": serde_json::Value::Null,
+            "sponsor_node_id": sponsor_node_id,
+            "sponsor_endpoints": sponsor_endpoints,
         }),
     })
 }
@@ -261,7 +288,13 @@ where
     }
 
     async fn redeem(&self, request: &JoinRequest) -> Result<Value> {
-        redemption_answer(self.store(), self.store().redeem_fleet_invite(request)?)
+        let redeemed = self.store().redeem_fleet_invite(request)?;
+        if matches!(redeemed, FleetRedemption::Admitted { .. })
+            && let Some(node_id) = &request.node_id
+        {
+            self.store().verify_fleet_pairing_admission(&request.name, &request.member_key, node_id)?;
+        }
+        redemption_answer(self.store(), redeemed)
     }
 
     async fn fleet_view(&self) -> Result<FleetView> {

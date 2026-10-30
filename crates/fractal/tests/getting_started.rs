@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use fractal_daemon::SeatsStoreCore;
 
 struct Newcomer {
     root: tempfile::TempDir,
@@ -55,6 +56,16 @@ impl Newcomer {
             ),
         )
         .unwrap();
+        // The walkthrough sends to an existing seat; no harness or signing setup is needed.
+        let store = fractal_daemon::store::Store::open(
+            &root.path().join("state/claims.sqlite3"), "studio",
+        ).unwrap();
+        let intent = fractal_daemon::parse_intent(
+            "version 2\nagent \"garden/worker\" { workspace \"/tmp\"; command \"true\"; restart never }\n",
+            store.origin(),
+        ).unwrap();
+        store.apply_internal(&intent, "fixture-walkthrough-recipient").unwrap();
+        drop(store);
         let log = std::fs::File::create(root.path().join("daemon.log")).unwrap();
         let daemon = Self::command(root.path())
             .arg("up")
@@ -81,7 +92,7 @@ impl Newcomer {
     }
 
     fn command(root: &Path) -> Command {
-        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
         command
             .env_clear()
             .env("PATH", Self::path(root))
@@ -185,7 +196,7 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
     let rules = newcomer.try_run(&["rules", "ls"]).unwrap();
     assert!(rules.starts_with("no rules"), "{rules}");
     let lockdown = newcomer.try_run(&["rules", "lockdown"]).unwrap();
-    assert!(lockdown.contains("st rules audit"), "{lockdown}");
+    assert!(lockdown.contains("fractal rules audit"), "{lockdown}");
     let rules = newcomer.try_run(&["rules", "ls"]).unwrap();
     assert_eq!(
         rules

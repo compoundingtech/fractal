@@ -1,30 +1,30 @@
 #!/usr/bin/env node
 /**
- * Live proof of the conversation alert strip against a real, isolated st.
+ * Live proof of the conversation alert strip against a real, isolated Fractal instance.
  *
  *   node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]
  *
- * `up` makes a throwaway st: the instance `webproof` under its own HOME in WEBPROOF_ROOT
- * (default /var/tmp/st-webproof), so neither `~/.st-instance` nor the default install, its
+ * `up` makes a throwaway Fractal instance: `webproof` under its own HOME in WEBPROOF_ROOT
+ * (default /var/tmp/fractal-webproof), so neither `~/.st-instance` nor the default install, its
  * daemon or its service units are touched. It founds a one-machine dial-out fleet, starts the
- * daemon in a transient user unit (`webproof-st-up`), declares person/avery and one program
+ * daemon in a transient user unit (`webproof-fractal-up`), declares person/avery and one program
  * seat, agent/example/atlas, and pairs a full-control device for avery whose bearer credential
  * stays in WEBPROOF_ROOT/authorization (mode 0600, never printed).
  * `run` (the default) brings it up when it is not, has atlas ask avery a yes-or-no question and
  * a structured decision, serves the app on loopback with WF_ST_GATEWAY/WF_ST_AUTHORIZATION set
  * to the instance's paired gateway, opens atlas's conversation in headless Chromium, answers
  * both from the strip (Yes, then the recommended decision; each confirmed with Send) and checks
- * with st that each step finished with that answer. It prints one JSON receipt: `firstDataMs`
+ * with Fractal that each step finished with that answer. It prints one JSON receipt: `firstDataMs`
  * (navigation to the ask in the strip, warm; `coldFirstDataMs` includes Vite's first optimize),
  * and per answer `answerToClearedMs` (Send click to the first frame painted without the alert,
  * against the 2000 ms alert_landed budget), the client requests the answer made, and
- * `alertFrameMs`, when st's collection stream first pushed a frame naming the alert. Earlier
+ * `alertFrameMs`, when Fractal's collection stream first pushed a frame naming the alert. Earlier
  * runs' unanswered asks are cleared first. Screenshots go to OUT (default WEBPROOF_ROOT/out).
  * `down` stops the daemon, uninstalls the instance and removes WEBPROOF_ROOT.
  *
- * Each st command runs in its own transient user unit (`systemd-run --user`) with a scrubbed
+ * Each Fractal command runs in its own transient user unit (`systemd-run --user`) with a scrubbed
  * environment: the daemon attributes a local caller by the ST_AGENT of its process ancestors, so
- * from inside an st seat a plain call would speak for that seat and its daemon. Nothing here
+ * from inside a Fractal seat a plain call would speak for that seat and its daemon. Nothing here
  * reaches the default daemon or any real person.
  *
  * Needs: systemd user manager; ST3_BINARY and PTY_BINARY (default: `st3` and `pty` on PATH);
@@ -41,12 +41,12 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const app = fileURLToPath(new URL('..', import.meta.url))
-const root = process.env.WEBPROOF_ROOT ?? '/var/tmp/st-webproof'
+const root = process.env.WEBPROOF_ROOT ?? '/var/tmp/fractal-webproof'
 const out = process.env.OUT ?? join(root, 'out')
 const instance = 'webproof'
 const person = 'person/avery'
 const seat = 'agent/example/atlas'
-const unit = 'webproof-st-up'
+const unit = 'webproof-fractal-up'
 const home = join(root, 'home')
 const tools = join(root, 'tools')
 const runDir = join(home, '.st-instance', instance, 'run')
@@ -63,7 +63,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const isolated = (argv) => [env, '-i', `HOME=${home}`, `PATH=${tools}:${dirname(sleep)}:/usr/bin:/bin`, `USER=${process.env.USER ?? 'webproof'}`, 'LANG=C.UTF-8', 'SHELL=/bin/sh', ...argv]
 const st = (args, { check = true } = {}) => {
   const result = spawnSync('systemd-run', ['--user', '--wait', '--pipe', '--collect', '--quiet', ...isolated([join(tools, 'st3'), '--instance', instance, ...args])], { encoding: 'utf8' })
-  if (check && result.status !== 0) throw new Error(`st ${args.join(' ')} exited ${result.status}: ${result.stderr || result.stdout}`)
+  if (check && result.status !== 0) throw new Error(`Fractal ${args.join(' ')} exited ${result.status}: ${result.stderr || result.stdout}`)
   return result
 }
 const stJson = (args) => JSON.parse(st(['--json', ...args]).stdout)
@@ -106,7 +106,7 @@ async function start() {
   mkdirSync(join(root, 'workspace'), { recursive: true })
   if (!existsSync(join(tools, 'st3'))) {
     copyFileSync(process.env.ST3_BINARY ?? which('st3'), join(tools, 'st3'))
-    copyFileSync(process.env.PTY_BINARY ?? which('pty'), join(tools, 'pty')) // st3 finds pty beside itself
+    copyFileSync(process.env.PTY_BINARY ?? which('pty'), join(tools, 'pty')) // Fractal finds pty beside itself
     chmodSync(join(tools, 'st3'), 0o755); chmodSync(join(tools, 'pty'), 0o755)
     symlinkSync('st3', join(tools, 'st'))
   }
@@ -130,8 +130,8 @@ async function start() {
 function down() {
   // WEBPROOF_ROOT comes from the environment: act only on a directory this script made,
   // so a wrong root neither uninstalls nor deletes anything.
-  if (!basename(root).startsWith('st-webproof') || !existsSync(join(root, 'fleet-created'))) {
-    console.error(`not removing ${root}: it is not named st-webproof* or has no fleet-created marker from this script`)
+  if (!basename(root).startsWith('fractal-webproof') || !existsSync(join(root, 'fleet-created'))) {
+    console.error(`not removing ${root}: it is not named fractal-webproof* or has no fleet-created marker from this script`)
     process.exitCode = 1
     return
   }
@@ -144,7 +144,7 @@ function down() {
   console.log(`removed ${root}`)
 }
 
-/** The step behind an alert, as st reports it once answered. */
+/** The step behind an alert, as Fractal reports it once answered. */
 const stepAnswer = (step) => {
   const view = stJson(['work', 'show', step]).value
   const last = view.person_answers?.at(-1)

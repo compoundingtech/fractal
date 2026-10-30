@@ -123,7 +123,7 @@ def read_pins(source=None):
 def release_pin(tag, releases):
     if tag not in {row['tag_name'] for row in releases}:
         raise BaselineError(f'{tag} is not a published stable release')
-    with tempfile.TemporaryDirectory(prefix='smalltalk-compat-release-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='fractal-compat-release-') as temporary:
         dist = Path(temporary)
         run('gh', 'release', 'download', tag, '--repo', repository(), '--dir', str(dist),
             '--pattern', 'RELEASE.json', '--pattern', 'SHA256SUMS', '--pattern', 'smalltalk-*.tar.gz')

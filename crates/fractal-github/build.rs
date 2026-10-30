@@ -4,7 +4,7 @@ fn main() {
         let bash = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
             .map(|directory| directory.join("bash"))
             .find(|candidate| candidate.is_file())
-            .expect("st3 fixture tests need bash on the build PATH");
+            .expect("Fractal fixture tests need bash on the build PATH");
         println!("cargo:rustc-env=ST3_FIXTURE_BASH={}", bash.display());
         println!(
             "cargo:rustc-env=ST3_FIXTURE_PATH={}",

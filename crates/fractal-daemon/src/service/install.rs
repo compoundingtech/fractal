@@ -177,7 +177,7 @@ pub(super) fn launchd(
             ));
         }
         return Err(error)
-            .context("the launchd install failed; st restored the prior service definition");
+            .context("the launchd install failed; Fractal restored the prior service definition");
     }
     println!("plist\t{}", plist.display());
     if spec.config.fleet_id.is_some() {
@@ -250,7 +250,7 @@ pub(super) fn systemd(
             ));
         }
         return Err(error)
-            .context("the systemd install failed; st restored the prior service definition");
+            .context("the systemd install failed; Fractal restored the prior service definition");
     }
     println!("unit\t{}", unit_path.display());
     if spec.config.fleet_id.is_some() {

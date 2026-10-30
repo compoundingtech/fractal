@@ -31,7 +31,7 @@ for (const request of sessionTraceFixture.requests) {
 }
 const compactions = sessionTraceFixture.events.flatMap((event) => event._tag === 'compaction' ? [{ tMs: event.ts, sessionId: event.sessionId }] : [])
 
-const stContextMeter={reportedPercent:unknown,usedTokens:known(61206,'st'),windowTokens:known(1000000,'st'),compactions:known(6,'st'),lastCompactionMs:known(asOfMs-644758,'st')}
+const fractalContextMeter={reportedPercent:unknown,usedTokens:known(61206,'st'),windowTokens:known(1000000,'st'),compactions:known(6,'st'),lastCompactionMs:known(asOfMs-644758,'st')}
 const unavailableUsdMetadata={
  mainUsdScope:unattributedScope,mainUsdWindow:unknown,mainUsdCoverage:{_tag:'Unavailable',reason:'no-provider'},
  subagentUsdScope:unattributedScope,subagentUsdWindow:unknown,subagentUsdCoverage:{_tag:'Unavailable',reason:'no-provider'},
@@ -46,7 +46,7 @@ export const fullTraceFixture: TraceSeries = {
   subagentCount:known(children.length),
   subagentsWindow:retainedWindow,
   meters: {
-    context: stContextMeter,
+    context: fractalContextMeter,
     spend: { usdScope:{_tag:'IncludingSubagents'}, tokensScope:{_tag:'IncludingSubagents'}, usdWindow:retainedWindow,totalUsdCoverage:attributedCoverage,mainUsdScope:{_tag:'Self'},mainUsdWindow:retainedWindow,mainUsdCoverage:{_tag:'Complete'},subagentUsdScope:{_tag:'IncludingSubagents'},subagentUsdWindow:retainedWindow,subagentUsdCoverage:attributedCoverage, totalUsd: known(scene.totals.usd), mainUsd: known(main.totalUsd), subagentUsd: known(children.reduce((sum, lane) => sum + lane.totalUsd, 0)), tokens: known(scene.lanes.reduce((sum, lane) => sum + lane.tokens.total, 0)), tokensWindow: retainedWindow, split: known(split) },
   },
   series: known({ range: '1d', bucketMs, points: [...buckets.values()].toSorted((a, b) => a.tMs - b.tMs), compactions, coverage: { harnesses: ['omp'], requestsIncluded: sessionTraceFixture.coverage.includedRequests, requestsTotal: sessionTraceFixture.coverage.totalRequests, oldestMs: sessionTraceFixture.windowStart } }),
@@ -55,14 +55,14 @@ export const fullTraceFixture: TraceSeries = {
   history: known([{ nativeSessionId: main.session.id, startedMs: main.session.startedAt, endedMs: main.session.endedAt, usd: main.totalUsd, compactions: main.compactionCount }]),
 }
 
-/** Captured st totals have no child dimension; neither self nor inclusive scope is proven. */
+/** Captured Fractal totals have no child dimension; neither self nor inclusive scope is proven. */
 export const partialTraceFixture: TraceSeries = {
   agentId: 'agent/example-worker-1', nativeSessionId: known('session-example', 'st'),
   coverage:{_tag:'Unavailable',reason:'no-provider'},
   subagentCount:unknown,
   subagentsWindow:unknown,
   meters: {
-    context: stContextMeter,
+    context: fractalContextMeter,
     spend: { ...unavailableUsdMetadata,usdScope:unattributedScope, tokensScope:unattributedScope, usdWindow:unknown, totalUsd: unknown, mainUsd: unknown, subagentUsd: unknown, tokens: known(480035214, 'st'), tokensWindow:unknown, split: unknown },
   },
   series: unknown, turns: unknown, subagents: unknown, history: unknown,

@@ -34,7 +34,7 @@ impl Store {
     /// Open divergence faults at the last check, or `None` when this daemon has not checked.
     /// Reads nothing from the store, so the SLO can show it on every sample.
     pub fn open_divergences_at_last_check(&self) -> Option<u64> {
-        *self.smalltalk.open_divergences.lock().unwrap()
+        *self.fractal.open_divergences.lock().unwrap()
     }
 
 }

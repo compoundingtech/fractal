@@ -1,5 +1,5 @@
 //! Terminals that draw images also make an address clickable when it is wrapped in an OSC 8
-//! hyperlink, and they open it on the person's own machine even when stui runs over SSH.
+//! hyperlink, and they open it on the person's own machine even when Fractal TUI runs over SSH.
 //! Ratatui counts the width of a cell's text, so the escape cannot ride inside a cell: after a
 //! frame is drawn the few link cells are written again, between the open and close sequences.
 
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn an_address_in_a_message_is_marked_with_the_cells_that_draw_it() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.world.conversations.insert(
             agent.clone(),
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn only_visible_web_addresses_are_marked() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();

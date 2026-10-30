@@ -7,11 +7,13 @@ mod checkout;
 pub use checkout::{agent_branch, checkout_label};
 mod contract;
 pub mod device;
+pub mod fabric;
 pub mod follow;
 mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+pub mod scenarios;
 pub use contract::*;
 pub use generated::*;
 mod identities;
@@ -44,8 +46,8 @@ pub const DEFAULT_ASSISTANT_RESPONSE_BYTES: usize = 4096;
 pub const MAX_ASSISTANT_RESPONSE_BYTES: usize = 16384;
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
 const STREAM_HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-const RAW_TERMINAL_SUBPROTOCOL: &str = "st3.client.pty.v0";
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
+const RAW_TERMINAL_SUBPROTOCOL: &str = "fractal.client.pty.v0";
 const RAW_TERMINAL_CHUNK_BYTES: usize = 16_384;
 
 /// Resolve the local daemon socket in the same order as the `st3` CLI.
@@ -116,7 +118,13 @@ fn xdg_path(variable: &str, home_suffix: &str) -> Result<PathBuf, ClientError> {
 #[derive(Clone, Debug)]
 pub enum Endpoint {
     Unix(PathBuf),
+    Fabric(fabric::FabricEndpoint),
     FabricLoopback(String),
+}
+
+enum TransportEndpoint<'a> {
+    Unix(std::borrow::Cow<'a, Path>),
+    FabricLoopback(&'a str),
 }
 
 /// The name and build this process reports to st in the `x-st3-client` header, for example
@@ -432,13 +440,17 @@ impl Capabilities {
     pub fn grants(&self, id: &str, version: u32) -> bool {
         self.capabilities.iter().any(|capability| {
             capability.id == id
-                && capability.version >= version
+                && capability.version >= u64::from(version)
                 && capability.state == CapabilityState::Granted
         })
     }
 }
 
 impl CollectionStream {
+    /// Follow the complete unfiltered roster as version-1 publications, not a held window.
+    pub async fn subscribe_agents_publication(&mut self, id: &str) -> Result<(), ClientError> {
+        self.send(&agents_publication_command(id)).await
+    }
     pub async fn subscribe_glasses(&mut self, id: &str) -> Result<(), ClientError> {
         self.subscribe(id, "glasses", 100, None, None).await
     }
@@ -455,6 +467,16 @@ impl CollectionStream {
             command["subject"] = serde_json::json!(subject);
         }
         self.send(&command).await
+    }
+
+    pub async fn subscribe_ordered_memberships(
+        &mut self,
+        id: &str,
+        person: &str,
+        subject: &str,
+        limit: usize,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"ordered-memberships", "person":person, "subject":subject, "limit":limit})).await
     }
     pub async fn subscribe(
         &mut self,
@@ -645,22 +667,79 @@ impl ConversationStream {
     }
 }
 
+fn agents_publication_command(id: &str) -> serde_json::Value {
+    serde_json::json!({"kind":"subscribe", "id":id, "collection":"agents", "agents_publication_version":1})
+}
+
 /// One frame from a collection socket.
 #[derive(Debug)]
 pub enum CollectionEvent {
     /// A subscription's first window, and the window again after a resubscribe.
     Snapshot {
         id: String,
+        collection: String,
         snapshot: Snapshot,
         items: Vec<Resource>,
         order: Vec<String>,
         has_more: bool,
+        /// This host's replication when the frame was built, on the collections that carry it.
+        /// `None` when the frame has none (an older daemon) or it could not be read: unknown.
+        sync: Option<StreamSync>,
     },
     /// What changed in the window since the last frame, with its complete new order.
     Changes {
         id: String,
+        collection: String,
         snapshot: Snapshot,
         upserts: Vec<Resource>,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+        /// This host's replication, only when it changed since the subscription's last frame.
+        sync: Option<StreamSync>,
+    },
+    /// An `ordered-memberships` subscription's first window, and again after a resubscribe.
+    /// `membership` describes the whole container, including members outside the window.
+    MembershipSnapshot {
+        id: String,
+        snapshot: Snapshot,
+        membership: OrderedMembershipState,
+        items: Vec<OrderedMembership>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// What changed in an `ordered-memberships` window, with its complete new order. A frame
+    /// whose rows, order, and `has_more` repeat the window still reports a new `membership`:
+    /// the container changed outside the window.
+    MembershipChanges {
+        id: String,
+        snapshot: Snapshot,
+        membership: OrderedMembershipState,
+        upserts: Vec<OrderedMembership>,
+        removes: Vec<String>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// Stage contiguous chunks privately; install only after the final chunk.
+    AgentsSnapshotChunk {
+        id: String,
+        collection: String,
+        snapshot: Snapshot,
+        publication: AgentsPublicationMetadata,
+        chunk_index: u64,
+        chunk_count: u64,
+        items: Vec<Agent>,
+        order: Vec<String>,
+        has_more: bool,
+    },
+    /// Apply atomically only when epoch and the applied base revision match.
+    AgentsChanges {
+        id: String,
+        collection: String,
+        snapshot: Snapshot,
+        publication: AgentsPublicationMetadata,
+        base_revision: u64,
+        upserts: Vec<Agent>,
         removes: Vec<String>,
         order: Vec<String>,
         has_more: bool,
@@ -668,12 +747,14 @@ pub enum CollectionEvent {
     /// A terminal subscription's whole current screen; it replaces every earlier one.
     Screen {
         id: String,
+        collection: String,
         screen: Box<Envelope<TerminalScreen>>,
     },
     /// A conversation's entries. `replace` means these are its newest page and every earlier
     /// entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
         id: String,
+        collection: String,
         session_id: String,
         replace: bool,
         items: Vec<TimelineEntry>,
@@ -690,15 +771,32 @@ pub enum CollectionEvent {
     /// whose owner cannot be reached; the server keeps retrying.
     Resync {
         id: String,
+        collection: Option<String>,
+        retryable: Option<bool>,
         code: Option<ErrorCode>,
         message: Option<String>,
     },
     /// The subscription failed or ended; the socket and other subscriptions continue.
     Error {
         id: String,
+        collection: Option<String>,
+        retryable: Option<bool>,
         code: Option<ErrorCode>,
         message: String,
     },
+}
+
+impl<'de> serde::Deserialize<'de> for CollectionEvent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_frame(serde_json::Value::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// A frame's `sync`, when it has one this client can read. A malformed one is no reason to drop
+/// the frame: it reads as none, unknown, like a frame from a daemon that sends none.
+fn stream_sync(frame: &serde_json::Value) -> Option<StreamSync> {
+    serde_json::from_value(frame.get("sync")?.clone()).ok()
 }
 
 impl CollectionEvent {
@@ -712,24 +810,120 @@ impl CollectionEvent {
                     ClientError::Protocol(format!("collection frame `{name}`: {error}"))
                 })
         }
-        let id = field::<String>(&frame, "id")?;
+        let kind = frame.get("kind").and_then(serde_json::Value::as_str);
+        // Reserved publication fields select that grammar; unknown extension keys do not.
+        let publication_frame = ["publication", "chunk_index", "chunk_count", "base_revision"]
+            .iter()
+            .any(|key| frame.get(key).is_some());
+        let id = if kind == Some("error") {
+            field::<Option<String>>(&frame, "id")?.unwrap_or_default()
+        } else {
+            field::<String>(&frame, "id")?
+        };
+        if publication_frame {
+            if (kind == Some("snapshot") && frame.get("base_revision").is_some())
+                || (kind == Some("changes")
+                    && ["chunk_index", "chunk_count"]
+                        .iter()
+                        .any(|key| frame.get(key).is_some()))
+            {
+                return Err(ClientError::Protocol(
+                    "mixed agents publication frame grammar".into(),
+                ));
+            }
+            let collection: String = field(&frame, "collection")?;
+            let snapshot: Snapshot = field(&frame, "snapshot")?;
+            let has_more: bool = field(&frame, "has_more")?;
+            if collection != "agents" || has_more || snapshot.published_at.is_none() {
+                return Err(ClientError::Protocol(
+                    "invalid agents publication envelope".into(),
+                ));
+            }
+            let publication = field(&frame, "publication")?;
+            return match kind {
+                Some("snapshot") => {
+                    let chunk_index = field::<u64>(&frame, "chunk_index")?;
+                    let chunk_count = field::<u64>(&frame, "chunk_count")?;
+                    if chunk_count == 0 || chunk_index >= chunk_count {
+                        return Err(ClientError::Protocol(
+                            "invalid agents snapshot chunk index/count".into(),
+                        ));
+                    }
+                    Ok(Self::AgentsSnapshotChunk {
+                        id,
+                        collection,
+                        snapshot,
+                        publication,
+                        chunk_index,
+                        chunk_count,
+                        items: field(&frame, "items")?,
+                        order: field(&frame, "order")?,
+                        has_more,
+                    })
+                }
+                Some("changes") => {
+                    let base_revision = field::<u64>(&frame, "base_revision")?;
+                    if !(1..=9_007_199_254_740_991).contains(&base_revision) {
+                        return Err(ClientError::Protocol("invalid agents base revision".into()));
+                    }
+                    Ok(Self::AgentsChanges {
+                        id,
+                        collection,
+                        snapshot,
+                        publication,
+                        base_revision,
+                        upserts: field(&frame, "upserts")?,
+                        removes: field(&frame, "removes")?,
+                        order: field(&frame, "order")?,
+                        has_more,
+                    })
+                }
+                _ => Err(ClientError::Protocol(format!(
+                    "unknown publication frame kind {kind:?}"
+                ))),
+            };
+        }
+        let memberships = frame.get("collection").and_then(serde_json::Value::as_str)
+            == Some("ordered-memberships");
         match frame.get("kind").and_then(serde_json::Value::as_str) {
-            Some("snapshot") => Ok(Self::Snapshot {
+            Some("snapshot") if memberships => Ok(Self::MembershipSnapshot {
                 snapshot: field(&frame, "snapshot")?,
+                membership: field(&frame, "membership")?,
                 items: field(&frame, "items")?,
                 order: field(&frame, "order")?,
                 has_more: field(&frame, "has_more")?,
                 id,
             }),
-            Some("changes") => Ok(Self::Changes {
+            Some("changes") if memberships => Ok(Self::MembershipChanges {
                 snapshot: field(&frame, "snapshot")?,
+                membership: field(&frame, "membership")?,
                 upserts: field(&frame, "upserts")?,
                 removes: field(&frame, "removes")?,
                 order: field(&frame, "order")?,
                 has_more: field(&frame, "has_more")?,
                 id,
             }),
+            Some("snapshot") => Ok(Self::Snapshot {
+                collection: field(&frame, "collection")?,
+                snapshot: field(&frame, "snapshot")?,
+                items: field(&frame, "items")?,
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+                sync: stream_sync(&frame),
+                id,
+            }),
+            Some("changes") => Ok(Self::Changes {
+                collection: field(&frame, "collection")?,
+                snapshot: field(&frame, "snapshot")?,
+                upserts: field(&frame, "upserts")?,
+                removes: field(&frame, "removes")?,
+                order: field(&frame, "order")?,
+                has_more: field(&frame, "has_more")?,
+                sync: stream_sync(&frame),
+                id,
+            }),
             Some("screen") => Ok(Self::Screen {
+                collection: field(&frame, "collection")?,
                 screen: Box::new(Envelope {
                     api_version: API_VERSION.into(),
                     request_id: String::new(),
@@ -739,6 +933,7 @@ impl CollectionEvent {
                 id,
             }),
             Some("conversation") => Ok(Self::Conversation {
+                collection: field(&frame, "collection")?,
                 session_id: field(&frame, "session_id")?,
                 replace: field(&frame, "replace")?,
                 items: field(&frame, "items")?,
@@ -748,22 +943,17 @@ impl CollectionEvent {
                 id,
             }),
             Some("resync") => Ok(Self::Resync {
-                code: frame
-                    .get("code")
-                    .cloned()
-                    .and_then(|code| serde_json::from_value(code).ok()),
-                message: frame
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                collection: field(&frame, "collection")?,
+                retryable: field(&frame, "retryable")?,
+                code: field(&frame, "code")?,
+                message: field(&frame, "message")?,
                 id,
             }),
             Some("error") => Ok(Self::Error {
-                code: frame
-                    .get("code")
-                    .cloned()
-                    .and_then(|code| serde_json::from_value(code).ok()),
-                message: field::<Option<String>>(&frame, "message")?.unwrap_or_default(),
+                collection: field(&frame, "collection")?,
+                retryable: field(&frame, "retryable")?,
+                code: field(&frame, "code")?,
+                message: field(&frame, "message")?,
                 id,
             }),
             other => Err(ClientError::Protocol(format!(
@@ -837,26 +1027,40 @@ impl ClientError {
         matches!(self, ClientError::Transport(_)) || self.applied() == Some("unknown")
     }
 
-    /// What went wrong in words a person reads: no codes and no Rust names. st's own message
-    /// follows where it says something the sentence does not.
+    /// Stable plain diagnostic used by gate reports and other machine/durable consumers.
+    /// Keep its legacy wording; use `human()` only at a human presentation boundary.
     pub fn plain(&self) -> String {
+        self.render_plain(false)
+    }
+
+    /// Human-only diagnostic. Does not mutate the server envelope or stored message.
+    pub fn human(&self) -> String {
+        self.render_plain(true)
+    }
+
+    fn render_plain(&self, human: bool) -> String {
+        let product = if human { "Fractal" } else { "st" };
         match self {
             ClientError::Api(..) if self.applied() == Some("unknown") => {
-                "st may have taken it and has not confirmed it yet; sending it again is safe".into()
+                format!(
+                    "{product} may have taken it and has not confirmed it yet; sending it again is safe"
+                )
             }
-            ClientError::Api(code, message, _) => plain_message(Some(code), message),
+            ClientError::Api(code, message, _) => render_message(Some(code), message, human),
             ClientError::Transport(message) if message.contains("deadline") => {
-                "st took too long to answer; it may or may not have done it".into()
+                format!("{product} took too long to answer; it may or may not have done it")
             }
-            ClientError::Transport(message) => format!("the connection to st broke ({message})"),
+            ClientError::Transport(message) => {
+                format!("the connection to {product} broke ({message})")
+            }
             ClientError::Unreachable(unreachable) => {
                 format!(
-                    "st is not answering at {} (restarting?)",
+                    "{product} is not answering at {} (restarting?)",
                     unreachable.endpoint
                 )
             }
             ClientError::Protocol(message) => {
-                format!("st sent something this client cannot read ({message})")
+                format!("{product} sent something this client cannot read ({message})")
             }
         }
     }
@@ -892,8 +1096,18 @@ impl ClientError {
 /// begins with it keeps st's own words.
 pub const PROMPT_REFUSAL_PREFIX: &str = "that prompt ";
 
-/// An error st sent (a code, when it gave one, and its message) as a person reads it.
+/// Stable diagnostic wording for machine/durable consumers, including gate reports.
 pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
+    render_message(code, message, false)
+}
+
+/// Human-only rendering of an API error; raw code and message remain unchanged.
+pub fn human_message(code: Option<&ErrorCode>, message: &str) -> String {
+    render_message(code, message, true)
+}
+
+fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> String {
+    let product = if human { "Fractal" } else { "st" };
     let Some(code) = code else {
         return message.to_owned();
     };
@@ -906,7 +1120,7 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         // answered elsewhere or replaced, or only its terminal can answer it.
         ErrorCode::StaleFence if message.starts_with(PROMPT_REFUSAL_PREFIX) => message.to_owned(),
         ErrorCode::StaleFence => {
-            "st changed while this was on its way, so it was not applied".into()
+            format!("{product} changed while this was on its way, so it was not applied")
         }
         ErrorCode::PageCursorExpired | ErrorCode::CursorGap => {
             "the list changed while it was being read".into()
@@ -915,23 +1129,36 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
             Some(host) => format!("{host} cannot be reached right now"),
             None => "the host this lives on cannot be reached right now".into(),
         },
-        ErrorCode::RateLimited => "st asked to slow down for a moment".into(),
+        ErrorCode::RateLimited => format!("{product} asked to slow down for a moment"),
         ErrorCode::RuntimeAuthorityIndeterminate => {
-            "st cannot tell yet which host runs this".into()
+            format!("{product} cannot tell yet which host runs this")
         }
         ErrorCode::RuntimeListNotReady => {
-            "st is still preparing the runtime list; try again shortly".into()
+            format!("{product} is still preparing the runtime list; try again shortly")
         }
-        ErrorCode::RuntimeListEnded => "the runtime list stopped updating; restart st".into(),
+        ErrorCode::AgentRosterNotReady => {
+            format!("{product} is still preparing the agents roster; try again shortly")
+        }
+        ErrorCode::RuntimeListEnded => {
+            "the runtime list stopped updating; restart fractal".into()
+        }
         ErrorCode::IdempotencyConflict => {
             "this was already sent once in another form, so it was not sent again".into()
         }
         ErrorCode::UnsupportedCapability => {
-            format!("this st does not do that yet ({message})")
+            format!("this {product} does not do that yet ({message})")
+        }
+        ErrorCode::PeerTooOld => {
+            "This host runs an older Fractal version; update it to open subagent conversations.".into()
         }
         ErrorCode::NotFound => format!("it is gone: {message}"),
         ErrorCode::Forbidden => format!("not allowed: {message}"),
-        ErrorCode::Internal => format!("st hit a problem: {message}"),
+        ErrorCode::Internal => format!("{product} hit a problem: {message}"),
+        ErrorCode::TimelineHistoryIncomplete
+            if human && message == "the retained transcript starts after its first entries; st cannot show it from the start" =>
+        {
+            "the retained transcript starts after its first entries; Fractal cannot show it from the start".into()
+        }
         ErrorCode::TimelineHistoryIncomplete
         | ErrorCode::InventoryUnavailable
         | ErrorCode::ConversationContentInvalidated
@@ -942,7 +1169,9 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::UnsupportedMediaType => {
             "only PNG, JPEG, GIF and WebP images can be attached".into()
         }
-        ErrorCode::BlobContentMismatch => "the file is not the kind of image it says it is".into(),
+        ErrorCode::BlobContentMismatch => {
+            "the file is not the kind of image it says it is".into()
+        }
         ErrorCode::BlobQuotaExceeded => {
             "too many images were uploaded recently; try again later".into()
         }
@@ -961,17 +1190,22 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         ErrorCode::ResponseBudgetExceeded => {
             "the answer is larger than the requested response budget".into()
         }
-        ErrorCode::ContentNotText => {
-            "this content is not plain text, so it was not returned".into()
-        }
+        ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::InvalidAnswer
+        | ErrorCode::NotAnswerable
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
+        | ErrorCode::AgentsPublicationRowTooLarge
         | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::SuspendAuthoredSessionSelection
+        | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
+        | ErrorCode::PrivateNotesCarrierConflict
+        | ErrorCode::PrivateNotesUnreachable
+        | ErrorCode::PrivateNotesIndeterminate
         | ErrorCode::ArrangementExists
         | ErrorCode::ArrangementFolderExists
         | ErrorCode::ArrangementRetired
@@ -986,6 +1220,15 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::InvalidArrangementFolder
         | ErrorCode::InvalidArrangementName
         | ErrorCode::InvalidArrangementKey
+        | ErrorCode::InvalidArrangementVersion
+        | ErrorCode::InvalidArrangementBody
+        | ErrorCode::UnsupportedMembershipContainer
+        | ErrorCode::MembershipOwnerForbidden
+        | ErrorCode::InvalidMembershipMember
+        | ErrorCode::InvalidMembershipBucket
+        | ErrorCode::InvalidMembershipKey
+        | ErrorCode::InvalidMembershipOperations
+        | ErrorCode::MembershipEditTooLarge
         | ErrorCode::InvalidSubjectReference
         | ErrorCode::RecipientRetired
         | ErrorCode::IdentityCycle
@@ -995,6 +1238,8 @@ pub fn plain_message(code: Option<&ErrorCode>, message: &str) -> String {
         | ErrorCode::IdentityUnknown
         | ErrorCode::LifecycleUnavailable
         | ErrorCode::RetirementUpgradeRequired
+        | ErrorCode::InvalidCustodySuccessor
+        | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
         | ErrorCode::Unknown => message.to_owned(),
     }
@@ -1089,9 +1334,9 @@ impl Client {
 
     fn features(&self) -> &'static str {
         if self.messages_paging {
-            "custom-subjects.v1, conversation-blocks.v1, messages-paging.v2"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2"
         } else {
-            "custom-subjects.v1, conversation-blocks.v1"
+            "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1"
         }
     }
 
@@ -1114,6 +1359,34 @@ impl Client {
         self.announce_outage_wait = announce;
         self
     }
+    /// Connect natively through the local Fabric daemon, without an HTTP proxy.
+    pub fn fabric(endpoint: fabric::FabricEndpoint) -> Self {
+        let mut client = Self::unix(Path::new(""));
+        client.endpoint = Endpoint::Fabric(endpoint);
+        client
+    }
+
+    /// Attach a paired credential to this transport. Fabric trust does not replace API auth.
+    pub fn with_credential(mut self, credential: impl Into<String>) -> Self {
+        self.credential = Some(credential.into());
+        self
+    }
+
+    async fn transport_endpoint(&self, path: &str) -> Result<TransportEndpoint<'_>, ClientError> {
+        match &self.endpoint {
+            Endpoint::Unix(socket) => {
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Borrowed(socket)))
+            }
+            Endpoint::Fabric(endpoint) => {
+                fabric::FabricEndpoint::validate_path(path)?;
+                Ok(TransportEndpoint::Unix(std::borrow::Cow::Owned(
+                    endpoint.dial().await?,
+                )))
+            }
+            Endpoint::FabricLoopback(base) => Ok(TransportEndpoint::FabricLoopback(base)),
+        }
+    }
+
     pub fn unix(path: impl AsRef<Path>) -> Self {
         Self {
             endpoint: Endpoint::Unix(path.as_ref().to_owned()),
@@ -1786,6 +2059,36 @@ impl Client {
         .await
     }
 
+    pub async fn harness_questions(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/harness-questions{suffix}"))
+            .await
+    }
+    pub async fn harness_question(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<HarnessQuestion>, ClientError> {
+        self.get(&format!(
+            "/v1/client/harness-questions/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
@@ -1807,6 +2110,13 @@ impl Client {
     }
     pub async fn custom_subjects_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("custom-subjects", id).await
+    }
+    pub async fn private_notes_get(
+        &self,
+        uri: &str,
+    ) -> Result<Envelope<PrivateNotesSubject>, ClientError> {
+        self.get(&format!("/v1/client/private-notes/{}", percent_encode(uri)))
+            .await
     }
     pub async fn host_repositories(
         &self,
@@ -2372,6 +2682,28 @@ impl Client {
         ))
         .await
     }
+    pub async fn arrangements_memberships(
+        &self,
+        person_name: &str,
+        uuid: &str,
+        person: &str,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<OrderedMembershipPage>, ClientError> {
+        let mut path = format!(
+            "/v1/client/arrangements/{}/{}/memberships?person={}",
+            percent_encode(person_name),
+            percent_encode(uuid),
+            percent_encode(person)
+        );
+        if let Some(cursor) = cursor {
+            path.push_str(&format!("&cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            path.push_str(&format!("&limit={limit}"));
+        }
+        self.get(&path).await
+    }
     pub async fn glasses_list(
         &self,
         cursor: Option<&str>,
@@ -2545,6 +2877,18 @@ impl Client {
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
+    pub async fn arrangement_membership_edit(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ArrangementMembershipEditParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request =
+            ActionRequest::arrangement_membership_edit(id, idempotency_key, fence, parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
     pub async fn attention_resolve(
         &self,
         id: impl Into<String>,
@@ -2564,6 +2908,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -2785,6 +3140,17 @@ impl Client {
         parameters: TargetParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::pairing_revoke(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn private_notes_write(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PrivateNotesWriteParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::private_notes_write(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -3487,10 +3853,10 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // WebSocket names switch independently of the unchanged HTTP headers.
             let protocols = capability.map_or_else(
                 || RAW_TERMINAL_SUBPROTOCOL.to_owned(),
-                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+                |capability| format!("{RAW_TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             );
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
@@ -3502,8 +3868,8 @@ impl Client {
         let config = WebSocketConfig::default()
             .max_message_size(Some(HARD_MAX_RESPONSE_BYTES))
             .max_frame_size(Some(HARD_MAX_RESPONSE_BYTES));
-        match &self.endpoint {
-            Endpoint::Unix(socket) => {
+        match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(socket) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(socket),
@@ -3529,7 +3895,7 @@ impl Client {
                 validate_raw_terminal_subprotocol(&response)?;
                 raw_terminal_connector(websocket, mode == RawTerminalMode::Peek)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3568,8 +3934,8 @@ impl Client {
             "/v1/client/terminals/{}/stream{suffix}",
             percent_encode_segment(terminal_id.trim_start_matches("terminal/"))
         );
-        let socket = match &self.endpoint {
-            Endpoint::Unix(socket) => {
+        let socket = match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(socket) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(socket),
@@ -3598,7 +3964,7 @@ impl Client {
                 validate_terminal_subprotocol(&response)?;
                 TerminalSocket::Unix(websocket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3644,15 +4010,15 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.collections.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.collections.v0"),
             );
             Ok(request)
         };
-        let socket = match &self.endpoint {
-            Endpoint::Unix(path) => {
+        let socket = match &self.transport_endpoint(path).await? {
+            TransportEndpoint::Unix(path) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(path),
@@ -3674,7 +4040,7 @@ impl Client {
                 validate_collection_subprotocol(&response)?;
                 TerminalSocket::Unix(socket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3749,15 +4115,15 @@ impl Client {
                 None,
                 self.features(),
             )?;
-            // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+            // Offer one alias: #3430 receivers reject dual surface offers.
             request.headers_mut().insert(
                 hyper::header::SEC_WEBSOCKET_PROTOCOL,
-                hyper::header::HeaderValue::from_static("st3.client.conversation.v0"),
+                hyper::header::HeaderValue::from_static("fractal.client.conversation.v0"),
             );
             Ok(request)
         };
-        let socket = match &self.endpoint {
-            Endpoint::Unix(path) => {
+        let socket = match &self.transport_endpoint(&path).await? {
+            TransportEndpoint::Unix(path) => {
                 let stream = tokio::time::timeout(
                     STREAM_HANDSHAKE_DEADLINE,
                     tokio::net::UnixStream::connect(path),
@@ -3779,7 +4145,7 @@ impl Client {
                 validate_conversation_subprotocol(&response)?;
                 TerminalSocket::Unix(socket)
             }
-            Endpoint::FabricLoopback(base) => {
+            TransportEndpoint::FabricLoopback(base) => {
                 let websocket_base = if let Some(base) = base.strip_prefix("https://") {
                     format!("wss://{base}")
                 } else if let Some(base) = base.strip_prefix("http://") {
@@ -3936,8 +4302,8 @@ impl Client {
         // Measured only when someone asked: no timer and no copy otherwise.
         let guard = RequestGuard::begin(&method, path);
         let request = async {
-            match &self.endpoint {
-                Endpoint::Unix(socket) => {
+            match &self.transport_endpoint(path).await? {
+                TransportEndpoint::Unix(socket) => {
                     unix_request(
                         socket,
                         method,
@@ -3953,7 +4319,7 @@ impl Client {
                     )
                     .await
                 }
-                Endpoint::FabricLoopback(base) => {
+                TransportEndpoint::FabricLoopback(base) => {
                     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
                     let mut request = self
                         .http
@@ -4211,7 +4577,7 @@ fn append_bounded(bytes: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(),
     Ok(())
 }
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+// WebSocket-only sender cutover; HTTP header names remain deployed spellings.
 fn websocket_request(
     url: &str,
     credential: Option<&str>,
@@ -4230,7 +4596,7 @@ fn websocket_request(
     request.headers_mut().insert(
         hyper::header::SEC_WEBSOCKET_PROTOCOL,
         hyper::header::HeaderValue::from_str(&match stream_capability {
-            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, st3.cap.{capability}"),
+            Some(capability) => format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.{capability}"),
             None => TERMINAL_SUBPROTOCOL.into(),
         })
         .map_err(|error| ClientError::Protocol(error.to_string()))?,
@@ -4261,8 +4627,8 @@ fn websocket_request(
 }
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
-// Sunset: 60 days after the first release shipping this bridge. Requests still offer
-// only the deployed spelling; tungstenite must continue rejecting unoffered protocols.
+// Sunset: 2026-11-01 (#3032 R5). Senders offer only Fractal protocols after every
+// host runs #3430; tungstenite must continue rejecting unoffered protocols.
 fn selected_subprotocol(
     response: &tokio_tungstenite::tungstenite::handshake::client::Response,
 ) -> Option<&str> {
@@ -4278,7 +4644,13 @@ fn wire_protocol_matches(selected: &str, expected: &str) -> bool {
     selected == expected
         || expected
             .strip_prefix("st3.")
-            .is_some_and(|suffix| selected.strip_prefix("fractal.") == Some(suffix))
+            .or_else(|| expected.strip_prefix("fractal."))
+            .is_some_and(|suffix| {
+                selected
+                    .strip_prefix("st3.")
+                    .or_else(|| selected.strip_prefix("fractal."))
+                    == Some(suffix)
+            })
 }
 // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
 
@@ -4292,8 +4664,8 @@ mod wire_receiver_tests {
             &tokio_tungstenite::tungstenite::handshake::client::Response,
         ) -> Result<(), ClientError>;
         let receivers: [(&str, Validator); 4] = [
-            (RAW_TERMINAL_SUBPROTOCOL, validate_raw_terminal_subprotocol),
-            (TERMINAL_SUBPROTOCOL, validate_terminal_subprotocol),
+            ("st3.client.pty.v0", validate_raw_terminal_subprotocol),
+            ("st3.client.terminal.v0", validate_terminal_subprotocol),
             (
                 "st3.client.conversation.v0",
                 validate_conversation_subprotocol,
@@ -4364,21 +4736,28 @@ mod wire_receiver_tests {
             assert_eq!(decoded.error_version, error);
             assert_eq!(decoded.code, ErrorCode::NotFound);
         }
-        // Alias readers must never change emitted request bytes.
-        let request = websocket_request(
-            "ws://localhost/stream",
-            None,
-            None,
-            None,
-            "custom-subjects.v1, conversation-blocks.v1",
-        )
-        .unwrap();
+        // WebSocket sender cutover does not change the HTTP API/error versions.
+        let request = websocket_request("ws://localhost/stream", None, None, None, "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1").unwrap();
         assert_eq!(
             request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
             TERMINAL_SUBPROTOCOL
         );
         assert_eq!(API_VERSION, "st3.client.v0");
         assert_eq!(ERROR_VERSION, "st3.client.error.v0");
+        assert_eq!(TERMINAL_SUBPROTOCOL, "fractal.client.terminal.v0");
+        assert_eq!(RAW_TERMINAL_SUBPROTOCOL, "fractal.client.pty.v0");
+        let request = websocket_request(
+            "ws://localhost/stream",
+            None,
+            None,
+            Some("secret"),
+            "custom-subjects.v1, conversation-blocks.v1",
+        )
+        .unwrap();
+        assert_eq!(
+            request.headers()[hyper::header::SEC_WEBSOCKET_PROTOCOL],
+            "fractal.client.terminal.v0, fractal.cap.secret"
+        );
     }
 }
 
@@ -4682,6 +5061,49 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agents_publication_subscribe_has_only_the_opt_in_grammar() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json"
+        ))
+        .unwrap();
+        assert_eq!(agents_publication_command("roster"), expected);
+        assert_eq!(agents_publication_command("other")["id"], "other");
+    }
+
+    /// The stream sync notice frames (`fixtures/clients/stream-sync/frames.json`) all decode: a
+    /// frame without `sync`, and every malformed one, reads as unknown, never level, and a key
+    /// this client does not know is ignored.
+    #[test]
+    fn stream_sync_frames_decode_and_no_bad_notice_reads_as_level() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/stream-sync/frames.json"
+        ))
+        .unwrap();
+        for group in ["valid", "invalid"] {
+            for (name, case) in fixture[group].as_object().unwrap() {
+                let mut frame = case["frame"].clone();
+                frame["a_key_from_a_newer_daemon"] = serde_json::json!({"any": "value"});
+                let event = CollectionEvent::from_frame(frame)
+                    .unwrap_or_else(|error| panic!("{name} does not decode: {error}"));
+                let (CollectionEvent::Snapshot { sync, .. }
+                | CollectionEvent::Changes { sync, .. }) = event
+                else {
+                    panic!("{name} is not a window frame");
+                };
+                let read = match sync
+                    .as_ref()
+                    .map(|sync| (sync.level(), sync.state.as_str()))
+                {
+                    Some((Some(true), _)) => "level",
+                    Some((Some(false), state)) => state,
+                    _ => "unknown",
+                };
+                assert_eq!(read, case["expect"], "{group} {name}");
+            }
+        }
+    }
+
     fn api(code: ErrorCode, message: &str) -> ClientError {
         ClientError::Api(
             code.clone(),
@@ -4778,6 +5200,112 @@ mod tests {
     }
 
     #[test]
+    fn membership_frames_decode_as_typed_membership_events_and_resource_frames_stay_resources() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/ordered-memberships-v2.json"
+        ))
+        .unwrap();
+        let super::CollectionEvent::MembershipSnapshot {
+            id,
+            membership,
+            items,
+            order,
+            has_more,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["snapshot_frame"].clone()).unwrap()
+        else {
+            panic!("a membership snapshot must decode as MembershipSnapshot");
+        };
+        assert_eq!(id, "sidebar");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].member, "agent/ada/worker");
+        assert_eq!(items[0].position.bucket, None);
+        assert_eq!(
+            items[1].position.bucket.as_deref(),
+            Some("019a0000-0000-7000-8000-000000000010")
+        );
+        assert_eq!(order, ["agent/ada/worker", "mission/m1"]);
+        assert!(!has_more);
+        assert_eq!(
+            membership,
+            super::OrderedMembershipState {
+                container: "arrangement/person/ada/019a0000-0000-7000-8000-000000000001".into(),
+                live_count: 2,
+                changed_index: 1842,
+            }
+        );
+        let super::CollectionEvent::MembershipChanges {
+            membership,
+            upserts,
+            removes,
+            order,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["changes_frame"].clone()).unwrap()
+        else {
+            panic!("membership changes must decode as MembershipChanges");
+        };
+        assert_eq!(upserts[0].member, "mission/m1");
+        assert_eq!(upserts[0].position.key, "Zz");
+        assert_eq!(removes, ["agent/ada/worker"]);
+        assert_eq!(order, ["mission/m1"]);
+        assert_eq!((membership.live_count, membership.changed_index), (1, 1843));
+        // An edit outside the window leaves rows, order, and `has_more` as they were; only the
+        // container's state says it changed.
+        let super::CollectionEvent::MembershipChanges {
+            membership: outside,
+            upserts,
+            removes,
+            order,
+            has_more,
+            ..
+        } = super::CollectionEvent::from_frame(fixture["outside_window_changes_frame"].clone())
+            .unwrap()
+        else {
+            panic!("an outside-window edit must decode as MembershipChanges");
+        };
+        assert!(upserts.is_empty() && removes.is_empty() && !has_more);
+        assert_eq!(order, ["mission/m1"]);
+        assert_eq!(outside.container, membership.container);
+        assert_eq!(outside.live_count, membership.live_count);
+        assert!(outside.changed_index > membership.changed_index);
+        for frame in ["snapshot_frame", "changes_frame"] {
+            let mut missing_state = fixture[frame].clone();
+            missing_state.as_object_mut().unwrap().remove("membership");
+            assert!(matches!(
+                super::CollectionEvent::from_frame(missing_state),
+                Err(super::ClientError::Protocol(message)) if message.contains("membership")
+            ));
+            let mut missing_count = fixture[frame].clone();
+            missing_count["membership"]
+                .as_object_mut()
+                .unwrap()
+                .remove("live_count");
+            assert!(matches!(
+                super::CollectionEvent::from_frame(missing_count),
+                Err(super::ClientError::Protocol(message)) if message.contains("live_count")
+            ));
+        }
+        let mut missing_bucket = fixture["snapshot_frame"].clone();
+        missing_bucket["items"][0]["position"]
+            .as_object_mut()
+            .unwrap()
+            .remove("bucket");
+        assert!(matches!(
+            super::CollectionEvent::from_frame(missing_bucket),
+            Err(super::ClientError::Protocol(message)) if message.contains("bucket")
+        ));
+        let mut resources = fixture["snapshot_frame"].clone();
+        resources["collection"] = serde_json::json!("agents");
+        resources["items"] = serde_json::json!([]);
+        resources["order"] = serde_json::json!([]);
+        resources.as_object_mut().unwrap().remove("membership");
+        assert!(matches!(
+            super::CollectionEvent::from_frame(resources).unwrap(),
+            super::CollectionEvent::Snapshot { items, .. } if items.is_empty()
+        ));
+    }
+
+    #[test]
     fn errors_read_as_sentences_and_say_whether_trying_again_may_help() {
         let stale = api(
             ErrorCode::StaleFence,
@@ -4817,6 +5345,8 @@ mod tests {
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
         for code in [
+            ErrorCode::InvalidAnswer,
+            ErrorCode::NotAnswerable,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {
@@ -4880,8 +5410,8 @@ mod tests {
 
     #[test]
     fn messages_paging_is_explicit_for_every_constructor_and_websocket_request() {
-        let legacy = "custom-subjects.v1, conversation-blocks.v1";
-        let negotiated = "custom-subjects.v1, conversation-blocks.v1, messages-paging.v2";
+        let legacy = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1";
+        let negotiated = "custom-subjects.v1, conversation-blocks.v1, conversation-delivery-links.v1, conversation-message-participants.v1, messages-paging.v2";
         for client in [
             Client::unix("/unused"),
             Client::unix_as("/unused", "person/test"),
@@ -4970,26 +5500,57 @@ mod tests {
     }
 
     #[test]
-    fn fence_carries_every_schema_fence_field() {
-        // runtime.stop/restart/reset require runtime_desired_revision; a missing typed field makes them unsendable.
-        let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
-        ))
+    fn a_retryable_code_this_client_does_not_know_stays_retryable() {
+        // An older client meets a newer daemon's code (as clients before agent-roster-not-ready
+        // meet the agents roster's 503): it reads the code as unknown and still retries.
+        let envelope: ErrorEnvelope = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/test",
+            "code": "a-code-from-a-newer-daemon",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        }))
         .unwrap();
-        let declared: std::collections::BTreeSet<&str> = schema["$defs"]["Fence"]["properties"]
-            .as_object()
+        assert_eq!(envelope.code, ErrorCode::Unknown);
+        let error = ClientError::Api(
+            envelope.code.clone(),
+            envelope.message.clone(),
+            Box::new(envelope),
+        );
+        assert!(error.is_transient());
+    }
+
+    #[test]
+    fn server_fence_round_trip_preserves_action_preconditions() {
+        let wire = serde_json::json!({
+            "snapshot_id": "snapshot/owner/7",
+            "subject_revisions": {"agent/owner/worker": "revision/3"},
+            "mission_generation": "generation/2",
+            "step_definition": "definition/4",
+            "attempt": 2,
+            "readiness_epoch": 3,
+            "runtime_incarnation": "incarnation/5",
+            "runtime_desired_revision": "desired/6",
+            "terminal_sequence": 7,
+            "preview_token": "preview/8",
+            "private_notes": {"carrier_generation": "carrier/9", "revision": "notes/10"}
+        });
+        let typed: Fence = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&typed).unwrap(), wire);
+        let notes = typed.private_notes.as_ref().unwrap();
+        assert_eq!(notes.carrier_generation, "carrier/9");
+        assert_eq!(notes.revision, "notes/10");
+
+        let mut without_notes = wire;
+        without_notes
+            .as_object_mut()
             .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        let typed = serde_json::to_value(Fence::default()).unwrap();
-        let typed: std::collections::BTreeSet<&str> = typed
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(typed, declared);
+            .remove("private_notes");
+        let typed: Fence = serde_json::from_value(without_notes.clone()).unwrap();
+        assert!(typed.private_notes.is_none());
+        assert_eq!(serde_json::to_value(typed).unwrap(), without_notes);
     }
 
     const EMPTY_PAGE: &str = r#"{
@@ -5535,7 +6096,7 @@ mod tests {
                                 .unwrap()
                                 .to_str()
                                 .unwrap(),
-                            format!("{TERMINAL_SUBPROTOCOL}, st3.cap.fixture-stream-capability-0000000000000000")
+                            format!("{TERMINAL_SUBPROTOCOL}, fractal.cap.fixture-stream-capability-0000000000000000")
                         );
                         response.headers_mut().insert(
                             hyper::header::SEC_WEBSOCKET_PROTOCOL,
@@ -5600,6 +6161,7 @@ mod device_stream_policy_tests {
                 device_key_chain: vec![],
                 device_key_proofs: vec![],
                 person_root_key_proof: None,
+                fabric_grant: None,
             },
         };
         let mut client = device.client().unwrap();

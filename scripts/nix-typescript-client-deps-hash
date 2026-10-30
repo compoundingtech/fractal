@@ -3,13 +3,14 @@
 
   scripts/nix-typescript-client-deps-hash [--system x86_64-linux] [--flake .]
 
-The frozen pnpm installation behind `checks.typescript-client` is a fixed-output derivation: Nix checks
-its output against the hash in nix/typescript-client-deps.hash and, when the lockfile changed, reports the
-new one. This sets a placeholder, builds, reads the hash Nix reports and writes it. It needs network
-access (the installation downloads the locked packages) and, like any build, a machine the build
-admission allows. The file is restored if the build fails for another reason.
+The frozen pnpm installation behind `checks.<system>.typescript-client` is a fixed-output derivation.
+The JSON pin records its output hash and the effect-utils narHash it was measured with. This reads
+the selected flake's actual input identity, sets a placeholder, builds only the installation (the
+check wrapper is Linux-only), and writes both measured values. It needs network and a builder for
+the selected system. The original file is restored if evaluation or the build fails.
 """
 import argparse
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -28,9 +29,17 @@ def main(argv, nix=('nix', '--extra-experimental-features', 'nix-command flakes'
     parser.add_argument('--flake', default='.')
     args = parser.parse_args(argv)
     before = hash_file.read_text()
-    hash_file.write_text(PLACEHOLDER + '\n')
+    previous = json.loads(before)
+    target = f'{args.flake}#checks.{args.system}.typescript-client.installation'
     try:
-        built = subprocess.run([*nix, 'build', f'{args.flake}#checks.{args.system}.typescript-client', '--no-link', '-L'],
+        identity = subprocess.run([*nix, 'eval', '--raw', f'{target}.effectUtilsNarHash'],
+                                  capture_output=True, text=True)
+        if identity.returncode:
+            print(identity.stderr[-2000:], file=sys.stderr)
+            return 1
+        pin = {'hash': PLACEHOLDER, 'effectUtilsNarHash': identity.stdout.strip()}
+        hash_file.write_text(json.dumps(pin, indent=2) + '\n')
+        built = subprocess.run([*nix, 'build', target, '--no-link', '-L'],
                                capture_output=True, text=True)
         found = GOT.search(built.stderr)
         if not found:
@@ -41,8 +50,9 @@ def main(argv, nix=('nix', '--extra-experimental-features', 'nix-command flakes'
     except BaseException:
         hash_file.write_text(before)
         raise
-    hash_file.write_text(found.group(1) + '\n')
-    print(f'nix/typescript-client-deps.hash: {found.group(1)}' + (' (unchanged)' if before.strip() == found.group(1) else ''))
+    pin['hash'] = found.group(1)
+    hash_file.write_text(json.dumps(pin, indent=2) + '\n')
+    print(f'nix/typescript-client-deps.hash: {pin["hash"]} (effect-utils {pin["effectUtilsNarHash"]})' + (' (unchanged)' if previous == pin else ''))
     return 0
 
 

@@ -247,12 +247,12 @@ async fn trace_follow_refuses_an_endpoint_version_transition_without_entering_le
     assert!(message.contains("2026-10-16 13:50 UTC"));
     assert!(
         message.contains(
-            "https://raw.githubusercontent.com/compoundingtech/smalltalk/main/install.sh"
+            "https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh"
         )
     );
     assert!(message.contains("--edge --no-run"));
     assert!(message.contains("If the daemon just restarted"));
-    assert!(message.contains("st service restart"));
+    assert!(message.contains("fractal service restart"));
     assert!(message.contains("rerun the original command"));
 }
 
@@ -270,7 +270,7 @@ async fn non_trace_missing_page_requires_upgrade_without_reading_history() {
         .unwrap();
     assert!(error.to_string().contains("2026-10-16 13:50 UTC"));
     assert!(error.to_string().contains("--edge --no-run"));
-    assert!(error.to_string().contains("st service restart"));
+    assert!(error.to_string().contains("fractal service restart"));
     assert_eq!(client.follow_test_result().0.len(), 2);
 }
 
@@ -308,7 +308,7 @@ async fn trace_follow_reports_the_gap_and_explicit_continuation_without_resettin
     assert!(
         error
             .to_string()
-            .contains("st trace show 'host/follow-fixture' --after-index 50 --follow")
+            .contains("fractal trace show 'host/follow-fixture' --after-index 50 --follow")
     );
     assert_eq!(output.requests.len(), 2);
     assert!(output.stdout.is_empty());
@@ -332,7 +332,7 @@ async fn non_trace_event_gap_does_not_suggest_a_trace_continuation() {
     assert!(error.downcast_ref::<EventCursorGap>().is_some());
     assert!(error.to_string().contains("retained floor 30, frontier 50"));
     assert!(error.to_string().contains("retry this command explicitly"));
-    assert!(!error.to_string().contains("st trace show"));
+    assert!(!error.to_string().contains("fractal trace show"));
     assert_eq!(client.follow_test_result().0.len(), 1);
 }
 

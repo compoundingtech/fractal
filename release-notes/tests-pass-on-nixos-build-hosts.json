@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Four tests that failed on NixOS build hosts under scripts/ci-local now pass there: the PTY fixtures take pty from the test's PATH, the zsh completion phase keeps the dev shell's PATH, and the demo test picks a home short enough for its PTY root.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to restore the previous test setup."}
+}

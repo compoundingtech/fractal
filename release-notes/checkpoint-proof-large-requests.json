@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The checkpoint proof no longer refuses a single SQLite request larger than 16 MiB, such as the size hint for a large commit's new pages; it measures free space just before such a request and charges it in full against the proof's scratch budget",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged; a proof that was refused at this bound can now complete and trim."},
+  "compatibility": {"status": "none", "detail": "The live reserve, reaction margin and scratch, temp, copy and journal caps are unchanged; a request that would cross any of them still refuses before SQLite writes."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the 16 MiB refusal; the proof then fails again at the same request and the store keeps its claims."}
+}

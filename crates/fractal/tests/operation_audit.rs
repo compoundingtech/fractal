@@ -620,7 +620,7 @@ fn edge_store_in(directory: &tempfile::TempDir) -> EdgeStore {
 /// which starts after the write, reports exactly it.
 fn assert_caught_by_this_or_the_next_pass(operation: &str, mutate: &dyn Fn(&Store, &EdgeStore)) {
     for at in mutation_points() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = fractal_daemon::test_support::memory_tempdir();
         let edge = edge_store_in(&directory);
         let drift = audit_with_mutation_at(&edge.store, at, &|store| mutate(store, &edge));
         assert!(

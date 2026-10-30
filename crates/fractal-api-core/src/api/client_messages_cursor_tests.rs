@@ -18,6 +18,9 @@ fn sent_messages(state: &AppState, accepted_at: u128) {
             idempotency_key: None,
         }).unwrap();
     }
+    // A commit folds selectors for at most 10 ms of wall time; on a loaded host the last
+    // message can still be pending, and a page would be cut below the store's index.
+    while state.store.maintain_client_message_selectors().unwrap() {}
 }
 
 async fn first_page(state: &AppState, now: u128) -> (ClientSnapshot, ClientListQuery, String) {

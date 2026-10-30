@@ -34,7 +34,7 @@ including `page`, `indexed_at`, `host_id`, `refreshing`, and `incomplete_sources
 revision. A changed revision or evicted index returns `cursor-gap`; restart the search.
 
 The index is a disposable, daemon-local SQLite FTS5 database in memory. It is derived from
-durable message text and st's existing normalized timeline entries, with no new graph facts,
+durable message text and Fractal's existing normalized timeline entries, with no new graph facts,
 replication vocabulary, or client-owned store. A first search starts its index in the
 background and waits at most two seconds. If a large inventory is still being read, the
 response is retryable `remote-unavailable`; that work continues. Later first-page searches
@@ -60,7 +60,7 @@ no additional disk writes. Cold cost is one inventory read, message projection, 
 normalization pass over available source windows; warm queries read FTS postings, and
 refresh cost depends on changed sources and reachable remote timelines.
 
-Search covers the history that st's normalized readers retain and expose. Their native
+Search covers the history that Fractal's normalized readers retain and expose. Their native
 transcript and inventory limits still apply; it is not an archive of discarded transcript
 prefixes. Truncation, redaction, malformed history, offline hosts, and index budget limits
 are reported in `incomplete_sources`, even when a query has zero matches. At most 128 source

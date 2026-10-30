@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::raw_terminal` that moved up from st3-api.
+//! The part of `api::client_v0::raw_terminal` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -137,7 +137,7 @@ pub async fn stream(
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
     authorize(&session, query.mode)?;
     // This protocol subscribes in the upgrade request, without a JSON subscribe command.
-    let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref())
+    let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref(), None)
         .map(|first| first.span);
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)

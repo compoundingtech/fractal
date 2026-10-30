@@ -84,8 +84,14 @@ const initialFocusPlay = async ({ canvasElement }: { readonly canvasElement: HTM
 }
 
 // The kit gate runs every story at 440/1440 in both schemes and passes `scheme` as an arg; `width` clamps to the viewport.
-const meta = { title: 'Fractal/Shell/Side panel', component: PanelSurface, parameters: { scenario: { _tag: 'primitive', reason: 'Static opener, sibling and panel controls isolate non-modal focus, Escape dismissal, focus return and inert-background behavior without domain data.' }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 } } satisfies Meta<typeof PanelSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal/Shell/Side panel', component: PanelSurface, parameters: { scenario: { _tag: 'primitive', reason: 'Static opener, sibling and panel controls isolate non-modal focus, Escape dismissal, focus return and inert-background behavior without domain data.' }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 1440 } } satisfies Meta<typeof PanelSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'NonModal:primitive',
+  'Open:primitive',
+]
 type Story = StoryObj<typeof meta>
 export const NonModal: Story = { play: nonModalPlay }
 export const Open: Story = { args: { initiallyOpen: true }, play: initialFocusPlay }

@@ -1,5 +1,5 @@
-//! st3 kernel: the leaf modules of the st3 library (model, wire types, CLI output, configuration-free
-//! helpers) that name no store, api or reconcile code. st3-daemon re-exports each module at its old path.
+//! Fractal kernel: the leaf modules of the Fractal library (model, wire types, CLI output, configuration-free
+//! helpers) that name no store, api or reconcile code. fractal-daemon re-exports each module at its old path.
 
 pub mod cli_output;
 pub mod accounts;
@@ -12,6 +12,8 @@ pub mod disk;
 pub mod evidence;
 pub mod native_views;
 pub mod conversation_header;
+/// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
+pub mod fabric_gateway;
 pub mod fleet;
 /// Built-in gate kinds: what gates shelled out for most, answered by st itself.
 pub mod gate_kinds;
@@ -33,4 +35,6 @@ pub mod seat_queue;
 pub mod skill;
 pub mod publication;
 pub mod terminal_binding;
+/// What a mission run waits on, and the fleet's blocked runs by cause.
+pub mod waiting_on;
 pub mod github_admission;

@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn quality_adds_no_allocations_to_a_warmed_draw() {
         use ratatui::{Terminal, backend::TestBackend};
-        let ui = Ui::new(demo::world());
+        let ui = Ui::new(demo::test_world());
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         let mut quality = super::super::slo::Draw::new(Instant::now());
         for _ in 0..4 {
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn hover_paints_the_topmost_target_and_links_without_acting() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.frame.borrow_mut().area = Rect::new(0, 0, 20, 6);
         ui.hit(Rect::new(0, 0, 10, 1), Hit::Key('s'));
         ui.hit(
@@ -300,9 +300,9 @@ mod tests {
 
     #[test]
     fn opaque_layers_hide_hits_and_clip_a_partly_covered_highlight() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.frame.borrow_mut().area = Rect::new(0, 0, 20, 6);
-        ui.hit(Rect::new(0, 0, 10, 1), Hit::Tab(1));
+        ui.hit(Rect::new(0, 0, 10, 1), Hit::Usage);
         ui.cover(Rect::new(5, 0, 5, 2));
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 6));
         buf.set_style(buf.area, theme::text().bg(theme::BASE));
@@ -313,7 +313,7 @@ mod tests {
         assert!(ui.input_event(motion(6, 0)));
         assert!(
             ui.hover.target.get().is_none(),
-            "blank overlay cells hide the tab"
+            "blank overlay cells hide the target"
         );
         ui.hit(Rect::new(5, 0, 3, 1), Hit::Key('x'));
         assert!(ui.input_event(motion(6, 0)));
@@ -322,8 +322,7 @@ mod tests {
 
     #[test]
     fn overlays_drags_focus_loss_and_frame_changes_cannot_keep_old_hover() {
-        let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(glass::Glasses::open(None, None));
+        let mut ui = Ui::new(demo::test_world());
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
         assert!(ui.input_event(motion(1, 0)));
@@ -398,7 +397,7 @@ mod tests {
 
     #[test]
     fn a_full_frame_motion_script_allocates_nothing_and_redraws_per_target_change() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         for _ in 0..2 {
             terminal.draw(|frame| ui.render(frame)).unwrap();

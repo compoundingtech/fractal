@@ -5,12 +5,12 @@ import { API_VERSION } from './Models.generated.ts';
 import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
-    ResourcesFilter, ResourcesPage, DirectiveNotes, SchedulesPage,
-    Arrangement, ArrangementId, ArrangementPage,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
+    Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
-    PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
+    PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
@@ -65,6 +65,8 @@ export type ClientOptions = {
     /** Read the active span's W3C context once per request, stream open, or collection subscribe. */
     traceContext?: () => TraceContext | undefined;
     fetchImpl?: typeof fetch;
+    /** Default native WebSocket carrier; per-stream factories still take precedence. */
+    socket?: CollectionSocketFactory;
     /** The app's name and build, sent as `x-st3-client` ("smalltalk-ios 1.0 (42)"). st lists it as
      * reported (clients.list); it is never identity or authority. */
     client?: string;
@@ -72,10 +74,10 @@ export type ClientOptions = {
     messagesPaging?: boolean;
 };
 
-// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-export const TERMINAL_SUBPROTOCOL = 'st3.client.terminal.v0';
-export const CONVERSATION_SUBPROTOCOL = 'st3.client.conversation.v0';
-export const COLLECTIONS_SUBPROTOCOL = 'st3.client.collections.v0';
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP names stay unchanged; sunset 2026-11-01.
+export const TERMINAL_SUBPROTOCOL = 'fractal.client.terminal.v0';
+export const CONVERSATION_SUBPROTOCOL = 'fractal.client.conversation.v0';
+export const COLLECTIONS_SUBPROTOCOL = 'fractal.client.collections.v0';
 
 /** The WebSocket surface a terminal stream uses. React Native's WebSocket accepts headers. */
 export type TerminalSocket = {
@@ -125,8 +127,11 @@ export type CollectionStreamOptions = {
 export type CollectionStream = {
     /** Hold a window of up to `limit` (1–200) current items. A held ID is replaced. */
     subscribeGlasses(id: string): void;
+    /** Complete unfiltered version-1 roster. The caller stages chunks and applies deltas atomically. */
+    subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
-    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements'>, limit?: number, filters?: CollectionFilters): void;
+    subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
+    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
@@ -137,19 +142,35 @@ export type CollectionStream = {
     unsubscribe(id: string): void;
     close(): void;
 };
-/** A window's rows in display order, as `applyWindow` keeps them. */
-export type CollectionWindow = { items: Resource[]; hasMore: boolean; snapshot: Snapshot };
+/** A window's rows in display order, as `applyWindow` keeps them: resources, or the
+ * `ordered-memberships` rows of an `OrderedMembershipFrame`. A membership window also holds the
+ * whole container's latest `membership` state, which moves on edits outside its rows too.
+ * `membership.changed_index` is an opaque host-local invalidation frontier scoped by
+ * `snapshot.host_id`: not a canonical revision, and never comparable across hosts. */
+export type CollectionWindow<TItem extends { id: string } = Resource> = { items: TItem[]; hasMore: boolean; snapshot: Snapshot }
+    & ([TItem] extends [OrderedMembership] ? { membership: OrderedMembershipState } : unknown);
+/** A `snapshot` or `changes` frame of an `ordered-memberships` subscription. */
+export type OrderedMembershipFrame = Extract<CollectionFrame, { collection: 'ordered-memberships' }>;
+/** Every frame except an `ordered-memberships` window's: its windows hold resources. */
+export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembershipFrame>;
 
 /** Apply one `snapshot` or `changes` frame to a window: removals and upserts first, then the
- * frame's complete order. A `changes` frame without an earlier snapshot has nothing to apply to. */
-export function applyWindow(window: CollectionWindow | undefined, frame: CollectionFrame): CollectionWindow | undefined {
+ * frame's complete order. A `changes` frame without an earlier snapshot has nothing to apply to.
+ * Membership frames keep membership windows; narrow on `frame.collection` to pick one. A
+ * membership `changes` frame that leaves rows, order, and `hasMore` alone still replaces the
+ * window's `membership` state. */
+export function applyWindow(window: CollectionWindow<OrderedMembership> | undefined, frame: OrderedMembershipFrame): CollectionWindow<OrderedMembership> | undefined;
+export function applyWindow(window: CollectionWindow | undefined, frame: ResourceCollectionFrame): CollectionWindow | undefined;
+export function applyWindow(window: CollectionWindow<{ id: string }> | undefined, frame: CollectionFrame): CollectionWindow<{ id: string }> | CollectionWindow<OrderedMembership> | undefined {
     if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return window;
+    if ('publication' in frame) throw new Error('Revisioned agents frames require atomic chunk/delta application, not applyWindow');
     if (frame.kind === 'changes' && !window) return undefined;
-    const rows = new Map<string, Resource>(frame.kind === 'snapshot' ? [] : window!.items.map(item => [item.id, item]));
+    const rows = new Map<string, { id: string }>(frame.kind === 'snapshot' ? [] : window!.items.map(item => [item.id, item]));
     if (frame.kind === 'changes') for (const id of frame.removes) rows.delete(id);
     for (const item of frame.kind === 'snapshot' ? frame.items : frame.upserts) rows.set(item.id, item);
     const items = frame.order.flatMap(id => rows.get(id) ?? []);
-    return { items, hasMore: frame.has_more, snapshot: frame.snapshot };
+    const next = { items, hasMore: frame.has_more, snapshot: frame.snapshot };
+    return frame.collection === 'ordered-memberships' ? { ...next, membership: frame.membership } : next;
 }
 
 function defaultTerminalSocket(url: string, protocols: string[], headers: Record<string, string>): TerminalSocket {
@@ -219,17 +240,22 @@ export class FractalClient {
     private readonly traceContext?: ClientOptions['traceContext'];
     private readonly client?: string;
     private readonly fetchImpl: typeof fetch;
+    private readonly socket?: CollectionSocketFactory;
     private readonly messagesPaging: boolean;
     /** Shared with every `withTraceContext` view so they discover once. */
     private discoveryCache: { value?: EnvelopeOf<Capabilities> } = {};
 
     constructor(options: ClientOptions) {
+        if (/^fabric:/i.test(options.baseUrl)) {
+            throw new Error('Use createFabricClient from @fractal/client/fabric for native Fabric endpoints; browser and React Native runtimes cannot dial the local daemon');
+        }
         this.baseUrl = options.baseUrl.replace(/\/+$/, '');
         this.credential = options.credential;
         this.traceContext = options.traceContext;
         this.messagesPaging = options.messagesPaging ?? false;
         if (options.client !== undefined) this.client = options.client;
         this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+        if (options.socket !== undefined) this.socket = options.socket;
     }
 
     async capabilities(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
@@ -253,6 +279,7 @@ export class FractalClient {
             fetchImpl: this.fetchImpl,
             traceContext,
             messagesPaging: this.messagesPaging,
+            ...(this.socket === undefined ? {} : { socket: this.socket }),
             ...(this.credential === undefined ? {} : { credential: this.credential }),
             ...(this.client === undefined ? {} : { client: this.client }),
         });
@@ -314,14 +341,23 @@ export class FractalClient {
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
-        if (readAuthorization) {
-            const bytes = new Uint8Array(await response.arrayBuffer());
+        try {
+            if (readAuthorization) {
+                const bytes = new Uint8Array(await response.arrayBuffer());
+                options.signal?.throwIfAborted();
+                if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
+                payload = JSON.parse(new TextDecoder().decode(bytes));
+            } else {
+                payload = await response.json();
+                options.signal?.throwIfAborted();
+            }
+        } catch (error) {
             options.signal?.throwIfAborted();
-            if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
-            payload = JSON.parse(new TextDecoder().decode(bytes));
-        } else {
-            payload = await response.json();
-            options.signal?.throwIfAborted();
+            // HTTP middleware can reject a request before the client API writes a JSON envelope.
+            if (response.ok || !(error instanceof SyntaxError)) throw error;
+            throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
+                request_id: '', code: 'http-error', message: `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`,
+                retryable: false, details: {} }, response.status, response.headers.get('Retry-After'));
         }
         if (!payload || typeof payload !== 'object' || !acceptsApiVersion((payload as { api_version?: unknown }).api_version)) {
             throw new Error('Unexpected st client API response');
@@ -475,7 +511,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `st3.cap.${options.streamCapability}`], headers);
+        const socket = (options.socket ?? this.socket ?? defaultTerminalSocket)(url.toString(), [TERMINAL_SUBPROTOCOL, `fractal.cap.${options.streamCapability}`], headers);
         let ended = false;
         const stop = () => { ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
         const end = (error?: Error) => { if (ended) return; stop(); options.onEnd?.(error); };
@@ -504,7 +540,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
+        const socket = (options.socket ?? this.socket ?? defaultTerminalSocket)(url.toString(), [CONVERSATION_SUBPROTOCOL], headers);
         let ended = false;
         const end = (error?: Error) => { if (ended) return; ended = true; socket.onmessage = null; socket.onclose = null; socket.onerror = null; options.onEnd?.(error); };
         socket.onmessage = event => {
@@ -531,7 +567,7 @@ export class FractalClient {
         if (credential) headers.Authorization = `Bearer ${credential}`;
         if (this.client) headers['x-st3-client'] = this.client;
         this.applyTraceContext(headers);
-        const socket = (options.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
+        const socket = (options.socket ?? this.socket ?? (defaultTerminalSocket as unknown as CollectionSocketFactory))(url.toString(), [COLLECTIONS_SUBPROTOCOL], headers);
         let ended = false, open = false, opening = false;
         const waiting: Record<string, unknown>[] = [];
         const stop = () => { ended = true; waiting.length = 0; socket.onopen = null; socket.onmessage = null; socket.onclose = null; socket.onerror = null; };
@@ -587,7 +623,9 @@ export class FractalClient {
         socket.onerror = () => end(new Error('The collections socket failed'));
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
+            subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
+            subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
             subscribe: (id, collection, limit, filters = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.
                 if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
@@ -624,9 +662,12 @@ export class FractalClient {
         return response;
     }
 
+    async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
+    async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }
     async hostRepositories(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HostRepositories>> { return this.get(`/v1/client/hosts/${encodeURIComponent(routedId(id))}/repositories`, undefined, requestOptions); }
     async setsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/sets' + query(options), undefined, requestOptions); }
     async setsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sets/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
@@ -690,6 +731,7 @@ export class FractalClient {
     async terminalScreen(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<TerminalScreen>> { return this.get(`/v1/client/terminals/${encodeURIComponent(routedId(id))}/screen`, undefined, requestOptions); }
     async arrangementsList(person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ArrangementPage>> { return this.get('/v1/client/arrangements' + query({ person, ...options }), undefined, requestOptions); }
     async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Arrangement>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}`, undefined, requestOptions); }
+    async arrangementsMemberships(personName: string, uuid: string, person: string, options: PageOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<OrderedMembershipPage>> { return this.get(`/v1/client/arrangements/${encodeURIComponent(personName)}/${encodeURIComponent(uuid)}/memberships` + query({ person, ...options }), undefined, requestOptions); }
     async glassesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/glasses' + query(options), undefined, requestOptions); }
     async glassesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Glass>> { return this.get(`/v1/client/glasses/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async assistantSummary(params: AssistantSummaryRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantSummary>> { return this.assistantRead<AssistantSummary>('summary', params, proof, requestOptions); }
@@ -710,8 +752,10 @@ export class FractalClient {
     async agentStop(input: Omit<ActionOf<'agent.stop'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'agent.stop' } as ActionOf<'agent.stop'>, requestOptions); }
     async agentSuspend(input: Omit<ActionOf<'agent.suspend'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'agent.suspend' } as ActionOf<'agent.suspend'>, requestOptions); }
     async arrangementEdit(input: Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.edit' } as ActionOf<'arrangement.edit'>, requestOptions); }
+    async arrangementMembershipEdit(input: Omit<ActionOf<'arrangement.membership.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.membership.edit' } as ActionOf<'arrangement.membership.edit'>, requestOptions); }
     async attentionResolve(input: Omit<ActionOf<'attention.resolve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.resolve' } as ActionOf<'attention.resolve'>, requestOptions); }
     async customReply(input: Omit<ActionOf<'custom.reply'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'custom.reply' } as ActionOf<'custom.reply'>, requestOptions); }
+    async harnessAnswer(input: Omit<ActionOf<'harness.answer'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.answer' } as ActionOf<'harness.answer'>, requestOptions); }
     async laneApprove(input: Omit<ActionOf<'lane.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.approve' } as ActionOf<'lane.approve'>, requestOptions); }
     async laneJoin(input: Omit<ActionOf<'lane.join'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.join' } as ActionOf<'lane.join'>, requestOptions); }
     async laneLeave(input: Omit<ActionOf<'lane.leave'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.leave' } as ActionOf<'lane.leave'>, requestOptions); }
@@ -731,6 +775,7 @@ export class FractalClient {
     async missionRevise(input: Omit<ActionOf<'mission.revise'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'mission.revise' } as ActionOf<'mission.revise'>, requestOptions); }
     async missionStart(input: Omit<ActionOf<'mission.start'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'mission.start' } as ActionOf<'mission.start'>, requestOptions); }
     async pairingRevoke(input: Omit<ActionOf<'pairing.revoke'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'pairing.revoke' } as ActionOf<'pairing.revoke'>, requestOptions); }
+    async privateNotesWrite(input: Omit<ActionOf<'private-notes.write'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'private-notes.write' } as ActionOf<'private-notes.write'>, requestOptions); }
     async promptRespond(input: Omit<ActionOf<'prompt.respond'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'prompt.respond' } as ActionOf<'prompt.respond'>, requestOptions); }
     async reviewApprove(input: Omit<ActionOf<'review.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.approve' } as ActionOf<'review.approve'>, requestOptions); }
     async reviewReject(input: Omit<ActionOf<'review.reject'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.reject' } as ActionOf<'review.reject'>, requestOptions); }

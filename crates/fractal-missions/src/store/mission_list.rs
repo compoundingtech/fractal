@@ -1,4 +1,4 @@
-//! The part of `store::mission_list` that moved up from st3-store.
+//! The part of `store::mission_list` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::mission_list::*;
@@ -343,7 +343,7 @@ impl MissionListStore for Store {
     }
 
     fn published_missions_list(&self) -> &published_list::PublishedList<MissionRows> {
-        &self.smalltalk.published_missions
+        &self.fractal.published_missions
     }
 }
 

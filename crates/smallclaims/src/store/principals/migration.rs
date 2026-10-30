@@ -29,6 +29,23 @@ pub struct SignatureMigration {
     pub completed_work: u64,
 }
 
+/// A person's (or the fleet fault agent's) word that the local defect behind a persisted
+/// signature fault is repaired, or was never local corruption, so the migration may go on.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SignatureResumeRequest {
+    pub reason: String,
+    pub actor: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SignatureResume {
+    pub actor: String,
+    pub reason: String,
+    /// The fault the resume cleared; none when nothing was stopped.
+    pub cleared: Option<String>,
+    pub migration: SignatureMigration,
+}
+
 impl SignatureMigration {
     pub fn progress_description(&self) -> String {
         let elapsed = now_ms().saturating_sub(self.started_at_unix_ms).max(1) as f64 / 1_000.0;
@@ -172,6 +189,47 @@ pub(super) fn judging_available(connection: &Connection) -> Result<bool> {
     Ok(state.fault.is_none() && matches!(state.phase.as_str(), "done" | "judging"))
 }
 
+/// SQLite could not take or open the database just now (BUSY, LOCKED, CANTOPEN). The local
+/// state is not damaged: the same work succeeds on a later attempt, so it is never persisted
+/// as signature-state-corrupt.
+pub fn transient_storage_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _)) if matches!(code.code,
+                rusqlite::ErrorCode::DatabaseBusy
+                    | rusqlite::ErrorCode::DatabaseLocked
+                    | rusqlite::ErrorCode::CannotOpen))
+            || cause
+                .downcast_ref::<crate::error::Error>()
+                .is_some_and(crate::error::Error::is_sqlite_contention)
+    })
+}
+
+/// How long a transient storage error may keep recurring before doctor reports it.
+pub(super) const SIGNATURE_RETRY_VISIBLE_MS: u128 = 300_000;
+
+impl Store {
+    /// Remember a transient storage error the signature work is retrying; any other outcome
+    /// ends the episode. A permanent cannot-open then surfaces in doctor instead of only on stderr.
+    pub fn note_signature_retry(&self, error: Option<&anyhow::Error>) {
+        let mut retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
+        match error.filter(|error| transient_storage_error(error)) {
+            Some(error) => {
+                let since = retrying.as_ref().map_or_else(now_ms, |(since, _)| *since);
+                *retrying = Some((since, format!("{error:#}")));
+            }
+            None => *retrying = None,
+        }
+    }
+
+    pub(super) fn lasting_signature_retry(&self) -> Option<String> {
+        let retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
+        retrying.as_ref().filter(|(since, _)| now_ms().saturating_sub(*since) >= SIGNATURE_RETRY_VISIBLE_MS).map(|(since, error)| {
+            format!("retrying for {}s, not persisted: {error}", now_ms().saturating_sub(*since) / 1_000)
+        })
+    }
+}
+
 pub(super) fn record_fault(connection: &Connection, reason: &str) -> Result<()> {
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h2cab6e9906c3 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET fault=?1 WHERE id=1",
@@ -197,9 +255,13 @@ impl Store {
     /// Advance a finite inventory page. Payload decoding and content hashing precede the
     /// background writer loan. Other reads and writes run between committed pages.
     /// A corrupt local row persists its identity/reason and stops this bootstrap; no retry.
+    /// A transient storage error is returned unpersisted, for the caller to retry.
     pub fn advance_signature_migration(&self) -> Result<SignatureMigration> {
         let result = self.advance_signature_migration_inner();
-        if let Err(error) = &result {
+        self.note_signature_retry(result.as_ref().err());
+        if let Err(error) = &result
+            && !transient_storage_error(error)
+        {
             record_fault(
                 &self.connection.write(),
                 &format!("inventory page: {error:#}"),
@@ -303,6 +365,7 @@ impl Store {
                                 payload,
                             })
                         }
+                        Err(error) if transient_storage_error(&error) => return Err(error),
                         Err(error) => {
                             fault = Some(format!(
                                 "replica_envelopes rowid {rowid}, writer {writer}: {error:#}"
@@ -407,7 +470,9 @@ impl Store {
 
     /// After repairing the named local row, explicitly resume the stopped inventory. If the
     /// row is still damaged the next page persists the same fault; it never marks completion.
-    pub fn resume_signature_migration(&self) -> Result<()> {
+    /// Returns the fault it cleared, if any, and wakes the stopped bootstrap job.
+    pub fn resume_signature_migration(&self) -> Result<Option<String>> {
+        let cleared = self.signature_migration()?.fault;
         *self
             .signature_migration_work
             .lock()
@@ -416,7 +481,10 @@ impl Store {
             /* sqlite-large-value: allow-for-now lv-hedd9a4ccf337 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET fault=NULL,legacy_fault=NULL WHERE id=1",
             [],
         )?;
-        Ok(())
+        // Claims admitted while the fault stood were never judged; the next pass takes them.
+        self.verdicts_due.store(true, std::sync::atomic::Ordering::Release);
+        self.signature_job_wake.notify_one();
+        Ok(cleared)
     }
 }
 
@@ -456,4 +524,65 @@ impl Store {
 pub(super) fn note_work(connection: &Connection, work: usize) -> Result<()> {
     connection.execute(/* sqlite-large-value: allow-for-now lv-h25919a7d0fc5 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET completed_work=completed_work+?1,advanced_at_unix_ms=?2 WHERE id=1 AND phase<>'done'",params![i64::try_from(work)?,i64::try_from(now_ms())?])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::*;
+    use rusqlite::ffi;
+
+    fn sqlite(code: i32) -> anyhow::Error {
+        anyhow::Error::new(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None))
+    }
+
+    #[test]
+    fn busy_locked_and_cannot_open_are_transient_and_corruption_is_not() {
+        for code in [ffi::SQLITE_BUSY, ffi::SQLITE_BUSY_SNAPSHOT, ffi::SQLITE_LOCKED, ffi::SQLITE_CANTOPEN] {
+            assert!(transient_storage_error(&sqlite(code)), "{code}");
+            // A failed read inside a candidate judgment carries this context.
+            assert!(transient_storage_error(&sqlite(code).context("signature-state-corrupt")), "{code}");
+        }
+        assert!(transient_storage_error(&anyhow::Error::new(crate::error::internal(sqlite(ffi::SQLITE_LOCKED)))));
+        for code in [ffi::SQLITE_CORRUPT, ffi::SQLITE_ERROR, ffi::SQLITE_NOTADB] {
+            assert!(!transient_storage_error(&sqlite(code)), "{code}");
+        }
+        assert!(!transient_storage_error(&anyhow::anyhow!("database is locked")));
+    }
+
+    #[tokio::test]
+    async fn a_transient_verdict_error_is_returned_unpersisted_and_resume_wakes_the_job() {
+        let store = Store::open_memory("node", Arc::new(crate::store::runtime::Plain)).unwrap();
+        // A member's fault, as `judge_claims` returned it in the field.
+        let locked = sqlite(ffi::SQLITE_LOCKED).context("verdict reconciliation");
+        assert!(store.record_judgment_failure(Err(locked)).is_err());
+        assert_eq!(store.signature_migration().unwrap().fault, None);
+        assert!(store.signature_migration().unwrap().done());
+
+        let corrupt = sqlite(ffi::SQLITE_CORRUPT);
+        assert!(store.record_judgment_failure(Err(corrupt)).is_err());
+        let fault = store.signature_migration().unwrap().fault.unwrap();
+        assert!(fault.starts_with("verdict reconciliation: "), "{fault}");
+        assert!(!store.signature_migration().unwrap().done());
+
+        assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault.as_str()));
+        assert!(store.signature_migration().unwrap().done());
+        assert!(store.verdicts_due.load(std::sync::atomic::Ordering::Acquire));
+        tokio::time::timeout(std::time::Duration::from_secs(5), store.signature_job_wake.notified())
+            .await
+            .expect("resume wakes the stopped bootstrap job");
+        assert_eq!(store.resume_signature_migration().unwrap(), None);
+    }
+
+    #[test]
+    fn a_transient_error_that_lasts_shows_in_doctor_and_success_ends_it() {
+        let store = Store::open_memory("node", Arc::new(crate::store::runtime::Plain)).unwrap();
+        let codes = |store: &Store| store.signature_state_faults().unwrap().into_iter().map(|fault| fault.code).collect::<Vec<_>>();
+        store.note_signature_retry(Some(&sqlite(ffi::SQLITE_CANTOPEN)));
+        assert!(!codes(&store).contains(&"signature-storage-retrying".into()), "a brief retry stays quiet");
+        store.signature_retrying.lock().unwrap().as_mut().unwrap().0 -= SIGNATURE_RETRY_VISIBLE_MS;
+        assert!(codes(&store).contains(&"signature-storage-retrying".into()));
+        assert_eq!(store.signature_migration().unwrap().fault, None, "never persisted");
+        store.note_signature_retry(None);
+        assert!(!codes(&store).contains(&"signature-storage-retrying".into()));
+    }
 }

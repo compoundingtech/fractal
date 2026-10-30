@@ -1,4 +1,4 @@
-//! The part of `store::publication_facts` that moved up from st3-store.
+//! The part of `store::publication_facts` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::PublicationStore;
 use super::*;
@@ -267,7 +267,7 @@ mod tests {
                     let root = tempfile::tempdir().unwrap();
                     let path = root.path().join("delete.db");
                     let baseline = (!after).then(|| {
-                        GraphStore::open(&path, "node", Arc::new(SmalltalkRuntime::default()))
+                        GraphStore::open(&path, "node", Arc::new(FractalRuntime::default()))
                             .unwrap()
                     });
                     let revised = after.then(|| Store::open(&path, "node").unwrap());
@@ -675,6 +675,9 @@ mod tests {
             .unwrap();
             tx.commit().unwrap();
         }
+        // Both corrections queue a pending claim; the commit's 10ms loan may sync only the
+        // first and leave the other to the background drain, which this test drives itself.
+        finish(&store);
         oracle(&store);
         let connection = store.readers.get();
         let selected: String = connection

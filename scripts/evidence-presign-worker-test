@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """scripts/evidence-presign-worker: which heads it signs (ready, ours, not forks, newest first, one per tick), what it never repeats,
-and when load keeps it from starting or stops it. gh, st-test and the host's pressure files are stand-ins; nothing is signed."""
+and when load keeps it from starting or stops it. gh, fractal-test and the host's pressure files are stand-ins; nothing is signed."""
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKER = ROOT / 'scripts/evidence-presign-worker'
 CLEAN = dict(PATH=os.environ['PATH'], GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
              GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
-# The base's st-test, as the worker reads it from origin/main: --list, --status and a run, each recorded.
+# The base's self-contained st-test, as the worker reads it from origin/main: --list, --status and a run, each recorded.
 STUB = '''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 argv = sys.argv[1:]
@@ -34,15 +35,15 @@ with open(os.environ['STUB_LOG'], 'a') as log:
                           'target': os.environ.get('CARGO_TARGET_DIR')}) + '\\n')
 time.sleep(float(os.environ.get('STUB_SLEEP', '0')))
 if os.environ.get('STUB_LEFTOVER'):
-    # A test's stray background process, still in the run's process group when st-test exits.
+    # A test's stray background process, still in the run's process group when fractal-test exits.
     stray = subprocess.Popen(['sleep', '60'])
     open(os.environ['STUB_LEFTOVER'], 'w').write(str(stray.pid))
 results = json.loads(os.environ.get('STUB_RESULTS', '{}'))
-# What a pull request's own test output could print: rows shaped like st-test's, before its summary.
+# What a pull request's own test output could print: rows shaped like fractal-test's, before its summary.
 for name in checks:
     print(f'  {name:<20} {"passed":<12} {1:>6}s  printed by a test')
 print()
-print('st-test: tree 0123456789ab (HEAD), in a clean worktree')
+print('fractal-test: tree 0123456789ab (HEAD), in a clean worktree')
 for name in checks:
     print(f'  {name:<20} {results.get(name, "passed"):<12} {12:>6}s  why')
 sys.exit(0)
@@ -108,7 +109,7 @@ class Worker(unittest.TestCase):
         self.gh_answer.write_text(json.dumps({'data': {'repository': {'pullRequests': {'nodes': self.prs}}}}))
         environment = dict(CLEAN, HOME=self.tmp.name, EVIDENCE_PRESIGN_CONFIG=str(self.config), EVIDENCE_PRESIGN_STATE=str(self.state),
                            EVIDENCE_PRESIGN_GH=str(self.gh), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
-                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
+                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
                            EVIDENCE_PRESIGN_ADMISSION=str(self.admission), STUB_LOG=str(self.log),
                            EVIDENCE_PRESIGN_TARGET=str(self.target), STUB_COVERED=json.dumps(self.covered), **env)
         return subprocess.run([sys.executable, str(WORKER), 'tick', '--class', kind, '--repo', str(self.state / 'repo'),
@@ -123,6 +124,67 @@ class Worker(unittest.TestCase):
 
     def checks_of(self, run):
         return [run['argv'][i + 1] for i, a in enumerate(run['argv']) if a == '--check']
+
+    def base_runners(self, runners):
+        git(self.work, 'checkout', '-q', 'main')
+        for name in ('fractal-test', 'st-test'):
+            (self.work / 'scripts' / name).unlink(missing_ok=True)
+        for name, source in runners.items():
+            (self.work / 'scripts' / name).write_text(source)
+        git(self.work, 'add', '-A')
+        git(self.work, 'commit', '-q', '-m', 'base runners')
+        git(self.work, 'push', '-q', 'origin', 'main')
+
+    def test_the_full_base_implementation_runs_when_copied_without_neighbors(self):
+        self.base_runners({'st-test': (ROOT / 'scripts/st-test').read_text(),
+                           'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
+        base_tools = runpy.run_path(str(WORKER))['base_tools']
+        with tempfile.TemporaryDirectory() as scratch:
+            copied = base_tools(self.work, scratch)
+            self.assertEqual(copied.name, 'st-test')
+            self.assertEqual(list(Path(scratch).iterdir()), [copied])
+            done = subprocess.run([sys.executable, '-I', str(copied), '--help'], cwd=self.work,
+                                  capture_output=True, text=True, env=CLEAN)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout, 'the copied implementation prints its help without adjacent files')
+
+    def test_a_st_test_only_base_reads_the_old_summary_header(self):
+        self.base_runners({'st-test': STUB.replace('fractal-test: tree ', 'st-test: tree ')})
+        self.pr(1)
+        done = self.tick()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(self.runs())
+        self.assertEqual(set(self.attempts()[0]['checks'].values()), {'passed'})
+
+    def test_both_base_names_copy_st_test_not_the_python_shim(self):
+        self.base_runners({'st-test': STUB, 'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
+        self.pr(1)
+        done = self.tick()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('POISON', done.stderr)
+        self.assertTrue(self.runs())
+
+    def test_a_base_without_either_runner_fails_without_running_pr_code(self):
+        self.base_runners({})
+        self.pr(1)
+        done = self.tick()
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertEqual(self.runs(), [])
+
+    def test_a_base_with_only_the_human_runner_fails_without_running_it(self):
+        self.base_runners({'fractal-test': STUB})
+        self.pr(1)
+        done = self.tick()
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertEqual(self.runs(), [])
+
+    def test_a_broken_st_test_does_not_fall_back_to_the_human_runner(self):
+        self.base_runners({'st-test': 'raise RuntimeError("implementation refused")\n', 'fractal-test': STUB})
+        self.pr(1)
+        done = self.tick()
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn('implementation refused', done.stderr)
+        self.assertEqual(self.runs(), [])
 
     def test_without_an_author_list_it_refuses_to_run_anything(self):
         self.pr(1)
@@ -222,7 +284,7 @@ class Worker(unittest.TestCase):
         self.gh_answer.write_text(json.dumps({'data': {'repository': {'pullRequests': {'nodes': self.prs}}}}))
         environment = dict(CLEAN, HOME=self.tmp.name, EVIDENCE_PRESIGN_CONFIG=str(self.config), EVIDENCE_PRESIGN_STATE=str(self.state),
                            EVIDENCE_PRESIGN_GH=str(self.gh), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
-                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
+                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
                            EVIDENCE_PRESIGN_ADMISSION=str(self.admission), STUB_LOG=str(self.log), STUB_SLEEP='30')
         process = worker([sys.executable, str(WORKER), 'tick', '--class', 'heavy', '--repo', str(self.state / 'repo'),
                           '--repository', 'example/repo'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)

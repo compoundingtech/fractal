@@ -91,8 +91,8 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/conversations/\(Self.routedSessionID(sessionID))/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         if let after { components.queryItems = [.init(name: "after", value: after)] }
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
+        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.conversation.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -122,11 +122,38 @@ public actor FractalClient {
     public func getGlass(id: String) async throws -> Envelope<Glass> { try await get("v1/client/glasses/\(Self.routedSessionID(id.split(separator: "/").last.map(String.init) ?? id))") }
     public func putGlass(id: String, body: GlassPut, idempotencyKey: String) async throws -> Envelope<Glass> { try await request("v1/client/glasses/\(Self.routedSessionID(id.split(separator: "/").last.map(String.init) ?? id))", query: [], method: "PUT", body: try JSONEncoder().encode(body), idempotencyKey: idempotencyKey) }
     public func deleteGlass(id: String, body: GlassDelete, idempotencyKey: String) async throws -> Envelope<Glass> { try await request("v1/client/glasses/\(Self.routedSessionID(id.split(separator: "/").last.map(String.init) ?? id))", query: [], method: "DELETE", body: try JSONEncoder().encode(body), idempotencyKey: idempotencyKey) }
+    /// Complete revisioned roster frames. Stage chunks and apply deltas atomically in the caller.
+    public func agentsPublicationStream(subscriptionID: String = "agents") -> AsyncThrowingStream<AgentsCollectionEvent, Error> {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!)
+        request.setValue(features, forHTTPHeaderField: "x-st3-features")
+        request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        applyTraceContext(to: &request)
+        let task = session.webSocketTask(with: request)
+        return AsyncThrowingStream { continuation in
+            task.resume()
+            continuation.onTermination = { @Sendable _ in task.cancel(with: .normalClosure, reason: nil) }
+            Task {
+                do {
+                    let command = try JSONEncoder().encode(AgentsPublicationSubscribe(id: subscriptionID))
+                    try await task.send(.string(String(decoding: command, as: UTF8.self)))
+                    while true {
+                        let data = try Self.websocketData(from: try await task.receive())
+                        continuation.yield(try JSONDecoder().decode(AgentsCollectionEvent.self, from: data))
+                    }
+                } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
+            }
+        }
+    }
+
     public func glassesStream(subscriptionID: String = "glasses") -> AsyncThrowingStream<GlassCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
+        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -150,8 +177,8 @@ public actor FractalClient {
     public func arrangementsStream(person: String, subscriptionID: String = "arrangements", limit: Int = 100, subject: String? = nil) -> AsyncThrowingStream<ArrangementCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        // WebSocket cutover requires #3430 on every receiver; HTTP headers remain unchanged.
+        var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -183,7 +210,7 @@ public actor FractalClient {
     public func agentsStream(subscriptionID: String = "agents", limit: Int = 100, status: String? = nil, agent: String? = nil) -> AsyncThrowingStream<AgentCollectionFrame, Error> {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
-        var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        var request = URLRequest(url: components.url!); request.setValue("custom-subjects.v1, conversation-blocks.v1", forHTTPHeaderField: "x-st3-features"); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
@@ -205,6 +232,29 @@ public actor FractalClient {
                         let data = try Self.websocketData(from: try await task.receive())
                         let frame = try JSONDecoder().decode(AgentCollectionFrame.self, from: data)
                         if frame.kind == "error" { throw NSError(domain: "St3Client", code: 0, userInfo: [NSLocalizedDescriptionKey: frame.message ?? "Agent subscription failed"]) }
+                        continuation.yield(frame)
+                    }
+                } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
+            }
+        }
+    }
+    public func orderedMembershipsStream(person: String, subject: String, subscriptionID: String = "ordered-memberships", limit: Int = 100) -> AsyncThrowingStream<OrderedMembershipCollectionFrame, Error> {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!); request.setValue("st3.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        let task = session.webSocketTask(with: request)
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
+            task.resume()
+            Task {
+                do {
+                    let command = try JSONSerialization.data(withJSONObject: ["kind":"subscribe", "id":subscriptionID, "collection":"ordered-memberships", "person":person, "subject":subject, "limit":limit])
+                    try await task.send(.string(String(decoding: command, as: UTF8.self)))
+                    while true {
+                        let data = try Self.websocketData(from: try await task.receive())
+                        let frame = try JSONDecoder().decode(OrderedMembershipCollectionFrame.self, from: data)
+                        if frame.kind == "error" { throw NSError(domain: "St3Client", code: 0, userInfo: [NSLocalizedDescriptionKey: frame.message ?? "Ordered membership subscription failed"]) }
+                        if frame.kind == "resync" { try await task.send(.string(String(decoding: command, as: UTF8.self))); continue }
                         continuation.yield(frame)
                     }
                 } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
@@ -278,8 +328,8 @@ public actor FractalClient {
         var components = URLComponents(url: baseURL.appending(path: "v1/client/terminals/\(id.replacingOccurrences(of: "terminal/", with: ""))/stream"), resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "https" ? "wss" : "ws"
         if let incarnation { components.queryItems = [.init(name: "incarnation", value: incarnation)] }
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("\(fractalClientTerminalSubprotocol), st3.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; sunset 2026-11-01.
+        var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.setValue("\(fractalClientTerminalSubprotocol), fractal.cap.\(streamCapability)", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         applyTraceContext(to: &request)
         let task = session.webSocketTask(with: request)
         return AsyncThrowingStream { continuation in
@@ -350,6 +400,10 @@ public actor FractalClient {
         }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    static func pathSegment(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"))!
     }
 
     static func routedSessionID(_ value: String) -> String {

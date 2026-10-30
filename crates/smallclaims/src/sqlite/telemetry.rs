@@ -30,8 +30,8 @@ static TASK_ORIGINS: &[&str] = &[
     "other", "task checkpoint", "task migrate-event-payloads", "task expire-completed-responses",
     "task coordination-counts-catch-up", "task account-limits-catch-up",
     "task enforce-account-limits", "task trim-local-observations", "task mailbox-wake-dispatch",
-    "task reconcile-pass", "task reconcile-deadline",
-    "reconcile", "reconcile.timer", "reconcile.gate_poll",
+    "task reconcile-pass", "task reconcile-deadline", "task mission-reads",
+    "reconcile", "reconcile.timer", "reconcile.gate_poll", "reconcile.mission_reads",
     "published_list.agents", "published_list.missions", "published_list.work",
     "publication.attention", "publication.summary", "publication.advance_evidence",
     "replication.activate", "replication.retry_projection", "replication.export",
@@ -40,7 +40,7 @@ static TASK_ORIGINS: &[&str] = &[
     "startup.apply_replication_repairs", "startup.settle_runs",
     "startup.project_replication_backlog", "startup.warmup", "startup.isolation",
     "account_limits.enforce", "account_limits.catch_up", "maintenance.checkpoint",
-    "maintenance.envelope_payloads", "maintenance.event_payloads",
+    "maintenance.envelope_payloads", "maintenance.event_payloads", "maintenance.signature_backfill",
     "maintenance.coordination_counts", "maintenance.stop_deferral_history",
     "maintenance.response_expiry", "maintenance.wal_checkpoint",
     "observations.trim", "observations.trim_usage_responses", "observations.database_size",
@@ -689,7 +689,7 @@ mod tests {
         let instruments = Instruments::new(&provider.meter("checkpoint-test"));
         let report = |frames: i32, recycled: bool| super::super::WalCheckpointReport {
             frames, backfilled: frames, passive_ms: 2, writer_wait_ms: 0,
-            truncate_ms: recycled.then_some(1), recycled,
+            truncate_ms: recycled.then_some(1), recycled, blocked_by: None,
         };
         let reports = [Some(report(0, false)), Some(report(8, true)), Some(report(8, false)), None];
         for operation in [CheckpointOperation::Truncate, CheckpointOperation::Passive] {

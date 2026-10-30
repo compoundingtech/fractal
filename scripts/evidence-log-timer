@@ -6,7 +6,7 @@
 # EVIDENCE_LOG_FLAGS adds --publish and, once GC writes its lines first, --restore.
 set -euo pipefail
 state=${EVIDENCE_LOG_STATE:-$HOME/.local/state/evidence-log}
-remote=${EVIDENCE_LOG_REMOTE:-https://github.com/compoundingtech/smalltalk.git}
+remote=${EVIDENCE_LOG_REMOTE:-https://github.com/compoundingtech/fractal.git}
 config=${EVIDENCE_LOG_CONFIG:-$HOME/.config/evidence-log}
 repo=$state/repo.git
 mkdir -p "$state"
@@ -22,8 +22,15 @@ for tool in evidence-log evidence-verify; do
   git -C "$repo" show "origin/main:scripts/$tool" > "$tools/$tool"
 done
 keys=$config/log-keys
-if git -C "$repo" cat-file -e origin/main:.st/evidence-log-key 2>/dev/null; then
-  git -C "$repo" show origin/main:.st/evidence-log-key > "$tools/log-keys"
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — only genuine absence permits the host-local key fallback.
+key_path=.fractal/evidence-log-key
+entry=$(git -C "$repo" ls-tree --full-tree -z origin/main -- "$key_path" | tr '\0' '\n')
+if [ -z "$entry" ]; then
+  key_path=.st/evidence-log-key
+  entry=$(git -C "$repo" ls-tree --full-tree -z origin/main -- "$key_path" | tr '\0' '\n')
+fi
+if [ -n "$entry" ]; then
+  git -C "$repo" show "origin/main:$key_path" > "$tools/log-keys"
   keys=$tools/log-keys
 fi
 # shellcheck disable=SC2086

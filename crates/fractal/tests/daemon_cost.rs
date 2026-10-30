@@ -31,6 +31,8 @@
 //!
 //! Arrangement probes keep one live resource's register heads fixed while its edit history grows
 //! with the generated scale, so both the owner-selected list and detail must be history-independent.
+//! The ordered-membership page and v2 arrangement/folder renames keep one live member fixed while
+//! its move history and retained hidden/absent members grow with the generated scale.
 //! Per-subject conversation-owner probes grow sparse identity history at fixed answer size,
 //! including other-origin actual-state claims without a rival runtime. SQL VM row work and
 //! statement counts must stay bounded; this path has no `KNOWN_GROWTH` exemption.
@@ -51,6 +53,7 @@ use fractal_daemon::MissionsStore;
 use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::{GitChangesStore, WatchesStore};
+use fractal_daemon::HarnessQuestionsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -78,6 +81,33 @@ use crate::daemon_bench::{
     FLEET, NODE, PEER, Subjects, claim_input, fleet_subjects, generated_stores, listed, stub_pty,
 };
 
+/// Only the cost fixture can enable this sink; invalid answers must never reach settlement.
+struct CostHarnessQuestionSink(std::sync::atomic::AtomicBool);
+
+impl fractal_daemon::api::HarnessQuestionSettleSink for CostHarnessQuestionSink {
+    fn availability(
+        &self,
+        _question: &fractal_daemon::api::HarnessQuestion,
+    ) -> Result<(), fractal_daemon::api::HarnessQuestionAdapterError> {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(fractal_daemon::api::HarnessQuestionAdapterError::Missing)
+        }
+    }
+
+    fn settle(
+        &self,
+        _question: &fractal_daemon::api::HarnessQuestion,
+        _answers: &BTreeMap<String, fractal_schema::harness_questions::Answer>,
+    ) -> Result<
+        BTreeMap<String, fractal_schema::harness_questions::Answer>,
+        fractal_daemon::api::HarnessQuestionAdapterError,
+    > {
+        unreachable!("cost probes must refuse before native settlement")
+    }
+}
+
 /// How many times more work a request may do at the larger scale, for the same answer.
 const GROWTH: f64 = 3.0;
 
@@ -91,8 +121,6 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Attention reads every person ask (11.8x full-scan steps).
-    ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
@@ -104,8 +132,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Reviews scan every claim of their kinds (19.6x steps, 25.0x full-scan steps).
-    ("GET /v1/reviews", 38.0),
     // Sessions read every harness observation (11.5x full-scan steps).
     ("GET /v1/sessions", 17.5),
 ];
@@ -114,8 +140,20 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/client/private-notes/{*uri}",
+        "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
+    ),
+    (
+        "POST /v1/deploy/verify-go",
+        "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
+    ),
+    (
+        "POST /v1/internal/fleet/pairing-admission",
+        "explicit one-use fleet admission proxies the bounded signed request to the live worker; uses the existing invite redemption and verified membership fold, not a polling read path",
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
@@ -274,6 +312,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
+    ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
@@ -281,6 +320,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/internal/replication/checkpoint-adopt",
         "adopts a peer's checkpoint",
+    ),
+    (
+        "POST /v1/internal/replication/answers",
+        "answers from a cache filled off the request path; filling it reads every claim, once a day by design",
+    ),
+    (
+        "POST /v1/internal/replication/answers-check",
+        "records a daily answers check; writes only when a fault opens or ends",
     ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
@@ -322,6 +369,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     // Writes that need a live runtime or a person's approval the generated store lacks.
     ("POST /v1/agents/rename", "renames a declared agent"),
+    (
+        "POST /v1/persons/rename",
+        "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
+    ),
     ("POST /v1/agents/restart", "restarts a live seat"),
     (
         "POST /v1/agents/rollout",
@@ -341,6 +392,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/repair/apply",
         "applies an operational repair plan",
+    ),
+    (
+        "POST /v1/repair/apply-attributed",
+        "applies an operational repair plan with an authenticated harness binding absent from generated cost stores; API repair tests cover actor enforcement",
     ),
     (
         "POST /v1/replication/repair",
@@ -369,11 +424,11 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "PUT /v1/client/glasses/{id}",
-        "a stui layout, outside the graph",
+        "a Fractal TUI layout, outside the graph",
     ),
     (
         "DELETE /v1/client/glasses/{id}",
-        "a stui layout, outside the graph",
+        "a Fractal TUI layout, outside the graph",
     ),
     ("POST /v1/intent/mission", "plans a mission from KDL"),
     ("POST /v1/intent/apply", "applies a planned mission"),
@@ -583,6 +638,15 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
+    ),
+    get("GET /v1/client/harness-questions", "/v1/client/harness-questions"),
+    get(
+        "GET /v1/client/harness-questions/{*id}",
+        "/v1/client/harness-questions/{harness_question}",
+    ),
+    get(
+        "GET /v1/client/arrangements/{person_name}/{uuid}/memberships",
+        MEMBERSHIP_PATH,
     ),
     post("POST /v1/sets/preview", "/v1/sets/preview", |_, attempt| {
         owned_set_request(&format!("preview-{attempt}"))
@@ -842,6 +906,7 @@ const PROBES: &[Probe] = &[
         "/v1/subscription-requests?subscription=subscription/bench/missing",
     ),
     get("GET /v1/messages", "/v1/messages?to={seat}"),
+    get("GET /v1/messages/recipient", "/v1/messages/recipient?to={seat}"),
     get(
         "GET /v1/messages/by-key",
         "/v1/messages/by-key?key=cost-fixture-message",
@@ -864,6 +929,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get(
+        "GET /v1/resource-references/{*subject}",
+        "/v1/resource-references/resource/bench/cost",
+    ),
     get("GET /v1/events", "/v1/events?after={event_after}&limit=100"),
     get(
         "GET /v1/events/page",
@@ -924,6 +993,8 @@ const PROBES: &[Probe] = &[
         "GET /v1/mission-runs/{run}/revision-proposal",
         "/v1/mission-runs/{run}/revision-proposal",
     ),
+    get("GET /v1/mission-runs/{run}/waiting-on", "/v1/mission-runs/{run}/waiting-on"),
+    get("GET /v1/blocked-runs", "/v1/blocked-runs"),
     get("GET /v1/mission-runs/{run}", "/v1/mission-runs/{run}"),
     get(
         "GET /v1/run-generations/{generation}",
@@ -1145,6 +1216,22 @@ const PROBES: &[Probe] = &[
         "/v1/internal/replication/checkpoint-need",
         |_, _| json!({}),
     ),
+    get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
+    get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
+    // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
+    // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id", "/v1/missions/rename-id", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -1211,6 +1298,80 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
     append(
         "cost-arrangement-current",
         json!([{"op":"rename","name":"Invented arrangement"}]),
+    )
+}
+
+const MEMBERSHIP_OWNER: &str = "person/avery";
+const MEMBERSHIP_SUBJECT: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
+const MEMBERSHIP_PATH: &str =
+    "/v1/client/arrangements/avery/019a0000-0000-7000-8000-000000000002/memberships?person=person%2Favery";
+/// A live member: another of the owner's arrangements, visible while it is created and unretired.
+const MEMBERSHIP_MEMBER: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000003";
+const MEMBERSHIP_FOLDER: &str = "019a0000-0000-7000-8000-000000000020";
+
+/// Grow the container's move history and retained hidden/absent members, not the live page, to
+/// catch membership reads and arrangement renames that scan retained heads.
+fn seed_memberships(store: &Store, scale: f64) -> String {
+    let arrangement = |subject: &str, fields: Value| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "arrangement.edited".into(),
+                actor: Some(MEMBERSHIP_OWNER.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("cost-membership-create-{subject}")),
+            })
+            .expect("the membership cost fixture's arrangement must publish")
+    };
+    arrangement(
+        MEMBERSHIP_SUBJECT,
+        json!({"owner":MEMBERSHIP_OWNER,"version":2,"operations":[
+            {"op":"create","name":"Invented memberships"},
+            {"op":"folder.create","id":MEMBERSHIP_FOLDER,"name":"Work","parent":null,"key":"a0"},
+        ]}),
+    );
+    arrangement(
+        MEMBERSHIP_MEMBER,
+        json!({"owner":MEMBERSHIP_OWNER,"operations":[{"op":"create","name":"Invented member"}]}),
+    );
+    let edit = |key: String, operations: Value| {
+        store
+            .edit_ordered_memberships(
+                &ClaimInput {
+                    subject: MEMBERSHIP_SUBJECT.into(),
+                    kind: "ordered-membership.edited".into(),
+                    actor: Some(MEMBERSHIP_OWNER.into()),
+                    fields: serde_json::from_value(json!({
+                        "owner": MEMBERSHIP_OWNER,
+                        "operations": operations,
+                    }))
+                    .unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(key),
+                },
+                &BTreeMap::new(),
+            )
+            .expect("the membership cost fixture must publish")
+            .id
+    };
+    for edit_index in 0..((scale * 10_000.0).round() as usize).max(1) {
+        edit(
+            format!("cost-membership-history-{edit_index}"),
+            json!([
+                {"op":"place","member":MEMBERSHIP_MEMBER,"bucket":null,"key":if edit_index % 2 == 0 { "a1" } else { "a0" }},
+                // A distinct variant nibble keeps these from naming the container or live member.
+                {"op":"remove","member":format!("arrangement/person/avery/019a0000-0000-7000-9000-{edit_index:012}")},
+                // A positioned member without a declaration is hidden, not absent.
+                {"op":"place","member":format!("arrangement/person/avery/019a0000-0000-7000-a000-{edit_index:012}"),"bucket":MEMBERSHIP_FOLDER,"key":"a0"},
+            ]),
+        );
+    }
+    edit(
+        "cost-membership-current".into(),
+        json!([{"op":"place","member":MEMBERSHIP_MEMBER,"bucket":null,"key":"a0"}]),
     )
 }
 
@@ -1468,6 +1629,9 @@ mission "cost/history" state="ready" {
         fleet_id: None, configured_peers: Vec::new(), client_relay: None,
         native_session_home: Some(root.path().join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     });
     let mut measurements = Vec::new();
     for run in 0..100 {
@@ -1837,6 +2001,72 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
 }
 
 #[test]
+fn v2_arrangement_renames_are_bounded_with_hidden_and_absent_membership_history() {
+    let mut measurements = Vec::new();
+    for scale in [0.01, 0.1] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("graph.db");
+        let store = Store::open(&path, "cost-node").unwrap();
+        seed_memberships(&store, scale);
+        let history = (scale * 10_000.0).round() as u64;
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let retained: (u64, u64) = connection.query_row(
+            "SELECT COUNT(*),SUM(position IS NULL) FROM ordered_membership_heads WHERE container=?1",
+            [MEMBERSHIP_SUBJECT], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, (history * 2 + 1, history));
+        assert_eq!(store.ordered_membership_count(MEMBERSHIP_SUBJECT).unwrap(), 1);
+        let page = store.ordered_memberships(MEMBERSHIP_SUBJECT, store.index().unwrap(), None, 10).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0]["member"], MEMBERSHIP_MEMBER);
+        let mut renames = Vec::new();
+        for operation in ["rename", "folder.rename"] {
+            let mut samples = Vec::new();
+            for attempt in 0..4 {
+                let mut edit = json!({"op":operation,"name":format!("Renamed {attempt}")});
+                if operation == "folder.rename" { edit["id"] = json!(MEMBERSHIP_FOLDER); }
+                let input = ClaimInput {
+                    subject: MEMBERSHIP_SUBJECT.into(),
+                    kind: "arrangement.edited".into(),
+                    actor: Some(MEMBERSHIP_OWNER.into()),
+                    fields: serde_json::from_value(json!({
+                        "owner":MEMBERSHIP_OWNER,"operations":[edit],
+                    })).unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(format!("cost-membership-{operation}-{attempt}")),
+                };
+                let before = work::total();
+                let claim = store.append_claim(&input).unwrap();
+                samples.push(work::total() - before);
+                let frontier = store.index().unwrap();
+                assert_eq!(store.ordered_memberships(MEMBERSHIP_SUBJECT, frontier, None, 10).unwrap(), page);
+                assert_eq!(store.ordered_membership_state(MEMBERSHIP_SUBJECT).unwrap().changed_index, claim.store_index);
+                let register = if operation == "rename" { "name".into() } else { format!("folder/{MEMBERSHIP_FOLDER}/name") };
+                let name: String = connection.query_row(
+                    "SELECT value FROM arrangement_registers WHERE subject=?1 AND register=?2",
+                    [MEMBERSHIP_SUBJECT, &register], |row| row.get(0),
+                ).unwrap();
+                assert_eq!(serde_json::from_str::<Value>(&name).unwrap(), json!(format!("Renamed {attempt}")));
+            }
+            renames.push(samples.into_iter().skip(1).min_by_key(|spent| spent.vm_steps).unwrap());
+        }
+        measurements.push(renames);
+    }
+    for (index, operation) in ["rename", "folder.rename"].into_iter().enumerate() {
+        let (small, large) = (measurements[0][index], measurements[1][index]);
+        println!("v2 {operation} 100 -> 1000 hidden and absent pairs: {small:?} -> {large:?}");
+        assert!(small.statements > 0, "rename SQL work must be traced");
+        assert!(large.statements <= small.statements + 2,
+            "{operation} SQL calls grew with retained pairs: {small:?} -> {large:?}");
+        assert!(large.vm_steps <= small.vm_steps + SLACK,
+            "{operation} row work grew with retained pairs: {small:?} -> {large:?}");
+        assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+            "{operation} scanned retained pairs: {small:?} -> {large:?}");
+    }
+}
+
+#[test]
 fn conversation_owner_sql_work_is_bounded_independently_of_subject_history() {
     conversation_owner_history_cost(false);
 }
@@ -1967,7 +2197,7 @@ fn declared_routes(source: &str) -> BTreeSet<String> {
         .expect("api.rs builds its router in router_for_transport")..])
 }
 
-/// The routes of a route family a crate above st3-api adds to the router (its `routes` fn).
+/// The routes of a route family a crate above fractal-api-core adds to the router (its `routes` fn).
 fn family_routes(source: &str) -> BTreeSet<String> {
     let start = source
         .find("pub fn routes(")
@@ -2346,6 +2576,36 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    let harness_question = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            store.append_claim(&ClaimInput {
+                subject: "agent/ada".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/ada".into()),
+                fields: serde_json::from_value(json!({
+                    "status": "running", "runtime_id": "cost-question-runtime",
+                    "incarnation_id": "cost-question-runtime", "terminal": true,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.observe_harness_question(&fractal_daemon::store::harness_questions::QuestionObservation {
+                agent: "agent/ada".into(),
+                session: "cost-question-session".into(),
+                native_id: "cost-question-call".into(),
+                runtime_incarnation: "cost-question-runtime".into(),
+                questions: vec![fractal_schema::harness_questions::Question {
+                    id: "q0".into(), options: 2, multi: false, required: true,
+                }],
+            }).unwrap()
+        }).await.unwrap()
+    };
+    let membership_revision = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_memberships(&store, scale))
+            .await
+            .unwrap()
+    };
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -2388,7 +2648,15 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         client_relay: relay,
         native_session_home: Some(root.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
+    let harness_sink = Arc::new(CostHarnessQuestionSink(
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    let mut state = state;
+    state.harness_question_sink = Some(harness_sink.clone());
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
@@ -2404,7 +2672,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let client = Client::unix(&socket);
-    // Client reads come from a person, as stui and the app make them.
+    // Client reads come from a person, as Fractal TUI and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
     let challenge: Value = person.post("/v1/client/pairings", &json!({
         "api_version":"st3.client.v0", "device_name":"Cost phone",
@@ -2437,6 +2705,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let notes: Value = person.get("/v1/client/notes").await.unwrap();
     assert_eq!(notes["notes"], json!([seeded["note"]]));
     let arrangement_person = Client::unix_as(&socket, ARRANGEMENT_OWNER).unwrap();
+    let membership_person = Client::unix_as(&socket, MEMBERSHIP_OWNER).unwrap();
     let subjects = {
         let store = store.clone();
         tokio::task::spawn_blocking(move || fleet_subjects(&store, 3))
@@ -2456,6 +2725,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert(
+        "harness_question",
+        urlencoding::encode(&harness_question.id).into_owned(),
+    );
     fixture.items.insert("usage_since", usage_window.0.to_string());
     fixture.items.insert("usage_until", usage_window.1.to_string());
     fixture.items.insert(
@@ -2593,6 +2866,18 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = membership_person
+        .get(MEMBERSHIP_PATH)
+        .await
+        .expect("the ordered-membership probe must read the live version-2 fixture");
+    assert_eq!(
+        page["items"],
+        json!([{
+            "id":MEMBERSHIP_MEMBER, "container":MEMBERSHIP_SUBJECT, "member":MEMBERSHIP_MEMBER,
+            "position":{"bucket":null,"key":"a0"}, "revision":membership_revision,
+        }])
+    );
+    assert_eq!(page["page"]["has_more"], false);
 
     prepare_custom_fixture(&store, &mut fixture, scale);
     let event_page: Value = client
@@ -2629,6 +2914,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
+        if probe.route == "POST /v1/agents/rename-id" {
+            prepare_renames(&store);
+        }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
@@ -2662,7 +2950,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             } else {
                 let path = fixture.fill(probe.path, attempt);
                 let body = probe.body.map(|body| body(&fixture, attempt));
-                let client = if path.starts_with("/v1/client/arrangements") {
+                let client = if path == MEMBERSHIP_PATH {
+                    membership_person.clone()
+                } else if path.starts_with("/v1/client/arrangements") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()
@@ -2773,6 +3063,109 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     }
     costs.insert(COLD_AGENTS.to_owned(), Cost::least(&samples));
 
+    // Compact resolutions never expire. Exercise shared action-key admission with 100 versus
+    // 1,000 unrelated answered calls at the default scales, including non-harness sends.
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            use fractal_schema::harness_questions::{Answer, Receipt, Status, actor_key};
+            for index in 0..((scale * 10_000.0).round() as usize).max(1) {
+                let question = store.observe_harness_question(
+                    &fractal_daemon::store::harness_questions::QuestionObservation {
+                        agent: "agent/ada".into(), session: "cost-resolved-session".into(),
+                        native_id: format!("cost-resolved-call-{index}"),
+                        runtime_incarnation: "cost-question-runtime".into(),
+                        questions: vec![fractal_schema::harness_questions::Question {
+                            id: "q0".into(), options: 2, multi: false, required: true,
+                        }],
+                    },
+                ).unwrap();
+                store.resolve_harness_question(
+                    &question.id, Status::Answered, &question.revision,
+                    &BTreeMap::from([("q0".into(), Answer { positions: vec![1], timed_out: false })]),
+                    Some(&Receipt {
+                        actor_key: actor_key(ARRANGEMENT_OWNER, &format!("cost-resolved-key-{index}")),
+                        request_digest: "b".repeat(64),
+                        action_id: format!("action/cost-resolved-{index}"),
+                    }),
+                ).unwrap();
+            }
+            // Sealing queues signatures; drain this finite setup judgment work so the
+            // summary measures steady state, not the receipt-history fixture backlog.
+            store.seal_local_batches().unwrap();
+            store.judge_claims(false).unwrap();
+        }).await.unwrap();
+    }
+    let mut samples = Vec::new();
+    for attempt in 0..4 {
+        let capabilities = fractal_client::Client::unix_as(&socket, "person/bench-operator")
+            .capabilities().await.unwrap();
+        let request = json!({
+            "api_version": "st3.client.v0", "type": "message.send",
+            "id": format!("action/resolved-history-send-{attempt}"),
+            "idempotency_key": format!("resolved-history-send-key-{attempt}"),
+            "fence": {"snapshot_id": capabilities.snapshot.id, "subject_revisions": {}},
+            "parameters": {"to": fixture.subjects.seats[0], "content": "Invented cost probe"},
+        });
+        let cost = counted(|| async {
+            person.post::<_, Value>("/v1/client/actions", &request).await
+                .map_err(|error| error.to_string())
+        }).await;
+        if attempt > 0 { samples.push(cost); }
+    }
+    costs.insert("POST /v1/client/actions (message.send retained harness receipts)".into(), Cost::least(&samples));
+
+    for (invalid, code, reason) in [
+        (false, "not-answerable", "adapter_missing"),
+        (true, "invalid-answer", "unknown_option"),
+    ] {
+        harness_sink.0.store(invalid, std::sync::atomic::Ordering::Relaxed);
+        let mut samples = Vec::new();
+        for attempt in 0..4 {
+            let current = fractal_client::Client::unix_as(&socket, ARRANGEMENT_OWNER)
+                .harness_question(&harness_question.id)
+                .await.unwrap();
+            let request = json!({
+                "api_version": "st3.client.v0",
+                "id": format!("action/harness-answer-cost-{invalid}-{attempt}"),
+                "type": "harness.answer",
+                "idempotency_key": format!("harness-answer-cost-key-{invalid}-{attempt}"),
+                "fence": {
+                    "snapshot_id": current.snapshot.id,
+                    "subject_revisions": {
+                        current.value.header.id: current.value.header.revision,
+                    },
+                    "runtime_incarnation": current.value.runtime_incarnation,
+                },
+                "parameters": {
+                    "question": harness_question.id,
+                    "answers": {"q0": {"positions": [if invalid { 2 } else { 1 }]}},
+                },
+            });
+            let cost = counted(|| async {
+                let error = arrangement_person
+                    .post::<_, Value>("/v1/client/actions", &request)
+                    .await.expect_err("the harness answer cost probe must refuse");
+                assert_eq!(fractal_daemon::client::api_error_code(&error), Some(code), "{error:#}");
+                assert_eq!(
+                    fractal_daemon::client::api_error_parts(&error)
+                        .and_then(|(_, _, _, details)| details.get("reason")).and_then(Value::as_str),
+                    Some(reason),
+                    "{error:#}",
+                );
+                Ok(json!({"reason": reason}))
+            }).await;
+            if attempt > 0 {
+                samples.push(cost);
+            }
+        }
+        costs.insert(
+            format!("POST /v1/client/actions (harness.answer {code})"),
+            Cost::least(&samples),
+        );
+    }
+    harness_sink.0.store(false, std::sync::atomic::Ordering::Relaxed);
+
     // The summary a peer asks for before each exchange, after the daemon wrote a few claims.
     let mut samples = Vec::new();
     for attempt in 0..4 {
@@ -2816,7 +3209,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
 
 fn custom_manifest(version: u32) -> fractal_schema::custom::Manifest {
     let mut manifest: fractal_schema::custom::Manifest =
-        serde_json::from_str(include_str!("../../../examples/st3/custom-review.json")).unwrap();
+        serde_json::from_str(include_str!("../../../examples/fractal/custom-review.json")).unwrap();
     manifest.version = version;
     manifest.subject_prefix = format!("custom/garden/review/v{version}/");
     manifest
@@ -3023,6 +3416,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
 
 /// Set up fresh writes outside the measured region. A handoff releases its sender before the
 /// next task starts, so each dedicated agent has exactly one worker lease during measurement.
+/// Four agents and four missions for the rename probes, one of each per attempt.
+fn prepare_renames(store: &Store) {
+    let kdl = (0..4)
+        .map(|attempt| format!(
+            "agent \"bench/cost/rename-{attempt}\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\" }}\n\
+             mission \"cost-rename-{attempt}\" state=\"ready\" {{ goal \"Invented goal\"; step \"review\" {{ assigned-to \"person/bench-operator\" }} }}\n"
+        ))
+        .collect::<String>();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\n{kdl}"), NODE).unwrap();
+    store.apply_internal(&intent, "cost-rename-identities").unwrap();
+}
+
 fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
     let kdl = (0..4)
         .map(|attempt| format!(

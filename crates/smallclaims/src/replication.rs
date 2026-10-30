@@ -55,6 +55,9 @@ pub struct ReplicationInventoryBucket {
 pub struct ReplicationExchange {
     pub peer: String,
     pub fleet_id: String,
+    /// None is the legacy/default store. A named shard must carry its durable ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
     pub schema_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projection_registry_digest: Option<String>,
@@ -105,6 +108,11 @@ pub struct ClaimRangeSummary {
     /// The retained claim IDs of each leaf range the peer asked about.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ids: Vec<ClaimRangeIds>,
+    /// The same summary of the claim IDs the sender retired, from a member that trims locally
+    /// once its retired ranges are folded. Its `retained` is the whole retired set. Older peers
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<ClaimRangeSummary>>,
 }
 
 /// The most top ranges one query asks the leaves of, and the most leaf ranges it asks the IDs
@@ -129,6 +137,10 @@ pub struct ClaimRangeQuery {
     pub ids_of: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claims: Vec<String>,
+    /// The same walk over the peer's retired claim IDs. Its `claims` is never used: a retired ID
+    /// found missing is recorded, not fetched. Older peers ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<ClaimRangeQuery>>,
 }
 
 /// One range's number, population and digest.
@@ -168,6 +180,10 @@ pub struct ClaimRangeComparison {
     /// Claim IDs the peer retains that this node neither retains nor has retired.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
+    /// How the peer's retired claim IDs differ, when both trim locally. Its `missing` are the
+    /// retired IDs this node lacked, which it has recorded as retired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired: Option<Box<ClaimRangeComparison>>,
 }
 
 /// The population of a claim range and the hex of its 512-bit digest.
@@ -308,6 +324,9 @@ pub struct ReplicationStatus {
     pub waiting_claims: u64,
     pub invalid_records: u64,
     pub repaired_records: u64,
+    /// Envelopes received and not yet admitted, including those held below.
+    #[serde(default)]
+    pub pending_envelopes: u64,
     /// Envelopes of keyed writers held until their writer's signature arrives.
     #[serde(default)]
     pub unsigned_envelopes: u64,
@@ -378,8 +397,23 @@ pub struct UnhealthyProjection {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReplicationWorkerStatusRequest {
+    /// Empty, with no `worker`, on a report of the worker's process CPU alone.
+    #[serde(default)]
     pub peer: String,
-    pub worker: ReplicationWorkerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<ReplicationWorkerStatus>,
+    /// The worker process's own CPU, for the member's CPU targets. Older workers send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ReplicationWorkerProcess>,
+}
+
+/// A replication worker's cumulative process CPU, and which process it is.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ReplicationWorkerProcess {
+    pub pid: u32,
+    /// When the process started, in Unix milliseconds: with the pid, its identity.
+    pub started_at_unix_ms: u64,
+    pub cpu_ns: u64,
 }
 
 /// Host-local worker state; absent after restart until the worker next attempts a peer.
@@ -431,15 +465,40 @@ pub enum ReplicationFailurePhase {
     FollowUpExport,
 }
 
+/// Last observed HTTP client boundary. Pool acquisition is not exposed by reqwest.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReplicationClientStage {
+    SendStarted,
+    Connected,
+    HeadersReceived,
+    PooledOrUnknown,
+}
+
 /// Bounded, allowlisted diagnostic metadata, not arbitrary error display or peer prose.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReplicationExchangeFailure {
     pub code: String,
     pub phase: ReplicationFailurePhase,
     pub elapsed_ms: u64,
+    /// Whole outbound attempt, including exports, dial, earlier requests and polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_elapsed_ms: Option<u64>,
+    /// Request serialization, hashing, signing, compression and construction before send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation_ms: Option<u64>,
+    /// HTTP request body length after optional compression, excluding headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_uncompressed_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_status: Option<u16>,
     pub cause: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_stage: Option<ReplicationClientStage>,
 }
 
 impl ReplicationExchangeFailure {
@@ -453,7 +512,6 @@ impl ReplicationExchangeFailure {
     ) -> Self {
         if let Some(failure) = error.downcast_ref::<Self>() {
             let mut failure = failure.clone();
-            failure.elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
             if phase == ReplicationFailurePhase::FollowUpExport
                 && failure.phase == ReplicationFailurePhase::LocalExport
             {
@@ -493,8 +551,14 @@ impl ReplicationExchangeFailure {
             code: code.into(),
             phase,
             elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            attempt_elapsed_ms: None,
+            preparation_ms: None,
+            request_body_bytes: None,
+            request_body_uncompressed_bytes: None,
             http_status,
             cause,
+            correlation_id: None,
+            client_stage: None,
         }
     }
 }

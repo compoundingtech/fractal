@@ -12,12 +12,13 @@ use ratatui::text::{Line, Span};
 /// What a button on an alert does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlertTap {
-    /// Send one of its typed answers: `allow`, `deny`, or a structured answer's id.
+    /// Send one of its typed answers: a prompt's (`allow`, `deny`, `skip`, ...), or a structured
+    /// answer's id.
     Answer(String),
     /// Choose, or for a multi-select also unchoose, an option of a harness's question: the
     /// question's and the option's places in the pending call.
     Choose(usize, usize),
-    /// Open the alert's whole card in Now, where every kind is answered.
+    /// Open the alert's whole card in Inbox: a call too long for the band is read whole there.
     Open,
     /// Expand or collapse the band: the `Hit` names the agent's conversation, not an alert.
     Toggle,
@@ -47,7 +48,6 @@ pub enum Hit {
     Usage,
     /// The top bar's connection word ("live"): this machine, or why it is not reached.
     Connection,
-    Tab(usize),
     Row(usize),
     /// A conversation entry: left drag selects text; right click opens message actions.
     Message,
@@ -99,6 +99,8 @@ pub enum Hit {
     GlassAdd(usize),
     /// Glasses: open a palette row.
     PaletteChoice(usize),
+    /// A document page's or the documents list's own button: back, try again, more.
+    Document(super::documents::Tap),
 }
 
 pub type Target = fractal_conversation_ui::doc::Target<Hit>;
@@ -225,21 +227,14 @@ impl DocExt for Doc {
 
 /// A meter of eighth blocks.
 pub fn meter(done: usize, total: usize, cells: usize, color: Color) -> Vec<Span<'static>> {
-    const EIGHTHS: [&str; 9] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"];
-    let filled = if total == 0 {
-        0.0
-    } else {
-        done as f32 / total as f32 * cells as f32
-    };
-    (0..cells)
-        .map(|cell| {
-            let part = (filled - cell as f32).clamp(0.0, 1.0);
-            Span::styled(
-                EIGHTHS[(part * 8.0).round() as usize],
-                Style::default().fg(color).bg(theme::SURFACE0),
-            )
-        })
-        .collect()
+    fractal_mission_ui::meter(
+        done,
+        total,
+        cells,
+        color,
+        &fractal_mission_ui::Palette::default(),
+        &fractal_mission_ui::Glyphs::default(),
+    )
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ import { FractalClient } from '@fractal/client'
 import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@fractal/client'
 import { Schema } from 'effect'
 import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema'
+import { formatDuration } from '@fractal/ui/human-time/format'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 const isCapabilities = Schema.is(Schema.toEncoded(CapabilitiesSchema))
@@ -23,8 +24,8 @@ export const selectionParts = ({ owner, subject }: Selection): { person: string;
   return { person: owner.slice('person/'.length), uuid: match[2] }
 }
 export const requireArrangements = (capabilities: Capabilities): void => {
-  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && item.version === 1))
-    throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && (item.version === 1 || item.version === 2)))
+    throw new TypeError('Granted arrangements capability version 1 or 2 is required; older pairings may need renewal')
 }
 
 /** Online only: immutable action IDs/keys belong to the caller, not a hidden retry queue. */
@@ -57,7 +58,7 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
     edit: async (identity: Pick<ArrangementEdit, 'id' | 'idempotency_key' | 'fence'>, operations: ArrangementOperation[]) => {
       await discover()
       const parameters = { subject: selection.subject, owner: selection.owner, operations }
-      if (!isEdit(parameters)) throw new TypeError('Invalid generated arrangements operations')
+      if (!isEdit(parameters as unknown)) throw new TypeError('Invalid generated arrangements operations')
       return gateway.arrangementEdit({ ...identity, parameters })
     },
   }
@@ -67,7 +68,7 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
 import * as Atom from 'effect/reactivity/Atom'
 import type { CollectionSocketFactory } from '@fractal/client'
 import { arrangementActions, type ArrangementActionPort } from '@fractal/sdk/effect'
-import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, st3InventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
+import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, fractalInventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
 import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
 export interface FolderState {
@@ -93,8 +94,10 @@ export const arrangementSidebarDoc = (arrangement: Arrangement): FolderDoc => {
       position: { ...folder.position.value, at: at(folder.position.revision) },
       ...(folder.tombstone === null ? {} : { deleted: at(folder.tombstone.revision) }),
     }])),
-    placements: Object.fromEntries(Object.entries(arrangement.body.placements).map(([subject, placement]) =>
-      [subject, { ...placement.value, at: at(placement.revision) }])),
+    placements: arrangement.body.version === 1
+      ? Object.fromEntries(Object.entries(arrangement.body.placements).map(([subject, placement]) =>
+          [subject, { ...placement.value, at: at(placement.revision) }]))
+      : {},
   }
 }
 export type SidebarGateway = ArrangementInventoryGateway & Pick<FractalClient, 'discover'> & {
@@ -186,7 +189,7 @@ export const sidebarFolders = ({ gateway, socket }: {
             publish({ ...current, phase: 'unavailable', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
             return
           case 'Interrupted':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${Math.ceil(event.retryInMs / 1000)}s.`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
             return
           case 'Refused':
             publish({ ...current, phase: 'unavailable', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })
@@ -206,7 +209,7 @@ const pageHotData = import.meta.hot?.data
 export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
     const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
-    return { ...st3InventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
+    return { ...fractalInventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
   },
 })
 

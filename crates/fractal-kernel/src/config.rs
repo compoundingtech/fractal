@@ -14,6 +14,14 @@ use crate::model::PlannerSpec;
 pub mod changes;
 mod client;
 
+/// The per-host switch for seat lanes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lanes {
+    On,
+    Off,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -21,15 +29,31 @@ pub struct Config {
     /// Absent in legacy installs: preserve their bypass policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<fractal_drivers::access::AccessMode>,
+    /// Opt in NEW Claude wrapper generations to the stricter direct-parent ownership rule.
+    /// Absent/false is legacy admission; existing generations are never migrated by a toggle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_primary_ownership: Option<bool>,
+    /// Separate explicit opt-in for non-authorizing legacy topology observations. Off by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_primary_ownership_observe: Option<bool>,
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
+    /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
+    /// means `off`: such a seat starts without one. Seats without a declaration never change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
+    /// SQLite database directory only; absent keeps the database in `state_dir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_dir: Option<PathBuf>,
     pub pty_root: Option<PathBuf>,
+    /// Owner-local catalog roots supplying declared private-notes carrier provenance.
+    pub private_notes_catalogs: Vec<PathBuf>,
     pub socket: PathBuf,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
@@ -68,6 +92,10 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// How long a person has to answer an ask that names no deadline. Written only when it
+    /// differs from the default.
+    #[serde(skip_serializing_if = "AsksConfig::is_default")]
+    pub asks: AsksConfig,
     /// The setup screen's "Let Codex work without asking" box. Unset and `true` give Codex the
     /// install's access mode; `false` makes Codex ask. Written only by the setup screen when Codex
     /// is found. A build that does not know the key rejects a config that has it, so a config
@@ -86,6 +114,8 @@ pub struct GithubConfig {
     /// A single-token file readable only by its owner.
     pub token_file: Option<PathBuf>,
     pub sekrets_profile: Option<String>,
+    /// Operator-supplied absolute root containing per-owner installation read tokens.
+    pub app_token_root: Option<PathBuf>,
     /// Local observer request ceiling per resource/hour. Unset meters only until
     /// current usage and freshness are qualified; Factory's proposed cap is1000.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +126,9 @@ impl GithubConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(root) = &self.app_token_root {
+            anyhow::ensure!(root.is_absolute(), "github.app_token_root must be absolute");
+        }
         anyhow::ensure!(self.observer_requests_per_hour.is_none_or(|cap| (1..=1000).contains(&cap)),
             "github.observer_requests_per_hour must be1..1000 or omitted for meter-only");
         anyhow::ensure!(self.token_file.is_none() || self.sekrets_profile.is_none(),
@@ -167,16 +200,31 @@ impl CheckpointConfig {
 /// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
 /// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
 /// other members until a person excuses this one. Off by default; nothing changes unless a
-/// member opts in.
+/// member opts in. `notify` names the agent that receives a fault when the daily answers check
+/// finds this member and a peer answering differently; without it the fleet's fault agent does.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
 }
 
 impl TrimConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.notify.as_deref().is_none_or(|agent| {
+                agent.starts_with("agent/")
+                    && agent.split('/').skip(1).all(|part| !part.is_empty())
+                    && !agent.chars().any(char::is_whitespace)
+            }),
+            "trim.notify names one agent/... subject"
+        );
+        Ok(())
     }
 }
 
@@ -261,12 +309,17 @@ impl LimitsConfig {
     }
 }
 
-/// `[reconcile]`: maximum background pass starts per minute, default30, and when a seat that
-/// holds claimed work and has nothing set to wake it is nudged.
+/// The reconcile pass cap when `[reconcile] max_passes_per_minute` is not set.
+pub const DEFAULT_MAX_PASSES_PER_MINUTE: u32 = 30;
+
+/// `[reconcile]`: maximum background pass starts per minute, and when a seat that holds claimed
+/// work and has nothing set to wake it is nudged.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReconcileConfig {
-    pub max_passes_per_minute: u32,
+    /// Unset: the running binary's default, [`DEFAULT_MAX_PASSES_PER_MINUTE`] for st.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_passes_per_minute: Option<u32>,
     /// How long a seat idles holding a claimed step, with nothing set to wake it, before st nudges
     /// it: a duration such as `30m`, or `off`.
     pub idle_nudge_after: String,
@@ -278,7 +331,7 @@ pub struct ReconcileConfig {
 impl Default for ReconcileConfig {
     fn default() -> Self {
         Self {
-            max_passes_per_minute: 30,
+            max_passes_per_minute: None,
             idle_nudge_after: "30m".into(),
             idle_nudge_quiet_watch: "2h".into(),
         }
@@ -287,8 +340,13 @@ impl Default for ReconcileConfig {
 
 impl ReconcileConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    /// The configured cap, or `default` when the config sets none.
+    pub fn max_passes_per_minute_or(&self, default: u32) -> u32 {
+        self.max_passes_per_minute.unwrap_or(default)
+    }
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!((1..=600).contains(&self.max_passes_per_minute),
+        anyhow::ensure!(self.max_passes_per_minute.is_none_or(|cap| (1..=600).contains(&cap)),
             "reconcile.max_passes_per_minute must be between 1 and 600");
         self.idle_nudge()?;
         Ok(())
@@ -312,6 +370,47 @@ impl ReconcileConfig {
                 "reconcile.idle_nudge_quiet_watch",
             )?,
         })
+    }
+}
+
+/// The deadline an ask gets when it names none and `[asks] default_deadline` is not set.
+pub const DEFAULT_ASK_DEADLINE: &str = "24h";
+
+/// `[asks]`: with `deadlines` on, every ask a person gets has a deadline, at which it resolves
+/// by itself with its default answer. `default_deadline` is the deadline of an ask that names
+/// none.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AsksConfig {
+    /// Off by default. Deadlines add fields to replicated ask claims that a member on an older
+    /// build keeps as retryable and does not show, so they are turned on once every member runs
+    /// a build that reads them. While off, no ask records a deadline and none resolves by one.
+    pub deadlines: bool,
+    /// A duration such as `24h` or `3d`, at least `1m` and at most `30d`.
+    pub default_deadline: String,
+}
+
+impl Default for AsksConfig {
+    fn default() -> Self {
+        Self { deadlines: false, default_deadline: DEFAULT_ASK_DEADLINE.into() }
+    }
+}
+
+impl AsksConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    pub fn validate(&self) -> Result<()> {
+        self.default_deadline_ms().map(drop)
+    }
+
+    /// The default deadline in milliseconds.
+    pub fn default_deadline_ms(&self) -> Result<u64> {
+        let ms = parse_duration_ms(&self.default_deadline, "asks.default_deadline")?;
+        anyhow::ensure!(
+            (60_000..=30 * 24 * 60 * 60_000).contains(&ms),
+            "asks.default_deadline must be between 1m and 30d"
+        );
+        Ok(ms)
     }
 }
 
@@ -351,18 +450,19 @@ pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
 }
 
 /// Read both policies once on the existing two-minute reload loop, outside database work.
-pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig)>> {
+pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig)>> {
     let path = DAEMON_CONFIG.get()?;
     Some(read_daemon_policies(path.as_deref()))
 }
 
-fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig)> {
+fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig)> {
     let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
     anyhow::ensure!(selected.exists(), "st config {} is missing", selected.display());
     let config = Config::load_unvalidated(Some(&selected))?;
     config.limits.validate()?;
     config.reconcile.validate()?;
-    Ok((config.limits, config.reconcile))
+    config.asks.validate()?;
+    Ok((config.limits, config.reconcile, config.asks))
 }
 
 /// `[limits]` from a config file that must exist: a file that is missing for a moment must not
@@ -481,12 +581,17 @@ impl Default for Config {
         Self {
             node: host_name(),
             access_mode: None,
+            claude_primary_ownership: None,
+            claude_primary_ownership_observe: None,
             seat_priority: None,
+            lanes: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
             state_dir,
+            store_dir: None,
             pty_root: None,
+            private_notes_catalogs: Vec::new(),
             socket,
             client_gateway_socket,
             peer_listen: None,
@@ -501,19 +606,40 @@ impl Default for Config {
             trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
+            asks: AsksConfig::default(),
             codex_work_without_asking: None,
             fleet: None,
         }
     }
 }
 
+pub use fractal_client::product_dirs::STORE_DATABASE_FILES;
+
+/// Resolve only the SQLite directory, never the product's identity, keys or payload roots.
+pub fn store_dir(config: &Config) -> PathBuf {
+    config.store_dir.as_ref().unwrap_or(&config.state_dir).clone()
+}
+
 impl Config {
+    /// The configured database path; SQLite creates its WAL and SHM beside it.
+    pub fn store_path(&self) -> PathBuf {
+        store_dir(self).join(STORE_DATABASE_FILES[0])
+    }
+
     pub fn active_access_mode(&self) -> fractal_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
     }
 
+    pub fn claude_primary_ownership_enabled(&self) -> bool {
+        self.claude_primary_ownership == Some(true)
+    }
+
     pub fn active_seat_priority(&self) -> fractal_runtime::SeatPriority {
         self.seat_priority.unwrap_or_default()
+    }
+
+    pub fn lanes_enforced(&self) -> bool {
+        self.lanes == Some(Lanes::On)
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.
@@ -686,8 +812,22 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(directory) = &self.store_dir {
+            anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
+            anyhow::ensure!(
+                directory.is_dir(),
+                "configured store_dir {} is missing or is not a directory; create and populate it before starting",
+                directory.display()
+            );
+        }
         self.reconcile.validate()?;
+        self.asks.validate()?;
         self.github.validate()?;
+        anyhow::ensure!(
+            self.private_notes_catalogs.iter().all(|path| path.is_absolute()
+                && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))),
+            "private_notes_catalogs must contain absolute paths without parent components"
+        );
         if self.work_root.is_some() {
             self.work_root()?;
         }
@@ -728,6 +868,7 @@ impl Config {
             otlp.validate()?;
         }
         self.limits.validate()?;
+        self.trim.validate()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
@@ -990,6 +1131,55 @@ fn machine_host_name() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn store_directory_defaults_to_state_root_and_roundtrips_explicit_configuration() {
+        let state = tempfile::tempdir().unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let mut config = super::Config {
+            state_dir: state.path().into(),
+            ..super::Config::default()
+        };
+        assert_eq!(super::store_dir(&config), state.path());
+        assert_eq!(config.store_path(), state.path().join("claims.sqlite3"));
+        assert!(!toml::to_string(&config).unwrap().contains("store_dir"));
+        config.store_dir = Some(database.path().into());
+        let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(super::store_dir(&restored), database.path());
+        assert_eq!(restored.store_path(), database.path().join(super::STORE_DATABASE_FILES[0]));
+        assert_eq!(restored.state_dir, state.path());
+        restored.validate().unwrap();
+    }
+
+    #[test]
+    fn store_directory_must_be_absolute_and_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = super::Config {
+            store_dir: Some(root.path().join("missing")),
+            ..super::Config::default()
+        };
+        assert!(config.validate().unwrap_err().to_string().contains("store_dir"));
+        config.store_dir = Some("relative".into());
+        assert!(config.validate().unwrap_err().to_string().contains("absolute"));
+        let file = root.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        config.store_dir = Some(file);
+        assert!(config.validate().unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
+    fn github_app_root_is_operator_supplied_absolute_and_optional() {
+        let mut config = super::GithubConfig::default();
+        assert!(config.app_token_root.is_none());
+        config.app_token_root = Some("relative/github-app-token".into());
+        assert!(config.validate().is_err());
+        let root = tempfile::tempdir().unwrap();
+        config.app_token_root = Some(root.path().join("not-minted-yet"));
+        config.validate().unwrap();
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: super::GithubConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
     fn the_work_root_defaults_to_a_folder_inside_home_that_macos_does_not_guard() {
         let Ok(home) = super::home_dir() else { return };
         if crate::instance::current().is_some() {
@@ -1023,7 +1213,7 @@ mod tests {
             let error = config(&format!("{home}/{guarded}/projects")).validate().unwrap_err();
             assert!(error.to_string().contains(guarded), "{error}");
         }
-        assert!(config(&format!("{home}/Smalltalk")).validate().is_ok());
+        assert!(config(&format!("{home}/Fractal")).validate().is_ok());
     }
 
     #[test]
@@ -1042,7 +1232,7 @@ mod tests {
         assert!(super::check_work_root_in(&new_through, home.path()).is_err());
         let new_direct = elsewhere.path().join("newwork/deeper");
         assert!(super::check_work_root_in(&new_direct, home.path()).is_err());
-        assert!(super::check_work_root_in(&home.path().join("Smalltalk"), home.path()).is_ok());
+        assert!(super::check_work_root_in(&home.path().join("Fractal"), home.path()).is_ok());
         assert!(super::check_work_root_in(home.path(), home.path()).is_err());
     }
 
@@ -1063,6 +1253,37 @@ mod tests {
         assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
         assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
         assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
+    }
+
+    #[test]
+    fn claude_primary_ownership_is_an_explicit_default_off_install_setting() {
+        assert!(!Config::default().claude_primary_ownership_enabled());
+        for text in ["", "claude_primary_ownership_observe=false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_ne!(config.claude_primary_ownership_observe, Some(true));
+        }
+        let observed: Config = toml::from_str("claude_primary_ownership_observe=true").unwrap();
+        assert_eq!(observed.claude_primary_ownership_observe, Some(true));
+        assert!(!observed.claude_primary_ownership_enabled(), "observation does not imply enforcement");
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("claude_primary_ownership_observe"));
+
+        for text in ["", "claude_primary_ownership=false"] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert!(!config.claude_primary_ownership_enabled());
+        }
+        let config: Config = toml::from_str("claude_primary_ownership=true").unwrap();
+        assert!(config.claude_primary_ownership_enabled());
+        assert!(
+            toml::to_string(&config)
+                .unwrap()
+                .contains("claude_primary_ownership = true")
+        );
+        assert!(
+            !toml::to_string(&Config::default())
+                .unwrap()
+                .contains("claude_primary_ownership")
+        );
+        assert!(toml::from_str::<Config>("claude_primary_ownership=\"true\"").is_err());
     }
 
     #[test]
@@ -1089,21 +1310,26 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
-        let (_, mut effective) = read_daemon_policies(Some(&path)).unwrap();
-        assert_eq!(effective.max_passes_per_minute, 30);
+        let (_, mut effective, _) = read_daemon_policies(Some(&path)).unwrap();
+        assert_eq!(effective.max_passes_per_minute, None);
+        assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
         effective = read_daemon_policies(Some(&path)).unwrap().1;
         for bad in ["0", "-1", "601", "4294967296", "\"bad\""] {
             std::fs::write(&path, format!("[reconcile]\nmax_passes_per_minute={bad}\n")).unwrap();
             assert!(read_daemon_policies(Some(&path)).is_err());
-            assert_eq!(effective.max_passes_per_minute, 60);
+            assert_eq!(effective.max_passes_per_minute, Some(60));
         }
         std::fs::remove_file(&path).unwrap();
         assert!(read_daemon_policies(Some(&path)).is_err());
-        assert_eq!(effective.max_passes_per_minute, 60);
+        assert_eq!(effective.max_passes_per_minute, Some(60));
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=15\n").unwrap();
         effective = read_daemon_policies(Some(&path)).unwrap().1;
-        assert_eq!(effective.max_passes_per_minute, 15);
+        assert_eq!(effective.max_passes_per_minute, Some(15));
+        // A cap the config names is kept, even the default value.
+        std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=30\n").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1;
+        assert_eq!(effective.max_passes_per_minute_or(600), 30);
     }
     use super::*;
     use tempfile::tempdir;

@@ -1,4 +1,4 @@
-//! Grant-authorized native actions and transaction-bound assistant write provenance (the part that moved up from st3-api).
+//! Grant-authorized native actions and transaction-bound assistant write provenance (the part that moved up from fractal-api-core).
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_api_core::api::client_v0::assistant::native::*;

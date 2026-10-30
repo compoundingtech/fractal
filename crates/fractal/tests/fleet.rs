@@ -17,7 +17,7 @@ use fractal_daemon::client::Client;
 use fractal_daemon::model::ClaimInput;
 
 fn st3() -> &'static str {
-    test_env!("CARGO_BIN_EXE_st3-fixture")
+    test_env!("CARGO_BIN_EXE_fractal-fixture")
 }
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
@@ -151,9 +151,16 @@ impl Node {
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
-        for file in [".profile", ".bash_profile", ".zprofile"] {
+        for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
             fs::write(root.join("home").join(file), &profile).unwrap();
         }
+        // Fish uses XDG_CONFIG_HOME rather than the POSIX login profiles above.
+        fs::create_dir_all(root.join("config/fish")).unwrap();
+        fs::write(
+            root.join("config/fish/config.fish"),
+            format!("set -gx PATH '{}' $PATH\n", root.join("bin").display()),
+        )
+        .unwrap();
         Self {
             name: name.into(),
             binary: PathBuf::from(st3()),
@@ -203,7 +210,7 @@ impl Node {
         if let Some(shell) = std::env::var_os("SHELL") {
             command.env("SHELL", shell);
         }
-        if let Some(root) = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS") {
+        if let Some(root) = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS") {
             command.env("RUST_LOG", "st3=trace,smallclaims=trace");
             fs::write(Path::new(&root).join("command.json"), serde_json::to_vec(&json!({
                 "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
@@ -263,10 +270,13 @@ impl Node {
     pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
+        // No browser UI: its default address (127.0.0.1:7410) is a fixed port, and a host that already
+        // listens there (a developer's web server) made the previous release exit at once with
+        // "Address already in use". Both releases accept `--web-listen off`.
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
-            vec!["up", "--pty-binary", pty.to_str().unwrap()]
+            vec!["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]
         } else {
-            vec!["up"]
+            vec!["up", "--web-listen", "off"]
         };
         let daemon = self
             .command(&up)
@@ -1267,6 +1277,151 @@ async fn create_after_standalone_run_records_explicit_name_before_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fresh_explicit_store_fleet_create_resolves_identity_under_admission_lock() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for requested in [None, Some("fern")] {
+        let directory = if requested.is_some() { "renamed" } else { "configured" };
+        let mut node = Node::named(root.path(), directory, "orchid");
+        let store_dir = node.root.join("external-store");
+        fs::create_dir(&store_dir).unwrap();
+        fs::write(
+            node.root.join("config/st3/config.toml"),
+            format!("node = \"orchid\"\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+        ).unwrap();
+        let pin = node.state_dir().join("node-identity.json");
+        assert!(!pin.exists());
+        assert!(!store_dir.join("claims.sqlite3").exists());
+        let mut arguments = vec!["fleet", "create", "--no-service", "--dial-out"];
+        if let Some(name) = requested {
+            arguments.extend(["--name", name]);
+        }
+        let founded = node.st_json(&arguments);
+        let expected = requested.unwrap_or("orchid");
+        assert_eq!(founded["node"], expected);
+        assert_eq!(
+            serde_json::from_slice::<String>(&fs::read(&pin).unwrap()).unwrap(),
+            expected,
+        );
+        assert_eq!(
+            fractal_daemon::config::FleetFile::load(&node.state_dir()).unwrap().unwrap().node.as_deref(),
+            Some(expected),
+        );
+        assert!(!node.state_dir().join("claims.sqlite3").exists());
+        node.name = expected.into();
+        node.start().await;
+        assert_eq!(node.st_json(&["fleet", "status"])["node"], expected);
+        assert!(store_dir.join("claims.sqlite3").exists());
+        assert!(!node.state_dir().join("claims.sqlite3").exists());
+        node.stop();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_store_writer_changes_are_refused_before_join_side_effects() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    for source in ["argument", "code", "configuration"] {
+        let old_name = format!("standalone-{source}");
+        let new_name = format!("joined-{source}");
+        let mut node = Node::new(root.path(), &old_name);
+        let store_dir = node.root.join("external-store");
+        fs::create_dir(&store_dir).unwrap();
+        let config_path = node.root.join("config/st3/config.toml");
+        fs::write(
+            &config_path,
+            format!("node = {old_name:?}\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+        ).unwrap();
+        // Establish the real standalone database writer and identity pin.
+        node.start().await;
+        node.stop();
+        let database = store_dir.join("claims.sqlite3");
+        let writer = || {
+            rusqlite::Connection::open_with_flags(
+                &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ).unwrap().query_row(
+                "SELECT value FROM meta WHERE key='local_node_writer'", [], |row| row.get::<_, String>(0),
+            ).unwrap()
+        };
+        assert_eq!(writer(), old_name);
+        let pin = node.state_dir().join("node-identity.json");
+        let original_pin = fs::read(&pin).unwrap();
+        let code = if source == "configuration" {
+            fs::write(
+                &config_path,
+                format!("node = {new_name:?}\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+            ).unwrap();
+            // An unnamed invitation falls back to the configured node.
+            sponsor.st_ok(&["fleet", "invite", "--code-only", "--via", "loopback", "--as", PERSON])
+                .trim().to_owned()
+        } else {
+            sponsor.invite(&new_name, &[])
+        };
+        let invites_before = sponsor.st_json(&["fleet", "invites", "--all"]);
+        let mut arguments = vec!["fleet", "join", code.as_str(), "--no-service"];
+        if source == "argument" {
+            arguments.extend(["--name", new_name.as_str()]);
+        }
+        let refused = node.st(&arguments);
+        assert!(!refused.status.success(), "{source}: {refused:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("writer"),
+            "{source}: {refused:?}"
+        );
+        for path in ["fleet.toml", "join.json", "node.key"] {
+            assert!(!node.state_dir().join("fleet").join(path).exists(), "{source}: {path}");
+        }
+        assert_eq!(fs::read(&pin).unwrap(), original_pin, "{source}");
+        assert_eq!(writer(), old_name, "{source}");
+        let first_sync_rows: u64 = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap().query_row(
+            "SELECT count(*) FROM meta WHERE key='first_sync'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(first_sync_rows, 0, "{source}");
+        // A real sponsor still sees the untouched invitation, not a redeemed member.
+        assert_eq!(sponsor.st_json(&["fleet", "invites", "--all"]), invites_before, "{source}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_store_join_resume_uses_checkpoint_name_before_configured_name() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    let node = Node::new(root.path(), "fern");
+    let store_dir = node.root.join("external-store");
+    fs::create_dir(&store_dir).unwrap();
+    fs::write(
+        node.root.join("config/st3/config.toml"),
+        format!("node = \"fern-computer\"\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+    ).unwrap();
+    let code = sponsor.st_ok(&[
+        "fleet", "invite", "--code-only", "--via", "loopback", "--as", PERSON,
+    ]).trim().to_owned();
+    let joined = node.join(&code, &[]);
+    assert!(joined.status.success(), "{joined:?}");
+    let membership = node.state_dir().join("fleet/fleet.toml");
+    let saved_membership = fs::read(&membership).unwrap();
+    let resumed = node.st(&["fleet", "join", &code, "--no-service"]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("fern joined"));
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed"));
+    assert_eq!(fs::read(&membership).unwrap(), saved_membership);
+    let pin: String = serde_json::from_slice(
+        &fs::read(node.state_dir().join("node-identity.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(pin, "fern");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn saved_join_resumes_when_membership_was_saved_before_the_identity_pin() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -1765,7 +1920,7 @@ async fn a_leaked_code_is_visible_and_can_be_revoked() {
     let rightful = Node::new(root.path(), "laptop");
     let refused = rightful.join(&code, &[]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("st fleet invites"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("fractal fleet invites"));
 
     for node in [&a, &m] {
         wait_until(
@@ -2440,7 +2595,7 @@ async fn leave_drains_everything_before_it_leaves() {
         return;
     }
     let temporary_root = tempfile::tempdir().unwrap();
-    let root = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS")
+    let root = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS")
         .map(PathBuf::from).unwrap_or_else(|| temporary_root.path().to_owned());
     let phase = |stage: &str| fs::write(root.join("phase.txt"), stage).unwrap();
     phase("create and start anchor a");
@@ -2503,21 +2658,21 @@ fn supervise_leave_with_diagnostics() -> bool {
     {
         use std::io::Write as _;
         let name = "fleet::leave_drains_everything_before_it_leaves";
-        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
             return false;
         }
         let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
         let root = tempfile::tempdir().unwrap();
         let output = Command::new("python3")
-            .arg(scripts.join("st3_test_process.py"))
+            .arg(scripts.join("fractal_test_process.py"))
             .args(["--owner", &std::process::id().to_string(), "--", "python3"])
-            .arg(scripts.join("st3_fleet_leave_diagnostics.py"))
+            .arg(scripts.join("fractal_fleet_leave_diagnostics.py"))
             .args(["--seconds", "600", "--root"])
             .arg(root.path())
             .arg("--")
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture", "--include-ignored"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
-            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("FRACTAL_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .output().expect("launch bounded fleet leave guardian");
         std::io::stdout().write_all(&output.stdout).unwrap();
@@ -2762,7 +2917,7 @@ async fn uninstall_leaves_nothing_behind() {
     ]);
     assert!(!first.status.success());
     assert!(
-        String::from_utf8_lossy(&first.stderr).contains("stop st3 up"),
+        String::from_utf8_lossy(&first.stderr).contains("stop fractal up"),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
@@ -2776,8 +2931,8 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the login
-    // profiles that put it on PATH.
+    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
+    // profiles (fish's config.fish among them) that put it on PATH.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2788,7 +2943,10 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.profile",
                 "home/.bash_profile",
                 "home/.zprofile",
+                "home/.zshrc",
                 "config",
+                "config/fish",
+                "config/fish/config.fish",
                 "state",
                 "data",
                 "run",
@@ -3278,10 +3436,10 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
         .unwrap();
     drop(reader);
     let archive = directory.join("baseline-claims.jsonl");
-    let header = fractal_daemon::backup::create_from_database(&copy, &archive).unwrap();
+    let header = fractal_daemon::backup::create_from_database(&copy, directory, &archive).unwrap();
     let source = fractal_daemon::store::Store::open(&copy, "backup-reader").unwrap();
     let target = directory.join("baseline-restored.db");
-    let report = fractal_daemon::backup::restore(&archive, &target).unwrap();
+    let report = fractal_daemon::backup::restore(&archive, &target, directory).unwrap();
     let restored = fractal_daemon::store::Store::open(&target, &report.writer).unwrap();
     assert!(old_schema <= header.source_schema);
     assert_eq!(report.graph_digest, header.graph_digest);
@@ -3392,7 +3550,8 @@ PY
     fi
     rm -f "$registry/$(key "$me" "$2")" ;;
   dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo '{{"error":{{"code":"service_not_exposed","class":"fault","message":"no such exposure","peer":null,"service":null}}}}'; exit 69; }}; printf '{{"address":"%s"}}\n' "$(cat "$f")" ;;
-  send-file) mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
+  peers) cat "$registry/peers-$me" 2>/dev/null || true ;;
+  send-file) [ ! -f "$registry/fail-send-$me" ] || {{ echo "the receiver refused the file" >&2; exit 1; }}; mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
   probe) [ -f "$registry/$(key "$2" "$3")" ] ;;
   *) exit 1 ;;
 esac
@@ -3661,7 +3820,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             args.push("--prefer");
         }
         let output = node.st_ok(&args);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(
             configured_file(&node).transports,
             if prefer_on_add {
@@ -3692,15 +3851,121 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             "--no-service",
         ]);
         if !prefer_on_add {
-            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+            assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         }
         let preferred = configured_file(&node);
         assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
         assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
         assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
         let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "preference").await;
+    node.stop_worker();
+    let mut file = configured_file(&node);
+    file.fabric = Some(fabric_shim(root.path(), &node.name));
+    file.transports = vec!["loopback".into(), "tailscale".into()];
+    file.save(&node.state_dir()).unwrap();
+    node.start_worker();
+    node.wait_listening().await;
+    node.st_ok(&["fleet", "transports", "add", "fabric", "--no-service"]);
+    node.stop_worker();
+    let registry = root.path().join("fabric-registry");
+    let calls = fs::read(registry.join("calls")).unwrap();
+    let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+    let path = fractal_daemon::config::FleetFile::path(&node.state_dir());
+
+    // Observe actual lock contention, then change another setting while holding it.
+    // The CLI must load after acquiring the same settings lock, not before.
+    let lock = fractal_daemon::config::FleetFile::lock_settings(&node.state_dir()).unwrap();
+    let barrier = root.path().join("prefer-lock");
+    fs::create_dir(&barrier).unwrap();
+    let mut prefer = node
+        .command(&["fleet", "transports", "prefer", "fabric", "--no-service"])
+        .env("ST3_TEST_REMOVAL_WRITE_BARRIER", &barrier)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let cli = prefer.id().to_string();
+    wait_until("preference CLI contends on settings lock", 20, || async {
+        fs::read_to_string(barrier.join("contended"))
+            .is_ok_and(|pids| pids.lines().any(|pid| pid == cli))
+    })
+    .await;
+    assert!(prefer.try_wait().unwrap().is_none());
+    let mut before = configured_file(&node);
+    before.fabric_protocol = Some("preserved/under-lock".into());
+    before.save(&node.state_dir()).unwrap();
+    let old_file = fs::File::open(&path).unwrap();
+    let old_inode = old_file.metadata().unwrap().ino();
+    let old_bytes = fs::read(&path).unwrap();
+    drop(lock);
+    let output = prefer.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Restart fractal daemon and fractal replication-worker")
+    );
+    let preferred = configured_file(&node);
+    assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
+    assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
+    assert_ne!(fs::metadata(&path).unwrap().ino(), old_inode);
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    use std::io::Read as _;
+    let mut retained_bytes = Vec::new();
+    (&old_file).read_to_end(&mut retained_bytes).unwrap();
+    assert_eq!(retained_bytes, old_bytes, "atomic save must replace, not truncate");
+
+    let inode = fs::metadata(&path).unwrap().ino();
+    let bytes = fs::read(&path).unwrap();
+    let output = node.st_ok(&["fleet", "transports", "prefer", "fabric", "--no-service"]);
+    assert!(output.contains("already preferred"));
+    assert!(!output.contains("Restart"));
+    assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    node.st_ok(&["fleet", "transports", "prefer", "tailscale", "--no-service"]);
+    assert_eq!(configured_file(&node).transports, ["tailscale", "fabric", "loopback"]);
+    assert_eq!(configured_file(&node).fabric_protocol, before.fabric_protocol);
+    assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
+    assert_eq!(fs::read(registry.join("calls")).unwrap(), calls);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transport_prefer_refuses_disabled_carriers_without_saving() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "disabled-preference").await;
+    node.stop_worker();
+    let path = fractal_daemon::config::FleetFile::path(&node.state_dir());
+    let before = fs::read(&path).unwrap();
+    let endpoints = node.st_json(&["fleet", "status"])["view"].clone();
+    for transport in ["tailscale", "fabric"] {
+        let output = node.st(&["fleet", "transports", "prefer", transport, "--no-service"]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("{transport} is not enabled"))
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
     }
 }
 
@@ -4016,6 +4281,248 @@ async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history(
     assert!(!calls.contains("--ephemeral"));
 }
 
+/// Founder `a` advertising `transports` with no st-fabric-adapter: a member whose install
+/// never set up Fabric pairing.
+async fn member_without_fabric_pairing(root: &Path, transports: &str) -> Node {
+    let mut a = Node::new(root, "a");
+    a.env.push((
+        "ST_FABRIC_ADAPTER".into(),
+        root.join("no-st-fabric-adapter").display().to_string(),
+    ));
+    let shim = fabric_shim(root, "a");
+    let no_tailscale = root.join("no-tailscale");
+    let port = a.port.to_string();
+    let mut create = vec![
+        "fleet",
+        "create",
+        "--no-service",
+        "--name",
+        "a",
+        "--port",
+        &port,
+        "--transports",
+        transports,
+        "--fabric",
+        shim.to_str().unwrap(),
+        "--tailscale",
+        no_tailscale.to_str().unwrap(),
+    ];
+    if transports.contains("loopback") {
+        create.push("--advertise-loopback");
+    }
+    a.st_ok(&create);
+    a.start().await;
+    wait_until("a advertises its Fabric endpoint", 30, || {
+        let client = a.client();
+        async move {
+            client
+                .get::<Value>("/v1/internal/fleet/status")
+                .await
+                .is_ok_and(|status| member_has_fabric(&status, "a"))
+        }
+    })
+    .await;
+    a
+}
+
+fn invite_states(node: &Node) -> Vec<String> {
+    node.st_json(&["fleet", "invites", "--all"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|invite| invite["state"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn inbox_codes(registry: &Path, home: &str) -> Vec<PathBuf> {
+    let inbox = registry.join(home).join("inbox").join("a-fabric-id");
+    fs::read_dir(inbox)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_fabric_delivers_to_a_trusted_fabric_peer_without_pairing() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("fabric-registry");
+    let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+    // Fabric already trusts b, though it grants b no services.
+    fs::write(registry.join("peers-a-fabric-id"), "b-fabric-id\tb\tno services\n").unwrap();
+
+    let sent = a.st_ok(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
+    assert!(sent.contains("to b's Fabric inbox"), "{sent}");
+    let delivered = inbox_codes(&registry, "home-b");
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let code = fs::read_to_string(&delivered[0]).unwrap();
+    assert!(!sent.contains(code.trim()), "the code reached stdout");
+    let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
+    assert!(decoded.pairing.is_none());
+    assert!(
+        decoded.endpoints.iter().all(|endpoint| {
+            !matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+        }),
+        "without pairing, auto must not route the new machine through Fabric"
+    );
+
+    let mut b = Node::new(root.path(), "b");
+    b.env.push((
+        "FABRIC_HOME".into(),
+        registry.join("home-b").display().to_string(),
+    ));
+    let port = b.port.to_string();
+    b.st_ok(&[
+        "fleet",
+        "join",
+        "--fabric-inbox",
+        "--no-service",
+        "--name",
+        "b",
+        "--port",
+        &port,
+        "--transports",
+        "loopback",
+        "--advertise-loopback",
+    ]);
+    assert!(inbox_codes(&registry, "home-b").is_empty(), "join removes the code");
+    assert_eq!(invite_states(&a), ["redeemed"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_fabric_fails_loudly_when_fabric_does_not_deliver() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("fabric-registry");
+    let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+
+    // A name Fabric does not trust is refused before any invite exists.
+    let untrusted = a.st(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
+    assert!(!untrusted.status.success());
+    let stderr = String::from_utf8_lossy(&untrusted.stderr);
+    assert!(stderr.contains("b is not a trusted Fabric peer"), "{stderr}");
+    assert!(invite_states(&a).is_empty());
+
+    // A transfer Fabric does not confirm revokes the invite it would have carried.
+    fs::write(registry.join("peers-a-fabric-id"), "b-fabric-id\tb\tsend-file\n").unwrap();
+    fs::write(registry.join("fail-send-a-fabric-id"), "").unwrap();
+    let refused = a.st(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
+    assert!(!refused.status.success());
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!stdout.contains("Sent invite"), "{stdout}");
+    assert!(stderr.contains("fabric send-file to b failed"), "{stderr}");
+    assert!(stderr.contains("the receiver refused the file"), "{stderr}");
+    assert!(stderr.contains("which was not delivered"), "{stderr}");
+    assert_eq!(invite_states(&a), ["revoked"]);
+    assert!(inbox_codes(&registry, "home-b").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_file_writes_a_private_file_without_fabric_pairing() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+    let directory = root.path().join("person-home");
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = directory.join("invite-b.code");
+
+    let printed = a.st_ok(&[
+        "fleet",
+        "invite",
+        "b",
+        "--code-file",
+        path.to_str().unwrap(),
+        "--expires",
+        "10m",
+        "--as",
+        PERSON,
+    ]);
+    let code = fs::read_to_string(&path).expect("the code file exists");
+    assert!(fractal_daemon::fleet::code::JoinCode::decode(code.trim()).is_ok());
+    assert!(!printed.contains(code.trim()), "the code reached stdout");
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "the person's directory keeps its mode"
+    );
+    assert_eq!(invite_states(&a), ["open"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_invites_over_another_endpoint_when_fabric_pairing_fails() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+    // An installed adapter whose Fabric was not started with --runtime-peers.
+    let adapter = root.path().join("st-fabric-adapter");
+    fs::write(
+        &adapter,
+        "#!/bin/sh\necho 'runtime_peers_disabled: restart Fabric with --runtime-peers' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&adapter, fs::Permissions::from_mode(0o755)).unwrap();
+    a.env.retain(|(key, _)| key != "ST_FABRIC_ADAPTER");
+    a.env.push(("ST_FABRIC_ADAPTER".into(), adapter.display().to_string()));
+    let path = root.path().join("invite-b.code");
+
+    let output = a.st(&[
+        "fleet",
+        "invite",
+        "b",
+        "--code-file",
+        path.to_str().unwrap(),
+        "--as",
+        PERSON,
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("inviting over loopback instead"), "{stderr}");
+    let code = fs::read_to_string(&path).unwrap();
+    let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
+    assert!(decoded.pairing.is_none());
+    assert!(decoded.endpoints.iter().all(|endpoint| {
+        matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Loopback(_))
+    }));
+    let mut states = invite_states(&a);
+    states.sort();
+    assert_eq!(states, ["open", "revoked"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_only_fabric_could_carry_fails_before_it_exists() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let a = member_without_fabric_pairing(root.path(), "fabric").await;
+    let path = root.path().join("invite-b.code");
+    let path = path.to_str().unwrap();
+    for delivery in [&["--code-file", path][..], &["--code-only"], &[]] {
+        let mut arguments = vec!["fleet", "invite", "b", "--as", PERSON];
+        arguments.extend(delivery);
+        let output = a.st(&arguments);
+        assert!(!output.status.success(), "{delivery:?} succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Fabric invitations need st-fabric-adapter installed"),
+            "{delivery:?}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{delivery:?} printed a code");
+    }
+    assert!(!Path::new(path).exists());
+    assert!(invite_states(&a).is_empty(), "a refused invitation left an invite open");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_fabric_transport_works_through_the_worker_alone() {
     if fractal_daemon::test_support::supervise_test() {
@@ -4046,17 +4553,33 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
     a.wait_listening().await;
     a.note("over-fabric-a").await;
 
-    // The code travels as a Fabric file and never appears in an argument list.
-    a.st_ok(&[
-        "fleet",
-        "invite",
-        "b",
-        "--via",
-        "fabric",
-        "--send-fabric",
-        "--as",
-        PERSON,
-    ]);
+    // This fixture isolates already-trusted worker tunnels and inbox delivery.
+    // Issue the legacy transport invitation through the daemon authority, not
+    // the CLI's separate restricted-pairing bootstrap (covered by pairing tests).
+    let invitation: fractal_daemon::api::FleetInviteCreated = a.client().post(
+        "/v1/internal/fleet/invites",
+        &fractal_daemon::api::FleetInviteRequest {
+            name: Some("b".into()),
+            expires_seconds: 600,
+            via: Some("fabric".into()),
+            migrate: false,
+            person: PERSON.into(),
+        },
+    ).await.unwrap();
+    let code_file = root.path().join("worker-transport.code");
+    fractal_daemon::fleet::join::write_private(&code_file, invitation.code.as_bytes()).unwrap();
+    let delivered_name = format!(
+        "st-fleet-join-{}.code",
+        invitation.invite.trim_start_matches("fleet-invite/")
+    );
+    assert!(Command::new(&shim_a)
+        .args(["send-file", "b"])
+        .arg(&code_file)
+        .args(["--as", &delivered_name])
+        .status()
+        .unwrap()
+        .success());
+    fs::remove_file(code_file).unwrap();
     let mut b = Node::new(root.path(), "b");
     b.env.push((
         "FABRIC_HOME".into(),
@@ -4590,6 +5113,17 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         "--reason",
         "The fixture projection was checked.",
     ]);
+    let resumed = amber.st_json(&[
+        "replication",
+        "signatures",
+        "resume",
+        "--as",
+        PERSON,
+        "--reason",
+        "The fixture signature migration was checked.",
+    ]);
+    assert!(resumed["cleared"].is_null(), "{resumed}");
+    assert_eq!(resumed["migration"]["phase"], "done", "{resumed}");
     amber.restart().await;
     amber.wait_listening().await;
     cobalt.st_ok(&[
@@ -4977,7 +5511,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
             format!(
                 "#!/bin/sh\nexec env STUB_HARNESS=omp '{}' '{}' \"$@\"\n",
                 node_program.display(),
-                repo.join("scripts/st3-boot-canaries/stub-pi-family.mjs")
+                repo.join("scripts/fractal-boot-canaries/stub-pi-family.mjs")
                     .display()
             ),
         )

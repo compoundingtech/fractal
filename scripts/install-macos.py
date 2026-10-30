@@ -15,17 +15,18 @@ import subprocess
 import sys
 import tempfile
 
-CERTIFICATE = os.environ.get('ST_MACOS_SIGNING_IDENTITY') or None
-TEAM = os.environ.get('ST_MACOS_SIGNING_TEAM') or None
-APP = os.environ.get('ST_MACOS_APP_PATH') or None
-BIN_DIR = os.environ.get('ST_MACOS_BIN_DIR') or None
-# A named instance (ST_INSTANCE, or --instance on the install wrappers) is a second, separate install:
+# Prefer Fractal environment names; retain ST_* reads for existing install wrappers.
+CERTIFICATE = os.environ.get('FRACTAL_MACOS_SIGNING_IDENTITY', os.environ.get('ST_MACOS_SIGNING_IDENTITY')) or None
+TEAM = os.environ.get('FRACTAL_MACOS_SIGNING_TEAM', os.environ.get('ST_MACOS_SIGNING_TEAM')) or None
+APP = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH')) or None
+BIN_DIR = os.environ.get('FRACTAL_MACOS_BIN_DIR', os.environ.get('ST_MACOS_BIN_DIR')) or None
+# A named instance (FRACTAL_INSTANCE, or --instance on the install wrappers) is a second, separate install:
 # its own app, command directory, bundle identifier, launchd services and install state, all under
 # ~/.st-instance/NAME. Without a name every default below is the shared install, as before.
-INSTANCE = os.environ.get('ST_INSTANCE') or None
+INSTANCE = os.environ.get('FRACTAL_INSTANCE', os.environ.get('ST_INSTANCE')) or None
 if INSTANCE and not (len(INSTANCE) <= 24 and re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', INSTANCE)):
     raise SystemExit('invalid instance name: lowercase letters, digits and single hyphens, at most 24 characters')
-IDENTIFIER = os.environ.get('ST_MACOS_BUNDLE_ID') or (
+IDENTIFIER = os.environ.get('FRACTAL_MACOS_BUNDLE_ID', os.environ.get('ST_MACOS_BUNDLE_ID')) or (
     'com.compoundingtech.smalltalk.instance.' + INSTANCE if INSTANCE else 'com.compoundingtech.smalltalk')
 # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — service writers retain old labels.
 SERVICES = (['com.compoundingtech.st3.instance.' + INSTANCE, 'com.compoundingtech.st3.instance.' + INSTANCE + '.replication']
@@ -82,7 +83,7 @@ def binaries(app):
 
 
 # The terminal client's speech helper (apps/macos/listen), when built: its own app inside SmallTalk.app, so the
-# microphone prompt names Small Talk with the helper's usage strings.
+# microphone prompt names Fractal with the helper's usage strings.
 HELPER = 'StListen.app'
 
 
@@ -156,19 +157,37 @@ def verify(app, expected=None):
             'designated_requirement': requirement, 'persistent_identity': bool(certificate_id)}
 
 
+def make_web_assets_writable(app):
+    web = Path(app) / 'Contents/share/fractal-web'
+    if web.is_dir():
+        web.chmod(web.stat().st_mode | 0o200)
+        for path in web.rglob('*'):
+            path.chmod(path.stat().st_mode | 0o200)
+
+
 def prepare(home, job, built):
     resolve_identity()
     payload = {name: sha(path) for name, path in built.items() if name != HELPER}
+    # Archive installs carry the embedded web UI beside bin/. Source-only callers
+    # may not have built it; include it whenever present, before signing the app.
+    web = Path(built['st3']).parent.parent / 'share/fractal-web'
+    if web.is_dir():
+        for path in sorted(web.rglob('*')):
+            if path.is_file():
+                payload['web/' + path.relative_to(web).as_posix()] = sha(path)
     if HELPER in built:
         payload['st-listen'] = sha(helper_executable(built[HELPER]))
     desired = {'hashes': payload, 'certificate': CERTIFICATE, 'team': TEAM, 'identifier': IDENTIFIER}
     current = fixed(home)
     metadata = current / 'Contents/Resources/deploy-payload.json'
     if metadata.exists() and json.loads(metadata.read_text()) == desired:
-        return current, dict(verify(current), payload_unchanged=True), payload
+        identity = verify(current)
+        make_web_assets_writable(current)
+        return current, dict(identity, payload_unchanged=True), payload
     app = Path(job) / 'candidate/St3.app'
     app.parent.mkdir(parents=True, exist_ok=True)
     if app.exists():
+        make_web_assets_writable(app)
         shutil.rmtree(app)
     paths = binaries(app)
     paths['st3'].parent.mkdir(parents=True)
@@ -176,6 +195,9 @@ def prepare(home, job, built):
     resources.mkdir()
     for name, path in paths.items():
         shutil.copy2(built[name], path); os.chmod(path, 0o755)
+    if web.is_dir():
+        shutil.copytree(web, app / 'Contents/share/fractal-web')
+        make_web_assets_writable(app)
     info = {'CFBundleIdentifier': IDENTIFIER, 'CFBundleExecutable': 'st3', 'CFBundleName': 'St3',
             'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1', 'LSUIElement': True}
     if HELPER in built:
@@ -305,11 +327,14 @@ def swap(app, home, job, suffix, expected=None):
         return
     staged = destination.parent / ('.St3-' + Path(job).name + '-' + suffix + '.app')
     if staged.exists():
+        make_web_assets_writable(staged)
         shutil.rmtree(staged)
     command(['/usr/bin/ditto', app, staged])
+    make_web_assets_writable(staged)
     verify(staged, expected)
     exchange(staged, destination)
     if staged.exists():
+        make_web_assets_writable(staged)
         shutil.rmtree(staged)
 
 
@@ -334,7 +359,7 @@ def install(app, home, job, stage_fractal=False):
         raise RuntimeError('refusing to remove directory: ' + str(retired))
     swap(app, home, job, 'install')
     links = dict(binaries(fixed(home)))
-    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     links['st'] = Path('st3')
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     for name, path in links.items():
@@ -388,6 +413,7 @@ def restore(home, job, had_app):
         if current.exists():
             moved = Path(job) / 'failed-app'
             if moved.exists():
+                make_web_assets_writable(moved)
                 shutil.rmtree(moved)
             os.replace(current, moved)
     for service, prior in definitions.items():
@@ -425,7 +451,8 @@ def main():
     global CERTIFICATE, TEAM, APP, BIN_DIR, IDENTIFIER
     parser = argparse.ArgumentParser(description='Install macOS tools as a fixed signed app without restarting services.')
     parser.add_argument('--from', dest='source', type=Path)
-    parser.add_argument('--home', type=Path, default=os.environ.get('ST_MACOS_INSTALL_HOME'),
+    parser.add_argument('--home', type=Path,
+                        default=os.environ.get('FRACTAL_MACOS_INSTALL_HOME', os.environ.get('ST_MACOS_INSTALL_HOME')),
                         help='installation home for isolated staging/tests (default: user home)')
     parser.add_argument('--bin-dir', default=BIN_DIR)
     parser.add_argument('--app', default=APP)

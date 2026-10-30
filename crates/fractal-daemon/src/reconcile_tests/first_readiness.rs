@@ -1,4 +1,4 @@
-//! First-readiness tests that serve the API; they live in st3-daemon because the API does.
+//! First-readiness tests that serve the API; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports, dead_code)]
 
@@ -124,6 +124,9 @@ let state = AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
 };
 let socket = root.path().join("st3.sock");
 let server_socket = socket.clone();
@@ -287,6 +290,9 @@ let state = AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
 };
 let socket = root.path().join("st3.sock");
 let server_socket = socket.clone();

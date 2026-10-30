@@ -18,7 +18,7 @@ export async function tooltipFor(anchor: HTMLElement, name: string): Promise<HTM
   })
 }
 
-/** Observe the final history commit, bounded by the plays' configured async assertion deadline. */
+/** Observe the final history commit; each advancing batch gets the configured async assertion deadline. */
 export async function committedTranscriptHistory(canvasElement: HTMLElement, expectedTurns: number, abortSignal: AbortSignal): Promise<HTMLElement> {
   const canvas = within(canvasElement)
   const controls = canvas.getByTestId('transcript-history-controls')
@@ -27,17 +27,24 @@ export async function committedTranscriptHistory(canvasElement: HTMLElement, exp
   let deadline: number | undefined
   try {
     await new Promise<void>((resolve, reject) => {
+      let mountedTurns = canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length
       const complete = () => {
-        if (controls.dataset.state === 'complete') resolve()
+        if (controls.dataset.state === 'complete') { resolve(); return }
+        const nextTurns = canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length
+        if (nextTurns > mountedTurns && nextTurns <= expectedTurns) {
+          mountedTurns = nextTurns
+          window.clearTimeout(deadline)
+          deadline = window.setTimeout(() => fail(`stalled for ${timeout}ms`), timeout)
+        }
       }
       const fail = (reason: string) => reject(new Error(`History readiness ${reason}: expected data-state="complete" and ${expectedTurns} turns; last data-state="${controls.dataset.state}", mounted turns=${canvasElement.querySelectorAll('[data-testid="transcript-turn"]').length}`))
       onAbort = () => fail('aborted')
       abortSignal.addEventListener('abort', onAbort, { once: true })
       if (abortSignal.aborted) { onAbort(); return }
       const timeout = getConfig().asyncUtilTimeout
-      deadline = window.setTimeout(() => fail(`timed out after ${timeout}ms`), timeout)
+      deadline = window.setTimeout(() => fail(`stalled for ${timeout}ms`), timeout)
       observer = new MutationObserver(complete)
-      observer.observe(controls, { attributes: true, attributeFilter: ['data-state'] })
+      observer.observe(canvasElement, { attributes: true, attributeFilter: ['data-state'], childList: true, subtree: true })
       // Also handle a final commit that preceded observer registration.
       complete()
     })

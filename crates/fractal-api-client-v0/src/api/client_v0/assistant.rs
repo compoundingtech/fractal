@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::assistant` that moved up from st3-api.
+//! The part of `api::client_v0::assistant` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use rusqlite::OptionalExtension as _;
@@ -301,7 +301,7 @@ mod tests {
                 match peer {
                     0 => { request.extensions_mut().insert(super::super::super::BoundAgent("agent/test".into())); }
                     1 => { request.extensions_mut().insert(super::super::super::LocalPeer {
-                        pid: 7, ancestor: Some("agent/test".into()),
+                        pid: 7, peer_process: None, ancestor: Some("agent/test".into()),
                     }); }
                     _ => { request.extensions_mut().insert(super::super::super::NativeDeliveryPeer {
                         agent: "agent/test".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
@@ -311,7 +311,7 @@ mod tests {
             }
             let mut owner_request = Request::builder().uri(path)
                 .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
-            owner_request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, ancestor: None });
+            owner_request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
             let response = app.clone().oneshot(owner_request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -420,7 +420,7 @@ mod tests {
         let id=challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
         let invalid_key = PairingComplete {
             api_version: request.api_version.clone(), code: request.code.clone(),
-            device_public_key: hex::encode([8_u8; 32]), key_storage: None,
+            device_public_key: hex::encode([8_u8; 32]), key_storage: None, fabric_node_id: None,
         };
         assert_eq!(complete(&state, id, &invalid_key, "fabric-loopback").await.unwrap_err().code, "validation-failed");
         let _ = complete(&state,id,&request,"fabric-loopback").await.unwrap().unwrap();

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A busy, locked or unopenable SQLite database during signature verdict reconciliation or the signature migration is retried and no longer persisted as signature-state-corrupt; a stopped migration no longer rewraps its own fault at each start; st replication signatures resume (a person or the fleet's fault agent) clears a persisted fault and wakes the migration; ordinary verdict passes (projection tail, admission, sealed export, startup) judge at most 8 writer loans and leave the rest due, the signature job drains a verdict backlog at 50% duty, and a trust-root change or a changed delegation queues its dependents a page (1024) per loan instead of in one transaction; a transient error that keeps recurring for 5 minutes shows in doctor as signature-storage-retrying, still unpersisted",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change. Resume clears the existing fault columns of claim_signature_migration. A requeue in progress is a meta row per link (claim_candidate_requeue:LINK)."},
+  "rules": {"status": "none", "detail": "No checkpoint or retention rule change. Verdict semantics are unchanged; only when each verdict is judged changes."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. New route POST /v1/signatures/resume; a bound harness may name only itself."},
+  "downtime": {"status": "none", "detail": "None. A large verdict backlog (after a resume or a trust-root change) drains in the background at half duty; no pass holds the projection lock or the writer for more than a slice."},
+  "manual": {"status": "changed", "detail": "A member that already persisted a transient error as signature-state-corrupt keeps it until a person or the fleet's fault agent runs st replication signatures resume --reason TEXT on it."},
+  "recovery": {"status": "none", "detail": "Revert the build: transient errors are persisted as faults again and the resume command is gone. A fault cleared by resume stays cleared."}
+}

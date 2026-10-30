@@ -22,11 +22,29 @@ pub struct Tab {
     pub pane: String,
 }
 
+/// Presentation identity, derived from the existing pane key rather than persisted state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabKind {
+    Agent,
+    Mission,
+    Inbox,
+    Other,
+}
+
 impl Tab {
     pub fn pane(key: impl Into<String>) -> Self {
         Self {
             title: None,
             pane: key.into(),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> TabKind {
+        match self.pane.split_once(':') {
+            Some(("agent", _)) | Some(("terminal", _)) if !self.pane.starts_with("terminal:terminal/") => TabKind::Agent,
+            Some(("mission" | "declaration", _)) => TabKind::Mission,
+            Some(("home", _)) | Some(("list", "home")) => TabKind::Inbox,
+            _ => TabKind::Other,
         }
     }
 }

@@ -418,7 +418,7 @@ impl View for AgentView {
     fn definition(&self) -> Definition {
         Definition {
             name: VIEW,
-            fingerprint: "agent-ordered-harness.v1;canonical.v1;sparse-seven;episodes433;retain-repaired;strict-state-reason",
+            fingerprint: "agent-ordered-harness.v1;canonical.v1;sparse-seven;episodes433;retain-repaired;strict-state-reason;background-jobs",
             kinds: KINDS,
             local_kinds: &[],
             max_contributions: 1,
@@ -552,6 +552,7 @@ pub fn observed(
         blocked_on: blocked_on.map(str::to_owned),
         ask: None,
         input_buffer: None,
+        background_jobs: None,
         exit: None,
         claim: event.claim.clone(),
         since_unix_ms: event.accepted,
@@ -640,6 +641,8 @@ pub fn observed(
         };
         let field = |name: &str| merged.fields.get(name).and_then(|f| f.value.clone());
         let mut state = text(event, "state").context("harness state missing")?;
+        let background_jobs =
+            crate::model::CurrentHarnessView::reported_background_jobs(&state, &event.fields);
         let mut reason = field("reason");
         let terminal = matches!(state.as_str(), "ended" | "indeterminate");
         if seat_status::permission_blocked(
@@ -669,6 +672,7 @@ pub fn observed(
             blocked_on: if terminal { None } else { field("blocked_on") },
             ask: if terminal { None } else { field("ask") },
             input_buffer: field("input_buffer"),
+            background_jobs,
             exit: field("exit"),
             claim: event.claim.clone(),
             since_unix_ms: event.accepted,

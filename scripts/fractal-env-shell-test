@@ -70,7 +70,7 @@ done
 rm -f "$work/observed"
 env -i PATH="$work/bin:$PATH" OBSERVED="$work/observed" FRACTAL_MISSION_RUN=fixture \
   FRACTAL_AGENT=private-new ST_AGENT=private-old \
-  bash "$repo/evals/st3/ghost-bug/judges/graph.sh" >/dev/null
+  bash "$repo/evals/fractal/ghost-bug/judges/graph.sh" >/dev/null
 IFS= read -r cleared <"$work/observed"
 test "$cleared" = : || fail 'operator command retained an inherited identity alias'
 # Daemon-owned hooks still hand the exact event and payload to their selected st3 binary.

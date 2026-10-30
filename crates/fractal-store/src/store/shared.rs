@@ -46,7 +46,7 @@ pub use crate::store::checkpoint_rules::{RULES_VERSION, plan_drops, rules_digest
 pub use crate::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use crate::store::limits::ACCOUNT_READING_WINDOW_MS;
 pub use crate::store::subagents::{SUBAGENT_KINDS, SubagentView};
-pub use crate::store::runtime::SmalltalkRuntime;
+pub use crate::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -105,6 +105,16 @@ impl Store {
             insert_local_observation_tx(&transaction, &self.origin, input, now_ms()).unwrap();
         }
         transaction.commit().unwrap();
+    }
+
+    /// Append `input` as a replicated claim, as a build from before its kind became a local
+    /// observation wrote it.
+    pub fn append_as_older_build_for_test(&self, input: &ClaimInput) -> Result<ClaimRecord, St3Error> {
+        append_claim_with_commit_context(self, input, None, None, None, None, ClaimCommitContext {
+            as_older_build: true,
+            ..Default::default()
+        })
+        .map(|(claim, _)| claim)
     }
 
     pub fn hold_write_transaction_for_test(&self, hold: impl FnOnce()) {
@@ -221,6 +231,7 @@ impl Store {
                 )
                 .map_err(internal)?;
             for (position, claim) in batch.claims.iter().enumerate() {
+                super::classify_replicated_claim_with_registry(claim, fractal_schema::registry())?;
                 ensure_claim_blobs(&transaction, claim)?;
                 smallclaims::store::canonical::record_position_tx(
                     &transaction,

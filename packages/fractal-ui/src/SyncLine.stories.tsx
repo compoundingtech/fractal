@@ -1,12 +1,11 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useArgs } from 'storybook/preview-api'
 import { Button } from 'react-aria-components'
-import { SyncLine } from './assistant-ui/st3-views/SyncLine'
+import { SyncLine } from './assistant-ui/sync-presentation/SyncLine'
 import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
-import { syncLine, observeSyncStatus } from './assistant-ui/st3-views/sync-line'
-import { syncObservations, syncNow } from './assistant-ui/st3-views/sync-fixtures'
+import { syncLine, observeSyncStatus } from './assistant-ui/sync-presentation/sync-line'
+import { syncObservations, syncNow } from './assistant-ui/sync-presentation/sync-fixtures'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -21,14 +20,15 @@ function TransitionPreview({ scheme, sequence, next, retry }: { scheme: Scheme; 
     <div {...stylex.props(styles.statusBar)}><SyncLine status={current.status} label="socket" socket gateway="gateway-1" now={syncNow} observedAt={current.observedAt} onRetry={retry} /></div>
   </ThemePortal></main>
 }
-function TransitionStory({ args, updateArgs }: { args: SyncArgs; updateArgs: (patch: Partial<SyncArgs>) => void }) {
-  const next = React.useCallback(() => updateArgs({ sequence: (args.sequence + 1) % syncObservations.length }), [args.sequence, updateArgs])
-  const retry = React.useCallback(() => updateArgs({ sequence: 1 }), [updateArgs])
-  return <TransitionPreview scheme={args.scheme} sequence={args.sequence} next={next} retry={retry} />
+function TransitionStory({ scheme, sequence: initialSequence }: SyncArgs) {
+  // These are component transitions, not new Storybook renders/play lifecycles.
+  const [sequence, setSequence] = React.useState(initialSequence)
+  const next = React.useCallback(() => setSequence(value => (value + 1) % syncObservations.length), [])
+  const retry = React.useCallback(() => setSequence(1), [])
+  return <TransitionPreview scheme={scheme} sequence={sequence} next={next} retry={retry} />
 }
 function StoryRender(args: SyncArgs) {
-  const [, updateArgs] = useArgs<SyncArgs>()
-  return <TransitionStory args={args} updateArgs={updateArgs} />
+  return <TransitionStory key={args.sequence} {...args} />
 }
 function ObservationRow({ observation, label }: { observation: typeof syncObservations[number]; label?: string }) {
   const [retried, setRetried] = React.useState(false)
@@ -65,12 +65,31 @@ const subscriptionLimitPlay: NonNullable<StoryObj<SyncArgs>['play']> = async ({ 
   }
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sync Line',
   render: StoryRender,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Portable SyncStatus tagged union with epoch-ms timestamps and the syncLine vocabulary. Every status/stage, derived stalled observations, both themes, and fixed-height existing header/status slots. The all-observations matrix stacks theme columns on narrow viewports so each row and its actions remain on their own theme surface. Last-known content remains present. Local and Server subscription-limit failures share plain vocabulary; only reported caps appear, including zero. HTTP Usage reads exclude subscription-limit failures and their actions. Dedicated dark/light stories cover those exclusions and the full transition sequence. No byte-progress or invented stage is shown.' } } },
   args: { scheme: 'dark', sequence: 0 }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, sequence: { control: { type: 'number', min: 0, max: syncObservations.length - 1 } } },
 } satisfies Meta<SyncArgs>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'InlineHeader:contract-fixture',
+  'InlineHeaderLight:contract-fixture',
+  'LocalFailureWithoutCap:contract-fixture',
+  'LocalFailureZeroCap:contract-fixture',
+  'NarrowFailure:contract-fixture',
+  'NarrowFailureLight:contract-fixture',
+  'ServerFailureSubscriptionLimit:contract-fixture',
+  'SubscriptionLimitsDark:contract-fixture',
+  'SubscriptionLimitsLight:contract-fixture',
+  'TransitionSequence:contract-fixture',
+  'TransitionSequenceLight:contract-fixture',
+  'UnknownReason:contract-fixture',
+  'UnknownReasonLastLive:contract-fixture',
+]
 type Story = StoryObj<SyncArgs>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local sync observations and clock transitions exercise status vocabulary and geometry.' } } } satisfies Story
 export const AllStates: Story = { ...contractFixture, tags: ['critical'], render: AllStatesStory, play: async ({ canvasElement }) => {

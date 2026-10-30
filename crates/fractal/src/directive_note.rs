@@ -55,7 +55,7 @@ pub(super) async fn run(
         super::parse_person_subject(&actor).map_err(anyhow::Error::msg)?;
     }
     let Endpoint::Unix(socket) = endpoint else {
-        anyhow::bail!("st note requires the authenticated local Unix socket");
+        anyhow::bail!("fractal note requires the authenticated local Unix socket");
     };
     let client = if actor.starts_with("agent/") {
         Client::unix_agent(socket, &actor)?

@@ -1,4 +1,4 @@
-//! Tests of st3-reconcile that need the API; they reach the reconciler through the re-export.
+//! Tests of fractal-reconcile that need the API; they reach the reconciler through the re-export.
 
 mod doctor_eligibility;
 mod first_readiness;

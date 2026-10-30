@@ -1,5 +1,5 @@
-//! st3 telemetry: the OpenTelemetry setup, the git/gh command recorder and the wake and startup
-//! telemetry of the st3 library, which name no store, api or reconcile code. st3-daemon re-exports
+//! Fractal telemetry: the OpenTelemetry setup, the git/gh command recorder and the wake and startup
+//! telemetry of the Fractal library, which name no store, api or reconcile code. fractal-daemon re-exports
 //! each module at its old path.
 
 pub mod incremental;

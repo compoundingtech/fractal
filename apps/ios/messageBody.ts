@@ -1,4 +1,4 @@
-// Reading the whole text of a long message: what the phone says when st cannot give it. The message
+// Reading the whole text of a long message: what the phone says when Fractal cannot give it. The message
 // shows its start either way; these are the words for why the rest is not there.
 import { ClientError, plainError } from '../../clients/typescript/fractal-client';
 
@@ -20,7 +20,7 @@ export function wholeText(answer: WholeTextAnswer): WholeText {
 export function wholeTextFailure(error: unknown): string {
   if (error instanceof ClientError) {
     switch (error.response.code) {
-      // st words this one itself: it names the machine and says only the start remains.
+      // Fractal words this one itself: it names the machine and says only the start remains.
       case 'blob-expired': return error.response.message || 'The full text of this message expired and was removed after its retention. Only the start remains.';
       case 'blob-not-found': return 'The full text of this message is no longer on the machine that took it. Only the start remains.';
       case 'remote-unavailable': return `${plainError(error)}, so only the start of this message can be shown. Try again in a moment.`;

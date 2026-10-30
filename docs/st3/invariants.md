@@ -19,13 +19,13 @@ The root st2 proof table and test suite remain while their retirement prerequisi
 
 Current paths exercised by these proofs:
 
-- Native file handoff receipts: st3's [Codex pump](../../crates/fractal-drivers/src/codex_app_server.rs) and [OpenCode session](../../crates/fractal-drivers/src/opencode_session.rs) use the shared message filename, unread and archive helpers for native handoffs.
-- Native delivery ownership: st3 starts the same Codex and OpenCode pumps in Graph control, which open the shared delivery ledger with their own harness profile and record exact correlated consumption.
+- Native file handoff receipts: Fractal's [Codex pump](../../crates/fractal-drivers/src/codex_app_server.rs) and [OpenCode session](../../crates/fractal-drivers/src/opencode_session.rs) use the shared message filename, unread and archive helpers for native handoffs.
+- Native delivery ownership: Fractal starts the same Codex and OpenCode pumps in Graph control, which open the shared delivery ledger with their own harness profile and record exact correlated consumption.
 - Observed harness state: the native [driver entries](../../crates/fractal/src/main.rs) start shared session writers, and the graph observation loop reads their categorical state records.
 - Harness context: the same native entries and graph observation loop use shared context writers/readers; the [pi/omp event observer](../../crates/fractal-drivers/src/pi_channel.rs) supplies its own occupancy and compaction readings.
 - Producer arithmetic: native Claude status-line readings, Codex turn readings, OpenCode assistant readings and pi/omp EventObserver frames enter the shared context writer through the version-qualified producer code.
-- Native diagnostics: native Codex, Claude and OpenCode publish shared diagnostic records; st3's observation/admission projection reads the earliest failing stage and surfaces VersionGate when selected by that shared order.
+- Native diagnostics: native Codex, Claude and OpenCode publish shared diagnostic records; Fractal's observation/admission projection reads the earliest failing stage and surfaces VersionGate when selected by that shared order.
 - Bounded notice text: the Codex and OpenCode native delivery paths call the shared notice formatter, so its untrusted-field bounds apply before transport.
-- Delivery wakeups: both native pumps use the shared mutation predicate; the real-inotify proof exercises that predicate through the recursive test harness rather than claiming st3 starts the catalog watcher.
+- Delivery wakeups: both native pumps use the shared mutation predicate; the real-inotify proof exercises that predicate through the recursive test harness rather than claiming Fractal starts the catalog watcher.
 - Scoped delivery inputs: both native pumps call watch_delivery_inputs_with_status with false under Graph control, exactly the branch exercised by the new test.
 - Proof references: the current integration binary registers this resolver and reads this table from the workspace root.
