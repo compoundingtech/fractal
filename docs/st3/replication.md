@@ -1173,6 +1173,9 @@ summarizes that per claim kind, at a cut, so members can compare it:
   and a key moving on either member is no difference.
 - Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
   keys and answers. `claims` is compared only between members that trim the same way.
+- A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
+  depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
+  leaves out every claim in `projection_digest_repaired_claims`.
 - Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
   difference narrows to a bucket and then to its keys without listing a whole kind.
 
