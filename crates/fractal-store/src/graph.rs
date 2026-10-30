@@ -1373,6 +1373,7 @@ fn parse_agent(
             shutdown_timeout_ms,
             driver: None,
             terminal_size: None,
+            capacity: None,
         });
     }
 
@@ -1384,6 +1385,7 @@ fn parse_agent(
                 "render",
                 "fresh-context",
                 "one-shot",
+                "capacity",
                 "pty",
                 "exec",
                 "rollout",
@@ -1437,6 +1439,9 @@ fn parse_agent(
 
     if let Some(member) = primary.as_mut() {
         member.one_shot = unique_child(children, "one-shot")?.is_some();
+        member.capacity = unique_child(children, "capacity")?
+            .map(parse_capacity)
+            .transpose()?;
         member.tags.extend(parse_tags(children)?);
         member.tags.insert("st3.subject".into(), subject.clone());
         if fresh_context {
@@ -1880,8 +1885,18 @@ fn validate_account_binding(
 
 fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
-    ensure_no_children(node)?;
-    let subject = one_string(node)?;
+    let subject = one_string_with_children(node)?;
+    // Why the seat stops, as its author gave it: the card shows it beside who stopped it.
+    let reason = match node.children() {
+        Some(children) => {
+            reject_unknown_children(children, &["reason"], "stop", &subject)?;
+            child_string(children, "reason")?
+        }
+        None => None,
+    };
+    if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
+        return Err(St3Error::new("empty-stop-reason", "a stop reason cannot be blank"));
+    }
     if !matches!(subject.split('/').next(), Some("agent" | "exec" | "pty")) {
         return Err(St3Error::new(
             "invalid-stop-subject",
@@ -1906,7 +1921,11 @@ fn parse_stop(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error
             accountable: None,
             subject: subject.clone(),
             kind: "stop".into(),
-            desired: json!({ "stop": subject }),
+            // A stop without a reason keeps the exact declaration, and revision, it always had.
+            desired: match reason {
+                Some(reason) => json!({ "stop": subject, "reason": reason }),
+                None => json!({ "stop": subject }),
+            },
             member: None,
             owner_run: context.owner_run.clone(),
             owner_generation: None,
@@ -2113,6 +2132,7 @@ fn driver_member(
         shutdown_timeout_ms,
         driver: Some(name),
         terminal_size: None,
+        capacity: None,
     })
 }
 
@@ -2205,6 +2225,7 @@ fn task_member(
         shutdown_timeout_ms,
         driver: None,
         terminal_size: None,
+        capacity: None,
     })
 }
 
@@ -2318,6 +2339,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "fresh-context",
         "bind-terminal",
         "one-shot",
+        "capacity",
         "handles-faults",
         "accountable",
         "mission-authority",
@@ -2361,6 +2383,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "fresh-context",
         "bind-terminal",
         "one-shot",
+        "capacity",
         "handles-faults",
         "accountable",
         "mission-authority",
@@ -4210,6 +4233,27 @@ fn one_bool(node: &KdlNode) -> Result<bool, St3Error> {
     }
 }
 
+/// `capacity cores=N memory="SIZE"`: the seat's lane (docs/st3/seat-lanes.md). What it leaves
+/// out is the base lane's.
+fn parse_capacity(node: &KdlNode) -> Result<fractal_runtime::Capacity, St3Error> {
+    let invalid = |message: String| St3Error::new("invalid-capacity", message);
+    ensure_only_properties(node, &["cores", "memory"])?;
+    ensure_no_children(node)?;
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(invalid("capacity takes only cores= and memory=".into()));
+    }
+    let cores = match node.get("cores") {
+        None => None,
+        Some(KdlValue::Integer(cores)) => Some(
+            u32::try_from(*cores).map_err(|_| invalid(format!("capacity cores {cores} is out of range")))?,
+        ),
+        Some(_) => return Err(invalid("capacity cores must be a whole number".into())),
+    };
+    let memory = property_string(node, "memory")?;
+    fractal_runtime::Capacity::declared(cores, memory.as_deref())
+        .map_err(|error| invalid(format!("{error:#}")))
+}
+
 fn property_bool(node: &KdlNode, property: &str) -> Result<Option<bool>, St3Error> {
     node.entries()
         .iter()
@@ -4893,6 +4937,55 @@ agent "seat" {
                 .is_err(),
                 "{invalid}"
             );
+        }
+    }
+
+    #[test]
+    fn capacity_declares_the_seats_lane_and_an_undeclared_seat_has_none() {
+        let seat = |body: &str| {
+            parse_intent(
+                &format!("version 2\nagent \"example/laned\" {{ {body} harness \"omp\" {{}}; exec \"helper\" {{ command \"true\" }} }}"),
+                "node",
+            )
+        };
+        let intent = seat(r#"capacity cores=2 memory="4G";"#).unwrap();
+        let member = intent.subjects["agent/example/laned"].member.as_ref().unwrap();
+        assert_eq!(
+            member.capacity,
+            Some(fractal_runtime::Capacity { cores: 2, memory: 4 << 30 })
+        );
+        // The lane is the seat's; a task the agent declares beside it is not in it.
+        assert!(intent.subjects["exec/example/laned/helper"].member.as_ref().unwrap().capacity.is_none());
+        assert_eq!(
+            seat("capacity cores=3;").unwrap().subjects["agent/example/laned"].member.as_ref().unwrap().capacity,
+            Some(fractal_runtime::Capacity { cores: 3, ..fractal_runtime::Capacity::DEFAULT })
+        );
+        // No declaration: no lane, and the stored member is byte-for-byte what it was before.
+        let undeclared = seat("").unwrap();
+        let undeclared = undeclared.subjects["agent/example/laned"].member.as_ref().unwrap();
+        assert!(undeclared.capacity.is_none());
+        assert!(serde_json::to_value(undeclared).unwrap().get("capacity").is_none());
+        // A mission's own agent declares its lane the same way.
+        let mission = |capacity: &str| {
+            parse_intent(
+                &format!("version 2\nmission \"example/laned\" state=\"ready\" {{\n  goal \"Work.\"\n  agent \"worker\" {{\n    {capacity}\n    command \"true\"\n  }}\n  step \"work\" {{\n    assigned-to \"agent/${{ST_MISSION_RUN}}/worker\"\n    goal \"Work.\"\n  }}\n}}\n"),
+                "node",
+            )
+        };
+        mission(r#"capacity cores=2 memory="4G""#).unwrap();
+        assert!(mission(r#"capacity disk="1G""#).is_err());
+        for invalid in [
+            "capacity \"big\";",
+            "capacity cores=0;",
+            "capacity cores=-1;",
+            "capacity cores=1.5;",
+            "capacity memory=\"4X\";",
+            "capacity memory=\"64M\";",
+            "capacity disk=\"1G\";",
+            "capacity cores=1 { memory \"1G\"; };",
+            "capacity cores=1; capacity cores=2;",
+        ] {
+            assert!(seat(invalid).is_err(), "{invalid}");
         }
     }
 

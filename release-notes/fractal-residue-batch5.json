@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Complete remaining Fractal help, developer-tool naming and preferred environment-variable reads",
+  "replay": {"status": "none", "detail": "No runtime replay change."},
+  "schema": {"status": "none", "detail": "No database or wire schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "Existing ST_, ST3_ and STUI_ environment names remain fallback reads; corresponding FRACTAL_ names take precedence. Public st and st3 aliases, wire values, state paths and runtime unit names remain unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption introduced."},
+  "manual": {"status": "none", "detail": "No deployed installation action required; source developer-tool callers are updated together."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}

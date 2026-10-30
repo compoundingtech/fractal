@@ -118,9 +118,9 @@ with tempfile.TemporaryDirectory() as tmp:
     git_command('-c', 'user.name=Example Builder', '-c', 'user.email=builder@example.invalid',
                 '-c', 'commit.gpgSign=false', 'commit', '-m', 'initial fixture')
     os.environ.update(GITHUB_WORKSPACE=str(work), RUNNER_TEMP=str(temp))
-    (temp / 'st-ci-cache').mkdir()
+    (temp / 'fractal-ci-cache').mkdir()
     module.remember_sources()
-    checkpoint = temp / 'st-ci-cache/perf-source-state.json'
+    checkpoint = temp / 'fractal-ci-cache/perf-source-state.json'
     checkpoint.write_bytes((temp / 'perf-source-state.json').read_bytes())
     before = source.stat().st_mtime_ns
     source.touch()
@@ -182,7 +182,7 @@ with tempfile.TemporaryDirectory() as tmp:
                       PERF_PR_NUMBER='1', PERF_HEAD_REPOSITORY='example/project',
                       GITHUB_HEAD_REF='example-branch', GITHUB_RUN_ATTEMPT='1', GITHUB_RUN_ID='10')
     # Exercise real archives: both workspace outputs and temp caches survive a round trip.
-    for name in ('cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'st-ci-cache', 'st-bench'):
+    for name in ('cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'fractal-ci-cache', 'st-bench'):
         directory = temp / name
         directory.mkdir(parents=True)
         (directory / 'sample').write_text(name)
@@ -194,11 +194,97 @@ with tempfile.TemporaryDirectory() as tmp:
     extracted = temp / 'extracted'
     extracted.mkdir()
     module.unpack(temp / 'perf-snapshots/build.tar.zst', extracted,
-                  ('target', 'cargo-home', 'perf-sccache', 'st-ci-cache'))
+                  ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache'))
     module.unpack(temp / 'perf-snapshots/stores.tar.zst', extracted, ('st-bench',))
     assert (extracted / 'target/sample').read_text() == 'build output'
     assert (extracted / 'target/sample').stat().st_mtime_ns == precise_mtime
     assert (extracted / 'st-bench/sample').read_text() == 'st-bench'
+    # Previous cache-directory layouts are misses, never extracted or installed.
+    legacy = temp / 'legacy'
+    legacy.mkdir()
+    for name in ('target', 'cargo-home/registry', 'cargo-home/git', 'perf-sccache', '-'.join(('st', 'ci', 'cache'))):
+        (legacy / name).mkdir(parents=True, exist_ok=True)
+    archive = temp / 'legacy.tar.zst'
+    module.subprocess.run(['tar', '--zstd', '-cf', str(archive), '-C', str(legacy),
+                           'target', 'cargo-home', 'perf-sccache', '-'.join(('st', 'ci', 'cache'))], check=True)
+    build_archive = temp / 'legacy-build.tar.zst'
+    module.subprocess.run(['tar', '--zstd', '-cf', str(build_archive), '-C', str(legacy),
+                           'target', 'cargo-home', '-'.join(('st', 'ci', 'cache'))], check=True)
+    untouched = temp / 'untouched'
+    untouched.mkdir()
+    try:
+        module.unpack(archive, untouched, ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache'))
+    except module.IncompatibleSnapshot:
+        pass
+    else:
+        raise AssertionError('previous archive layout must be a cache miss')
+    assert list(untouched.iterdir()) == []
+    snapshot_loader = importlib.machinery.SourceFileLoader('ci_build_snapshot', str(root / 'scripts/ci-build-snapshot'))
+    snapshot_spec = importlib.util.spec_from_loader(snapshot_loader.name, snapshot_loader)
+    snapshot = importlib.util.module_from_spec(snapshot_spec)
+    snapshot_loader.exec_module(snapshot)
+    try:
+        snapshot.unpack(build_archive, untouched)
+    except snapshot.source.IncompatibleSnapshot:
+        pass
+    else:
+        raise AssertionError('previous build archive layout must be a cache miss')
+    assert list(untouched.iterdir()) == []
+    # Only the complete known legacy layout is recoverable. Corrupt or mixed layouts remain fatal.
+    for reader, expected, legacy_roots in (
+            (module, ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache'),
+             ['target', 'cargo-home', 'perf-sccache', '-'.join(('st', 'ci', 'cache'))]),
+            (snapshot, None, ['target', 'cargo-home', '-'.join(('st', 'ci', 'cache'))])):
+        (legacy / 'arbitrary').mkdir(exist_ok=True)
+        (legacy / 'fractal-ci-cache').mkdir(exist_ok=True)
+        cases = [
+            (['arbitrary'], 'unexpected snapshot'),
+            (legacy_roots + ['arbitrary'], 'unexpected snapshot'),
+            (legacy_roots + ['fractal-ci-cache'], 'unexpected snapshot'),
+            (['target', '-'.join(('st', 'ci', 'cache'))], 'unexpected snapshot'),
+            (['target', 'fractal-ci-cache'], 'incomplete build snapshot'),
+            (['target'], 'incomplete build snapshot'),
+        ]
+        for members, message in cases:
+            invalid = temp / 'invalid.tar.zst'
+            module.subprocess.run(['tar', '--zstd', '-cf', str(invalid), '-C', str(legacy), *members], check=True)
+            with tempfile.TemporaryDirectory(dir=temp) as destination:
+                try:
+                    if expected is None:
+                        reader.unpack(invalid, Path(destination))
+                    else:
+                        reader.unpack(invalid, Path(destination), expected)
+                        # The perf restore loop checks required directories after unpacking.
+                        for name in expected:
+                            if not (Path(destination) / name).is_dir():
+                                raise ValueError(f'incomplete build snapshot: missing {name}')
+                except ValueError as error:
+                    assert type(error) is ValueError, 'invalid archives must not become recoverable misses'
+                    assert message in str(error), str(error)
+                else:
+                    raise AssertionError(f'invalid archive accepted: {members}')
+    event_path, github_output, github_env, summary = [temp / name for name in ('event.json', 'output', 'env', 'summary')]
+    event_path.write_text('{}')
+    artifact = dict(name='recipe', expired=False, workflow_run=dict(id=1))
+    def snapshot_api(path):
+        return dict(artifacts=[artifact]) if '/artifacts?' in path else dict(id=1)
+    def snapshot_download(repo, run, name, dest):
+        dest.mkdir()
+        module.shutil.copyfile(build_archive, dest / 'build.tar.zst')
+    with patch.dict(os.environ, GITHUB_REPOSITORY='example/project', GITHUB_EVENT_PATH=str(event_path),
+                    GITHUB_OUTPUT=str(github_output), GITHUB_ENV=str(github_env),
+                    GITHUB_STEP_SUMMARY=str(summary), GITHUB_RUN_ID='2', GITHUB_RUN_ATTEMPT='1',
+                    CI_LOCAL_CACHES='0'), \
+         patch.object(snapshot, 'fingerprint', return_value='recipe'), \
+         patch.object(snapshot, 'trusted', return_value=True), \
+         patch.object(snapshot.source, 'git', return_value=''), \
+         patch.object(snapshot.source, 'api', side_effect=snapshot_api), \
+         patch.object(snapshot.source, 'download', side_effect=snapshot_download):
+        with contextlib.redirect_stdout(io.StringIO()):
+            snapshot.restore()
+    assert github_output.read_text() == 'cache-hit=false\n'
+    assert not github_env.exists(), 'old build archives must not publish a HIT'
+    assert 'incompatible archive layout' in summary.read_text()
     # API ordering includes untrusted entries: none may supply caches or a baseline.
     runs = [dict(run, id=9, event='pull_request')] + [dict(run, id=i) for i in range(8, 0, -1)]
     daily_runs, jobs_by_run = [], {}
@@ -261,7 +347,20 @@ with tempfile.TemporaryDirectory() as tmp:
     assert sorted(p.name for p in (temp / 'perf-baseline').iterdir()) == [f'load-{i}.json' for i in range(4, 9)]
     assert all(json.loads(p.read_text()) == report for p in (temp / 'perf-baseline').iterdir())
     assert (work / 'target/cached').read_text() == 'snapshot'
-    assert (temp / 'st-ci-cache/cached').exists() and (temp / 'st-bench/cached').exists()
+    assert (temp / 'fractal-ci-cache/cached').exists() and (temp / 'st-bench/cached').exists()
+    # The restore loop handles the same incompatible-layout signal without installing a build.
+    def incompatible_build(archive, destination, names):
+        if 'fractal-ci-cache' in names:
+            raise module.IncompatibleSnapshot('previous directory layout')
+        unpack(archive, destination, names)
+    module.unpack = incompatible_build
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        module.restore()
+    assert 'Performance build cache MISS: incompatible archive layout' in output.getvalue()
+    assert 'Performance build cache HIT' not in output.getvalue()
+    assert len(list((temp / 'perf-baseline').glob('load-*.json'))) == 5
+    module.unpack = unpack
     # Explicit steady and legacy reports remain supported; upgrade-only or mislabeled
     # root reports must fail before they can supply any historical comparison.
     original_reports = report_files
@@ -386,4 +485,4 @@ with tempfile.TemporaryDirectory() as tmp:
         else:
             raise AssertionError('unexpected archive root accepted')
 
-print('Performance cache tests passed: main baselines, same-PR snapshots, rerun provenance, archive completeness')
+print('Performance cache tests passed: main baselines, same-PR snapshots, rerun provenance, archive completeness, legacy build/performance layout misses')

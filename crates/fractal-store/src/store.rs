@@ -43,6 +43,8 @@ pub mod arrangements_tests;
 pub mod authored_pull_requests_tests;
 #[cfg(test)]
 pub mod schedule_active_run_tests;
+#[cfg(test)]
+pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -216,6 +218,8 @@ pub mod revision_seats;
 pub mod delegation;
 pub mod limits;
 pub mod database_size;
+pub mod answers_check;
+pub mod local_trim_fault;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
@@ -234,12 +238,18 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
+#[cfg(test)]
+mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
 pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod checkpoint_identity_reuse_tests;
+#[cfg(test)]
+mod newest_claim_index_tests;
+#[cfg(test)]
+mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
@@ -667,6 +677,35 @@ impl UsageFold {
     }
 }
 
+
+/// The newest crash-loop raise of each subject in the JSON array ?1 at store index ?2 since its
+/// newest running observation. One seek per subject on (subject, kind, store_index), and only
+/// past that observation: a seat that ran since it was parked has nothing to find. The index is
+/// named because the planner otherwise ranges over every subject's reconcile decisions by kind.
+pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, claims.body, claims.accepted_at_unix_ms
+     FROM json_each(?1) subjects
+     JOIN claims ON claims.id=(
+         SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=subjects.value
+            AND kind='runtime.reconcile-decision' AND store_index<=?2
+            AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                WHERE subject=subjects.value AND kind='runtime.observed'
+                  AND store_index<=?2
+                  AND json_extract(body, '$.fields.status')='running'), 0)
+            AND json_extract(body, '$.fields.decision')='raise'
+            AND (json_extract(body, '$.fields.key') GLOB 'runtime-crash-loop:*'
+              OR json_extract(body, '$.fields.key') GLOB 'codex-crash-loop:*')
+          ORDER BY store_index DESC LIMIT 1)";
+
+/// A seat st stopped restarting after it failed to start: why, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The crash-loop decision that parked it.
+    pub decision: String,
+    /// The first raise since the seat last ran: one park, however many retries failed in it.
+    pub episode: String,
+    pub reason: String,
+    pub parked_at_unix_ms: u128,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentWorkQueue {
@@ -2111,6 +2150,13 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
+    pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
+    /// Whether asks get deadlines: `[asks] deadlines`, off by default.
+    pub ask_deadlines: std::sync::atomic::AtomicBool,
+    /// The store index up to which person answers were checked for overriding a deadline's
+    /// default; in memory, so a restart checks them again and the notice's key keeps it once.
+    pub person_answers_checked: std::sync::atomic::AtomicU64,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2479,7 +2525,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2499,7 +2546,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2511,7 +2559,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -4002,12 +4051,23 @@ impl Store {
     /// Local observations written after `after`, oldest first. The records carry the
     /// `store_index` of the claim each one follows.
     pub fn local_observations_after(&self, after: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_after_through(after, i64::MAX as u64, limit)
+    }
+
+    /// [`Self::local_observations_after`], leaving out observations that follow a claim past
+    /// `through` (an event feed passes the published index, as `events_page` does).
+    pub fn local_observations_after_through(
+        &self,
+        after: u64,
+        through: u64,
+        limit: usize,
+    ) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4f521b72fe3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 ORDER BY id LIMIT ?2"
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6fff3783c9f8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+            "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 AND after_store_index <= ?3 ORDER BY id LIMIT ?2"
         ))?;
         let rows = statement.query_map(
-            params![after as i64, limit.min(i64::MAX as usize) as i64],
+            params![after as i64, limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64) as i64],
             |row| local_observation_from_row(&self.origin, row),
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4056,13 +4116,19 @@ impl Store {
 
     /// The newest local observations, oldest first.
     pub fn local_observations_tail(&self, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_tail_through(i64::MAX as u64, limit)
+    }
+
+    /// The newest local observations that follow a claim at or before `through`, oldest first.
+    pub fn local_observations_tail_through(&self, through: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbe0f6965fe14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} ORDER BY id DESC LIMIT ?1) ORDER BY id"
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd1501a4b8d3a owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} WHERE after_store_index <= ?2 ORDER BY id DESC LIMIT ?1) ORDER BY id"
         ))?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], |row| {
-            local_observation_from_row(&self.origin, row)
-        })?;
+        let rows = statement.query_map(
+            params![limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64) as i64],
+            |row| local_observation_from_row(&self.origin, row),
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -5042,9 +5108,13 @@ impl Store {
     /// One keyset page at the caller's pinned snapshot. Owner filtering never expands the
     /// indexed scan; the continuation records the last inspected event even for an empty answer.
     /// Both subject and owner filters run after the bounded global membership scan.
+    /// The events after `after`, up to and including `through`: a caller passes the published
+    /// index (`index()`) so that no cursor it hands out runs ahead of what a read snapshot taken
+    /// from that index shows. A commit is visible to SQL readers before the writer publishes it.
     pub fn events_page(
         &self,
         after: u64,
+        through: u64,
         subject: Option<&str>,
         owner_run: Option<&str>,
         limit: usize,
@@ -5053,10 +5123,10 @@ impl Store {
         let connection = self.readers.get();
         // Keep the global last-scanned-event contract without adding a subject index.
         let sql = "SELECT store_index,kind,subject,body FROM events
-             WHERE store_index>?1 ORDER BY store_index LIMIT ?2";
+             WHERE store_index>?1 AND store_index<=?3 ORDER BY store_index LIMIT ?2";
         let raw = connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3051ca7c80f3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)?
-            .query_map(params![after, limit.saturating_add(1)], |row| {
+            .query_map(params![after, limit.saturating_add(1), through], |row| {
                 let body = row.get::<_, String>(3)?;
                 Ok(EventRecord {
                     store_index: row.get(0)?,
@@ -5099,14 +5169,15 @@ impl Store {
         self.events_after_filtered(after, subject, None)
     }
 
-    pub fn events_after_bounded(&self, after: u64, limit: usize) -> Result<Vec<EventRecord>> {
+    /// The events after `after`, up to and including `through` (see `events_page`).
+    pub fn events_after_bounded(&self, after: u64, through: u64, limit: usize) -> Result<Vec<EventRecord>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "SELECT store_index, kind, subject, body FROM events
-             WHERE store_index > ?1 ORDER BY store_index LIMIT ?2",
+             WHERE store_index > ?1 AND store_index <= ?3 ORDER BY store_index LIMIT ?2",
         )?;
         let rows =
-            statement.query_map(params![after, limit.min(i64::MAX as usize) as i64], |row| {
+            statement.query_map(params![after, limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64)], |row| {
                 let body = row.get::<_, String>(3)?;
                 Ok(EventRecord {
                     store_index: row.get(0)?,
@@ -5118,13 +5189,14 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn events_tail_bounded(&self, limit: usize) -> Result<Vec<EventRecord>> {
+    /// The newest `limit` events at or before `through`, oldest first (see `events_page`).
+    pub fn events_tail_bounded(&self, through: u64, limit: usize) -> Result<Vec<EventRecord>> {
         let connection = self.readers.get();
         // Bound membership before fetching bodies. Ordering the joined view can make SQLite
         // visit every canonical claim, even when the response has a LIMIT.
         let sql = event_tail_sql(self.event_payload_migration_pending()?);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h09ab98dbcf94 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], |row| {
+        let rows = statement.query_map(params![limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64)], |row| {
             let body = row.get::<_, String>(3)?;
             Ok(EventRecord {
                 store_index: row.get(0)?,
@@ -5425,6 +5497,74 @@ impl Store {
         kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
         times.extend(read);
         Ok(times)
+    }
+
+    /// Each of `subjects` that st parked at `at_index` and that has not run since: its newest
+    /// crash-loop raise (after repeated failed starts, or a failed explicit restart) for its
+    /// current launch, with no running observation after it. A new declaration launches afresh,
+    /// so a raise for an earlier launch parks nothing.
+    pub fn parked_seats_for(
+        &self,
+        subjects: &[String],
+        at_index: u64,
+    ) -> Result<BTreeMap<String, ParkedSeat>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he0201008ecc8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ PARKED_SEATS_SQL)?;
+        let mut parked = BTreeMap::new();
+        for chunk in subjects.chunks(256) {
+            let rows = statement
+                .query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (subject, id, body, accepted_at) in rows {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").unwrap_or(&body);
+                let token = fields
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| key.split_once(':'))
+                    .map(|(_, token)| token.to_owned())
+                    .unwrap_or_default();
+                if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
+                    continue;
+                }
+                // Each failed retry raises again; the episode is the first raise since the seat
+                // last ran, so one park is one fault however many retries fail.
+                let episode: String = connection.query_row(
+                    "SELECT id FROM claims INDEXED BY claims_subject_kind_index
+                      WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                        AND store_index<=?2
+                        AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                            WHERE subject=?1 AND kind='runtime.observed' AND store_index<=?2
+                              AND json_extract(body, '$.fields.status')='running'), 0)
+                        AND json_extract(body, '$.fields.decision')='raise'
+                        AND json_extract(body, '$.fields.key')=?3
+                      ORDER BY store_index LIMIT 1",
+                    params![subject, at_index, fields.get("key").and_then(Value::as_str)],
+                    |row| row.get(0),
+                )?;
+                parked.insert(
+                    subject,
+                    ParkedSeat {
+                        episode,
+                        decision: id,
+                        reason: fields
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("st stopped restarting it after repeated failures")
+                            .to_owned(),
+                        parked_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Ok(parked)
     }
 
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
@@ -8784,14 +8924,65 @@ fn latest_harness_of_incarnation_tx(
         .map_err(internal)
 }
 
+/// Whether readers fold the seat's harness to `latest` itself: no other observation of the
+/// seat is newer, and this incarnation has claimed or reported no work canonically after it,
+/// which the harness fold reads as working until a newer observation replicates. Both use the
+/// fold's canonical order, not arrival order: a replicated work claim can arrive before an
+/// observation it canonically follows.
+fn harness_view_rests_on_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    latest: &ClaimRecord,
+) -> Result<bool, St3Error> {
+    if latest_claim_of_kind_tx(transaction, subject, "harness.observed")?
+        .is_none_or(|claim| claim.id != latest.id)
+    {
+        return Ok(false);
+    }
+    // A canonical key leads with the accepted time, so only work accepted no earlier than the
+    // observation can follow it.
+    let accepted = latest.accepted_at_unix_ms.to_string();
+    let candidates = transaction
+        .prepare(
+            "SELECT id FROM claims INDEXED BY claims_actor_work_activity_index
+             WHERE actor=?1 AND json_extract(body, '$.fields.claim_incarnation')=?2
+               AND kind IN ('work.claimed','work.progress')
+               AND (length(accepted_at_unix_ms)>length(?3)
+                    OR (length(accepted_at_unix_ms)=length(?3) AND accepted_at_unix_ms>=?3))",
+        )
+        .map_err(internal)?
+        .query_map(params![subject, incarnation, accepted], |row| row.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    if candidates.is_empty() {
+        return Ok(true);
+    }
+    let latest_key = canonical::claim_key(transaction, &latest.id).map_err(internal)?;
+    for work in candidates {
+        if canonical::claim_key(transaction, &work).map_err(internal)? > latest_key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Publish a harness observation when any field other than its observation time differs
 /// from the subject's latest replicated observation. When the harness stops working, its
 /// usage that is still only local replicates too.
+///
+/// An unchanged observation refreshes the replicated one at most once a minute, but only while
+/// the harness works or when `heartbeat` is set. A resting native driver re-stamps its state
+/// every five minutes; its event was admitted against the seat's running runtime row, so no
+/// reader needs that re-stamp replicated (a stuck runtime row is what makes the card overlay
+/// read a report's age). Those re-stamps were most of the fleet's `harness.observed` claims.
 fn publish_changed_harness_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
     now: u128,
+    heartbeat: bool,
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
@@ -8838,8 +9029,21 @@ fn publish_changed_harness_state_tx(
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
     let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
-    // Refresh remote freshness at most once a minute, without manufacturing transitions.
-    if unchanged && latest.as_ref().is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000) {
+    // Refresh remote freshness at most once a minute, without manufacturing transitions. A
+    // working harness keeps refreshing: a wake counts as taken up by a working report accepted
+    // after it was sent. A resting one replicates its unchanged state only when readers would
+    // otherwise fold the seat to something newer than it.
+    let refreshed = latest
+        .as_ref()
+        .is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000);
+    if unchanged
+        && (refreshed
+            || (resting && !heartbeat
+                && match &latest {
+                    Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
+                    None => false,
+                }))
+    {
         if resting {
             publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
         }
@@ -8981,6 +9185,11 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
 /// stopped working (a turn's last response can arrive after its idle report). Otherwise it
 /// stays local and pending until one of those holds or the harness stops working.
 ///
+/// A reading equal to the slot's last replicated one never replicates again: it stays local and
+/// leaves nothing pending, since the replicated claim already says the same. Seats at rest
+/// re-sent an unchanged context occupancy, and its five-minute interval replicated each copy.
+/// A `response` reading is never a repeat: the fold sums responses, so two equal ones are two.
+///
 /// Responses keep arriving while a harness reports idle: its subagents and background tasks
 /// answer while the main loop waits. Replicating each of them at once wrote one claim every
 /// few seconds per busy seat, so after the turn's tally they wait for the interval too.
@@ -9014,27 +9223,37 @@ fn publish_due_usage_tx(
                 .map_or(claim.accepted_at_unix_ms, u128::from),
         ),
     };
-    let due = match &last {
-        None => true,
+    let (due, repeat) = match &last {
+        None => (true, false),
         Some((published_at, published_fields)) => {
-            let published: BTreeMap<String, Value> =
+            let mut published: BTreeMap<String, Value> =
                 serde_json::from_str(published_fields).unwrap_or_default();
+            // The publication may have added the native binding the reading lacks.
+            if !input.fields.contains_key("native_session_id") {
+                published.remove("native_session_id");
+            }
             let published_at = (*published_at).max(0) as u128;
-            resting_since.is_some_and(|since| published_at < since)
+            // Each response reading adds to the fold's sum, so an equal one is a new event, not a repeat.
+            let repeat = input.fields.get("semantics").and_then(Value::as_str) != Some("response")
+                && published == input.fields;
+            let due = resting_since.is_some_and(|since| published_at < since)
                 || now.saturating_sub(published_at) >= USAGE_PUBLISH_INTERVAL_MS
                 || ["compactions", "model"]
                     .iter()
-                    .any(|name| published.get(*name) != input.fields.get(*name))
+                    .any(|name| published.get(*name) != input.fields.get(*name));
+            (due && !repeat, repeat)
         }
     };
     if !due {
         let local_id = local_observation_position(local)
             .ok_or_else(|| St3Error::new("internal", "a local observation has no position"))?;
+        // A repeat supersedes an older pending reading: the replicated claim is current again.
+        let pending = (!repeat).then_some(local_id as i64);
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h14dfeb90e40a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=?3
                  WHERE subject=?1 AND kind='harness.usage' AND slot=?2",
-                params![input.subject, slot, local_id as i64],
+                params![input.subject, slot, pending],
             )
             .map_err(internal)?;
         return Ok(None);
@@ -10309,16 +10528,18 @@ fn event_tail_sql(migrating: bool) -> &'static str {
     if migrating {
         "SELECT p.store_index,c.kind,p.subject,c.body FROM (
                  SELECT store_index,subject FROM (
-                     SELECT store_index,subject FROM event_positions ORDER BY store_index DESC LIMIT ?1
+                     SELECT store_index,subject FROM event_positions WHERE store_index<=?2
+                     ORDER BY store_index DESC LIMIT ?1
                  ) UNION ALL SELECT store_index,subject FROM (
-                     SELECT store_index,subject FROM local_event_payloads
+                     SELECT store_index,subject FROM local_event_payloads WHERE store_index<=?2
                      ORDER BY store_index DESC LIMIT ?1
                  ) legacy WHERE NOT EXISTS(SELECT 1 FROM event_positions n WHERE n.store_index=legacy.store_index)
                  ORDER BY store_index DESC LIMIT ?1
              ) p CROSS JOIN claims c ON c.store_index=p.store_index ORDER BY p.store_index"
     } else {
         "SELECT p.store_index,c.kind,p.subject,c.body FROM (
-                 SELECT store_index,subject FROM event_positions ORDER BY store_index DESC LIMIT ?1
+                 SELECT store_index,subject FROM event_positions WHERE store_index<=?2
+                 ORDER BY store_index DESC LIMIT ?1
              ) p CROSS JOIN claims c ON c.store_index=p.store_index ORDER BY p.store_index"
     }
 }
@@ -15702,6 +15923,18 @@ pub fn try_project_simple_replication_tx(
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
         };
+        // A claim a repair replaced decides no operation (`expected_operations`); its repair
+        // already brought the operation's row to the claims that remain.
+        let repaired: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
+                [&claim.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
+        if repaired {
+            continue;
+        }
         if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
             continue;
         }
@@ -17438,6 +17671,15 @@ pub fn seat_queue_joins_query() -> String {
     )
 }
 
+/// When seat `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
+/// run's status. `+step_runs.assignee` keeps SQLite on the run's own steps (`step_runs_run_index`):
+/// through the assignee index it read every step the seat was ever assigned, once per named run,
+/// and a seat that has moved its queue often names a hundred runs on every claim.
+pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
+    "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
+     FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
+     WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
+
 /// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
 /// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
@@ -17567,11 +17809,7 @@ pub fn seat_queue_inputs_of_tx(
     }
     drop(statement);
 
-    let mut statement = connection.prepare(
-        "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
-         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-         WHERE step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0",
-    )?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hefdad4fbcd1d owner=fractal_store::store TODO=trace-statement-and-value-representation */ SEAT_QUEUE_NAMED_RUN_QUERY)?;
     if let Some(only) = only {
         seats.retain(|seat, _| only.contains(seat));
     }
@@ -21262,7 +21500,9 @@ pub fn append_latest_observation_publication(
             }
             let published = match input.kind.as_str() {
                 "harness.observed" => {
-                    publish_changed_harness_state_tx(transaction, &graph.origin, input, now)?
+                    publish_changed_harness_state_tx(
+                        transaction, &graph.origin, input, now, event_runtime.is_none(),
+                    )?
                 }
                 "harness.usage" => {
                     publish_due_usage_tx(transaction, &graph.origin, input, &local, now)?

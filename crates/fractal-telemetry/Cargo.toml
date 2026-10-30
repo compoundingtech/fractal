@@ -27,6 +27,7 @@ smallclaims = { path = "../smallclaims" }
 fractal-drivers = { path = "../fractal-drivers" }
 fractal-client = { path = "../fractal-client" }
 fractal-kernel = { path = "../fractal-kernel" }
+fractal-runtime = { path = "../fractal-runtime" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 toml = "0.9"

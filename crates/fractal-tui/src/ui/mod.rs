@@ -21,6 +21,7 @@ pub mod demo;
 mod demo_test_fixture;
 mod direct;
 pub mod doc;
+mod documents;
 pub mod checklist;
 mod edit;
 mod glass;
@@ -408,8 +409,8 @@ pub struct Ui {
     tick: u64,
     help: bool,
     resource_sidebar: resource_sidebar::Sidebar,
-    /// The documents open in a pane, by name: their text once st has sent it.
-    pub(crate) documents: std::collections::BTreeMap<String, Load<String>>,
+    /// Documents read so far, the list, and the documents missions name.
+    documents: documents::Documents,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -762,7 +763,6 @@ impl Ui {
         Self {
             tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
             world,
-            documents: std::collections::BTreeMap::new(),
             selected: [0; 6],
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
@@ -776,6 +776,7 @@ impl Ui {
             tick: 0,
             help: false,
             resource_sidebar,
+            documents: documents::Documents::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -1344,6 +1345,29 @@ impl Ui {
                     }
                 }
                 from = start + token.len().max(1);
+            }
+            // Document references written out, `doc/NAME` or `doc/NAME@HASH`: in a message, a
+            // mission or a document, each opens that document.
+            for link in fractal_ui_model::documents::document_links(&text) {
+                let mut from = 0;
+                while let Some(offset) = text[from..].find(&link.reference) {
+                    let start = from + offset;
+                    from = start + link.reference.len();
+                    if documents::inside_word(&text[..start], &text[from..]) {
+                        continue;
+                    }
+                    if let Some((x, _)) = cells.get(text[..start].chars().count()) {
+                        self.hit(
+                            Rect {
+                                x: *x,
+                                y,
+                                width: link.reference.chars().count() as u16,
+                                height: 1,
+                            },
+                            Hit::Link(link.reference.clone()),
+                        );
+                    }
+                }
             }
             // Markdown links: underlined runs whose text names a link.
             let mut index = 0;
@@ -2427,14 +2451,18 @@ impl Ui {
                             self.content.expand_requests(&mut doc, width);
                             doc
                         });
-                screens::mission_detail(
+                let mut doc = screens::mission_detail(
                     &self.world,
                     id.as_deref(),
                     width,
                     self.spinner(),
                     decision,
                     &self.conversation_state.expanded,
-                )
+                );
+                if let Some(id) = id.as_deref() {
+                    self.documents.mission_section(&mut doc, &self.document_subjects(id), width);
+                }
+                doc
             }
             Pane::Machine(id) => {
                 let name = id
@@ -2446,10 +2474,30 @@ impl Ui {
                 screens::worktree_detail(&self.world, id.as_deref(), width, self.spinner())
             }
             Pane::Resource(id) => observed_resources::detail(id, self.resource_sidebar.observations.iter().find(|row| &row.id == id), width),
-            Pane::Document(name) => document_detail(name, self.documents.get(name), width),
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
+            Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
+            Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
         };
         self.pane(buf, &pane.key(), area, doc, false);
+    }
+
+    /// A document in a split of a glass, with the way back along what that split followed.
+    fn draw_document(&self, buf: &mut Buffer, area: Rect, reference: &str, split: &str) {
+        let width = area.width.saturating_sub(1) as usize;
+        let back = self.documents.previous(split, reference);
+        let doc = self.documents.page(reference, back, width, documents::now_ms());
+        self.pane(buf, &Pane::Document(reference.to_owned()).key(), area, doc, false);
+    }
+
+    /// The subjects whose documents a mission's card lists: the mission and its steps.
+    fn document_subjects(&self, mission: &str) -> Vec<(String, Option<String>)> {
+        let mut subjects = vec![(mission.to_owned(), None)];
+        if let Some(mission) = self.world.missions.items().iter().find(|candidate| candidate.id == mission) {
+            subjects.extend(
+                mission.steps.iter().filter(|step| step.id.starts_with("step-run/")).take(documents::STEPS).map(|step| (step.id.clone(), Some(step.name.clone()))),
+            );
+        }
+        subjects
     }
 
     fn conversation_failure(reason: &str, width: usize) -> Doc {
@@ -3945,6 +3993,10 @@ impl Ui {
 
     /// A subject opens as its own tab in the focused split, or is focused where it already is.
     fn open(&mut self, id: &str) {
+        if documents::openable(id).is_some() {
+            self.open_document(id);
+            return;
+        }
         if let Some(pane) = glass::pane_for(id) {
             self.open_in_glass(pane, glass::Open::Tab);
         }
@@ -6128,6 +6180,8 @@ impl Ui {
             // The terminal may be on another machine than Fractal TUI (over SSH or fabric): the
             // clipboard is the person's, so the link lands where their browser is. Run locally,
             // the browser opens too.
+            Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
+            Hit::Document(tap) => self.document_tap(tap),
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);
@@ -6766,23 +6820,6 @@ fn dump(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// A stored document: its name, then its text as Markdown.
-fn document_detail(name: &str, text: Option<&Load<String>>, width: usize) -> Doc {
-    let mut doc = Doc::new();
-    let (title, version) = name.rsplit_once('@').unwrap_or((name, ""));
-    doc.field("Document", title.trim_start_matches("doc/"), width, theme::fg(theme::TEXT));
-    if !version.is_empty() {
-        doc.field("Version", &version[..version.len().min(12)], width, theme::fg(theme::OVERLAY1));
-    }
-    doc.blank();
-    match text {
-        Some(Load::Ready(text)) => doc.lines(text::markdown(text, width, theme::fg(theme::TEXT))),
-        Some(Load::Failed(why)) => doc.field("Status", why, width, theme::fg(theme::RED)),
-        _ => doc.field("Status", "Loading…", width, theme::fg(theme::OVERLAY1)),
-    }
-    doc
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7320,6 +7357,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-10-03T08:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
@@ -7389,6 +7427,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-10-16T08:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
