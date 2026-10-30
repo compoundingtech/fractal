@@ -36,6 +36,9 @@ use crate::sqlite::{
     STATEMENT_CACHE_CAPACITY, WriterConnection,
 };
 
+mod admitted;
+pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
+
 mod operation_metadata;
 pub mod prepared_envelope;
 mod replica_record;
@@ -818,6 +821,8 @@ pub type MemberRoots = BTreeSet<(String, String)>;
 /// projections read and write through the same connections.
 pub struct Store {
     pub connection: WriterConnection,
+    // Lasting ownership of the admitted directory and its lock, including lazy reopens.
+    admitted: Option<Arc<AdmittedStore>>,
     /// Same-code baseline for the isolated transport benchmark only.
     #[cfg(feature = "transport-bench")]
     pub transport_bench_original_lookup: AtomicBool,
@@ -945,7 +950,17 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, true, |_| {})
+        Self::open_with(path, origin.into(), runtime, None, true, |_| {})
+    }
+
+    /// Open only through an admitted, locked directory, without recreating it.
+    pub fn open_admitted(
+        admitted: Arc<AdmittedStore>,
+        origin: impl Into<String>,
+        runtime: Arc<dyn Runtime>,
+    ) -> Result<Self> {
+        let path = admitted.database_path().to_path_buf();
+        Self::open_with(&path, origin.into(), runtime, Some(admitted), true, |_| {})
     }
 
     /// [`Self::open`] with the initialization of a fresh database committed the way it was
@@ -960,23 +975,32 @@ impl Store {
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, defer_fresh_durability, prepare)
+        Self::open_with(path, origin.into(), runtime, None, defer_fresh_durability, prepare)
     }
 
     fn open_with(
         path: &Path,
         origin: String,
         runtime: Arc<dyn Runtime>,
+        admitted: Option<Arc<AdmittedStore>>,
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        if let Some(parent) = path.parent() {
+        if admitted.is_none() && let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut connection = Connection::open(path)
-            .with_context(|| format!("open st database {}", path.display()))?;
+        let mut connection = if let Some(admitted) = &admitted {
+            admitted.open_connection(OpenFlags::default())?
+        } else {
+            Connection::open(path)
+                .with_context(|| format!("open st database {}", path.display()))?
+        };
         prepare(&connection);
-        let path = crate::sqlite::opened_database_path(&connection, path)?;
+        let path = if admitted.is_some() {
+            path.to_path_buf()
+        } else {
+            crate::sqlite::opened_database_path(&connection, path)?
+        };
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
             [],
@@ -1018,15 +1042,16 @@ impl Store {
             // frame the initialization wrote, before open returns.
             connection.pragma_update(None, "synchronous", "FULL")?;
         }
-        let readers = ReadPool::new(&path, false)?;
-        Self::from_connection(
-            connection,
-            readers,
-            origin,
-            path,
-            false,
-            runtime,
-        )
+        let readers = if let Some(admitted) = &admitted {
+            ReadPool::new_admitted(admitted.clone())?
+        } else {
+            ReadPool::new(&path, false)?
+        };
+        let mut store = Self::from_connection(
+            connection, readers, origin, path, false, runtime,
+        )?;
+        store.admitted = admitted;
+        Ok(store)
     }
 
     /// Open a new store in shared memory, as tests and short-lived tools use.
@@ -1154,7 +1179,11 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
-        let path = crate::sqlite::opened_database_path(&connection, &path)?;
+        let path = if readers.is_admitted() {
+            path
+        } else {
+            crate::sqlite::opened_database_path(&connection, &path)?
+        };
         anyhow::ensure!(
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
@@ -1192,11 +1221,17 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
-        let connection = match runtime.writer_observer() {
-            Some(observer) => WriterConnection::new_with_observer(
-                connection, committed_index.clone(), observer,
-            )?,
-            None => WriterConnection::new(connection, committed_index.clone()),
+        let connection = if let Some(admitted) = readers.admitted_handle() {
+            WriterConnection::new_admitted(
+                connection, committed_index.clone(), runtime.writer_observer(), admitted,
+            )?
+        } else {
+            match runtime.writer_observer() {
+                Some(observer) => WriterConnection::new_with_observer(
+                    connection, committed_index.clone(), observer,
+                )?,
+                None => WriterConnection::new(connection, committed_index.clone()),
+            }
         };
         let finalizing_runtime = runtime.clone();
         connection.install_runtime_finalizer(move |transaction| {
@@ -1204,6 +1239,7 @@ impl Store {
         })?;
         Ok(Self {
             connection,
+            admitted: None,
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,

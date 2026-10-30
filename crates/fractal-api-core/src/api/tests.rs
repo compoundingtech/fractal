@@ -13038,9 +13038,12 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
     }
     // The refresher follows the transcript before it is read.
     let followed = std::cell::RefCell::new(Vec::new());
-    let calls = prompt_card::seat_pending_calls(&state, owner, |path| {
+    let calls = prompt_card::seat_pending_calls(&state, owner, |conversation| {
+        let prompt_card::Follow::Transcript(path) = conversation else {
+            panic!("the seat runs here");
+        };
         followed.borrow_mut().push(path.to_owned());
-        Ok(())
+        Ok(None)
     })
     .unwrap();
     assert_eq!(
@@ -13061,7 +13064,7 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
         "arguments":json!({"patch":"x".repeat(300 * 1024)}).to_string(),"call_id":"call-large"}});
     let mut file = fs::OpenOptions::new().append(true).open(&transcript).unwrap();
     std::io::Write::write_all(&mut file, format!("{large}\n").as_bytes()).unwrap();
-    let calls = prompt_card::seat_pending_calls(&state, owner, |_| Ok(())).unwrap();
+    let calls = prompt_card::seat_pending_calls(&state, owner, |_| Ok(None)).unwrap();
     let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-large"}}});
     let prompt = prompt_card::prompt_card(&row, || Ok(calls));
     assert_eq!(prompt["calls"][0]["call_id"], "call-large");
@@ -13069,7 +13072,7 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
     assert_eq!(prompt["allow"], false);
 
     // A seat st has no session for says why, and the card offers no answer.
-    let reason = prompt_card::seat_pending_calls(&state, "agent/example/absent", |_| Ok(())).unwrap_err();
+    let reason = prompt_card::seat_pending_calls(&state, "agent/example/absent", |_| Ok(None)).unwrap_err();
     assert!(reason.starts_with("st cannot read this seat's conversation"), "{reason}");
 }
 
