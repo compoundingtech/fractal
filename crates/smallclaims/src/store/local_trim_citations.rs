@@ -11,7 +11,7 @@
 //! of the store, or written under other checkpoint rules is not trusted: the cache is rebuilt.
 use super::*;
 
-pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS local_trim_citations(
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h2747359aff8a owner=smallclaims::store::local_trim_citations TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS local_trim_citations(
     cited TEXT NOT NULL, citer TEXT NOT NULL, PRIMARY KEY(cited, citer)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS local_trim_citations_citer ON local_trim_citations(citer);";
 
@@ -45,9 +45,9 @@ impl Store {
             None => {
                 let mut connection = self.connection.write();
                 let transaction = connection.transaction()?;
-                transaction.execute("DELETE FROM local_trim_citations", [])?;
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hd67b5a939818 owner=smallclaims::store::local_trim_citations TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations", [])?;
                 transaction.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                    /* sqlite-large-value: allow-for-now lv-h6a249ef6d339 owner=smallclaims::store::local_trim_citations TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
                     params![CURSOR, format!("0 {rules}")],
                 )?;
                 transaction.commit()?;
@@ -60,7 +60,7 @@ impl Store {
             let claims = self
                 .readers
                 .get()
-                .prepare_cached(&sql)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h469f1627db34 owner=smallclaims::store::local_trim_citations TODO=trace-statement-and-value-representation */ &sql)?
                 .query_map(params![read, PAGE], claim_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let Some(last) = claims.last().map(|claim| i64::try_from(claim.store_index)) else {
@@ -81,13 +81,13 @@ impl Store {
             let transaction = connection.transaction()?;
             {
                 let mut insert = transaction
-                    .prepare_cached("INSERT OR IGNORE INTO local_trim_citations(cited, citer) VALUES (?1, ?2)")?;
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h7eb4aef1e4c3 owner=smallclaims::store::local_trim_citations TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_trim_citations(cited, citer) VALUES (?1, ?2)")?;
                 for (cited, citer) in &rows {
-                    insert.execute(params![cited, citer])?;
+                    insert.execute(/* sqlite-large-value: allow-for-now lv-h88167b4eff82 owner=smallclaims::store::local_trim_citations TODO=trace-statement-and-value-representation */ params![cited, citer])?;
                 }
             }
             transaction.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+                /* sqlite-large-value: allow-for-now lv-h6b4470fbd115 owner=smallclaims::store::local_trim_citations TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
                 params![CURSOR, format!("{last} {rules}")],
             )?;
             transaction.commit()?;
@@ -120,7 +120,7 @@ impl Store {
         let mut claims_read = 0;
         loop {
             let claims = connection
-                .prepare_cached(&sql)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc4fe19b4483d owner=smallclaims::store::local_trim_citations TODO=trace-statement-and-value-representation */ &sql)?
                 .query_map(params![after, PAGE], claim_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let Some(last) = claims.last() else { break };
@@ -129,7 +129,7 @@ impl Store {
             let mut present = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?;
             for claim in &claims {
                 for cited in self.runtime.checkpoint_claim_facts(claim).cites {
-                    if present.query_row([&cited], |row| row.get::<_, bool>(0))? {
+                    if present.query_row(/* sqlite-large-value: allow-for-now lv-h988794483e9c owner=smallclaims::store::local_trim_citations TODO=trace-statement-and-value-representation */ [&cited], |row| row.get::<_, bool>(0))? {
                         scanned.insert((cited, claim.id.clone()));
                     }
                 }

@@ -526,7 +526,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                     "kind IN ('observer.observed', 'resource.observed')"
                 };
                 let sql = format!("SELECT {} FROM claims WHERE {which} ORDER BY store_index", smallclaims::store::CLAIM_COLUMNS);
-                let mut statement = connection.prepare(&sql).unwrap();
+                let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hcc86b5e9b027 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
                 statement.query_map([], smallclaims::store::claim_from_row).unwrap().collect::<rusqlite::Result<_>>().unwrap()
             };
             if claims.is_empty() {
@@ -545,7 +545,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
             // A claim a projection row still names is one a trim keeps: retire only what may go.
-            transaction.execute_batch("SAVEPOINT retire").unwrap();
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ce7384320fa owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ "SAVEPOINT retire").unwrap();
             let retired = smallclaims::store::checkpoint::delete_dropped_rows_tx(
                 &transaction,
                 &[],
@@ -564,14 +564,14 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                 }],
             );
             if retired.is_err() {
-                transaction.execute_batch("ROLLBACK TO retire; RELEASE retire").unwrap();
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h147460d38c0c owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO retire; RELEASE retire").unwrap();
                 return;
             }
-            transaction.execute_batch("RELEASE retire").unwrap();
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h3fec8e4cbeb7 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ "RELEASE retire").unwrap();
             if *stale {
                 for (cited, citer) in rows {
                     transaction
-                        .execute("INSERT OR IGNORE INTO local_trim_citations(cited, citer) VALUES (?1, ?2)", params![cited, citer])
+                        .execute(/* sqlite-large-value: allow-for-now lv-h3458778f2d90 owner=fractal_store::store::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_trim_citations(cited, citer) VALUES (?1, ?2)", params![cited, citer])
                         .unwrap();
                 }
             }
@@ -583,7 +583,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                 .connection
                 .write()
                 .execute(
-                    "INSERT INTO checkpoint_envelopes(writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
+                    /* sqlite-large-value: allow-for-now lv-h23de9485734a owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes(writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
                      VALUES (?1, ?2, ?3, 1, 'checkpoint/1970-01-02')",
                     params![store.origin, sequence, format!("tombstone-{n}")],
                 )

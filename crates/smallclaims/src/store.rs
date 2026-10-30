@@ -1111,7 +1111,7 @@ impl Store {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
         })?;
         install_schema_batch(connection, fresh, |connection| {
-            connection.execute_batch(local_trim_citations::SCHEMA).map_err(Into::into)
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb1035261bc59 owner=smallclaims::store TODO=trace-statement-and-value-representation */ local_trim_citations::SCHEMA).map_err(Into::into)
         })?;
         initialize_fleet_generation(connection)?;
         install_schema_batch(connection, fresh, idempotency::initialize)?;
