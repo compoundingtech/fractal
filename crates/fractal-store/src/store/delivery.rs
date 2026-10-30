@@ -368,7 +368,8 @@ impl Store {
                     output.push(message);
                 }
             }
-            if has_more {
+            // A member without a messages shard pages the graph alone, as before.
+            if has_more || super::messages_shard::shard(self).is_none() {
                 return Ok((output, next_after));
             }
             // The graph's messages are all listed; the page goes on into the stream. A page the

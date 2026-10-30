@@ -31,9 +31,10 @@ pub const SHARD_ID: &str = "messages";
 pub const STREAM_INDEX_BASE: u64 = 1 << 48;
 
 /// The shard's own tables. `stream_messages` indexes each message by recipient as it is
-/// admitted. `stream_lifecycle` is this member's record of a stream item's delivery: it is
+/// admitted; on open it catches up only on claims newer than its newest row, such as those a
+/// rolled-back build admitted without the trigger. `stream_lifecycle` is this member's record of a stream item's delivery: it is
 /// local, never replicated and outside every digest, as a lifecycle claim would not be.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h47e8dde52819 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5ce4a3a3ab1 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -59,7 +60,8 @@ CREATE TABLE IF NOT EXISTS stream_lifecycle (
 INSERT OR IGNORE INTO stream_messages(subject, recipient, sender, store_index)
     SELECT subject, COALESCE(json_extract(body, '$.fields.to'), ''),
            COALESCE(json_extract(body, '$.fields.from'), ''), store_index
-    FROM claims WHERE kind='message.sent';
+    FROM claims WHERE kind='message.sent'
+      AND store_index > COALESCE((SELECT MAX(store_index) FROM stream_messages), 0);
 ";
 
 /// Where each lifecycle kind stands; a stream item moves only forward through them.
@@ -177,6 +179,24 @@ pub fn lifecycle_receipt(
         predecessors: Vec::new(),
         accepted_at_unix_ms: smallclaims::store::now_ms(),
     }
+}
+
+/// A delivery channel's receipt for a stream item, admitted under the fence a graph receipt
+/// is: a live incarnation, the lease, and the current owner's token. The shard is a separate
+/// database, so the fence is read just before the record rather than in its transaction.
+pub fn record_fenced_lifecycle(
+    graph: &super::Store,
+    fence: &crate::mailbox::Fence,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &std::collections::BTreeMap<String, Value>,
+) -> Result<bool, St3Error> {
+    {
+        let connection = graph.readers.get();
+        super::check_mailbox_fence(&connection, fence, &graph.graph.origin)?;
+    }
+    record_lifecycle(graph, subject, kind, actor, fields)
 }
 
 /// Record a lifecycle step a member took for a stream item: staged, delivered, read or closed.
@@ -769,6 +789,14 @@ mod tests {
                 .code,
             "missing-message"
         );
+        // A delivery channel whose fence is stale records nothing.
+        let fresh = "message/00000000000000b2";
+        let mut stale = crate::mailbox::Fence::new("agent/cedar", "incarnation-ended", "delivery");
+        stale.epoch = 1;
+        let refused = record_fenced_lifecycle(&graph, &stale, fresh, "message.delivered", Some("agent/cedar"), &status("delivered"))
+            .unwrap_err();
+        assert_eq!(refused.code, "stale-mailbox-session", "{refused:?}");
+        assert_eq!(graph.message(fresh).unwrap().unwrap().status, "sent");
         let receipt = lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read"));
         assert!(receipt.id.starts_with("offset-receipt/"));
         assert_eq!(receipt.id, lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read")).id);

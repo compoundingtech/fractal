@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "A member's mail readers also read its messages shard: a recipient's page and a message read include stream items, and a stream item's staged, delivered, read and closed are recorded on the member with an offset receipt instead of a graph claim",
+  "summary": "A member's mail readers start reading its messages shard: the recipient page (/v1/messages/page?to=) and a single message read include stream items, and a stream item's staged, delivered, read and closed are recorded on the member with an offset receipt instead of a graph claim. The filtered and unpaged message lists, waits and the mailbox stream still read the graph only and follow in the next change",
   "replay": {
     "status": "none",
     "detail": "No graph claim, projection or cache changes. The shard gains two derived tables, filled from its own claims when they are created."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "POST /v1/messages/{id}/claims and mailbox receipts answer a stream item with a claim-shaped record whose id starts offset-receipt/; the record shape is unchanged. A stream item's created_index is offset past 2^48 so it sorts after every graph index. No client-v0 field is added or removed."
+    "detail": "POST /v1/messages/{id}/claims and mailbox receipts answer a stream item with a claim-shaped record whose id starts offset-receipt/; the record shape is unchanged. A mailbox receipt for a stream item is checked against the same mailbox fence as a graph receipt. A lifecycle post for a stream item with expected_subject set is refused with expected-subject-unsupported; no built-in caller sets it. A delegated or successor transition on a stream item is refused with stream-lifecycle-unsupported until the graph write rules cover stream items. A stream item's created_index is offset past 2^48 so it sorts after every graph index. No client-v0 field is added or removed."
   },
   "downtime": {
     "status": "none",

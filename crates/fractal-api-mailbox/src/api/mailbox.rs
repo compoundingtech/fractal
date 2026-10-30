@@ -330,7 +330,7 @@ pub async fn receipt(
         let _admission = admission;
         authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
         // A stream item's receipt is this member's record, not a graph claim. Only its
-        // recipient's delivery component records it, under the same lease checks.
+        // recipient's delivery component records it, under the fence a graph receipt checks.
         let stream = store
             .message(&input.subject)
             .map_err(|error| St3Error::new("internal", error.to_string()))?
@@ -343,8 +343,8 @@ pub async fn receipt(
             )));
         }
         let record_stream = || -> Result<(ClaimRecord, bool), St3Error> {
-            let appended = crate::store::messages_shard::record_lifecycle(
-                &store, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
+            let appended = crate::store::messages_shard::record_fenced_lifecycle(
+                &store, &request.fence, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
             )?;
             Ok((crate::store::messages_shard::lifecycle_receipt(
                 &store.graph.origin, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
