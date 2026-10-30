@@ -95,46 +95,62 @@ fn property<'a>(text: &'a str, name: &str) -> Result<&'a str> {
         .with_context(|| format!("service manager omitted {name}"))
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
+    inspect_services(
+        &["st3.service", "smalltalk.service"],
+        &[("st3-replication.service", "fractal-replication.service"), ("smalltalk-apply.service", "fractal-apply.service")],
+        "fractal.service",
+        probe,
+    )
+}
+
+fn inspect_services(
+    legacy_daemons: &[&str],
+    auxiliary: &[(&str, &str)],
+    target_name: &str,
+    mut probe: impl FnMut(&str) -> Result<Unit>,
+) -> Result<Services> {
+    let daemons = legacy_daemons.iter().map(|name| probe(name)).collect::<Result<Vec<_>>>()?;
+    let mut legacy: Vec<_> = daemons.iter().filter(|unit| unit.installed).cloned().collect();
+    ensure!(legacy.len() <= 1, "multiple legacy daemon definitions exist; resolve which owns the default state before host cutover");
+    // Keep a missing primary in the recovery plan after successful retirement.
+    if legacy.is_empty() { legacy.push(daemons[0].clone()); }
+    let mut target = vec![probe(target_name)?];
+    for (old, new) in auxiliary {
+        let old = probe(old)?;
+        let new = probe(new)?;
+        if old.installed {
+            legacy.push(old);
+            target.push(new);
+        } else if new.running {
+            // A stray active target auxiliary is still a preflight conflict.
+            target.push(new);
+        }
+    }
+    Ok(Services { legacy, target })
+}
+
 impl Manager for Native {
     fn kind(&self) -> &'static str { if cfg!(target_os = "linux") { "systemd-user" } else { "launchd-user" } }
 
     fn inspect(&mut self) -> Result<Services> {
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME not set")?);
         #[cfg(target_os = "linux")]
-        let (legacy_daemons, auxiliary, base): (&[&str], &[(&str, &str)], PathBuf) = (
-            &["st3.service", "smalltalk.service"],
-            &[("st3-replication.service", "fractal-replication.service"), ("smalltalk-apply.service", "fractal-apply.service")],
-            std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from).join("systemd/user"),
-        );
-        #[cfg(target_os = "macos")]
-        let (legacy_daemons, auxiliary, base): (&[&str], &[(&str, &str)], PathBuf) = (
-            &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
-            &[("com.compoundingtech.st3.replication", "com.compoundingtech.fractal.replication"), ("org.nix-community.home.smalltalk-apply", "com.compoundingtech.fractal-apply")],
-            home.join("Library/LaunchAgents"),
-        );
-        #[cfg(target_os = "linux")]
-        let probe = |name| Self::systemd(name, &base);
-        #[cfg(target_os = "macos")]
-        let probe = |name| Self::launchd(name, &base);
-        let daemons = legacy_daemons.iter().map(|name| probe(name)).collect::<Result<Vec<_>>>()?;
-        let mut legacy: Vec<_> = daemons.iter().filter(|unit| unit.installed).cloned().collect();
-        ensure!(legacy.len() <= 1, "multiple legacy daemon definitions exist; resolve which owns the default state before host cutover");
-        // Keep a missing primary in the recovery plan after successful retirement.
-        if legacy.is_empty() { legacy.push(daemons[0].clone()); }
-        let target_name = if cfg!(target_os = "linux") { "fractal.service" } else { "com.compoundingtech.fractal" };
-        let mut target = vec![probe(target_name)?];
-        for (old, new) in auxiliary {
-            let old = probe(old)?;
-            let new = probe(new)?;
-            if old.installed {
-                legacy.push(old);
-                target.push(new);
-            } else if new.running {
-                // A stray active target auxiliary is still a preflight conflict.
-                target.push(new);
-            }
+        {
+            let base = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from).join("systemd/user");
+            linux_services(|name| Self::systemd(name, &base))
         }
-        Ok(Services { legacy, target })
+        #[cfg(target_os = "macos")]
+        {
+            let base = home.join("Library/LaunchAgents");
+            inspect_services(
+                &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
+                &[("com.compoundingtech.st3.replication", "com.compoundingtech.fractal.replication"), ("org.nix-community.home.smalltalk-apply", "com.compoundingtech.fractal-apply")],
+                "com.compoundingtech.fractal",
+                |name| Self::launchd(name, &base),
+            )
+        }
     }
 
     fn stop(&mut self, unit: &Unit) -> Result<()> {
