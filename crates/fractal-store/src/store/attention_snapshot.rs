@@ -2030,6 +2030,8 @@ impl Store {
                 .expect("a native answer has an idempotency key");
             let body = json!({"fields":input.fields,"evidence":input.evidence,
                 "_operation":{"id":operation_id,"request_digest":request_digest}});
+            #[cfg(any(test, feature = "test-support"))]
+            delegated_write_probe::reached();
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
             return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
@@ -2418,6 +2420,30 @@ pub fn native_prompt_answer(connection: &Connection, observation: &str) -> Resul
         .query_row(/* sqlite-large-value: allow-for-now lv-h4b255e5591ff owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ [operation], |row| native_prompt_answer_from_row(row, 0))
         .optional()?
         .flatten())
+}
+
+/// Tells a test that this thread's delegated dismissal passed its reader fence and is about to
+/// ask the writer for its answer. The probe is per thread, so only the test's own callers see it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod delegated_write_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PROBE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// Call `probe` each time this thread's delegated dismissal reaches its write.
+    pub fn set(probe: impl Fn() + 'static) {
+        PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+    }
+
+    pub(crate) fn reached() {
+        PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow().as_ref() {
+                probe();
+            }
+        });
+    }
 }
 
 /// The claim that answered the native prompt `observation`, if one is recorded.

@@ -915,40 +915,40 @@ fn concurrent_delegated_dismissals_have_one_source_answer_and_one_notice() {
 
 #[test]
 fn delegated_dismissals_that_both_pass_the_fence_record_one_answer() {
-    // Hold the writer until both dismissals have read the fence and queued their writes, so the
-    // second one's fence read cannot see the first one's answer.
+    // Hold the writer until both dismissals have read the fence, so the second one's fence read
+    // cannot see the first one's answer. Each caller's own probe says when it passed.
+    use fractal_store::store::attention_snapshot::delegated_write_probe;
     let (store, denial, proof) = denial_fixture(&["close-item"]);
+    let (denial, proof) = (&denial, &proof);
     let (held, is_held) = std::sync::mpsc::sync_channel(1);
-    let (release, released) = std::sync::mpsc::sync_channel(1);
-    let waiting = || {
-        smallclaims::windows::holds::report()["waiting"]["writer"]
-            .as_u64()
-            .unwrap()
-    };
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(1);
+    let (fenced, passed) = std::sync::mpsc::channel();
     let results = std::thread::scope(|scope| {
         let store = &store;
+        // Owned here, so a failed wait below drops it while unwinding and frees the writer.
+        let release = release;
         let writer = scope.spawn(move || {
             store.hold_writer_for_test(|| {
                 held.send(()).unwrap();
-                released.recv().unwrap();
+                let _ = released.recv();
             })
         });
         is_held.recv().unwrap();
-        let before = waiting();
         let callers = (0..2)
             .map(|_| {
-                scope.spawn(|| {
-                    store.respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+                let fenced = fenced.clone();
+                scope.spawn(move || {
+                    delegated_write_probe::set(move || {
+                        let _ = fenced.send(());
+                    });
+                    store.respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(proof))
                 })
             })
             .collect::<Vec<_>>();
-        let asked = std::time::Instant::now();
-        while waiting() < before + 2 {
-            assert!(
-                asked.elapsed() < std::time::Duration::from_secs(10),
-                "the dismissals never both asked for the writer"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        for _ in 0..2 {
+            passed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("both dismissals pass the reader fence while the writer is held");
         }
         release.send(()).unwrap();
         writer.join().unwrap();
