@@ -12774,14 +12774,30 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         "from":"person/robin","to":OLD,"content":"Before rename","idempotency_key":"mail-before",
     })).await;
     assert_eq!(status, StatusCode::OK, "{before}");
+    let (status, second_before) = json_request(app.clone(), "/v1/messages", json!({
+        "from":"person/robin","to":OLD,"content":"Also before rename","idempotency_key":"mail-second-before",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{second_before}");
+    let (status, before_page) = get_request(app.clone(), &format!(
+        "/v1/messages/page?to={OLD}&acting_as={OLD}&include_closed=true&limit=1",
+    )).await;
+    assert_eq!(status, StatusCode::OK, "{before_page}");
     let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
         "from":OLD,"to":NEW,"actor":"person/robin","reason":"Clarify seat",
         "idempotency_key":"mail-rename",
     })).await;
     assert_eq!(status, StatusCode::OK, "{renamed}");
+    let (status, continued) = get_request(app.clone(), &format!(
+        "/v1/messages/page?to={NEW}&acting_as={NEW}&include_closed=true&limit=1&cursor={}",
+        urlencoding::encode(before_page["next_cursor"].as_str().unwrap()),
+    )).await;
+    assert_eq!(status, StatusCode::OK, "{continued}");
+    assert_eq!(continued["items"].as_array().unwrap().len(), 1);
+    assert_ne!(continued["items"][0]["subject"], before_page["items"][0]["subject"]);
+    assert!(continued["next_cursor"].is_null());
     for (index, name) in [OLD, NEW].iter().enumerate() {
         let (status, sent) = json_request(app.clone(), "/v1/messages", json!({
-            "from":name,"to":name,"content":"After rename","subject":"rename-mail",
+            "from":name,"to":name,"content":"After rename","title":"rename-mail",
             "idempotency_key":format!("mail-after-{index}"),
         })).await;
         assert_eq!(status, StatusCode::OK, "{sent}");
@@ -12808,7 +12824,7 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
                 "/v1/messages?to={mailbox}&include_closed=true",
             )).await;
             assert_eq!(status, StatusCode::OK, "{messages}");
-            assert_eq!(messages.as_array().unwrap().len(), 3);
+            assert_eq!(messages.as_array().unwrap().len(), 4);
             for actor in [OLD, NEW] {
                 let (status, filtered) = get_request(app.clone(), &format!(
                     "/v1/messages/page?to={mailbox}&from={actor}&acting_as={actor}&subject=rename-mail&include_closed=true",
@@ -12833,8 +12849,8 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
                     subjects.extend(page["items"].as_array().unwrap().iter().map(|item| item["subject"].clone()));
                     cursor = page["next_cursor"].as_str().map(str::to_owned);
                 }
-                assert_eq!(subjects.len(), 3);
-                assert_eq!(subjects.iter().map(|subject| subject.as_str().unwrap()).collect::<BTreeSet<_>>().len(), 3);
+                assert_eq!(subjects.len(), 4);
+                assert_eq!(subjects.iter().map(|subject| subject.as_str().unwrap()).collect::<BTreeSet<_>>().len(), 4);
                 for lifecycle in ["read", "closed"] {
                     for subject in &subjects {
                         let (status, claim) = json_request(app.clone(), &format!(
