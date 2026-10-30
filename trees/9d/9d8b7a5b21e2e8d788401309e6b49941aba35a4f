@@ -2,3 +2,13 @@ record 1e1048619806185263021b5654dd2c04e7c97892 typescript-client 0 host/anvil 2
 record 7f7f7cb0924efdf46bc6de5bc45fd1aeec97cbb1 genie-freshness 0 host/anvil 2026-10-30T03:34:29Z
 record b763a12b4ab64353b2e547c3e9fa678ab4aadd05 ci-script-tests 0 host/anvil 2026-10-30T03:38:32Z
 record 8519d26247c9c9d3f05918d989cadf98f711e2d9 linux-gate 0 host/anvil 2026-10-30T04:09:27Z
+record 21e49aaabfe647671239a038692894e93f7771d1 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record 2560fd22bef9d5b479a75dce2eec139de958594d rust-tests 0 host/anvil 2026-10-30T04:10:31Z
+record 2b4c91c868ad8c689443954feb80d2eb130cd649 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record 5039888ce4a2665df069eb4e093e7cd8f088bff3 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record 7b116dd2d439857e2076cfde195cf6e75937e5c7 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record 89a677da29b3dd963828db7f87d99e17afd1a66e rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record 8bff9043055a0e1a334114560066ce5a47ba26f8 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record 8f448f2fdef1b9b46e34d8d8f3a78fce640baa02 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record bd26f3fb6d6a8ed1c3e4901608de269c20395220 rust-tests 0 host/anvil 2026-10-30T04:10:23Z
+record ce85b62155191e8118b37656f8bb4a2ac737bda5 rust-tests 0 host/anvil 2026-10-30T04:10:19Z
