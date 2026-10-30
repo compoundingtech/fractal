@@ -99,7 +99,7 @@ async fn declared_bootstrap(crate_name: &str, harness: &'static str, canonical_i
     let http_listener = tokio::net::UnixListener::bind(&http_path).unwrap();
     let provider_path = root.path().join("provider.mjs");
     fs::write(&provider_path, PROVIDER).unwrap();
-    let asset = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let asset = std::path::Path::new(test_env!("CARGO_MANIFEST_DIR"))
         .join("..").join(crate_name).join("hooks").join(format!("{harness}-channel.ts"));
     let identity = if canonical_identity { subject } else { "node.worker" };
     let argv = vec!["sh".into(), "-c".into(), "\"$@\" & wait".into(), "bootstrap-wrapper".into(),
