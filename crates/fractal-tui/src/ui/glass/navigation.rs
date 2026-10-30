@@ -21,7 +21,7 @@ impl Ui {
         self.glasses.save();
     }
     pub(in crate::ui) fn current_place(&self) -> Option<StoredPlace> {
-        let glass = self.glasses.glass();
+        let glass = self.glasses.all.get(self.glasses.shown)?;
         let groups = glass.layout.groups();
         let group = groups.get(glass.focus)?;
         let pane = group
@@ -35,6 +35,8 @@ impl Ui {
             space: glass.id.clone(),
             group: glass.focus,
             tab: group.current,
+            group_id: group.id.clone(),
+            tab_id: group.tabs.get(group.current).map(|tab| tab.id.clone()),
             pane,
             selection,
         })
@@ -71,18 +73,27 @@ impl Ui {
         glasses.save();
     }
 
-    fn place_exists(&self, place: &StoredPlace) -> bool {
-        if !self.glasses.all.iter().any(|glass| {
-            glass.id == place.space
-                && glass.layout.groups().get(place.group).is_some_and(|group| {
-                    place.tab < group.tabs.len()
-                        || (group.tabs.is_empty()
-                            && place.tab == 0
-                            && place.pane == Pane::List(0).key())
-                })
-        }) {
-            return false;
-        }
+    fn place_location(&self, place: &StoredPlace) -> Option<(usize, usize, Option<usize>)> {
+        let space = self
+            .glasses
+            .all
+            .iter()
+            .position(|glass| glass.id == place.space)?;
+        let groups = self.glasses.all[space].layout.groups();
+        let group = groups.iter().position(|group| group.id == place.group_id)?;
+        let tab = match &place.tab_id {
+            Some(id) => Some(groups[group].tabs.iter().position(|tab| &tab.id == id)?),
+            None if place.pane == Pane::List(0).key() => None,
+            None => return None,
+        };
+        Some((space, group, tab))
+    }
+
+    pub(in crate::ui) fn place_exists(&self, place: &StoredPlace) -> bool {
+        self.place_location(place).is_some() && self.place_content_exists(place)
+    }
+
+    fn place_content_exists(&self, place: &StoredPlace) -> bool {
         if let Some(selection) = &place.selection
             && self.world.attention.ready().is_some()
             && !self
@@ -117,40 +128,41 @@ impl Ui {
                         .iter()
                         .any(|item| item.id == id)
             }
+            Some(Pane::Document(reference)) => !self.documents.known_missing(&reference),
             Some(_) => true,
             None => false,
         }
     }
 
     pub(in crate::ui) fn restore_place(&mut self, place: &StoredPlace) -> bool {
-        if !self.place_exists(place) {
+        let Some((space, split, tab)) = self.place_location(place) else {
+            return false;
+        };
+        if !self.place_content_exists(place) {
             return false;
         }
         let before = self.current_place();
         let was_restoring = self.glasses.restoring;
         self.glasses.restoring = true;
-        let index = self
-            .glasses
-            .all
-            .iter()
-            .position(|glass| glass.id == place.space)
-            .unwrap();
-        self.glasses.shown = index;
+        self.glasses.shown = space;
         self.glasses.home = false;
         self.glasses.palette = None;
         self.glasses.sidebar.focused = false;
         self.glasses.zoomed = false;
         let glass = self.glasses.glass_mut();
-        glass.focus = place.group;
-        let group = glass.layout.group_mut(place.group).unwrap();
-        group.current = place.tab;
-        let changed = group
-            .tabs
-            .get(place.tab)
-            .is_some_and(|tab| tab.pane != place.pane);
-        if let Some(tab) = group.tabs.get_mut(place.tab) {
-            tab.pane.clone_from(&place.pane);
-        }
+        glass.focus = split;
+        let group = glass.layout.group_mut(split).unwrap();
+        // An empty workspace's Inbox has no physical tab yet. Restoring it must not
+        // overwrite the first tab subsequently opened in that group.
+        let index = tab
+            .or_else(|| group.tabs.iter().position(|tab| tab.pane == place.pane))
+            .unwrap_or_else(|| {
+                group.tabs.push(Tab::pane(&place.pane));
+                group.tabs.len() - 1
+            });
+        group.current = index;
+        let changed = group.tabs[index].pane != place.pane || tab.is_none();
+        group.tabs[index].pane.clone_from(&place.pane);
         let id = glass.id.clone();
         if changed {
             self.glass_changed(&id);
@@ -382,5 +394,118 @@ mod tests {
         ui.close_tab();
         ui.navigate_history(false);
         assert!(!ui.current_place().unwrap().pane.contains("agent/removed"));
+    }
+
+    #[test]
+    fn history_skips_documents_observed_missing_but_not_unavailable_hosts() {
+        use fractal_ui_model::documents::Unavailable;
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Document("doc/kept".into()), Open::Tab);
+        ui.open_in_glass(Pane::Document("doc/deleted".into()), Open::Tab);
+        ui.open_in_glass(Pane::Document("doc/current".into()), Open::Tab);
+        ui.documents.got("doc/deleted", Err(Unavailable::NotFound));
+        ui.documents
+            .got("doc/kept", Err(Unavailable::RemoteUnavailable));
+        ui.navigate_history(false);
+        assert_eq!(ui.focused_pane(), Some(Pane::Document("doc/kept".into())));
+    }
+
+    #[test]
+    fn reordering_tabs_and_inserting_splits_never_overwrites_other_content() {
+        let mut ui = Ui::new(demo::test_world());
+        let a = Pane::Document("doc/a".into());
+        let b = Pane::Document("doc/b".into());
+        let c = Pane::Document("doc/c".into());
+        ui.open_in_glass(a.clone(), Open::Tab);
+        let first = ui.current_place().unwrap();
+        ui.open_in_glass(b.clone(), Open::Tab);
+        ui.drop_tab((0, 0), Drop::Strip { group: 0, index: 2 });
+        ui.navigate_history(false);
+        assert_eq!(ui.focused_pane(), Some(b.clone()));
+        assert_eq!(ui.glasses.glass().layout.groups()[0].tabs[1].pane, a.key());
+        assert!(ui.restore_place(&first));
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(a, Open::Tab);
+        ui.open_in_glass(b.clone(), Open::Right);
+        let second = ui.current_place().unwrap();
+        ui.focus_group(0);
+        ui.open_in_glass(c.clone(), Open::Right);
+        assert!(ui.restore_place(&second));
+        assert_eq!(ui.focused_pane(), Some(b));
+        assert!(ui.glasses.glass().layout.find(&c.key()).is_some());
+    }
+
+    #[test]
+    fn remote_layout_reorders_keep_surviving_history_identities() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Document("doc/a".into()), Open::Tab);
+        ui.open_in_glass(Pane::Document("doc/b".into()), Open::Right);
+        let before = ui.current_place().unwrap();
+        let glass = ui.glasses.glass_mut();
+        let mut layout = glass.layout.clone();
+        layout.split_first(0, Side::Right, Group::of(Tab::pane("document:doc/c")));
+        glass.take(
+            GlassBody {
+                name: glass.name.clone(),
+                layout: to_wire(&layout),
+            },
+            None,
+        );
+        assert!(ui.restore_place(&before));
+        assert_eq!(ui.current_place().unwrap().tab_id, before.tab_id);
+        assert_eq!(ui.focused_pane(), Some(Pane::Document("doc/b".into())));
+    }
+
+    #[test]
+    fn sidebar_drag_open_records_the_content_transition() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Document("doc/a".into()), Open::Tab);
+        ui.open_in_glass(Pane::Document("doc/b".into()), Open::Tab);
+        let before = ui.current_place().unwrap();
+        let id = ui.world.agents.items()[0].id.clone();
+        ui.drop_subject(
+            &id,
+            Drop::Edge {
+                group: 0,
+                side: Side::Right,
+                first: false,
+            },
+        );
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some(id))));
+        ui.navigate_history(false);
+        assert_eq!(ui.current_place(), Some(before));
+    }
+
+    #[test]
+    fn closing_the_last_index_space_keeps_the_active_location_valid() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Document("doc/a".into()), Open::Glass);
+        assert_eq!(ui.glasses.shown, 1);
+        ui.open_palette(Some(GLASSES), Open::Here);
+        let palette = ui.glasses.palette.as_ref().unwrap();
+        let close = ui
+            .matches(palette)
+            .iter()
+            .position(|choice| choice.action == Action::CloseGlass)
+            .unwrap();
+        ui.open_choice(Some(close), Open::Here);
+        assert_eq!(ui.glasses.shown, 0);
+        assert_eq!(ui.glasses.all.len(), 1);
+    }
+
+    #[test]
+    fn enter_keeps_sidebar_and_usage_ownership_over_a_detached_terminal() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Terminal("terminal/example-shell".into()), Open::Tab);
+        ui.glasses.sidebar.shown = true;
+        ui.glasses.sidebar.focused = true;
+        ui.glasses.sidebar.section = 4;
+        ui.key(KeyCode::Enter.into());
+        assert!(ui.terminal.is_none());
+        ui.glasses.sidebar.focused = false;
+        ui.glasses.home = true;
+        ui.glasses.usage = true;
+        ui.key(KeyCode::Enter.into());
+        assert!(ui.terminal.is_none());
     }
 }
