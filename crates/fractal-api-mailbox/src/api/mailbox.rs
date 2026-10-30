@@ -153,9 +153,12 @@ pub async fn bind(
         &authority::source_agent_dir(&state, &request),
     ).await.map_err(ApiError::internal)?;
     let attempted = request.clone();
-    let bound = authority_action(move || {
+    let (bound, primary_admitted) = authority_action(move || {
         let _admission = admission;
-        authority::with_claude_primary(&bind_state, &request, &peer, None, || {
+        let mut primary_admitted = false;
+        let bound = authority::with_claude_primary(&bind_state, &request, &peer, None, || {
+        // A nested/non-primary caller cannot change the primary seat's delivery diagnostics.
+        primary_admitted = true;
         if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
             bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
@@ -163,13 +166,15 @@ pub async fn bind(
         authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
-    }) }).await.map_err(|error| {
-        if crate::client::mailbox_bind_refusal(error.status.as_u16(), &error.code)
+    });
+        Ok((bound, primary_admitted))
+    }).await?;
+    let bound = bound.map_err(ApiError::bad).inspect_err(|error| {
+        if primary_admitted && crate::client::mailbox_bind_refusal(error.status.as_u16(), &error.code)
         {
             delivery_presence::bind_refused(&attempted, &error.code);
             signal_local_change(&state);
         }
-        error
     })?;
     delivery_presence::bind_recovered(&attempted);
     signal_local_change(&state);

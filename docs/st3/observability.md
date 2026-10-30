@@ -671,6 +671,9 @@ time series.
 `stale-mailbox-session`, `mailbox-binding-conflict`, `mailbox-peer-mismatch`,
 `mailbox-not-authorized`, `recipient-retired`, and `other`. Unrecognized codes
 map to `other`; their original text remains in the warning log and API reason.
+Refusal observation follows primary-caller admission: a rejected nested Claude
+caller cannot mark the primary seat refused or alter its recovery diagnostics.
+
 Free-form diagnostic text is never exported as a label.
 
 The value is seconds since the current normalized state began in this daemon
