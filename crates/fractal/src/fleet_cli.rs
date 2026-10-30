@@ -537,6 +537,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     };
     fractal_daemon::service::preflight(manages_services)?;
     let mut config = Config::load_unvalidated(None)?;
+    config.validate()?;
     // Explicit admissions can repair a pin after their prior attempt saved membership.
     // Other controls must use the daemon's resolved identity, including leave's runtime check.
     if !matches!(&command, FleetCommand::Join(_) | FleetCommand::Create(_)) {
@@ -753,6 +754,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
             let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
                 state_dir: config.state_dir.clone(),
+                store_path: config.store_path(),
                 configured_node: config.node.clone(),
                 code: code.trim().to_owned(),
                 name: args.name.clone(),
@@ -1355,7 +1357,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     // its store before writing. Invalid admission must not stop healthy services.
     {
         use rusqlite::OptionalExtension as _;
-        let database = config.state_dir.join("claims.sqlite3");
+        let database = config.store_path();
         anyhow::ensure!(
             database.exists(),
             "this store is not bound to a fleet yet; run fractal up once first"
@@ -1395,6 +1397,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     if args.anchor {
         let founded = fractal_daemon::fleet::join::migrate_anchor(
             &config.state_dir,
+            &config.store_path(),
             &config.node,
             &fleet_id,
             &secret_file,
@@ -1426,6 +1429,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         };
         let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
             state_dir: config.state_dir.clone(),
+            store_path: config.store_path(),
             configured_node: config.node.clone(),
             code: code.trim().to_owned(),
             name: Some(config.node.clone()),
