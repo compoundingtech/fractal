@@ -151,7 +151,17 @@
       "additionalProperties": false,
       "required": ["kind", "ended_at"],
       "properties": {
-        "kind": {"enum": ["completed", "stopped-by-person", "stopped-by-agent", "crashed", "harness-exited", "host-lost", "retired"]},
+        "kind": {"anyOf": [{"enum": [
+          "completed",
+          "stopped-by-person",
+          "stopped-by-agent",
+          "stopped-by-mission",
+          "parked",
+          "crashed",
+          "harness-exited",
+          "host-lost",
+          "retired"
+        ]}, {"type": "string"}]},
         "actor": {"type": "string"},
         "reason": {"type": "string"},
         "exit_code": {"type": "integer"},
