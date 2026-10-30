@@ -150,6 +150,9 @@ pub(super) mod tests {
         // distinguishes this attacker from the managed wrapper it impersonates.
         authorize(&frame, Some(peer)).unwrap();
         let index = store.index().unwrap();
+        let delivery_before = super::super::delivery_presence::assess_current(
+            &frame.agent, "omp", Some(&frame.runtime_incarnation),
+        );
         for close in [false, true] {
             frame.event = if close {
                 Observation::Closed { session: "native-session".into(),
@@ -163,6 +166,11 @@ pub(super) mod tests {
             };
             assert!(admit().and_then(|()| apply(&store, &frame)).is_err());
             assert_eq!(store.index().unwrap(), index, "forged open/close wrote a claim");
+            let delivery_after = super::super::delivery_presence::assess_current(
+                &frame.agent, "omp", Some(&frame.runtime_incarnation),
+            );
+            assert_eq!(delivery_after.state, delivery_before.state, "forged open/close changed diagnostics");
+            assert_eq!(delivery_after.reason, delivery_before.reason, "forged open/close recorded a refusal");
         }
     }
 

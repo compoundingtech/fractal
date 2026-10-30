@@ -1062,7 +1062,7 @@ pub fn with_authority<T>(
     authenticated: impl FnOnce(),
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
-    with_authority_mode(state, fence, peer, true, action)
+    with_authority_mode(state, fence, peer, true, authenticated, action)
 }
 
 /// Native observations use physical custody without creating/promoting a mailbox lease.
@@ -1072,7 +1072,8 @@ pub(super) fn with_observation_authority<T>(
     peer: &NativeDeliveryPeer,
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
-    with_authority_mode(state, fence, peer, false, action)
+    // Question observation never records mailbox bind-refusal diagnostics or promotes custody.
+    with_authority_mode(state, fence, peer, false, || {}, action)
 }
 
 fn with_authority_mode<T>(
@@ -1080,6 +1081,7 @@ fn with_authority_mode<T>(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     promote: bool,
+    authenticated: impl FnOnce(),
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
     if fence.epoch != 0 {
@@ -1172,6 +1174,8 @@ fn with_authority_mode<T>(
     // Identity proof only, not mailbox custody: provider, physical runtime membership
     // and daemon-selected source paths match. Pre-authority rejected callers cannot
     // mutate shared delivery diagnostics. Session/fence refusals after this point can.
+    // Observation identity additionally requires the exact wrapper BootstrapWitness above;
+    // a same-seat descendant cannot reach this point merely by forging argv or environment.
     authenticated();
     let source = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
         .map_err(|error| unavailable(error.to_string()))?;

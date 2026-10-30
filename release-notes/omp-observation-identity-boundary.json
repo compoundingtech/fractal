@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve the native identity-proof boundary when admitting OMP question observations",
+  "replay": {"status": "none", "detail": "No retained question replay or projection rebuild."},
+  "schema": {"status": "none", "detail": "No schema, index or stored format change."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordination rule change."},
+  "compatibility": {"status": "none", "detail": "Native observation admission retains exact wrapper process-generation proof before any shared diagnostic or claim mutation. Mailbox bind callers retain their identity-proof callback before session/custody checks. Client-v0 and native frame shapes are unchanged; observation flags remain off by default."},
+  "downtime": {"status": "none", "detail": "Ordinary daemon deployment only."},
+  "manual": {"status": "none", "detail": "No operator action or new opt-in."},
+  "recovery": {"status": "none", "detail": "No state migration or rollback restriction is introduced."}
+}
