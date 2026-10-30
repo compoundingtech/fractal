@@ -131,6 +131,43 @@ the migration: without an existing committed journal, the mover requires real
 legacy directories (not absent paths or bridge symlinks), rejects populated
 destinations even if they contain a receipt, and only publishes receipts after
 the directory exchanges.
+
+The mover reads `store_dir` from the daemon configuration; when its unit uses
+`up --config`, `--state-dir` or `--store-dir`, pass the same overrides to
+`fractal migrate host` (including `--dry-run`). These flags describe the running
+daemon; they do not edit its service definition. With no explicit store directory,
+the store follows `state_dir` as before. A separate store must already be reachable
+and either outside both config/state product roots or an ordinary directory below
+a legacy root. An external store, including an external mounted dataset, stays
+untouched and is checked again after the exchange. An ordinary nested store moves
+only with its containing root; its target path maps `st3` to `fractal` just like the
+daemon state path. Symlinked store paths and destination-root stores refuse before
+cutover. The mover never copies or separately moves database files.
+After stopping legacy services, the mover also acquires the separate store's
+directory-FD lock and holds it through the exchanges, releasing it before starting
+the target daemon. A concurrent store owner refuses the swap and restores legacy
+services; the fence creates no store files and follows a nested store's inode.
+Symlinks for any database-trio file, including dangling links, refuse before
+services stop and are checked again under the store fence before exchanges.
+The product-root bridge is an ancestor symlink, not a database-file symlink,
+and remains compatible with the daemon's store checks.
+
+To put only the database on a dataset mounted at
+`~/.local/state/fractal/store`, first complete cutover without mounts below either
+product root. Then stop only the Fractal daemon, preserve and move
+`claims.sqlite3`, `claims.sqlite3-wal` and `claims.sqlite3-shm` together into the
+dataset without hiding other migrated files, and configure the daemon with
+`store_dir = "/Users/example/.local/state/fractal/store"` (or its equivalent
+`up --store-dir` flag). Keep `state_dir` at `~/.local/state/fractal`; identity,
+sockets, locks, logs and PTY state do not move into the dataset. Restart the daemon.
+This database relocation is operator-managed, not performed by `migrate host`.
+
+Rerunning a committed migration accepts exactly the configured store mount;
+other mounts below either product root still refuse. `--rollback` always refuses
+any product-root mount or submount and tells the operator to unmount first, before
+stopping services or touching paths. Unmounting does not authorize rollback after
+the local API probe committed the migration: that existing forward-only boundary
+still applies. The receipt format is unchanged.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts

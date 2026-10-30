@@ -11,7 +11,8 @@ use fractal_daemon::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
-use super::view::{Load, MissionPreview};
+use super::resource_sidebar::ArrangementV1 as _;
+use super::view::Load;
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
@@ -400,7 +401,6 @@ enum Fetched {
         /// How long st took to answer, so a slow st is not asked for more than the person scrolled to.
         took: Duration,
     },
-    Preview(String, Load<MissionPreview>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
@@ -546,7 +546,6 @@ pub fn run(context: Context) -> Result<()> {
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
     let mut sessions_requested = HashSet::new();
-    let mut preview_requested: HashSet<String> = HashSet::new();
     let mut body_requested: HashSet<String> = HashSet::new();
     let mut read_receipts = ReadReceipts::default();
     // Messages sent from here, shown at once until st reports them back.
@@ -735,7 +734,6 @@ pub fn run(context: Context) -> Result<()> {
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
-                    preview_requested.clear();
                     body_requested.clear();
                     changed = true;
                 }
@@ -747,10 +745,11 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
                     ui.resource_sidebar.writable = true;
                     ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
-                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted => Some(arrangement),
+                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted
+                            && matches!(arrangement.body, fractal_client::ArrangementBody::V1(_)) => Some(arrangement),
                         _ => None,
                     }).collect();
-                    if ui.resource_sidebar.arrangements.iter().any(|a| a.body.folders.values().any(|folder| folder.tombstone.is_none()))
+                    if ui.resource_sidebar.arrangements.iter().any(|a| a.v1().folders.values().any(|folder| folder.tombstone.is_none()))
                         && !ui.glasses.sidebar.configured {
                         ui.glasses.sidebar.shown = true;
                     }
@@ -1084,9 +1083,6 @@ pub fn run(context: Context) -> Result<()> {
                         }
                         waiting
                     });
-                }
-                Fetched::Preview(id, preview) => {
-                    extras.previews.insert(id, preview);
                 }
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
@@ -1460,60 +1456,6 @@ pub fn run(context: Context) -> Result<()> {
         for target in moved_sessions(&conversing, &model, &timelines, &mut resubscribed) {
             let _ = commands.send(Command::Resubscribe { target });
         }
-        if tab == 0
-            && let Some(id) = selected.clone()
-            && !preview_requested.contains(&id)
-            && let Some(item) = model
-                .attention()
-                .find(|item| item.header.id == id && item.attention_kind == "launch-approval")
-        {
-            preview_requested.insert(id.clone());
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            let source = item.source_id.clone();
-            let name = item
-                .mission_id
-                .clone()
-                .unwrap_or_else(|| item.title.clone())
-                .trim_start_matches("mission/")
-                .to_owned();
-            runtime.spawn(async move {
-                let preview = match client.launch_variants_list(&source, None, Some(50)).await {
-                    Err(error) => Load::Failed(format!("Could not load the proposed mission: {error}")),
-                    Ok(variants) => {
-                        let latest = variants
-                            .value
-                            .items
-                            .iter()
-                            .filter_map(|item| match item {
-                                Resource::LaunchVariant(variant) => Some(variant),
-                                _ => None,
-                            })
-                            .max_by_key(|variant| variant.ordinal);
-                        match latest {
-                            None => Load::Failed("The planner has not proposed a mission yet.".into()),
-                            Some(variant)
-                                if variant.normalized_mission.as_object().is_none_or(|fields| fields.is_empty()) =>
-                            {
-                                let mut reason = format!(
-                                    "The planner's latest candidate ({}) has no preview, so there is no mission to show yet.",
-                                    variant.status
-                                );
-                                for diagnostic in variant.diagnostics.iter().take(3) {
-                                    if let Some(message) = diagnostic.get("message").and_then(|value| value.as_str()) {
-                                        reason.push_str(&format!("\n• {message}"));
-                                    }
-                                }
-                                Load::Failed(reason)
-                            }
-                            Some(variant) => Load::Ready(adapt::preview(&name, &variant.normalized_mission)),
-                        }
-                    }
-                };
-                let _ = tx.send(Fetched::Preview(id, preview));
-            });
-        }
-
         // An unread-message item names its message; load the message itself.
         if tab == 0
             && let Some(id) = selected.clone()
@@ -1955,10 +1897,6 @@ pub fn run(context: Context) -> Result<()> {
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
-            extras.pending_calls = timelines
-                .iter()
-                .map(|(agent, timeline)| (agent.clone(), adapt::pending_calls(&timeline.items)))
-                .collect();
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
                     entries.push(super::view::Entry {
@@ -2786,7 +2724,7 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
     let reply = client.arrangement_edit(
         format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
         Fence { snapshot_id: snapshot.id, ..Default::default() },
-        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone(), version: None },
     ).await?;
     anyhow::ensure!(matches!(reply.value.status, fractal_client::ActionStatus::Completed), "Sidebar edit is not completed.");
     Ok(())
@@ -4184,19 +4122,19 @@ mod tests {
         // Exact retry of the accepted create does not replace later register winners.
         save_sidebar(&client, &creation).await.unwrap();
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].position.value.key < found.body.folders[&first].position.value.key);
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].position.value.key < found.v1().folders[&first].position.value.key);
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
         save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
         server.abort(); let _ = server.await; drop(store);
         let _ = std::fs::remove_file(&socket);
         let (_store, server) = serve(root.path(), &socket).await;
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].tombstone.is_some());
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].tombstone.is_some());
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
         // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
-        assert!(found.body.placements.contains_key("agent/example/atlas"));
+        assert!(found.v1().placements.contains_key("agent/example/atlas"));
         server.abort();
     }
 

@@ -393,6 +393,8 @@ impl Store {
                     Some(&review.mission_run),
                 )?;
                 items.push(AttentionItemView {
+                    deadline_unix_ms: None,
+                    default_answer: None,
                     conversation,
                     ..attention_item_from_review(review)
                 });
@@ -567,10 +569,11 @@ impl Store {
         at_index: Option<u64>,
     ) -> Result<Option<UsageSummary>> {
         let connection = self.readers.get();
-        // A current read on the seat's host also folds the rollups not yet replicated. Callers
-        // pass the request's index, the latest one, for a current read.
+        // A current read on the seat's host also folds the rollups and occupancy not yet
+        // replicated, at the time each was observed. Callers pass the request's index, the
+        // latest one, for a current read.
         let pending = if at_index.is_none_or(|at| at >= self.index().unwrap_or(u64::MAX)) {
-            crate::store::pending_usage_rollups(&connection, Some(subject))?
+            crate::store::pending_usage(&connection, Some(subject), false)?
         } else {
             Vec::new()
         };
@@ -587,7 +590,7 @@ impl Store {
                 row.get::<_, String>(2)?,
             ))
         })?;
-        let pending = pending.into_iter().map(|(_, body)| Ok((at_index, body, String::new())));
+        let pending = pending.into_iter().map(|(_, body, at)| Ok((at_index, body, at.to_string())));
         Self::usage_summary_from_rows(rows.chain(pending), incarnation)
     }
 
@@ -702,11 +705,11 @@ impl Store {
         }
         let mut summaries = BTreeMap::new();
         for (subject, cached) in &folded {
-            // A current read on the seat's host also folds the rollups not yet replicated
-            // (rollups replicate hourly); the kept fold stays the replicated claims' alone.
+            // A current read on the seat's host also folds the rollups and occupancy not yet
+            // replicated (both are held); the kept fold stays the replicated claims' alone.
             // Card reads pass the request's snapshot index: a read at the snapshot is current.
             let pending = if at_index.is_none_or(|at| at >= snapshot) {
-                crate::store::pending_usage_rollups(&connection, Some(subject))?
+                crate::store::pending_usage(&connection, Some(subject), false)?
             } else {
                 Vec::new()
             };
@@ -714,8 +717,8 @@ impl Store {
                 cached.fold.summary()
             } else {
                 let mut fold = cached.fold.clone();
-                for (_, body) in &pending {
-                    fold.apply(through, body, &cached.last_accepted, None)?;
+                for (_, body, at) in &pending {
+                    fold.apply(through, body, &at.to_string(), None)?;
                 }
                 fold.summary()
             };
@@ -841,7 +844,7 @@ impl Store {
                 subject: first.subject.clone(), person: owner, requester_id: None, launch_id: None,
                 variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: Some(first.subject.clone()),
                 title, detail,
-                request: None, mission: None, mission_run: None, step: None,
+                request: None, deadline_unix_ms: None, default_answer: None, mission: None, mission_run: None, step: None,
                 targets: names.iter().map(|name| (*name).to_owned()).collect(),
                 requested_at_unix_ms: first.requested_at,
                 actions: vec![crate::model::AttentionActionView { label: "Attach to log in".into(),
@@ -1057,6 +1060,8 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
 
 fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: review.request.clone(),
         priority: "normal".into(),
         kind: "human-gate".into(),
@@ -1120,6 +1125,8 @@ fn attention_item_from_planning(
     preview: &PlanningPreviewView,
 ) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: preview.hash.clone(),
         priority: "normal".into(),
         kind: "launch-approval".into(),
@@ -1182,6 +1189,8 @@ fn attention_item_from_revision(
 ) -> AttentionItemView {
     let preview_hash = proposal.preview_hash.as_deref().unwrap_or_default();
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: format!("{}:{}", proposal.source_generation, preview_hash),
         priority: "normal".into(),
         kind: "revision-approval".into(),

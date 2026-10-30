@@ -36,6 +36,9 @@ use crate::sqlite::{
     STATEMENT_CACHE_CAPACITY, WriterConnection,
 };
 
+mod admitted;
+pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
+
 mod operation_metadata;
 pub mod prepared_envelope;
 mod replica_record;
@@ -818,6 +821,8 @@ pub type MemberRoots = BTreeSet<(String, String)>;
 /// projections read and write through the same connections.
 pub struct Store {
     pub connection: WriterConnection,
+    // Lasting ownership of the admitted directory and its lock, including lazy reopens.
+    admitted: Option<Arc<AdmittedStore>>,
     /// Same-code baseline for the isolated transport benchmark only.
     #[cfg(feature = "transport-bench")]
     pub transport_bench_original_lookup: AtomicBool,
@@ -877,6 +882,12 @@ pub struct Store {
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
     pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
+    /// Wakes the idle signature job: an explicit resume, or a verdict backlog an ordinary
+    /// pass left over.
+    pub signature_job_wake: tokio::sync::Notify,
+    /// The first time and text of a transient storage error the signature work is retrying,
+    /// until the next success. Never persisted; doctor reports it once it lasts.
+    pub(crate) signature_retrying: Mutex<Option<(u128, String)>>,
     pub origin: String,
     /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
     /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
@@ -939,7 +950,17 @@ impl Store {
     /// Open the store at `path`, creating it when it does not exist, with `runtime`'s tables
     /// and projections beside the graph's.
     pub fn open(path: &Path, origin: impl Into<String>, runtime: Arc<dyn Runtime>) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, true, |_| {})
+        Self::open_with(path, origin.into(), runtime, None, true, |_| {})
+    }
+
+    /// Open only through an admitted, locked directory, without recreating it.
+    pub fn open_admitted(
+        admitted: Arc<AdmittedStore>,
+        origin: impl Into<String>,
+        runtime: Arc<dyn Runtime>,
+    ) -> Result<Self> {
+        let path = admitted.database_path().to_path_buf();
+        Self::open_with(&path, origin.into(), runtime, Some(admitted), true, |_| {})
     }
 
     /// [`Self::open`] with the initialization of a fresh database committed the way it was
@@ -954,23 +975,32 @@ impl Store {
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        Self::open_with(path, origin.into(), runtime, defer_fresh_durability, prepare)
+        Self::open_with(path, origin.into(), runtime, None, defer_fresh_durability, prepare)
     }
 
     fn open_with(
         path: &Path,
         origin: String,
         runtime: Arc<dyn Runtime>,
+        admitted: Option<Arc<AdmittedStore>>,
         defer_fresh_durability: bool,
         prepare: impl FnOnce(&Connection),
     ) -> Result<Self> {
-        if let Some(parent) = path.parent() {
+        if admitted.is_none() && let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut connection = Connection::open(path)
-            .with_context(|| format!("open st database {}", path.display()))?;
+        let mut connection = if let Some(admitted) = &admitted {
+            admitted.open_connection(OpenFlags::default())?
+        } else {
+            Connection::open(path)
+                .with_context(|| format!("open st database {}", path.display()))?
+        };
         prepare(&connection);
-        let path = crate::sqlite::opened_database_path(&connection, path)?;
+        let path = if admitted.is_some() {
+            path.to_path_buf()
+        } else {
+            crate::sqlite::opened_database_path(&connection, path)?
+        };
         let has_meta: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
             [],
@@ -1005,21 +1035,23 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        seed_empty_projection_health(&connection)?;
         if fresh && defer_fresh_durability {
             // Back to the member's setting before `from_connection` commits its first meta rows,
             // which a fresh store always writes: that commit fsyncs the WAL, and with it every
             // frame the initialization wrote, before open returns.
             connection.pragma_update(None, "synchronous", "FULL")?;
         }
-        let readers = ReadPool::new(&path, false)?;
-        Self::from_connection(
-            connection,
-            readers,
-            origin,
-            path,
-            false,
-            runtime,
-        )
+        let readers = if let Some(admitted) = &admitted {
+            ReadPool::new_admitted(admitted.clone())?
+        } else {
+            ReadPool::new(&path, false)?
+        };
+        let mut store = Self::from_connection(
+            connection, readers, origin, path, false, runtime,
+        )?;
+        store.admitted = admitted;
+        Ok(store)
     }
 
     /// Open a new store in shared memory, as tests and short-lived tools use.
@@ -1047,6 +1079,7 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        seed_empty_projection_health(&connection)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -1146,7 +1179,11 @@ impl Store {
         shared_memory: bool,
         runtime: Arc<dyn Runtime>,
     ) -> Result<Self> {
-        let path = crate::sqlite::opened_database_path(&connection, &path)?;
+        let path = if readers.is_admitted() {
+            path
+        } else {
+            crate::sqlite::opened_database_path(&connection, &path)?
+        };
         anyhow::ensure!(
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
@@ -1184,11 +1221,17 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
-        let connection = match runtime.writer_observer() {
-            Some(observer) => WriterConnection::new_with_observer(
-                connection, committed_index.clone(), observer,
-            )?,
-            None => WriterConnection::new(connection, committed_index.clone()),
+        let connection = if let Some(admitted) = readers.admitted_handle() {
+            WriterConnection::new_admitted(
+                connection, committed_index.clone(), runtime.writer_observer(), admitted,
+            )?
+        } else {
+            match runtime.writer_observer() {
+                Some(observer) => WriterConnection::new_with_observer(
+                    connection, committed_index.clone(), observer,
+                )?,
+                None => WriterConnection::new(connection, committed_index.clone()),
+            }
         };
         let finalizing_runtime = runtime.clone();
         connection.install_runtime_finalizer(move |transaction| {
@@ -1196,6 +1239,7 @@ impl Store {
         })?;
         Ok(Self {
             connection,
+            admitted: None,
             #[cfg(feature = "transport-bench")]
             transport_bench_original_lookup: AtomicBool::new(false),
             readers,
@@ -1228,6 +1272,8 @@ impl Store {
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
             signature_migration_work: Mutex::new(None),
+            signature_job_wake: tokio::sync::Notify::new(),
+            signature_retrying: Mutex::new(None),
             origin,
             path,
             shared_memory,
@@ -6569,7 +6615,7 @@ impl Store {
         }
         // Judge the claims just sealed only after the snapshot is taken: a verdict pass takes the
         // writer, and writes queued behind it must not land between sealing and the snapshot.
-        self.judge_claims(false)?;
+        self.judge_claims_slice(false)?;
         Ok(snapshot)
     }
 
@@ -7605,7 +7651,7 @@ impl Store {
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it.
         self.seal_local_batches_after_frontier()?;
-        self.judge_claims(false)?;
+        self.judge_claims_slice(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self
@@ -8322,7 +8368,7 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
-                        self.judge_claims(true).map_err(|error| {
+                        self.judge_claims_slice(true).map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
                             if error.is_sqlite_contention() {
@@ -10196,6 +10242,23 @@ thread_local! {
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.
     static STOP_BETWEEN_REPAIR_PAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A store that holds no claims, and has held none a checkpoint dropped, has projected every
+/// claim it holds. Record that, so a backlog it receives before its first projection pass is
+/// projected a chunk per writer hold from here, as on a store whose first pass found nothing,
+/// instead of replayed from nothing in one hold. Without this row a pass cannot tell what the
+/// projection holds, and replays it all. It runs at every open, so an interrupted first open
+/// reopens to the store a whole one makes.
+fn seed_empty_projection_health(connection: &Connection) -> Result<()> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hfd7ba932c92e owner=smallclaims::store TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+         SELECT 'graph', 'healthy', 0, ?1
+         WHERE NOT EXISTS(SELECT 1 FROM claims) AND NOT EXISTS(SELECT 1 FROM checkpoint_claims)
+         ON CONFLICT(aggregate) DO NOTHING",
+        [now_ms().to_string()],
+    )?;
+    Ok(())
 }
 
 pub fn apply_replication_repair_tx(

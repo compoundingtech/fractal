@@ -878,6 +878,8 @@ impl Store {
 pub fn attention_item(body: &Value, at: u128) -> Result<AttentionItemView> {
     let a = &body["attention"];
     Ok(AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: a["episode"].as_str().unwrap_or_default().into(),
         priority: "normal".into(),
         kind: format!(
