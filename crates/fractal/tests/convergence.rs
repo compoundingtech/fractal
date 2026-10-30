@@ -1584,6 +1584,10 @@ fn append_generated_claim(
     store: &Store,
     input: &ClaimInput,
 ) -> Result<ClaimRecord, fractal_daemon::St3Error> {
+    // A fleet's checkpoints still trim the diagnostics its older builds replicated.
+    if input.kind == "daemon.diagnostic" {
+        return store.append_as_older_build_for_test(input);
+    }
     if input.kind != "mission.published" {
         return store.append_claim(input);
     }
