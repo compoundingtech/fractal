@@ -4796,11 +4796,13 @@ impl MissionsStore for Store {
             &self,
             id: &str,
         ) -> Result<(MissionRunView, Option<MissionSpec>)> {
-        let connection = self.readers.get();
-        let (view, mission) =
-            mission_run_view_and_definition_tx(&connection, id, MissionRunEnrichment::Evaluation)?;
-        note_run_view_reads(&view);
-        Ok((view, mission))
+        self.read_snapshot_unindexed(|| {
+            let connection = self.readers.get();
+            let (view, mission) =
+                mission_run_view_and_definition_tx(&connection, id, MissionRunEnrichment::Evaluation)?;
+            note_run_view_reads(&view);
+            Ok((view, mission))
+        })
     }
 
     fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>> {

@@ -10902,3 +10902,95 @@ mod terminal_projection_date_tests {
 
     /* sqlite-large-value: allow-for-now lv-h68fae53a4501 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ include!("terminal_projection_date_tests.rs");
 }
+
+#[test]
+fn evaluation_snapshot_survives_revision_cutover_between_header_and_steps() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
+
+    struct Pause {
+        fired: AtomicBool,
+        reached: mpsc::SyncSender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    let scratch = tempfile::tempdir().unwrap();
+    // WAL lets the real cutover commit while the evaluator holds its read snapshot.
+    let store = Arc::new(Store::open(&scratch.path().join("claims.sqlite3"), "node").unwrap());
+    let publish = |goal: &str, key: &str| {
+        crate::store::tests::publish_mission(
+            &store,
+            &format!(r#"version 2
+mission "snapshot-cutover" state="ready" {{
+ goal "Keep a revision evaluation coherent."
+ completion {{ when "all-steps-exhausted" }}
+ step "work" {{ assigned-to "person/test"; goal {goal:?} }}
+}}"#),
+            key,
+        )
+    };
+    let first = publish("First revision work.", "snapshot-first");
+    let original = store.create_mission_run(&MissionRunRequest {
+        mission: first.id.clone(),
+        revision: None,
+        workspace: scratch.path().to_str().unwrap().into(),
+        requester: Some("person/test".into()),
+        mode: None,
+        inputs: BTreeMap::new(),
+        idempotency_key: "snapshot-run".into(),
+    }).unwrap();
+    let subject = original.steps[0].subject.clone();
+    assert!(store.set_step_state(&subject, "ready", None).unwrap());
+    let second = publish("Replacement revision work.", "snapshot-second");
+    let (reached, at_steps) = mpsc::sync_channel(1);
+    let (resume, continue_steps) = mpsc::sync_channel(1);
+    let pause = Arc::new(Pause {
+        fired: AtomicBool::new(false),
+        reached,
+        resume: Mutex::new(continue_steps),
+    });
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        let pause = pause.clone();
+        connection.authorizer(Some(move |context: AuthContext<'_>| {
+            // The header SELECT has finished. Hold preparation of the next SELECT
+            // before any predecessor step state is read, without a production hook.
+            if matches!(context.action, AuthAction::Read { table_name, .. } if table_name == "step_runs")
+                && !pause.fired.swap(true, Ordering::AcqRel)
+            {
+                let _ = pause.reached.send(());
+                let _ = pause.resume.lock().unwrap().recv();
+            }
+            Authorization::Allow
+        }));
+    }
+    let reader_store = store.clone();
+    let id = original.id.clone();
+    let reader = std::thread::spawn(move || reader_store.mission_run_for_evaluation(&id));
+    at_steps.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let cutover = store.adopt_mission_revision(
+        &original.id,
+        &second,
+        "person/test",
+        "Replace the work during an evaluation read.",
+        "snapshot-cutover",
+    ).unwrap();
+    assert_ne!(cutover.generation, original.generation);
+    assert_eq!(store.step_run(&subject).unwrap().unwrap().status, "cancelled");
+    resume.send(()).unwrap();
+    let observed = reader.join().unwrap();
+    for connection in store.readers.idle.lock().unwrap().iter() {
+        connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    }
+    let (view, mission) = observed.unwrap();
+    assert!(pause.fired.load(Ordering::Acquire), "the cutover interleaving must run");
+    assert_eq!(view.generation, original.generation);
+    assert_eq!(mission.unwrap().revision, original.revision);
+    assert_eq!(view.steps.len(), 1);
+    assert_eq!(view.steps[0].subject, subject);
+    assert_eq!(view.steps[0].status, "ready", "old header must retain its pre-cutover step state");
+    assert!(store.readers.get().is_autocommit(), "evaluation must release its read transaction");
+    let (current, _) = store.mission_run_for_evaluation(&original.id).unwrap();
+    assert_eq!(current.generation, cutover.generation);
+    assert_eq!(current.phase, "normal");
+    assert_eq!(current.steps[0].status, "pending");
+}
