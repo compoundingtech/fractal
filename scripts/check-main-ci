@@ -18,14 +18,16 @@ def api(path):
 
 
 def evidence_skipped(repo, run, sha):
-    """Read only the selected queue attempt; stale attempts and similarly named PR jobs do not count."""
+    """Request proof for an exact-attempt evidence skip or metadata that cannot prove hosted execution."""
     path = f"repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100"
     jobs = [job for page in api(path) for job in page["jobs"]]
     gates = [job for job in jobs if job["name"].startswith("evidence-gate-")]
-    if {job["name"] for job in gates} != GATES or any(job["head_sha"] != sha for job in gates):
-        raise ValueError("exact queue attempt has incomplete or mismatched evidence-gate jobs")
-    return any(step["name"] == "evidence skip taken" and step["conclusion"] == "success"
-               for job in gates for step in job["steps"])
+    if len(gates) != len(GATES) or {job["name"] for job in gates} != GATES or any(job["head_sha"] != sha for job in gates):
+        return True  # Incomplete metadata cannot prove hosted execution; request proof.
+    markers = [[step for step in job.get("steps", []) if step.get("name") == "evidence skip taken"] for job in gates]
+    if any(len(steps) != 1 or steps[0].get("conclusion") is None for steps in markers):
+        return True  # Missing or ambiguous markers must never silently suppress proof.
+    return any(steps[0]["conclusion"] == "success" for steps in markers)
 
 
 def main():
@@ -47,7 +49,7 @@ def main():
                 with open(output, "a") as handle:
                     handle.write(f"evidence-skipped={str(skipped).lower()}\n")
             message = f"Main `{sha}` retains all {len(REQUIRED)} successful merge-queue checks: {run['html_url']}"
-            message += ("; evidence skipped hosted work: post-merge hosted proof required" if skipped
+            message += ("; post-merge hosted proof required (evidence skip or incomplete queue metadata)" if skipped
                         else "; hosted queue proof retained: no duplicate workspace run")
             print(message)
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:

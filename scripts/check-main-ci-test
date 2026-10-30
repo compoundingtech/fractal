@@ -75,13 +75,17 @@ for conclusion in ('success', 'failure', 'skipped', 'cancelled'):
           job_results=marked, skipped=conclusion == 'success')
 wrong_sha = copy.deepcopy(jobs)
 wrong_sha[0]['head_sha'] = 'b' * 40
-for invalid in ([], jobs[:-1], wrong_sha):
-    try:
-        check('incomplete or wrong-SHA jobs', [run], checks, 0, job_results=invalid)
-    except ValueError:
-        pass
+for invalid in ([], jobs[:-1], wrong_sha, jobs + [jobs[0]]):
+    check('incomplete or wrong-SHA jobs request hosted proof', [run], checks, 0, job_results=invalid, skipped=True)
+for steps in ([], None, [dict(name='other step', conclusion='skipped')],
+              [jobs[0]['steps'][0]] * 2, [dict(name='evidence skip taken', conclusion=None)]):
+    incomplete = copy.deepcopy(jobs)
+    if steps is None:
+        del incomplete[0]['steps']
     else:
-        raise AssertionError('ambiguous jobs must not suppress hosted proof')
+        incomplete[0]['steps'] = steps
+    check('missing or ambiguous marker requests hosted proof', [run], checks, 0,
+          job_results=incomplete, skipped=True)
 
 
 # The merge queue's required checks are six since fractal-web joined the main ruleset; the queue watcher
