@@ -1884,7 +1884,9 @@ impl Store {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let connection = if let Some(vfs) = vfs {
+        let connection = if let Some(admitted) = &self.admitted {
+            admitted.open_connection_with_vfs(flags, vfs.map(super::checkpoint_space::ProofVfs::name))?
+        } else if let Some(vfs) = vfs {
             Connection::open_with_flags_and_vfs(&self.path, flags, vfs.name())?
         } else {
             Connection::open_with_flags(&self.path, flags)?

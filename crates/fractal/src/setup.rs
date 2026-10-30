@@ -151,7 +151,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let first_run = config.person.is_none();
     let previous_node = config.node.clone();
     let existing_store = config.state_dir.join("node-identity.json").exists()
-        || config.state_dir.join("claims.sqlite3").exists()
+        || config.store_path().exists()
         || config.fleet.is_some();
 
     let default_person = config
