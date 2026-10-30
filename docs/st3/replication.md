@@ -1195,9 +1195,13 @@ was written before it. A member asks a peer only after an exchange with it moved
 signed peer route `/v1/peer/answers`, authenticated like an exchange. The daemon computes its
 answers on a thread of its own, answering `pending` until it has them, so a request never waits
 for a pass over the store. It keeps the summary for the rest of the cut's day, and beside its
-database (`claims.sqlite3.answers.json`), so a restart and every peer's ask at the same cut are
-answered from it rather than computed again; a new build computes again. A claim that arrives
-after the cut only moves its key, so the summary at a cut does not change.
+database (`claims.sqlite3.answers.json`, readable by its owner only), so a restart and every
+peer's ask at the same cut are answered from it rather than computed again; a new build computes
+again. The summary also records the newest claim admitted when it was computed. A claim keeps
+the time its origin accepted it, so a member that was offline replays claims older than the cut
+after the summary was taken; before answering from a kept summary the member looks for a claim
+admitted since that is older than the cut, a short range of the primary key, and computes again
+if it finds one. A claim accepted after the cut only moves its key.
 
 When a kind differs the member compares again two hours later. A difference that lasts two hours
 is narrowed:

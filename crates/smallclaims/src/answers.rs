@@ -226,9 +226,9 @@ fn each_answer_in_pages(
     )?;
     let repaired = repaired_claims(connection)?;
     let mut claims = 0;
-    // Each key's claims by subject and origin. A key's claims can fall in different pages, so
-    // every key is finished after the last page.
-    let mut keys: BTreeMap<String, BTreeMap<String, KeyClaims>> = BTreeMap::new();
+    // Each key's claims. A key's claims can fall in different pages, so every key is finished
+    // after the last page.
+    let mut keys: BTreeMap<(String, String), KeyClaims> = BTreeMap::new();
     let mut after = 0_i64;
     loop {
         let mut rows = statement.query(rusqlite::params![kind, after, page])?;
@@ -244,7 +244,7 @@ fn each_answer_in_pages(
                 .get::<_, String>(4)?
                 .parse()
                 .with_context(|| format!("claim {id} has an unreadable acceptance time"))?;
-            let (newest, before) = keys.entry(row.get(1)?).or_default().entry(row.get(2)?).or_default();
+            let (newest, before) = keys.entry((row.get(1)?, row.get(2)?)).or_default();
             newer(newest, accepted, &id);
             if accepted < cut_unix_ms {
                 claims += 1;
@@ -255,16 +255,14 @@ fn each_answer_in_pages(
             break;
         }
     }
-    for (subject, origins) in keys {
-        for (origin, (newest, before)) in origins {
-            let Some((accepted, newest)) = newest else { continue };
-            let before = before.map(|(_, ids)| pick(connection, ids)).transpose()?;
-            let claim = match &before {
-                Some(before) if accepted < cut_unix_ms => before.clone(),
-                _ => pick(connection, newest)?,
-            };
-            visit(AnswerKey { subject: subject.clone(), origin, claim, moving: accepted >= cut_unix_ms }, before)?;
-        }
+    for ((subject, origin), (newest, before)) in keys {
+        let Some((accepted, newest)) = newest else { continue };
+        let before = before.map(|(_, ids)| pick(connection, ids)).transpose()?;
+        let claim = match &before {
+            Some(before) if accepted < cut_unix_ms => before.clone(),
+            _ => pick(connection, newest)?,
+        };
+        visit(AnswerKey { subject, origin, claim, moving: accepted >= cut_unix_ms }, before)?;
     }
     Ok(claims)
 }
@@ -596,6 +594,8 @@ pub struct AnswersCache {
 #[derive(Default)]
 struct CacheState {
     summary: Option<AnswersSummary>,
+    /// The newest claim the summary has seen admitted; see [`still_current`].
+    summary_mark: i64,
     kinds: Vec<(Instant, KindBuckets)>,
     /// Every fold reader's keys at the summary's cut, kept apart so narrowing a claim kind never
     /// evicts them.
@@ -604,19 +604,41 @@ struct CacheState {
 }
 
 enum Computed {
-    Summary(AnswersSummary, Vec<KindBuckets>),
-    Kept(AnswersSummary, Vec<KindBuckets>),
+    Summary(AnswersSummary, Vec<KindBuckets>, i64),
+    Kept(AnswersSummary, Vec<KindBuckets>, i64),
     Kind(KindBuckets),
 }
 
-/// The summary a store keeps beside it, with every fold reader's keys and the build that computed
-/// them. A summary at a cut no longer changes, as a claim that arrives after the cut only moves its
-/// key, so a restart serves it; a new build computes again, in case it answers differently.
+/// The summary a store keeps beside it, with every fold reader's keys, the build that computed
+/// them and the newest claim admitted when it started. A restart serves it while it is current;
+/// a new build computes again, in case it answers differently.
 #[derive(Serialize, Deserialize)]
 struct Kept {
     build: String,
     summary: AnswersSummary,
     readers: Vec<KindBuckets>,
+    mark: i64,
+}
+
+/// The store index of the newest claim admitted.
+fn newest_claim(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row("SELECT COALESCE(MAX(store_index), 0) FROM claims", [], |row| row.get(0))?)
+}
+
+/// The newest claim admitted, unless a claim older than the cut was admitted after `mark`, so a
+/// summary computed when `mark` was newest lacks it. A claim keeps the time its origin accepted
+/// it, so a member that was offline replays claims older than the cut long after it; a claim
+/// accepted after the cut only moves its key. The claims after `mark` are a short range of the
+/// primary key, and the mark moves up each time nothing older arrived.
+fn still_current(connection: &Connection, mark: i64, cut_unix_ms: u128) -> Result<Option<i64>> {
+    let newest = newest_claim(connection)?;
+    let late: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE store_index>?1 AND store_index<=?2
+             AND CAST(accepted_at_unix_ms AS INTEGER)<?3)",
+        rusqlite::params![mark, newest, i64::try_from(cut_unix_ms)?],
+        |row| row.get(0),
+    )?;
+    Ok((!late).then_some(newest))
 }
 
 /// Where `store` keeps its summary: beside its database, and nowhere for a store in memory.
@@ -627,25 +649,34 @@ fn kept_path(store: &Store) -> Option<std::path::PathBuf> {
 }
 
 /// The summary `store` kept at `cut`, if this build computed it as the store trims now.
-fn kept(store: &Store, cut_unix_ms: u128) -> Option<(AnswersSummary, Vec<KindBuckets>)> {
+fn kept(store: &Store, cut_unix_ms: u128) -> Option<Kept> {
     let kept: Kept = serde_json::from_slice(&std::fs::read(kept_path(store)?).ok()?).ok()?;
     (kept.build == crate::store::checkpoint_agreement::checkpoint_build()
         && kept.summary.cut_unix_ms == cut_unix_ms
         && kept.summary.trims_locally == store.trims_locally())
-    .then_some((kept.summary, kept.readers))
+    .then_some(kept)
 }
 
 /// Keep `summary` beside `store`, replacing the summary it kept at an earlier cut.
-fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets]) -> Result<()> {
+fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: i64) -> Result<()> {
+    use std::io::Write as _;
     let Some(path) = kept_path(store) else { return Ok(()) };
     let kept = Kept {
         build: crate::store::checkpoint_agreement::checkpoint_build(),
         summary: summary.clone(),
         readers: readers.to_vec(),
+        mark,
     };
     let mut written = path.clone().into_os_string();
     written.push(".new");
-    std::fs::write(&written, serde_json::to_vec(&kept)?).with_context(|| format!("writing {}", path.display()))?;
+    // Readable by the store's owner only, as the store is; a mode applies only to a new file.
+    let _ = std::fs::remove_file(&written);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&written).with_context(|| format!("writing {}", path.display()))?;
+    file.write_all(&serde_json::to_vec(&kept)?).with_context(|| format!("writing {}", path.display()))?;
     std::fs::rename(&written, &path).with_context(|| format!("replacing {}", path.display()))?;
     Ok(())
 }
@@ -664,6 +695,26 @@ impl AnswersCache {
     {
         let fresh = |at: &Instant| at.elapsed() < ANSWERS_FRESH;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
+            let mark = state.summary_mark;
+            drop(state);
+            let store: &Store = (**store).borrow();
+            let current = still_current(&store.readers.get(), mark, request.cut_unix_ms);
+            state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            match current {
+                Ok(Some(newest)) => state.summary_mark = state.summary_mark.max(newest),
+                Ok(None) => {
+                    eprintln!(
+                        "st3: answers at {}: a claim older than the cut arrived since they were computed; \
+                         computing them again",
+                        request.cut_unix_ms
+                    );
+                    state.summary = None;
+                    state.readers.clear();
+                }
+                Err(error) => eprintln!("st3: answers at {} could not be checked: {error:#}", request.cut_unix_ms),
+            }
+        }
         match &request.kind {
             None => {
                 if let Some(summary) = &state.summary
@@ -723,9 +774,16 @@ impl AnswersCache {
             let store: &Store = (*store).borrow();
             let computed = crate::task_cpu::blocking("replication.answers", || match &kind {
                 None => {
-                    if let Some((summary, every)) = kept(store, cut) {
-                        return Ok(Computed::Kept(summary, every));
+                    if let Some(kept) = kept(store, cut) {
+                        match still_current(&store.readers.get(), kept.mark, cut)? {
+                            Some(newest) => return Ok(Computed::Kept(kept.summary, kept.readers, newest)),
+                            None => eprintln!(
+                                "st3: answers at {cut}: a claim older than the cut arrived since they were kept; \
+                                 computing them again"
+                            ),
+                        }
                     }
+                    let mark = newest_claim(&store.readers.get())?;
                     let mut summary = store.answers_summary(cut)?;
                     let mut every = Vec::new();
                     if let Some(readers) = &readers {
@@ -735,21 +793,21 @@ impl AnswersCache {
                             every.push(buckets);
                         }
                     }
-                    Ok(Computed::Summary(summary, every))
+                    Ok(Computed::Summary(summary, every, mark))
                 }
                 Some(kind) => store
                     .answer_buckets(kind, cut, &(0..BUCKETS).collect())
                     .map(Computed::Kind),
             });
-            if let Ok(Computed::Summary(summary, readers)) = &computed
-                && let Err(error) = keep(store, summary, readers)
+            if let Ok(Computed::Summary(summary, readers, mark)) = &computed
+                && let Err(error) = keep(store, summary, readers, *mark)
             {
                 eprintln!("st3: answers at {cut} could not be kept: {error:#}");
             }
             let mut state = cache.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.computing.remove(&(cut, kind.clone()));
             match computed {
-                Ok(Computed::Summary(summary, readers)) => {
+                Ok(Computed::Summary(summary, readers, mark)) => {
                     eprintln!(
                         "st3: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
                         started.elapsed().as_secs(),
@@ -757,11 +815,13 @@ impl AnswersCache {
                         readers.len()
                     );
                     state.summary = Some(summary);
+                    state.summary_mark = mark;
                     state.readers = readers;
                 }
-                Ok(Computed::Kept(summary, readers)) => {
+                Ok(Computed::Kept(summary, readers, mark)) => {
                     eprintln!("st3: answers at {cut} kept from an earlier run: {} kinds", summary.kinds.len());
                     state.summary = Some(summary);
+                    state.summary_mark = mark;
                     state.readers = readers;
                 }
                 Ok(Computed::Kind(every)) => {

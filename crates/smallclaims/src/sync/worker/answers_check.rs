@@ -4,8 +4,8 @@
 //! written before the cut, and checks a peer only after an exchange with it moved nothing.
 //!
 //! A kind that differs is compared again two hours later. Each member keeps its summary at a cut
-//! for the day, since a claim that arrives later only moves its key, so a real difference stays,
-//! and comparing more often only costs the members another read. A difference that lasts two
+//! until a claim older than the cut arrives, so a real difference stays, and comparing more often
+//! only costs the members another read. A difference that lasts two
 //! hours is narrowed to buckets and keys and handed to the store to record, which raises a fault.
 //! A kind whose differing keys all moved past the cut on one member is no difference: that member
 //! only computed after the newer claim arrived. An agreeing check is handed over too, so the store
