@@ -368,6 +368,9 @@ enum Step {
     Repair(u8, bool),
     /// An observer claim and a claim of another kind in one operation, in two envelopes.
     Shared(u8),
+    /// An earlier checkpoint's tombstone of one of this writer's envelopes, newer than any it
+    /// holds (`newer`) or older: the writer's-newest guard reads tombstones too.
+    Tombstone(bool),
     /// Two observations of one observer in one batch: the older is not the newest of its slot
     /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
     Twice(u8),
@@ -381,6 +384,7 @@ fn step_strategy() -> impl Strategy<Value = Step> {
         1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
         1 => (0..3u8).prop_map(Step::Shared),
         1 => (0..3u8).prop_map(Step::Twice),
+        1 => any::<bool>().prop_map(Step::Tombstone),
     ]
 }
 
@@ -460,6 +464,18 @@ fn take_step(store: &Store, step: &Step, n: usize) {
                          state, claim_id, replacement_claim_id, updated_at_unix_ms)
                      VALUES (?1, 'node.elsewhere', ?2, 'repaired', 0, X'', 'repaired', ?3, ?4, '1')",
                     params![format!("record/repaired-{n}"), n as i64, format!("claim/original-{n}"), id],
+                )
+                .unwrap();
+        }
+        Step::Tombstone(newer) => {
+            let sequence = if *newer { 1_000_000 + n as i64 } else { 0 };
+            store
+                .connection
+                .write()
+                .execute(
+                    "INSERT INTO checkpoint_envelopes(writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
+                     VALUES (?1, ?2, ?3, 1, 'checkpoint/1970-01-02')",
+                    params![store.origin, sequence, format!("tombstone-{n}")],
                 )
                 .unwrap();
         }

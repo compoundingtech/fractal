@@ -236,7 +236,7 @@ impl StagedSet {
                  ORDER BY sequence DESC LIMIT 1",
             )?;
             let mut tombstoned = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h316cb5ff1a74 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!(
-                "SELECT sequence, envelope_hash, accepted_at_unix_ms, 0 FROM checkpoint_envelopes
+                "SELECT sequence, envelope_hash, CAST(accepted_at_unix_ms AS TEXT), 0 FROM checkpoint_envelopes
                  WHERE writer=?1 AND ?2 IS NOT NULL AND {RECORDED_TOMBSTONE_FILTER}
                  ORDER BY sequence DESC LIMIT 1"
             ))?;
