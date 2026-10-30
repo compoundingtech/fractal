@@ -9517,3 +9517,82 @@ fn managed_launch_argv_carries_access_mode_flags() {
         assert_eq!(crate::claude_session::managed_claude_argv(None, workspace, authored.clone()), authored);
     }
 }
+
+#[test]
+fn a_seat_start_trusts_its_work_root_and_a_second_start_changes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let config = home.join("config.toml");
+    let existing = "# Avery's codex config\nmodel = \"gpt-5\"\n\n[projects.\"/other\"]\ntrust_level = \"trusted\"\n";
+    fs::write(&config, existing).unwrap();
+    let root = tmp.path().join("work");
+    fs::create_dir_all(&root).unwrap();
+    let args = vec![
+        "--cd".to_string(),
+        root.display().to_string(),
+        "boot".to_string(),
+    ];
+
+    let admitted = admit_controlled_workspace_at(&config, &args).unwrap();
+
+    assert_eq!(admitted, fs::canonicalize(&root).unwrap());
+    let first = fs::read_to_string(&config).unwrap();
+    assert!(first.starts_with(existing), "the existing config was rewritten: {first}");
+    let parsed: toml::Value = toml::from_str(&first).unwrap();
+    assert_eq!(
+        parsed["projects"][admitted.to_str().unwrap()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+    assert_eq!(parsed["projects"]["/other"]["trust_level"].as_str(), Some("trusted"));
+
+    admit_controlled_workspace_at(&config, &args).unwrap();
+    assert_eq!(fs::read_to_string(&config).unwrap(), first, "a second start changed the config");
+    // Only the seat's config.toml exists: no login file was created or touched.
+    let mut names: Vec<String> = fs::read_dir(&home)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["config.toml"]);
+}
+
+#[test]
+fn a_seat_start_creates_a_missing_config_and_trusts_only_the_last_work_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("codex-home").join("config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let first = tmp.path().join("first");
+    let last = tmp.path().join("last");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&last).unwrap();
+    let args = vec![
+        "-C".to_string(),
+        first.display().to_string(),
+        format!("--cd={}", last.display()),
+    ];
+
+    let admitted = admit_controlled_workspace_at(&config, &args).unwrap();
+
+    assert_eq!(admitted, fs::canonicalize(&last).unwrap());
+    let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    let projects = parsed["projects"].as_table().unwrap();
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    assert_eq!(
+        projects[admitted.to_str().unwrap()]["trust_level"].as_str(),
+        Some("trusted")
+    );
+}
+
+#[test]
+fn a_seat_start_with_a_missing_work_root_fails_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config.toml");
+    let args = vec![
+        "--cd".to_string(),
+        tmp.path().join("absent").display().to_string(),
+    ];
+
+    assert!(admit_controlled_workspace_at(&config, &args).is_err());
+    assert!(!config.exists());
+}

@@ -3320,6 +3320,7 @@ fn run_controlled_owned(
             insert_app_server_config_override(&mut server_args, projection.override_value)?;
         }
     }
+    admit_controlled_workspace_at(&crate::pretrust::codex_config_path()?, &codex_argv[1..])?;
     diagnostics.record("appServerStarting", json!({ "safeFallback": false }))?;
     let mut server = spawn_controlled_app_server(&codex_argv[0], &server_args, &socket_path, &log)?;
     let result = diagnostics
@@ -4553,6 +4554,18 @@ fn authored_bypasses_hook_trust(authored_args: &[String]) -> Result<bool> {
     Ok(authored_args[..boundary]
         .iter()
         .any(|argument| argument == "--dangerously-bypass-hook-trust"))
+}
+
+/// Mark the work root this seat's Codex will open as trusted in `config`, so a new seat starts at
+/// its first usable screen instead of Codex's "Do you trust this directory?" prompt. The root is the
+/// one the TUI and the hook review use (see [`controlled_hook_cwd`]). The config is the seat's own
+/// `$CODEX_HOME/config.toml`; only a `[projects."<root>"]` entry is appended when it is absent, every
+/// other entry stays, a second start changes nothing, and no login or `auth.json` is read or written.
+fn admit_controlled_workspace_at(config: &Path, authored_args: &[String]) -> Result<PathBuf> {
+    let workspace = controlled_hook_cwd(authored_args)?;
+    crate::pretrust::pretrust_codex_at(config, std::slice::from_ref(&workspace))
+        .with_context(|| format!("admitting Codex workspace {}", workspace.display()))?;
+    Ok(workspace)
 }
 
 /// Resolve the workspace whose non-managed hooks the remote TUI reviews before a resume.
