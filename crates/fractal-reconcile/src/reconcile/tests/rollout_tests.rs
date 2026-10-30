@@ -1012,6 +1012,7 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     seat.store
         .work_action(&origin, "claim", &crate::model::WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some(SUBJECT.into()),
             incarnation: Some("original-1".into()),
             summary: None,
