@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "evidence-sign records runner nix for a nix build of a check derivation, and scripts/nix-check-facts writes the facts for it (output path, NAR hash, references, daemon signatures, cache hit)",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change; CI configuration only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. Nothing reads these records to skip a check; no policy names kinds.nix yet."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. Required checks keep their names and outcomes. evidence-sign accepts one optional request key, runner, with the values wrapper (the default) and nix; every existing request is unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change; no nix record is published by anything yet."}
+}

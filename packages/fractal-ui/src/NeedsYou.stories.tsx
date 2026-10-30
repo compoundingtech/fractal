@@ -57,12 +57,33 @@ const assertBlockGap = async (target: HTMLElement) => {
 
 const meta = {
   title: 'Fractal/Plugins/Questions/Needs you',
+  excludeStories: ['scenarioExemptions'],
+  scenario: { _tag: 'contract-fixture', reason: 'Isolated needs-you framing and keyboard contracts use host-owned request fixtures.' },
   parameters: { layout: 'fullscreen' },
   argTypes: { scheme: { control: 'select', options: ['dark', 'light'] }, width: { control: 'select', options: [440, 1440] } },
   decorators: [(Story, context) => <main data-scheme={context.args.scheme ?? context.parameters.scheme ?? 'dark'} {...stylex.props(styles.root, ...baselineTheme, (context.args.scheme ?? context.parameters.scheme) === 'light' && lightTheme, (context.args.width ?? context.parameters.width) === 1440 ? styles.wide : styles.narrow)}><Story /></main>],
 } satisfies Meta<{ readonly scheme?: 'dark' | 'light'; readonly width?: 440 | 1440 }>
 export default meta
 type Story = StoryObj<typeof meta>
+
+export const scenarioExemptions = [
+  'CompositionFrames:contract-fixture',
+  'CompositionFramesDark1440:contract-fixture',
+  'CompositionFramesLight1440:contract-fixture',
+  'CompositionFramesLight440:contract-fixture',
+  'DockDimensions:contract-fixture',
+  'DockDimensionsDark1440:contract-fixture',
+  'DockDimensionsLight1440:contract-fixture',
+  'DockDimensionsLight440:contract-fixture',
+  'Inbox:contract-fixture',
+  'InboxDark1440:contract-fixture',
+  'InboxLight1440:contract-fixture',
+  'InboxLight440:contract-fixture',
+  'ScrollAttention:contract-fixture',
+  'ScrollAttentionDark1440:contract-fixture',
+  'ScrollAttentionLight1440:contract-fixture',
+  'ScrollAttentionLight440:contract-fixture',
+]
 
 export const DockDimensions: Story = {
   render: function DockDimensionsExample() {

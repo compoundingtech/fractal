@@ -21,6 +21,7 @@ globalThis.cancelAnimationFrame = clearTimeout
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const server = await createServer({ configFile: false, root: new URL('../../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], server: { middlewareMode: true } })
 const { Tooltip, Button } = await server.ssrLoadModule('/src/assistant-ui/composition/Controls.tsx')
+const { ChromeControl } = await server.ssrLoadModule('/src/assistant-ui/composition/ChromeControl.tsx')
 after(async () => { await server.close(); dom.window.close(); for (const [name, descriptor] of saved) { if (descriptor === undefined) Reflect.deleteProperty(globalThis, name); else Object.defineProperty(globalThis, name, descriptor) } })
 const wait = ms => act(async () => { await new Promise(resolve => setTimeout(resolve, ms)) })
 const tips = () => [...document.querySelectorAll('[role=tooltip]')]
@@ -65,5 +66,78 @@ test('main React Aria tooltip supports one open card, Escape and keyboard scroll
     await act(async () => first.focus())
     await wait(150)
     assert.deepEqual(tips().map(tip => tip.textContent), ['First'], 'a settling card cannot displace the newer focused card')
+  } finally { await act(async () => root.unmount()); container.remove() }
+})
+
+test('controlled acknowledgement and shortcut compose with the same tooltip and Escape', async () => {
+  const container = document.createElement('section'); document.body.append(container)
+  const root = createRoot(container)
+  const changes = []
+  function Acknowledgement() {
+    const [open, setOpen] = React.useState(true)
+    return React.createElement(Tooltip, { label: 'Copied', shortcut: 'Ctrl+C', isOpen: open, onOpenChange: value => { changes.push(value); setOpen(value) } }, React.createElement(Button, null, 'Copy'))
+  }
+  try {
+    await act(async () => root.render(React.createElement(Acknowledgement)))
+    await key(document.body, 'Tab')
+    await act(async () => container.querySelector('button').focus())
+    await wait(20)
+    assert.equal(tips().length, 1)
+    assert.equal(tips()[0].textContent, 'Copied Ctrl+C')
+    assert.equal(tips()[0].querySelector('kbd').textContent, 'Ctrl+C')
+    await key(container.querySelector('button'), 'Escape')
+    await wait(120)
+    assert.equal(tips().length, 0)
+    assert.ok(changes.includes(false), 'controlled owner receives dismissal')
+  } finally { await act(async () => root.unmount()); container.remove() }
+})
+
+test('chrome tooltips distinguish keyboard navigation from initial and restored focus', async () => {
+  const container = document.createElement('section'); document.body.append(container)
+  const root = createRoot(container)
+  try {
+    await key(document.body, 'Enter')
+    await act(async () => root.render(React.createElement(React.Fragment, null,
+      React.createElement(ChromeControl, { icon: 'chevrons-left', label: 'First chrome', ref: button => button?.focus() }),
+      React.createElement(ChromeControl, { icon: 'chevrons-left', label: 'Second chrome' }),
+    )))
+    const [first, second] = container.querySelectorAll('button')
+    await wait(20)
+    assert.equal(document.activeElement, first)
+    assert.equal(tips().length, 0, 'dialog initial focus must not open a tooltip')
+    await key(first, 'Tab')
+    await act(async () => second.focus())
+    await wait(20)
+    assert.deepEqual(tips().map(tip => tip.textContent), ['Second chrome'])
+    await key(second, 'Escape')
+    await wait(20)
+    assert.equal(tips().length, 0)
+    await act(async () => first.focus())
+    await wait(20)
+    assert.equal(tips().length, 0, 'programmatic restoration must not inherit keyboard modality')
+    await key(first, 'ArrowDown')
+    await act(async () => second.focus())
+    await wait(20)
+    assert.deepEqual(tips().map(tip => tip.textContent), ['Second chrome'])
+    await key(second, 'Escape')
+    await key(second, 'Tab')
+    await act(async () => second.dispatchEvent(new KeyboardEvent('keyup', { key: 'Tab', bubbles: true })))
+    await act(async () => first.focus())
+    await wait(20)
+    assert.equal(tips().length, 0, 'an unused navigation key must not authorize later programmatic focus')
+  } finally { await act(async () => root.unmount()); container.remove() }
+})
+
+test('leaving the document cancels unconsumed Tab intent before programmatic restoration', async () => {
+  const container = document.createElement('section'); document.body.append(container)
+  const root = createRoot(container)
+  try {
+    await act(async () => root.render(React.createElement(ChromeControl, { icon: 'chevrons-left', label: 'Restored chrome' })))
+    await key(document.body, 'Tab')
+    await act(async () => window.dispatchEvent(new Event('blur')))
+    await act(async () => container.querySelector('button').focus())
+    await wait(20)
+    assert.equal(document.activeElement, container.querySelector('button'))
+    assert.equal(tips().length, 0, 'a Tab whose keyup landed elsewhere must not disclose a restored control')
   } finally { await act(async () => root.unmount()); container.remove() }
 })

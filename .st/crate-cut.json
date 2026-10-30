@@ -1,0 +1,41 @@
+{
+  "order": [
+    "delivery",
+    "missions",
+    "seats",
+    "attention",
+    "evidence"
+  ],
+  "domains": {
+    "evidence": [
+      "store/(evidence|owned_sets|publication|publication_facts|published_views|terminal_gate_evidence)(\\.rs|/.*)",
+      "recorder_receipts\\.rs"
+    ],
+    "delivery": [
+      "store/(delivery|mailbox_changes|mailbox_lease|mailbox_wakes|message_bodies|message_point_qualification|message_subscriptions|agent_messages|conversation_reads|glasses|glass_heads|idle_mail|unread_mail|directive_notes|assistant_write|assistant_write_gate|agent_queue_values)(\\.rs|/.*)"
+    ],
+    "attention": [
+      "store/(attention|attention_ivm|attention_list|attention_snapshot|summary_list|owner_lists|published_list|card_fold|agent_view|work_summaries_ivm|client_summary)(\\.rs|/.*)",
+      "render\\.rs"
+    ],
+    "seats": [
+      "store/(seats|seat_status|retirements|limits|subagents|rollouts|revision_seats|stopped_seat_declaration_controls|roster_admission|roster_controls|harness_health_capture|harness_questions|usage_period|accounts|trace_principal|runtime_starts|stop_deferral)(\\.rs|/.*)",
+      "external_sessions\\.rs",
+      "rollout\\.rs",
+      "suspension\\.rs",
+      "sekrets_daemon\\.rs"
+    ],
+    "missions": [
+      "store/(missions|mission_deadline_probe|mission_eligibility|mission_ivm|mission_list|mission_provenance|person_work|work_list|adhoc_work|delegation|lanes|arrangements|coordination|step_labels|reconcile_work_context|declarations)(\\.rs|/.*)",
+      "graph\\.rs",
+      "references\\.rs"
+    ]
+  },
+  "crates": {
+    "attention": "fractal-attention",
+    "missions": "fractal-missions",
+    "delivery": "fractal-delivery",
+    "seats": "fractal-seats",
+    "evidence": "fractal-evidence"
+  }
+}

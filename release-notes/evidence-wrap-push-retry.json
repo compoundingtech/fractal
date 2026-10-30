@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "evidence-wrap --push pushes a record's refs again, up to 3 times with a 2 s and then 4 s backoff, when the remote answers them with a bare '[remote rejected] (failed)' (GitHub does now and then; the same ref goes up on the next push), instead of failing the check; a refusal that gives a reason still fails at once, and the failure now names every refused ref",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "What is signed, what is pushed and how the gate judges a note are unchanged."},
+  "compatibility": {"status": "none", "detail": "Only a bare 'failed' refusal is retried; rule refusals, non-fast-forwards and transport errors fail at once as before."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

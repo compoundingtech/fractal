@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Revising a schedule's owning mission run no longer misclassifies its new generation as an ownership move and indefinitely blocks stale-peer admission.",
+  "replay": { "status": "none", "detail": "No replay or backfill; existing catch-up and occurrence deduplication apply." },
+  "schema": { "status": "none", "detail": "No stored-state changes." },
+  "rules": { "status": "none", "detail": "No replication or retention rule changes." },
+  "compatibility": { "status": "changed", "detail": "A generation change with the same owning run and declaring step is a revision. Actual owning-run, declaring-step, primary-placement changes and retained standbys remain fail-closed for stale positive peer comparisons." },
+  "downtime": { "status": "none", "detail": "No live-state changes or activation included." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "changed", "detail": "Primary-only schedules revised in place can resume after a positive comparison becomes stale, subject to the existing startup and ownership barriers." }
+}

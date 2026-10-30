@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A terminal stream capability's attachment and current-head fence are chosen in canonical claim order, so a store that admits an attachment after the claim that consumed or detached it no longer treats the capability as current",
+  "replay": {"status": "none", "detail": "Read-path change only; no replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No schema or persistent data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
+  "compatibility": {"status": "none", "detail": "No protocol or API shape change. On a store whose claims for one attachment arrived out of write order, a consumed or detached capability is now refused, as it is on the writing gateway."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator actions or configuration changes."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new swap-back restrictions."}
+}

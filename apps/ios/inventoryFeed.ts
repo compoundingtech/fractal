@@ -1,5 +1,5 @@
-import { applyWindow, plainMessage, type CollectionFrame, type CollectionStream, type CollectionWindow, type Snapshot } from '../../clients/typescript/st3-client';
-import { inventoryRows, type InventoryLists, type InventoryName } from '@smalltalk/st3-views';
+import { applyWindow, plainMessage, type CollectionFrame, type CollectionStream, type CollectionWindow, type Snapshot } from '../../clients/typescript/fractal-client';
+import { inventoryRows, type InventoryLists, type InventoryName } from '@fractal/views';
 
 export type InventoryHandlers<K extends InventoryName> = {
   onRows: (rows: InventoryLists[K], hasMore: boolean, snapshot: Snapshot) => void;
@@ -67,7 +67,7 @@ export class InventoryFeed {
     if (!('id' in frame) || typeof frame.id !== 'string') return false;
     const follow = this.held.get(frame.id);
     if (!follow || !this.granted) return false;
-    if (frame.kind === 'snapshot' || frame.kind === 'changes') {
+    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection !== 'ordered-memberships') {
       const next = applyWindow(follow.window, frame);
       if (!next) { this.subscribe(frame.id, follow); return true; }
       follow.window = next; follow.issue = '';

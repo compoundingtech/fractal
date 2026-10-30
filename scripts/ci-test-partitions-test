@@ -25,10 +25,10 @@ def document(binary, matches, ignored=(), excluded=()):
     }}}})
 
 
-full = module.selected(document("workspace", ["same", "other"], ignored=["ignored"], excluded=["filtered"]) + "\n" + document("st2", ["same"]))
-assert full == {("workspace", "same"), ("workspace", "other"), ("st2", "same")}
-module.verify(full, {("workspace", "same")}, {("workspace", "other"), ("st2", "same")})
-for first, second in [(full, full), (set(), full), ({("workspace", "same")}, {("st2", "same")}),
+full = module.selected(document("workspace", ["same", "other"], ignored=["ignored"], excluded=["filtered"]) + "\n" + document("fractal-legacy-runner", ["same"]))
+assert full == {("workspace", "same"), ("workspace", "other"), ("fractal-legacy-runner", "same")}
+module.verify(full, {("workspace", "same")}, {("workspace", "other"), ("fractal-legacy-runner", "same")})
+for first, second in [(full, full), (set(), full), ({("workspace", "same")}, {("fractal-legacy-runner", "same")}),
                        ({("workspace", "same")}, full - {("workspace", "same")} | {("new", "extra")})]:
     try:
         module.verify(full, first, second)

@@ -10,6 +10,7 @@ st conversations reply message/ID -m "Thanks, noted." --kind silent --as agent/e
 st conversations send agent/example/builder -m "Which branch?" --kind wake --as agent/example/reviewer
 ```
 
+`--fyi` is the same as `--kind silent` on send and reply; it cannot be combined with `--kind`.
 The client API's `message.send` takes `kind: "silent" | "wake"`; omission means wake.
 There is no per-seat wake policy, question tag, question-thread inference or content classifier.
 A reply independently defaults to wake, including an answer to a silent message. To keep a
@@ -60,6 +61,12 @@ awaits each bootstrap job on the existing FIFO writer, pauses 100 milliseconds b
 when complete; per-claim projections cannot multiply the historical budget. `complete: false` means bootstrap is unfinished, so collectors publish no ratio.
 Reads never advance bootstrap. The factory SLO timer divides each count by merges in the
 rolling day and publishes informational values; zero merges gives no ratio.
+
+Beside the counts, `merged_pull_requests` counts the pull requests this daemon observed merging in the
+period, from the `merged_at` of each `vcs.pull-request` observation, once per pull request; one
+merged in a repository the daemon does not observe is not counted. `agent_to_agent_per_merged_pull_request`
+divides the two, and is null while `complete` is false or nothing merged. `st usage` prints both on
+its `MESSAGES` line, so coordination cost shows beside spend.
 
 ## Count bootstrap
 

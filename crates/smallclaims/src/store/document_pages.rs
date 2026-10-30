@@ -152,6 +152,10 @@ pub(super) fn read(
         (prefix, cursor) => prefix.or(cursor),
     };
     let upper = prefix.and_then(prefix_end);
+    // A name's current-only page has at most one row: (name, hash) is the primary key and
+    // only the latest hash matches. A larger limit finds that row and then walks every older
+    // version of the name looking for a second one that cannot exist.
+    let limit = if name.is_some() && !history { limit.min(1) } else { limit };
     let sql = query(
         name.is_some(),
         prefix.is_some(),
@@ -161,7 +165,7 @@ pub(super) fn read(
         after.is_some(),
     );
     let connection = store.readers.get();
-    let mut statement = connection.prepare_cached(&sql)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2f4c6110e554 owner=smallclaims::store::document_pages TODO=trace-statement-and-value-representation */ &sql)?;
     statement
         .query_map(
             params![name, prefix, cursor_name, cursor_index, lower, upper, limit],

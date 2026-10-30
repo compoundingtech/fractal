@@ -426,6 +426,24 @@ pub enum CheckpointAction {
     SweptTrimmedClaimRows {
         rows: usize,
     },
+    /// This node holds envelopes from before the cut that it has not validated, so it neither
+    /// seals nor proves the checkpoint until they are. Every pass that holds back says so, with
+    /// the oldest such envelope, so a node whose envelopes never validate does not stall every
+    /// checkpoint silently.
+    HeldBack {
+        checkpoint: String,
+        pending: u64,
+        oldest_writer: String,
+        oldest_sequence: u64,
+    },
+}
+
+/// Envelopes from before a cut that this node holds but has not validated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldEnvelopes {
+    pub pending: u64,
+    pub oldest_writer: String,
+    pub oldest_sequence: u64,
 }
 
 /// `st replication checkpoint status`: the newest stable checkpoint and the one being agreed.
@@ -584,7 +602,7 @@ impl Store {
     /// Every admitted `checkpoint.*` claim, in canonical order.
     pub fn checkpoint_claims(&self) -> Result<Vec<CheckpointClaim>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he39b0f08fa41 owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ &format!(
             "SELECT {CLAIM_COLUMNS} FROM claims JOIN batches ON batches.id=claims.batch_id
              WHERE claims.kind IN ('{CHECKPOINT_SEALED}', '{CHECKPOINT_VERIFIED}',
                                    '{CHECKPOINT_EXCUSED}')
@@ -621,10 +639,28 @@ impl Store {
     ) -> Result<BTreeSet<String>> {
         let mut known = {
             let connection = self.readers.get();
+            // Both primary keys start with the writer, so step from one writer to the next with
+            // a seek each. A DISTINCT reads every envelope's index entry instead, which on a large
+            // node is hundreds of megabytes a call.
             connection
                 .prepare_cached(
-                    "SELECT DISTINCT writer FROM replica_envelopes
-                     UNION SELECT DISTINCT writer FROM checkpoint_envelopes",
+                    /* sqlite-large-value: allow-for-now lv-h0c33f43323e7 owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ "WITH RECURSIVE
+                         replica(writer) AS (
+                             SELECT MIN(writer) FROM replica_envelopes
+                             UNION ALL
+                             SELECT (SELECT MIN(writer) FROM replica_envelopes
+                                     WHERE writer>replica.writer)
+                             FROM replica WHERE replica.writer IS NOT NULL
+                         ),
+                         checkpoint(writer) AS (
+                             SELECT MIN(writer) FROM checkpoint_envelopes
+                             UNION ALL
+                             SELECT (SELECT MIN(writer) FROM checkpoint_envelopes
+                                     WHERE writer>checkpoint.writer)
+                             FROM checkpoint WHERE checkpoint.writer IS NOT NULL
+                         )
+                     SELECT writer FROM replica WHERE writer IS NOT NULL
+                     UNION SELECT writer FROM checkpoint WHERE writer IS NOT NULL",
                 )?
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?
@@ -692,7 +728,7 @@ impl Store {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, sealed_digest,
+            /* sqlite-large-value: allow-for-now lv-h7470bc661492 owner=smallclaims::store::checkpoint_agreement TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, sealed_digest,
                                      drop_digest, updated_at_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET state=excluded.state, seal_rowid=excluded.seal_rowid,
@@ -830,7 +866,7 @@ impl Store {
         detail.as_object_mut().ok_or_else(|| anyhow::anyhow!("checkpoint detail is not an object"))?
             .insert("proof_failures".into(), serde_json::to_value(failures)?);
         transaction.execute(
-            "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, sealed_digest,
+            /* sqlite-large-value: allow-for-now lv-hb8994accebf5 owner=smallclaims::store::checkpoint_agreement TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, seal_rowid, sealed_digest,
                                      drop_digest, detail, updated_at_unix_ms)
              VALUES (?1, ?2, 'sealed', ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET detail=excluded.detail,
@@ -862,6 +898,13 @@ impl Store {
             actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
         }
         if self.replication_catching_up() {
+            return Ok(actions);
+        }
+        // A member that trims locally takes no part in checkpoints: it finishes a trim it had
+        // already committed, then trims its own due cut.
+        if self.trims_locally() {
+            self.finish_interrupted_trims(&mut actions)?;
+            self.trim_local_cut(context, &mut actions)?;
             return Ok(actions);
         }
         let claims = self.checkpoint_claims()?;
@@ -896,7 +939,25 @@ impl Store {
         participants.insert(self.origin.clone());
         let verified = first_verifications(&claims, &checkpoint);
         let seals = newest_seals(&claims, &checkpoint);
+        // An envelope this node holds but has not validated is in its sealed identities without
+        // its claims, so its proof could not agree with a node that admitted them: sealing or
+        // proving now would only spend a proof on a checkpoint that cannot become stable.
+        if !verified.contains_key(&self.origin)
+            && let Some(held) = self.unvalidated_envelopes_before(cut)?
+        {
+            actions.push(CheckpointAction::HeldBack {
+                checkpoint,
+                pending: held.pending,
+                oldest_writer: held.oldest_writer,
+                oldest_sequence: held.oldest_sequence,
+            });
+            return Ok(actions);
+        }
         if !verified.contains_key(&self.origin) {
+            // Register the cut and seal row with the capture guard, as a capture does, so its
+            // triggers fence the history the seal reads and the next pass reuses the digest
+            // until that history changes. It writes only when a bound grows.
+            self.register_checkpoint_capture(cut, None)?;
             let sealed = self.checkpoint_sealed_identities(cut, None)?;
             let terms = SealTerms {
                 cut_unix_ms: cut,
@@ -937,6 +998,33 @@ impl Store {
             }
         }
         Ok(actions)
+    }
+
+    /// The envelopes dated before `cut` that this node holds but has not validated, pending or
+    /// degraded, whose claims are therefore not admitted here: how many, and the oldest. None
+    /// when there are none.
+    pub fn unvalidated_envelopes_before(&self, cut: u128) -> Result<Option<HeldEnvelopes>> {
+        let cut = i64::try_from(cut)?;
+        // One statement, so it needs no snapshot of its own: a waiting seal pass runs it every
+        // few minutes, and the identity-reuse test bounds what such a pass costs.
+        Ok(self
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) OVER (), writer, sequence FROM replica_envelopes
+                 WHERE receipt_state IN ('pending','degraded')
+                   AND CAST(accepted_at_unix_ms AS INTEGER) < ?1
+                 ORDER BY CAST(accepted_at_unix_ms AS INTEGER), writer, sequence LIMIT 1",
+                [cut],
+                |row| {
+                    Ok(HeldEnvelopes {
+                        pending: row.get(0)?,
+                        oldest_writer: row.get(1)?,
+                        oldest_sequence: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn verify_checkpoint(
@@ -1050,19 +1138,32 @@ impl Store {
     /// A person looked at a trim that stopped because the graph would change. The rows stay
     /// as they are, and checkpoints go on from the next one.
     pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+        self.resume_checkpoints_allowing(actor, reason, None)
+    }
+
+    /// As [`Self::resume_checkpoints`], and on a member that trims locally `agent` may resume
+    /// too: the agent its stop alerts (`[trim] notify`), which owns the fault. Resuming past a
+    /// stop is the safety decision, so no other agent may.
+    pub fn resume_checkpoints_allowing(
+        &self,
+        actor: &str,
+        reason: &str,
+        agent: Option<&str>,
+    ) -> Result<(), St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
-        if !actor.starts_with("person/") || reason.trim().is_empty() {
+        let allowed = actor.starts_with("person/") || (self.trims_locally() && agent == Some(actor.as_str()));
+        if !allowed || reason.trim().is_empty() {
             return Err(St3Error::new(
                 "invalid-checkpoint-resume",
-                "a person resumes checkpoints, with a reason",
+                "a person resumes checkpoints, with a reason (or, where trim is local, the [trim] notify agent)",
             ));
         }
         let mut connection = self.connection.write();
         let transaction = connection.transaction().map_err(internal)?;
         transaction
             .execute(
-                "UPDATE checkpoints SET state='set-aside', detail=?1, updated_at_unix_ms=?2
+                /* sqlite-large-value: allow-for-now lv-h7e11b486a2fc owner=smallclaims::store::checkpoint_agreement TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='set-aside', detail=?1, updated_at_unix_ms=?2
                  WHERE state='graph-changed'",
                 params![
                     json!({"resumed_by": actor, "reason": reason}).to_string(),
@@ -1236,9 +1337,9 @@ impl Store {
     /// clocks or days passing sets it; nothing else does.
     pub fn set_write_clock_offset(&self, offset_ms: i64) -> Result<()> {
         let connection = self.connection.write();
-        connection.execute("DELETE FROM temp.write_clock", [])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hf7027d3cb134 owner=smallclaims::store::checkpoint_agreement TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.write_clock", [])?;
         connection.execute(
-            "INSERT INTO temp.write_clock(offset_ms) VALUES (?1)",
+            /* sqlite-large-value: allow-for-now lv-h4da262ac8192 owner=smallclaims::store::checkpoint_agreement TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.write_clock(offset_ms) VALUES (?1)",
             [offset_ms],
         )?;
         Ok(())
@@ -1249,9 +1350,9 @@ impl Store {
     /// same claims however fast it runs. Nothing else sets it.
     pub fn set_write_clock_at(&self, at_unix_ms: u128) -> Result<()> {
         let connection = self.connection.write();
-        connection.execute("DELETE FROM temp.write_clock", [])?;
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h956c01951452 owner=smallclaims::store::checkpoint_agreement TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM temp.write_clock", [])?;
         connection.execute(
-            "INSERT INTO temp.write_clock(offset_ms, at_ms) VALUES (0, ?1)",
+            /* sqlite-large-value: allow-for-now lv-hf41fabef76b6 owner=smallclaims::store::checkpoint_agreement TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO temp.write_clock(offset_ms, at_ms) VALUES (0, ?1)",
             [i64::try_from(at_unix_ms)?],
         )?;
         Ok(())
@@ -1274,17 +1375,17 @@ pub fn terms_key(terms: &SealTerms) -> String {
 pub fn write_time(connection: &Connection, origin: &str) -> Result<u128> {
     let floor: Option<i64> = connection
         .prepare_cached("SELECT MAX(cut_unix_ms) FROM checkpoints")?
-        .query_row([], |row| row.get(0))?;
+        .query_row(/* sqlite-large-value: allow-for-now lv-h493b95db430a owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
     let newest_own: Option<String> = connection
         .prepare_cached(
             "SELECT accepted_at_unix_ms FROM batches WHERE origin=?1
              ORDER BY replica_sequence DESC LIMIT 1",
         )?
-        .query_row([origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-hedbb3482a27f owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
         .optional()?;
     let (offset, at): (i64, Option<i64>) = connection
         .prepare_cached("SELECT offset_ms, at_ms FROM temp.write_clock")
-        .and_then(|mut statement| statement.query_row([], |row| Ok((row.get(0)?, row.get(1)?))))
+        .and_then(|mut statement| statement.query_row(/* sqlite-large-value: allow-for-now lv-h34c3494cd92e owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ [], |row| Ok((row.get(0)?, row.get(1)?))))
         .unwrap_or((0, None));
     let now = match at {
         Some(at) => i128::from(at),

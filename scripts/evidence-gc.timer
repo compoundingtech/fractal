@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily evidence GC at 03:40 UTC, before the daily long-lane run
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

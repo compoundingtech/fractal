@@ -8,7 +8,7 @@ import { useDataSource } from '../data/react.tsx'
 import { DOCUMENT_REF, documentVersion, type DocumentRead } from './document-port.ts'
 import { documentReferences } from './DocumentLink.tsx'
 
-// An st document in a workspace tab: read once when opened, drawn as Markdown with its version,
+// A Fractal document in a workspace tab: read once when opened, drawn as Markdown with its version,
 // and every `doc/…` it links to opens in a tab of its own. "Read again" fetches the newest.
 
 type State = { readonly _tag: 'Reading' } | DocumentRead
@@ -60,7 +60,7 @@ export const DocumentPane = ({
         ) : state._tag === 'Unavailable' ? (
           <p role="status" {...stylex.props(styles.notice)}>{state.detail}</p>
         ) : state._tag === 'Binary' ? (
-          <p role="status" {...stylex.props(styles.notice)}>This document is not text ({state.size} bytes). Read it with st documents get {state.reference}.</p>
+          <p role="status" {...stylex.props(styles.notice)}>This document is not text ({state.size} bytes). Read it with fractal documents get {state.reference}.</p>
         ) : (
           <div {...stylex.props(styles.column)}><Markdown text={state.text} renderInlineReference={reference} /></div>
         )}

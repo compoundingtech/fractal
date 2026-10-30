@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Finish native transcript design follow-ups: share one icon-size constant with first-line alignment and top-align harness story grid content.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage, wire or in-memory Notice schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule or digest changes." },
+  "compatibility": { "status": "none", "detail": "Icon size and first-line centering remain unchanged. The Notice projection, rendering and content-revision paths are unchanged from main." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "No persisted data changes; nothing to recover." }
+}

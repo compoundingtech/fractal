@@ -290,6 +290,40 @@
           {
             "id": "agent/example/atlas/builder",
             "name": "Atlas Builder"
+          }
+        ],
+        "hosts": [
+          {
+            "id": "host/meadow",
+            "name": "meadow"
+          }
+        ],
+        "people": [
+          {
+            "id": "person/ada",
+            "name": "Ada"
+          }
+        ]
+      },
+      "id": "transcript-families",
+      "narrative": "An Atlas builder inspects a release report using visible reasoning and native structured tools, loses an export run, then cancels its retry before summarizing the retained evidence.",
+      "seed": 25,
+      "slices": {
+        "attention": "transcript-families/attention.json",
+        "conversation": "transcript-families/conversation.json",
+        "details": "transcript-families/details.json",
+        "roster": "transcript-families/roster.json",
+        "sync": "transcript-families/sync.json",
+        "terminal": "transcript-families/terminal.json"
+      },
+      "title": "Transcript families"
+    },
+    {
+      "cast": {
+        "agents": [
+          {
+            "id": "agent/example/atlas/builder",
+            "name": "Atlas Builder"
           },
           {
             "id": "agent/example/atlas/reviewer",
@@ -865,6 +899,60 @@
         "terminal": "failed-sync-capability-absent/terminal.json"
       },
       "title": "Failed sync: capability-absent"
+    },
+    {
+      "cast": {
+        "agents": [
+          {
+            "id": "agent/example/atlas/builder",
+            "name": "Atlas Builder"
+          },
+          {
+            "id": "agent/example/atlas/reviewer",
+            "name": "Atlas Reviewer"
+          },
+          {
+            "id": "agent/example/atlas/migrator",
+            "name": "Atlas Migrator"
+          },
+          {
+            "id": "agent/example/atlas/docs",
+            "name": "Atlas Docs"
+          }
+        ],
+        "hosts": [
+          {
+            "id": "host/meadow",
+            "name": "meadow"
+          },
+          {
+            "id": "host/foundry",
+            "name": "foundry"
+          }
+        ],
+        "people": [
+          {
+            "id": "person/ada",
+            "name": "Ada"
+          },
+          {
+            "id": "person/robin",
+            "name": "Robin"
+          }
+        ]
+      },
+      "id": "failed-sync-arrangements-absent",
+      "narrative": "The refactor fleet stays readable while sidebar discovery refuses the ungranted arrangements feature.",
+      "seed": 1,
+      "slices": {
+        "attention": "failed-sync-arrangements-absent/attention.json",
+        "conversation": "failed-sync-arrangements-absent/conversation.json",
+        "details": "failed-sync-arrangements-absent/details.json",
+        "roster": "failed-sync-arrangements-absent/roster.json",
+        "sync": "failed-sync-arrangements-absent/sync.json",
+        "terminal": "failed-sync-arrangements-absent/terminal.json"
+      },
+      "title": "Failed sync: arrangements-absent"
     },
     {
       "cast": {

@@ -75,8 +75,8 @@ def main():
   try:
    machine.start()
    if not run.install(False): return 1
-   machine.send(args.claude.read_bytes(),"/home/ada/smalltalk-install/claude-native")
-   r=run.execute("Install native Claude without host auth","mkdir -p ~/.local/bin ~/plain-work; install -m755 ~/smalltalk-install/claude-native ~/.local/bin/claude; ~/.local/bin/claude --version")
+   machine.send(args.claude.read_bytes(),"/home/ada/fractal-install/claude-native")
+   r=run.execute("Install native Claude without host auth","mkdir -p ~/.local/bin ~/plain-work; install -m755 ~/fractal-install/claude-native ~/.local/bin/claude; ~/.local/bin/claude --version")
    if not run.check("native-claude",r["exit"]==0,"actual Claude binary copied; no credentials/settings copied"): return 1
    r=run.execute("Setup without any provider seat",shlex.join([run.st,"setup","--person","ada","--node","studio","--yes","--harness","none","--service","true"]))
    if not run.check("plain-setup",r["exit"]==0,"configured actual daemon without creating an assistant/provider seat"): return 1

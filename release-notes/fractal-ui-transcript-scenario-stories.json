@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Transcript adds separate catalog-driven stories for generic tool calls, native structured results, reasoning, streaming revisions, failed runs and cancelled runs, with light variants. The scenario harness uses the live native timeline projection and retains semantic lifecycle evidence. Streaming plays advance the kit's manual clock and assert the final revision replaces the initial text in exactly one row.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Storybook-only projection and story coverage; existing Transcript contract fixtures and public component contracts are unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

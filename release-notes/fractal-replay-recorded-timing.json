@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Align the Fractal Web replay browser gate with recorded onboarding frame timing",
+  "replay": {
+    "status": "none",
+    "detail": "Only browser gate assertions change; production replay delivery and recorded scenario frames are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema, index or trigger changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No production admission, authority or transaction guard changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No production API or response changes; the test follows the existing recorded onboarding boundaries."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Test-only change with no migration or runtime deployment requirement."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No production state or recovery path changes."
+  }
+}

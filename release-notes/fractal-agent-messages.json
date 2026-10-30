@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fractal presents agent messages with explicit sender and recipient context and folds outgoing delivery receipts into expandable rows.",
+  "replay": {"status": "none", "detail": "Presentation only; recorded messages are unchanged."},
+  "schema": {"status": "none", "detail": "No persisted schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Uses existing message and delivery observations without inferring missing receipts."},
+  "downtime": {"status": "none", "detail": "No service interruption required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Revert the presentation change."}
+}

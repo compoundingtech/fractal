@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Changed: list locally replicated schedule declarations with bounded pages and explicit local knowledge.",
+  "replay": {
+    "status": "none",
+    "detail": "No projection replay or recovery admission change; reads the existing applied desired projection."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database DDL, stored kind, index, meta, migration or payload admission change. Materialization/page limits apply only to this reader."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint/rules change or scheduler, role, arming, heartbeat, occurrence identity or catch-up change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive schedules.list GET /v1/client/schedules and Rust/TS/Swift models/methods under st3.client.v0; st/fractal schedules ls. Uses existing read.declarations plus read.projections; no new scope or grants. Anonymous local and limited observation-paired sessions remain denied; existing devices/tokens retain recorded scopes. Old servers answer unsupported, old clients unaffected. Only raw standby-node presence is exposed until the separate standby implementation lands. Knowledge age is last direct exchange, never freshness/completeness/host-down authority; bounded coverage is configured peers and page hosts only. Exact-head generated contracts and client compatibility remain to be verified."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No extra interruption required by this declaration read; no deployment or measured restart claim."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade the serving member to use schedules.list. Use existing declaration-read authority, explicitly follow one-page cursors, and read the coverage/age limits in docs/st3/schedules-list.md. No device, permission, state or identity migration."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No new stored representation to undo; older binaries retain their existing behavior and do not support this new read."
+  }
+}

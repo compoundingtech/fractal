@@ -1,4 +1,4 @@
-import type { TerminalLine } from '@smalltalk/st3-client/schema'
+import type { TerminalLine } from '@fractal/client/schema'
 
 /** Presentation window, not a producer wire DTO. Only explicit main-buffer history belongs here. */
 export interface HistoryWindow {

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A read-only script reports the evidence gate's SLO counters: satisfied by existing notes by producer, and produced-but-not-verified",
+  "replay": {"status": "none", "detail": "No daemon replay change."},
+  "schema": {"status": "none", "detail": "No daemon claim or portable record change."},
+  "rules": {"status": "none", "detail": "scripts/ci-evidence-slo only reads finished Workspace CI runs through GitHub's API and prints counters; no workflow, policy, gate or verifier changes and no job is skipped or rejected."},
+  "compatibility": {"status": "none", "detail": "A new script and its test (run in the genie-freshness list); nothing else changes."},
+  "downtime": {"status": "none", "detail": "No daemon downtime required."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting removes the script; no state is written."}
+}

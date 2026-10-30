@@ -7,10 +7,18 @@
 //! store), each holder's writer holds over the last hour in five-minute slots, and the last 64
 //! writer holds and 64 read transactions over their target. A read under its target costs one
 //! clock read and is not attributed.
+//!
+//! A lend asked for inside `Stages::begin` also says where its hold went: each stage its borrower
+//! entered, and what no stage covers, which is the handoff between the writer thread and the
+//! borrower. Other holds carry no stages. Stages never overlap: entering one, including through
+//! `stage` from code the borrower calls, pauses the one it interrupts, so the stages and the
+//! unattributed rest add up to the hold. A staged lend also counts the aggregates it rebuilt and
+//! their claims, by the stage that rebuilt them.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::Location;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,6 +36,9 @@ const SLOTS: u64 = 12;
 const HOUR: Duration = Duration::from_secs(SLOT_SECONDS * SLOTS);
 /// Holders reported, by total hold time over the hour.
 const REPORTED: usize = 16;
+/// A writer hold longer than this logs one line naming its holder, so a stall can be attributed
+/// from the log alone.
+const LOGGED_HOLD: Duration = Duration::from_secs(1);
 
 /// Who asked for the writer or a read transaction. One pointer, so a queued write stays small.
 #[derive(Clone, Debug)]
@@ -40,6 +51,12 @@ struct Asked {
     /// The client that sent the request, when known.
     client: Option<Arc<str>>,
     at: &'static Location<'static>,
+    /// When it asked, so a hold can say how long its holder waited for the writer.
+    asked: Instant,
+    /// The `longest_during` or `holds_during` scope this thread was in when it asked.
+    observer: Option<Arc<Observed>>,
+    /// The `Stages` scope this thread was in when it asked.
+    stages: Option<Arc<Mutex<StageClock>>>,
 }
 
 impl Holder {
@@ -57,7 +74,16 @@ impl Holder {
                 None,
             ),
         };
-        Self(Arc::new(Asked { label, client, at }))
+        let observer = OBSERVER.with(|observer| observer.borrow().clone());
+        let stages = STAGES.with(|stages| stages.borrow().clone());
+        Self(Arc::new(Asked {
+            label,
+            client,
+            at,
+            asked: Instant::now(),
+            observer,
+            stages,
+        }))
     }
 
     fn json(&self) -> Value {
@@ -101,6 +127,17 @@ struct Current {
     writes: usize,
 }
 
+impl Current {
+    /// The stage a staged lend's borrower is in now.
+    fn stage(&self) -> Option<&'static str> {
+        if self.kind != HoldKind::Lend {
+            return None;
+        }
+        let clock = self.holder.0.stages.as_ref()?;
+        clock.lock().unwrap_or_else(PoisonError::into_inner).open.map(|(stage, _)| stage)
+    }
+}
+
 struct Long {
     holder: Holder,
     /// `None` for a read transaction.
@@ -110,6 +147,10 @@ struct Long {
     held: Duration,
     writes: usize,
     longest_write: Duration,
+    /// A staged lend's time by stage, in the order first entered.
+    stages: Option<Vec<(&'static str, Duration)>>,
+    /// A staged lend's rebuilt aggregates and their claims, by stage.
+    rebuilt: Vec<(&'static str, Rebuilt)>,
 }
 
 #[derive(Default)]
@@ -119,6 +160,8 @@ struct Record {
     holders: BTreeMap<Arc<str>, Vec<Slot>>,
     long_holds: VecDeque<Long>,
     long_reads: VecDeque<Long>,
+    /// The `WaitWatch`es open now.
+    watchers: Vec<std::sync::Weak<Mutex<Watched>>>,
 }
 
 fn us(duration: Duration) -> u64 {
@@ -143,7 +186,7 @@ fn push(ring: &mut VecDeque<Long>, long: Long) {
 }
 
 impl Record {
-    fn held(&mut self, now: Instant, wall_ms: u64, hold: &WriterHold, held: Duration, over: bool) {
+    fn held(&mut self, now: Instant, wall_ms: u64, hold: &mut WriterHold, held: Duration, over: bool) {
         let holder = hold.holder();
         let epoch = now.saturating_duration_since(super::origin()).as_secs() / SLOT_SECONDS;
         let label = if self.holders.len() < HOLDERS || self.holders.contains_key(&holder.0.label) {
@@ -166,6 +209,19 @@ impl Record {
         slot.over += u64::from(over);
         slot.total_us = slot.total_us.saturating_add(us(held));
         slot.max_us = slot.max_us.max(us(held));
+        self.watchers.retain(|watcher| watcher.strong_count() > 0);
+        // A hold ends on its writer's thread.
+        let writer = std::thread::current().id();
+        for watcher in self.watchers.iter().filter_map(std::sync::Weak::upgrade) {
+            let mut watched = watcher.lock().unwrap_or_else(PoisonError::into_inner);
+            if watched.writer != writer {
+                continue;
+            }
+            watched.holds += 1;
+            if watched.longest.as_ref().is_none_or(|(_, _, longest)| held > *longest) {
+                watched.longest = Some((holder.clone(), hold.kind, held));
+            }
+        }
         if over {
             push(&mut self.long_holds, Long {
                 holder: holder.clone(),
@@ -175,6 +231,8 @@ impl Record {
                 held,
                 writes: hold.writes,
                 longest_write: hold.longest.as_ref().map_or(Duration::ZERO, |(_, took)| *took),
+                stages: hold.stages.take(),
+                rebuilt: std::mem::take(&mut hold.rebuilt),
             });
         }
     }
@@ -188,6 +246,8 @@ impl Record {
             held,
             writes: 0,
             longest_write: Duration::ZERO,
+            stages: None,
+            rebuilt: Vec::new(),
         });
     }
 
@@ -235,6 +295,18 @@ impl Record {
                         row["writes"] = json!(long.writes);
                         row["longest_write_ms"] = json!(ms(long.longest_write));
                     }
+                    if let Some(stages) = &long.stages {
+                        let staged = stages.iter().map(|(_, spent)| *spent).sum::<Duration>();
+                        row["stages"] = stages.iter().map(|(stage, spent)| ((*stage).to_owned(), json!(ms(*spent)))).collect::<Value>();
+                        row["unattributed_ms"] = json!(ms(long.held.saturating_sub(staged)));
+                    }
+                    if !long.rebuilt.is_empty() {
+                        row["rebuilt"] = long
+                            .rebuilt
+                            .iter()
+                            .map(|(stage, rebuilt)| ((*stage).to_owned(), rebuilt.json()))
+                            .collect::<Value>();
+                    }
                     row
                 })
                 .collect::<Vec<_>>()
@@ -250,6 +322,9 @@ impl Record {
                 row["started_unix_ms"] = json!(wall_ms.saturating_sub(us(held) / 1000));
                 row["held_ms"] = json!(ms(held));
                 row["writes"] = json!(current.writes);
+                if let Some(stage) = current.stage() {
+                    row["stage"] = json!(stage);
+                }
                 row
             })
             .collect::<Vec<_>>();
@@ -281,6 +356,10 @@ pub struct WriterHold {
     first: Holder,
     longest: Option<(Holder, Duration)>,
     writes: usize,
+    /// A staged lend's stages, closed when the hold ends.
+    stages: Option<Vec<(&'static str, Duration)>>,
+    /// A staged lend's rebuilt aggregates, taken when the hold ends.
+    rebuilt: Vec<(&'static str, Rebuilt)>,
 }
 
 impl WriterHold {
@@ -300,6 +379,8 @@ impl WriterHold {
             first: holder.clone(),
             longest: None,
             writes: 0,
+            stages: None,
+            rebuilt: Vec::new(),
         }
     }
 
@@ -325,11 +406,58 @@ impl WriterHold {
     fn holder(&self) -> &Holder {
         self.longest.as_ref().map_or(&self.first, |(holder, _)| holder)
     }
+
+    /// Log one line for a hold over `LOGGED_HOLD`: who held the writer (a batch's longest write, or
+    /// a lend's borrower), for how long, and how long that holder waited to get it.
+    fn log_if_long(&self, held: Duration) {
+        if held <= LOGGED_HOLD {
+            return;
+        }
+        let holder = &self.holder().0;
+        let stages = self.stages.as_ref().map(|stages| {
+            stages.iter().map(|(stage, spent)| format!("{stage}={:.0}ms", ms(*spent))).collect::<Vec<_>>().join(",")
+        });
+        tracing::warn!(
+            holder = &*holder.label,
+            client = holder.client.as_deref().unwrap_or("-"),
+            at = %format_args!("{}:{}", holder.at.file(), holder.at.line()),
+            kind = self.kind.name(),
+            held_ms = ms(held).round() as u64,
+            waited_ms = ms(self.started.saturating_duration_since(holder.asked)).round() as u64,
+            writes = self.writes,
+            stages = stages.as_deref().unwrap_or("-"),
+            "a write held the store's writer over 1 s",
+        );
+    }
 }
 
 impl Drop for WriterHold {
     fn drop(&mut self) {
-        let held = self.started.elapsed();
+        let ended = Instant::now();
+        let held = ended.saturating_duration_since(self.started);
+        // The borrower has given the connection back, so its open stage ends with the hold.
+        if self.kind == HoldKind::Lend
+            && let Some(clock) = &self.first.0.stages
+        {
+            let mut clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+            self.stages = Some(clock.close(ended));
+            self.rebuilt = clock.rebuilt.clone();
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                let mut recent = RECENT_STAGED.lock().unwrap_or_else(PoisonError::into_inner);
+                if recent.len() == LONG {
+                    recent.pop_front();
+                }
+                recent.push_back((
+                    self.stages.clone().unwrap_or_default(),
+                    self.rebuilt.clone(),
+                ));
+            }
+        }
+        if let Some(observer) = &self.holder().0.observer {
+            observer.longest.fetch_max(us(held), Ordering::Relaxed);
+        }
+        self.log_if_long(held);
         let over = super::record_store(StoreWork::WriterHold, held);
         let now = Instant::now();
         let wall = unix_ms();
@@ -369,6 +497,263 @@ impl Drop for ReadHold {
     }
 }
 
+thread_local! {static OBSERVER: RefCell<Option<Arc<Observed>>> = const {RefCell::new(None)};}
+
+/// What a `holds_during` scope saw.
+#[derive(Debug, Default)]
+pub struct Observed {
+    /// The longest writer hold, in microseconds.
+    longest: AtomicU64,
+    /// What each paged writer hold covered, in the order the holds ended (`covered`).
+    pages: Mutex<Vec<(&'static str, usize)>>,
+}
+
+/// The writer holds work this thread asked for during a `holds_during` scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holds {
+    /// The longest one, on the wall clock.
+    pub longest: Duration,
+    /// What each hold of a paged bulk path covered, as that path reported it: the unit (claims
+    /// sealed, envelopes received or admitted, claims projected, repairs applied) and how many.
+    pub pages: Vec<(&'static str, usize)>,
+}
+
+impl Holds {
+    /// The counts the holds reported in `unit`, one per hold.
+    pub fn pages_of(&self, unit: &str) -> Vec<usize> {
+        self.pages.iter().filter(|(of, _)| *of == unit).map(|(_, count)| *count).collect()
+    }
+}
+
+/// Run `work`, and return with its result the longest writer hold charged to work this thread
+/// asked for during it. Unlike the report, it does not depend on how many other holders the
+/// process has, so a test can bound one path while others run beside it.
+pub fn longest_during<T>(work: impl FnOnce() -> T) -> (T, Duration) {
+    let (result, holds) = holds_during(work);
+    (result, holds.longest)
+}
+
+/// `longest_during`, with what each paged hold covered.
+pub fn holds_during<T>(work: impl FnOnce() -> T) -> (T, Holds) {
+    struct Restore(Option<Arc<Observed>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            OBSERVER.with(|observer| *observer.borrow_mut() = previous);
+        }
+    }
+    let observed = Arc::new(Observed::default());
+    let _restore = Restore(OBSERVER.with(|observer| observer.borrow_mut().replace(observed.clone())));
+    let result = work();
+    let pages = std::mem::take(&mut *observed.pages.lock().unwrap_or_else(PoisonError::into_inner));
+    (result, Holds { longest: Duration::from_micros(observed.longest.load(Ordering::Relaxed)), pages })
+}
+
+/// A paged bulk path says what one writer hold covered: `count` of `unit`. It reports once per
+/// hold, from the thread that asked for the hold. Kept only inside a `holds_during` scope;
+/// anywhere else it is one thread-local read.
+pub fn covered(unit: &'static str, count: usize) {
+    OBSERVER.with(|observer| {
+        if let Some(observed) = observer.borrow().as_ref() {
+            observed.pages.lock().unwrap_or_else(PoisonError::into_inner).push((unit, count));
+        }
+    });
+}
+
+/// Stages a lend keeps; a later stage adds to `other`, the last.
+const STAGES_KEPT: usize = 16;
+
+/// The aggregates one stage of a staged lend rebuilt, and the claims they replayed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rebuilt {
+    pub aggregates: u64,
+    pub claims: u64,
+}
+
+impl Rebuilt {
+    fn json(&self) -> Value {
+        json!({"aggregates": self.aggregates, "claims": self.claims})
+    }
+}
+
+/// Where one staged lend's borrower spent its hold so far.
+#[derive(Debug, Default)]
+struct StageClock {
+    open: Option<(&'static str, Instant)>,
+    spent: Vec<(&'static str, Duration)>,
+    rebuilt: Vec<(&'static str, Rebuilt)>,
+    closed: bool,
+}
+
+impl StageClock {
+    fn add(&mut self, stage: &'static str, spent: Duration) {
+        if let Some(entry) = self.spent.iter_mut().find(|(kept, _)| *kept == stage) {
+            entry.1 += spent;
+        } else if self.spent.len() < STAGES_KEPT - 1 {
+            self.spent.push((stage, spent));
+        } else if let Some(entry) = self.spent.iter_mut().find(|(kept, _)| *kept == "other") {
+            entry.1 += spent;
+        } else {
+            self.spent.push(("other", spent));
+        }
+    }
+
+    /// Count one aggregate rebuilt with `claims` claims against the open stage, or `other`.
+    fn rebuilt(&mut self, claims: u64) {
+        let open = self.open.map_or("other", |(stage, _)| stage);
+        let stage = if self.rebuilt.len() < STAGES_KEPT - 1
+            || self.rebuilt.iter().any(|(kept, _)| *kept == open)
+        {
+            open
+        } else {
+            "other"
+        };
+        let index = match self.rebuilt.iter().position(|(kept, _)| *kept == stage) {
+            Some(index) => index,
+            None => {
+                self.rebuilt.push((stage, Rebuilt::default()));
+                self.rebuilt.len() - 1
+            }
+        };
+        let entry = &mut self.rebuilt[index].1;
+        entry.aggregates += 1;
+        entry.claims = entry.claims.saturating_add(claims);
+    }
+
+    /// End the open stage at `at` and stop. A stage entered after this is not counted.
+    fn close(&mut self, at: Instant) -> Vec<(&'static str, Duration)> {
+        if let Some((stage, since)) = self.open.take() {
+            self.add(stage, at.saturating_duration_since(since));
+        }
+        self.closed = true;
+        self.spent.clone()
+    }
+}
+
+thread_local! {static STAGES: RefCell<Option<Arc<Mutex<StageClock>>>> = const {RefCell::new(None)};}
+
+#[cfg(test)]
+thread_local! {static UNSTAGED: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};}
+
+/// Run `work` with every `Stages` scope it begins recording nothing, so a test can compare a
+/// staged path with the same path unstaged.
+#[cfg(test)]
+pub fn unstaged<T>(work: impl FnOnce() -> T) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            UNSTAGED.set(false);
+        }
+    }
+    UNSTAGED.set(true);
+    let _restore = Restore;
+    work()
+}
+
+/// A scope whose writer lend records where its hold went. Begin it before asking for the writer,
+/// enter each stage as the borrower reaches it, and end it once the writer is given back: a lend
+/// asked for in the scope carries its clock, and the writer thread closes the stage still open
+/// when the hold ends. Holds asked for outside it, and batches, are not staged.
+pub struct Stages {
+    clock: Arc<Mutex<StageClock>>,
+    previous: Option<Arc<Mutex<StageClock>>>,
+}
+
+impl Stages {
+    pub fn begin() -> Self {
+        let clock = Arc::new(Mutex::new(StageClock::default()));
+        #[cfg(test)]
+        if UNSTAGED.get() {
+            clock.lock().unwrap_or_else(PoisonError::into_inner).closed = true;
+            let previous = STAGES.with(|stages| stages.borrow().clone());
+            return Self { clock, previous };
+        }
+        let previous = STAGES.with(|stages| stages.borrow_mut().replace(clock.clone()));
+        Self { clock, previous }
+    }
+
+    /// End the open stage and begin `stage`, returning the stage it ended, so a callback can be
+    /// charged to its own stage and the caller's resumed after it.
+    pub fn enter(&self, stage: &'static str) -> Option<&'static str> {
+        enter(&self.clock, stage)
+    }
+
+    /// Run `work` as `stage`, then resume the stage it interrupted.
+    pub fn during<T>(&self, stage: &'static str, work: impl FnOnce() -> T) -> T {
+        during(&self.clock, stage, work)
+    }
+}
+
+fn enter(clock: &Mutex<StageClock>, stage: &'static str) -> Option<&'static str> {
+    let now = Instant::now();
+    let mut clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+    if clock.closed {
+        return None;
+    }
+    let ended = clock.open.replace((stage, now));
+    if let Some((ended, since)) = ended {
+        clock.add(ended, now.saturating_duration_since(since));
+    }
+    ended.map(|(stage, _)| stage)
+}
+
+fn during<T>(clock: &Mutex<StageClock>, stage: &'static str, work: impl FnOnce() -> T) -> T {
+    let resumed = enter(clock, stage);
+    let result = work();
+    if let Some(resumed) = resumed {
+        enter(clock, resumed);
+    }
+    result
+}
+
+/// Run `work` as `stage` of the staged lend this thread is in, then resume the stage it
+/// interrupted, whose time excludes `work`'s. Outside a `Stages` scope it only runs `work`, so
+/// code that both a staged lend and other callers reach can mark its parts. If `work` panics, the
+/// stage stays open until the writer closes the lend at the end of its hold, which charges it the
+/// rest, as for any stage a borrower leaves open.
+pub fn stage<T>(stage: &'static str, work: impl FnOnce() -> T) -> T {
+    match STAGES.with(|stages| stages.borrow().clone()) {
+        Some(clock) => during(&clock, stage, work),
+        None => work(),
+    }
+}
+
+/// Count one rebuilt aggregate and the claims it replayed against the staged lend's open stage.
+/// Outside a `Stages` scope, or once the writer has closed the lend, it does nothing.
+pub fn rebuilt(claims: usize) {
+    if let Some(clock) = STAGES.with(|stages| stages.borrow().clone()) {
+        let mut clock = clock.lock().unwrap_or_else(PoisonError::into_inner);
+        if !clock.closed {
+            clock.rebuilt(claims as u64);
+        }
+    }
+}
+
+/// A staged lend's stages and rebuilt aggregates, as the writer closed them.
+#[cfg(any(test, feature = "test-support"))]
+pub type StagedLend = (Vec<(&'static str, Duration)>, Vec<(&'static str, Rebuilt)>);
+
+#[cfg(any(test, feature = "test-support"))]
+static RECENT_STAGED: Mutex<VecDeque<StagedLend>> = Mutex::new(VecDeque::new());
+
+/// The last staged lends this process closed, oldest first, whether or not they were long.
+#[cfg(any(test, feature = "test-support"))]
+pub fn recent_staged() -> Vec<StagedLend> {
+    RECENT_STAGED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .cloned()
+        .collect()
+}
+
+impl Drop for Stages {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        STAGES.with(|stages| *stages.borrow_mut() = previous);
+    }
+}
+
 static WRITER_WAITING: AtomicUsize = AtomicUsize::new(0);
 static READ_WAITING: AtomicUsize = AtomicUsize::new(0);
 
@@ -403,6 +788,44 @@ pub fn report() -> Value {
     with_record(|record| record.report(now, wall))
 }
 
+struct Watched {
+    writer: ThreadId,
+    holds: u64,
+    longest: Option<(Holder, HoldKind, Duration)>,
+}
+
+/// The holds of one writer that end while it is open, such as the holds queued ahead of a caller
+/// that waits for that writer: how many, and the longest with its holder.
+pub struct WaitWatch(Arc<Mutex<Watched>>);
+
+impl WaitWatch {
+    /// Watch the writer that runs on thread `writer` (`WriterConnection::writer_thread`).
+    pub fn start(writer: ThreadId) -> Self {
+        let watched = Arc::new(Mutex::new(Watched { writer, holds: 0, longest: None }));
+        with_record(|record| record.watchers.push(Arc::downgrade(&watched)));
+        Self(watched)
+    }
+
+    /// The longest hold that ended since `start`, named as the window names a holder, with its
+    /// `kind`, `held_ms` and the number of `holds` that ended; `None` when none did.
+    pub fn blocked_by(self) -> Option<Value> {
+        let watched = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (holder, kind, held) = watched.longest.as_ref()?;
+        let mut row = holder.json();
+        row["kind"] = json!(kind.name());
+        row["held_ms"] = json!(ms(*held));
+        row["holds"] = json!(watched.holds);
+        Some(row)
+    }
+}
+
+impl Drop for WaitWatch {
+    fn drop(&mut self) {
+        let watched = Arc::as_ptr(&self.0);
+        with_record(|record| record.watchers.retain(|watcher| !std::ptr::eq(watcher.as_ptr(), watched)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +835,9 @@ mod tests {
             label: label.into(),
             client: Some("member-b".into()),
             at: Location::caller(),
+            asked: Instant::now(),
+            observer: None,
+            stages: None,
         }))
     }
 
@@ -423,6 +849,8 @@ mod tests {
             first: holder(first),
             longest: None,
             writes: 0,
+            stages: None,
+            rebuilt: Vec::new(),
         }
     }
 
@@ -434,11 +862,11 @@ mod tests {
         batch.ran(&holder("/v1/messages"), Duration::from_millis(2));
         batch.ran(&holder("/v1/internal/replication/receive"), Duration::from_millis(180));
         batch.ran(&holder("/v1/harness-events"), Duration::from_millis(1));
-        record.held(now, 1_000_000, &batch, Duration::from_millis(190), true);
+        record.held(now, 1_000_000, &mut batch, Duration::from_millis(190), true);
         std::mem::forget(batch);
-        let lend = hold(HoldKind::Lend, "retention/trim");
-        record.held(now, 1_000_000, &lend, Duration::from_millis(30), false);
-        record.held(now, 1_000_000, &lend, Duration::from_millis(40), false);
+        let mut lend = hold(HoldKind::Lend, "retention/trim");
+        record.held(now, 1_000_000, &mut lend, Duration::from_millis(30), false);
+        record.held(now, 1_000_000, &mut lend, Duration::from_millis(40), false);
         std::mem::forget(lend);
         let report = record.report(now, 1_000_000);
         let holders = report["holders"].as_array().unwrap();
@@ -459,13 +887,106 @@ mod tests {
         assert!(long[0]["at"].as_str().unwrap().contains("holds.rs"));
     }
 
+    /// The fields of each WARN event logged on this thread.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN { return; }
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.insert(field.name().into(), value.into());
+                }
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    self.0.insert(field.name().into(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    #[test]
+    fn a_hold_over_one_second_logs_its_holder_and_wait_and_a_shorter_one_logs_nothing() {
+        // A lend that began `ago`, borrowed by a request that asked 300 ms before it began.
+        let lend = |ago: Duration| {
+            let started = Instant::now().checked_sub(ago).unwrap();
+            let mut hold = hold(HoldKind::Lend, "POST /v1/internal/replication/receive");
+            hold.started = started;
+            Arc::get_mut(&mut hold.first.0).unwrap().asked = started.checked_sub(Duration::from_millis(300)).unwrap();
+            hold
+        };
+        let warnings = Warnings::default();
+        tracing::subscriber::with_default(warnings.clone(), || drop(lend(Duration::from_millis(500))));
+        assert!(warnings.0.lock().unwrap().is_empty(), "a hold under 1 s logs nothing");
+        tracing::subscriber::with_default(warnings.clone(), || drop(lend(Duration::from_millis(1_200))));
+        let logged = warnings.0.lock().unwrap().clone();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let line = &logged[0];
+        assert_eq!(line["holder"], "POST /v1/internal/replication/receive");
+        assert_eq!(line["client"], "member-b");
+        assert!(line["at"].contains("holds.rs"), "{line:?}");
+        assert_eq!(line["kind"], "lend");
+        assert!(line["held_ms"].parse::<u64>().unwrap() >= 1_200, "{line:?}");
+        assert_eq!(line["waited_ms"], "300");
+        // A batch names its longest write, not the first one in it.
+        let mut batch = hold(HoldKind::Batch, "POST /v1/messages");
+        batch.ran(&holder("task replication.receive"), Duration::from_millis(1_100));
+        tracing::subscriber::with_default(warnings.clone(), || batch.log_if_long(Duration::from_millis(1_150)));
+        std::mem::forget(batch);
+        let logged = warnings.0.lock().unwrap().clone();
+        assert_eq!((logged.len(), logged[1]["holder"].as_str(), logged[1]["writes"].as_str()),
+            (2, "task replication.receive", "1"));
+    }
+
+    #[test]
+    fn a_scope_sees_the_longest_hold_its_thread_asked_for_and_nothing_after_it() {
+        let ((), longest) = longest_during(|| {
+            for held in [5, 25, 10] {
+                let hold = WriterHold::start(HoldKind::Lend, &Holder::current());
+                std::thread::sleep(Duration::from_millis(held));
+                drop(hold);
+            }
+        });
+        assert!(longest >= Duration::from_millis(25), "{longest:?}");
+        assert!(Holder::current().0.observer.is_none());
+        let ((), unasked) = longest_during(|| {});
+        assert_eq!(unasked, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_scope_keeps_what_each_paged_hold_covered_and_nothing_outside_it() {
+        covered("claims", 9);
+        let ((), holds) = holds_during(|| {
+            for page in [64, 64, 12] {
+                let hold = WriterHold::start(HoldKind::Lend, &Holder::current());
+                covered("claims", page);
+                drop(hold);
+            }
+            covered("envelopes", 8);
+        });
+        assert_eq!(holds.pages_of("claims"), vec![64, 64, 12]);
+        assert_eq!(holds.pages_of("envelopes"), vec![8]);
+        let ((), unasked) = holds_during(|| {});
+        assert!(unasked.pages.is_empty());
+    }
+
     #[test]
     fn holds_age_out_of_the_hour_and_the_record_stays_bounded() {
         let mut record = Record::default();
         let now = super::super::origin() + Duration::from_secs(7_200);
         for i in 0..200 {
-            let hold = hold(HoldKind::Lend, &format!("task-{i}"));
-            record.held(now, 5_000_000, &hold, Duration::from_millis(150), true);
+            let mut hold = hold(HoldKind::Lend, &format!("task-{i}"));
+            record.held(now, 5_000_000, &mut hold, Duration::from_millis(150), true);
             std::mem::forget(hold);
         }
         for _ in 0..100 {
@@ -575,5 +1096,120 @@ mod tests {
         assert_eq!(oldest["held_ms"], 101_800.0);
         assert_eq!(oldest["started_unix_ms"], 9_000_000 - 101_800);
         assert_eq!(report["in_progress"][1]["writes"], 3);
+    }
+
+    #[test]
+    fn a_staged_lend_keeps_a_bounded_set_of_stages_and_stops_at_its_end() {
+        const NAMES: [&str; 20] = [
+            "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12", "s13",
+            "s14", "s15", "s16", "s17", "s18", "s19",
+        ];
+        let mut clock = StageClock::default();
+        for name in NAMES {
+            clock.add(name, Duration::from_millis(1));
+        }
+        assert_eq!(clock.spent.len(), STAGES_KEPT);
+        let folded = (NAMES.len() - (STAGES_KEPT - 1)) as u64;
+        assert_eq!(
+            clock.spent[STAGES_KEPT - 1],
+            ("other", Duration::from_millis(folded))
+        );
+        let total = clock.spent.iter().map(|(_, spent)| *spent).sum::<Duration>();
+        assert_eq!(total, Duration::from_millis(20));
+        // A stage entered after the writer closed the clock is not counted.
+        let stages = Stages::begin();
+        stages.enter("begin");
+        let closed = stages.clock.lock().unwrap().close(Instant::now());
+        assert_eq!(closed.iter().map(|(stage, _)| *stage).collect::<Vec<_>>(), ["begin"]);
+        assert_eq!(stages.enter("late"), None);
+        assert_eq!(stages.clock.lock().unwrap().spent.len(), 1);
+    }
+
+    #[test]
+    fn a_lend_asked_for_in_a_stage_scope_reports_its_stages_and_the_rest_unattributed() {
+        let mut record = Record::default();
+        let now = super::super::origin() + Duration::from_secs(7_200);
+        let stages = Stages::begin();
+        let asked = Holder::current();
+        drop(stages);
+        assert!(Holder::current().0.stages.is_none(), "the scope ends with its guard");
+        let clock = asked.0.stages.clone().unwrap();
+        clock.lock().unwrap().spent = vec![("incremental", Duration::from_millis(150)), ("commit", Duration::from_millis(30))];
+        let mut lend = WriterHold {
+            kind: HoldKind::Lend,
+            started: Instant::now(),
+            first: asked,
+            longest: None,
+            writes: 0,
+            stages: Some(clock.lock().unwrap().spent.clone()),
+            rebuilt: vec![(
+                "rebuild-tree",
+                Rebuilt {
+                    aggregates: 2,
+                    claims: 40,
+                },
+            )],
+        };
+        record.held(now, 1_000_000, &mut lend, Duration::from_millis(200), true);
+        std::mem::forget(lend);
+        let long = &record.report(now, 1_000_000)["long_holds"][0];
+        assert_eq!(long["stages"], json!({"incremental": 150.0, "commit": 30.0}));
+        assert_eq!(long["unattributed_ms"], 20.0);
+        assert_eq!(
+            long["rebuilt"],
+            json!({"rebuild-tree": {"aggregates": 2, "claims": 40}})
+        );
+        // A batch inside a scope is charged as before, with no stages.
+        let mut batch = hold(HoldKind::Batch, "/v1/messages");
+        record.held(now, 1_000_000, &mut batch, Duration::from_millis(200), true);
+        std::mem::forget(batch);
+        let batch = &record.report(now, 1_000_000)["long_holds"][0];
+        assert!(batch.get("stages").is_none() && batch.get("unattributed_ms").is_none(), "{batch}");
+    }
+
+    #[test]
+    fn a_stage_entered_by_called_code_pauses_the_stage_it_interrupts_and_counts_rebuilds() {
+        // Outside a scope, a stage only runs its work and a rebuild counts nothing.
+        assert_eq!(stage("rebuild-tree", || 7), 7);
+        rebuilt(5);
+        let stages = Stages::begin();
+        stages.enter("incremental");
+        stage("rebuild-tree", || {
+            rebuilt(40);
+            rebuilt(2);
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        rebuilt(3);
+        let mut clock = stages.clock.lock().unwrap();
+        let spent = clock.close(Instant::now());
+        let of = |name: &str| spent.iter().find(|(stage, _)| *stage == name).unwrap().1;
+        assert!(of("rebuild-tree") >= Duration::from_millis(300));
+        assert!(
+            of("incremental") < Duration::from_millis(100),
+            "the stage a rebuild interrupts does not also count its time: {spent:?}"
+        );
+        assert_eq!(
+            clock.rebuilt,
+            [
+                (
+                    "rebuild-tree",
+                    Rebuilt {
+                        aggregates: 2,
+                        claims: 42
+                    }
+                ),
+                (
+                    "incremental",
+                    Rebuilt {
+                        aggregates: 1,
+                        claims: 3
+                    }
+                ),
+            ]
+        );
+        drop(clock);
+        // Once the writer has closed the lend, a late rebuild is not counted.
+        rebuilt(9);
+        assert_eq!(stages.clock.lock().unwrap().rebuilt.len(), 2);
     }
 }

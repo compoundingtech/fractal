@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { validatePairingTrust, verifyPairing } from './pairingProof.ts';
+import { fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof.ts';
 
 // Public receipts exported from a real, isolated daemon predating fingerprint support.
 const vector = JSON.parse(readFileSync(new URL('../../fixtures/clients/device-pairing-proofs-v1.json', import.meta.url)));
@@ -66,4 +66,26 @@ test('malformed public proofs and sessions do not reflect injected secret text',
   await assert.rejects(verifyPairing(malformed, vector.device_key, vector.fingerprint, crypto), error => !error.message.includes('secret-sentinel') && /Unsupported/.test(error.message));
   const bearer = session(); bearer.credential = 'short';
   await assert.rejects(verifyPairing(bearer, vector.device_key, vector.fingerprint, crypto), /Invalid paired session/);
+});
+
+test('the phone sends its Fabric NodeID only to a member that grants paired phones over Fabric', () => {
+  const node = '0123456789abcdef'.repeat(4);
+  const proofs = { id: 'device-key-proofs', version: 1, state: 'granted' };
+  const grants = { id: 'fabric-gateway-grant', version: 1, state: 'granted' };
+  assert.deepEqual(pairingFabricNode([proofs, grants], node), { fabric_node_id: node });
+  // An older member refuses the unknown field, so it never sees it.
+  assert.deepEqual(pairingFabricNode([proofs], node), {});
+  assert.deepEqual(pairingFabricNode([proofs, { ...grants, version: 2 }], node), {});
+  // No fabric in this build, or no identity yet.
+  assert.deepEqual(pairingFabricNode([proofs, grants], ''), {});
+  assert.deepEqual(pairingFabricNode([proofs, grants], node.toUpperCase()), {});
+});
+
+test('only a failed Fabric grant is worth telling the person after pairing', () => {
+  assert.equal(fabricGrantProblem(undefined), '');
+  assert.equal(fabricGrantProblem({ state: 'granted', service: 'demo-client/0', peer: 'st-device-0123456789ab' }), '');
+  assert.equal(fabricGrantProblem({ state: 'not-enabled' }), '');
+  assert.equal(fabricGrantProblem({ state: 'not-requested' }), '');
+  assert.equal(fabricGrantProblem({ state: 'already-trusted', peer: 'demo-phone' }), '');
+  assert.match(fabricGrantProblem({ state: 'failed', detail: 'fabric add failed' }), /^Paired, but .*: fabric add failed\. Tailscale or LAN still reaches it\.$/);
 });

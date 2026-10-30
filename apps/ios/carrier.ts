@@ -196,9 +196,13 @@ export class FabricCarrier {
     if (this.running) await this.ports.stop();
     if (epoch !== this.epoch) return;
     this.running = false;
-    // A fabric that just failed is not waited on again at every foreground.
-    if (this.ports.now() - this.failedAt < REMEMBER_FAILURE_MS) {
+    // A fabric that just failed is not waited on again at every foreground. It is tried again when the
+    // memory of the failure ends: leaving the foreground cancelled the earlier try, and a phone that
+    // flickered to the background (a pulled-down notification, the app switcher) must not stay failed.
+    const since = this.ports.now() - this.failedAt;
+    if (since < REMEMBER_FAILURE_MS) {
       this.publish({ phase: 'failed', bridgeUrl: '', reason: this.failedReason });
+      this.retryAfter(epoch, REMEMBER_FAILURE_MS - since);
       return;
     }
     await this.walk(epoch, this.pinned ? [this.pinned] : this.members);
@@ -260,8 +264,10 @@ export class FabricCarrier {
 
   /** Try fabric again after a wait that grows, while it is still wanted and still failed. */
   private scheduleRetry(): void {
-    const epoch = this.epoch;
-    const wait = RETRY_WAITS_MS[Math.min(this.failures++, RETRY_WAITS_MS.length - 1)];
+    this.retryAfter(this.epoch, RETRY_WAITS_MS[Math.min(this.failures++, RETRY_WAITS_MS.length - 1)]);
+  }
+
+  private retryAfter(epoch: number, wait: number): void {
     void this.ports.wait(wait).then(() => {
       if (epoch !== this.epoch || this.snapshotValue.phase !== 'failed') return;
       void this.reconcile(true);

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test runs in a small pool of persistent worktrees per repository (~/.cache/st-test/<hash>/tree-N, one flock each, reset and cleaned before every run) with one cargo target per tree, instead of a new throwaway worktree per run, so a second run is warm; ST_TEST_TREES (size, or off) and ST_TEST_POOL configure it.",
+  "replay": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None: the pool is created on first use; the old ~/.cache/st-test-target is no longer used by default and can be deleted."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "ST_TEST_TREES=off restores the throwaway worktree; remove ~/.cache/st-test while no st-test runs."
+  }
+}

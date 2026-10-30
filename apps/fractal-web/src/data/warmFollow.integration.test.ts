@@ -12,7 +12,7 @@ import type {
   CollectionSocket,
   Snapshot,
   TimelineEntry,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import * as Option from 'effect/Option'
 import * as os from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -61,7 +61,7 @@ class Gateway {
   socket: CollectionSocket | undefined
   readonly commands: CollectionCommand[] = []
   readonly decodeMs: number[] = []
-  /** Advertise the st main's `collections` v1 capability (subscription cap 16) when set. */
+  /** Advertise Fractal main's `collections` v1 capability (subscription cap 16) when set. */
   collectionsV1 = false
   onUnsubscribe: (() => void) | undefined
   denyReads = false
@@ -358,6 +358,59 @@ describe('warm conversation switching at the data layer', () => {
         return current._tag === 'Observed' && current.freshness === 'live' && current.value[0]?.name === 'Live roster'
       })
     } finally { release(); await live.dispose() }
+  })
+
+  it('keeps the published HTTP roster when the first socket snapshot is all bad', async () => {
+    const { live, gateway } = openLive({ maxFollows: 8 })
+    gateway.publishedRoster = [agent]
+    const release = live.registry.mount(live.source.agents)
+    try {
+      await stallInitialRoster(gateway)
+      await until(() => live.registry.get(live.source.agents)._tag === 'Observed')
+      gateway.fleet([{ ...agent, id: 'broken-id' }])
+      await until(() => live.registry.get(live.source.rosterDecode!).decodeStale)
+      expect(live.registry.get(live.source.agents)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: agent.id }],
+      })
+      expect(live.registry.get(live.source.rosterDecode!).undecodable).not.toHaveLength(0)
+      const subscription = gateway.commands.findLast(command =>
+        command.kind === 'subscribe' && command.collection === 'agents')
+      if (subscription === undefined) throw new Error('Expected roster subscription')
+      gateway.send({
+        kind: 'changes', id: subscription.id, collection: 'agents', has_more: false,
+        upserts: [], removes: [], order: [], snapshot,
+      })
+      await drain()
+      await drain()
+      expect(live.registry.get(live.source.agents)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: agent.id }],
+      })
+      expect(live.registry.get(live.source.rosterDecode!)).toMatchObject({ decodeStale: true })
+      expect(live.registry.get(live.source.rosterDecode!).undecodable).not.toHaveLength(0)
+    } finally { release(); await live.dispose() }
+  })
+
+  it('ignores diagnostics from a late HTTP fallback after newer socket evidence', async () => {
+    const { live, gateway } = openLive({ maxFollows: 8 })
+    gateway.publishedRoster = [agent]
+    let releaseRead: () => void = () => {}
+    gateway.rosterGate = new Promise<void>(resolve => { releaseRead = resolve })
+    const release = live.registry.mount(live.source.agents)
+    try {
+      await stallInitialRoster(gateway)
+      gateway.fleet([agent])
+      await until(() => live.registry.get(live.source.agents)._tag === 'Observed')
+      gateway.fleet([{ ...agent, id: 'broken-id' }])
+      await until(() => live.registry.get(live.source.rosterDecode!).decodeStale)
+      const evidence = live.registry.get(live.source.rosterDecode!)
+      releaseRead()
+      await drain()
+      await drain()
+      expect(live.registry.get(live.source.rosterDecode!)).toEqual(evidence)
+      expect(live.registry.get(live.source.agents)).toMatchObject({
+        _tag: 'Observed', freshness: 'stale', value: [{ id: agent.id }],
+      })
+    } finally { releaseRead(); release(); await live.dispose() }
   })
 
   it('keeps waiting for live data when no roster publication exists yet', async () => {
@@ -998,7 +1051,7 @@ describe('warm conversation switching at the data layer', () => {
     } finally {
       await legacy.live.dispose()
     }
-    // The st main's collections v1 raises the cap to 16: 12 conversation slots.
+    // Fractal main's collections v1 raises the cap to 16: 12 conversation slots.
     const modern = openLive({ maxFollows: 8, conversationSlots: 'advertised' })
     modern.gateway.collectionsV1 = true
     try {

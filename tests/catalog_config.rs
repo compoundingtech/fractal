@@ -129,7 +129,7 @@ agent "worker" { host "example-linux"; command "true" }
     )
     .unwrap();
 
-    let discovered = st2::discover_strict(catalog.path());
+    let discovered = fractal_legacy_runner::discover_strict(catalog.path());
     assert!(discovered.errors.is_empty(), "{:?}", discovered.errors);
     assert!(discovered.warnings.is_empty(), "{:?}", discovered.warnings);
     assert_eq!(discovered.specs.len(), 1);
@@ -143,7 +143,7 @@ agent "worker" { host "example-linux"; command "true" }
         "the shared catalog envelope must retain a valid agent declaration parse"
     );
 
-    let config = st2::catalog::load(catalog.path()).expect("catalog and profile nodes parse");
+    let config = fractal_legacy_runner::catalog::load(catalog.path()).expect("catalog and profile nodes parse");
     assert_eq!(config.pty_root.as_deref(), Some("pty"));
     assert_eq!(config.profiles.len(), 1);
     assert_eq!(config.profiles[0].scheme, "dev.example.goal");

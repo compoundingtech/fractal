@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The evidence verifier passes over a passing shard's own note (the policy's shard_inputs.index, kit_shard for fractal-web) when it picks the latest record, so the merge queue's per-shard fractal-web notes no longer shadow the whole run's note under the same input key. A failing shard's note still decides.",
+  "replay": {"status": "none", "detail": "No record or signature format changes."},
+  "schema": {"status": "changed", "detail": ".st/evidence-skip-policy.json: shard_inputs takes an optional index input name; fractal-web's is kit_shard."},
+  "rules": {"status": "changed", "detail": "A passing record that carries its kind's shard index input never decides; a failing one decides as check_failed; passing shard records alone read no_record (no_note)."},
+  "compatibility": {"status": "none", "detail": "The gate reads the policy and the verifier from the same accepted base."},
+  "downtime": {"status": "none", "detail": "CI script and policy only."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert: the newest shard note decides again and is refused as missing_input."}
+}
