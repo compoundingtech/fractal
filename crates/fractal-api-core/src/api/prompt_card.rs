@@ -594,7 +594,7 @@ pub(crate) mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
         let first = loop {
             watch.begin();
-            let read = watch.follow_remote(&conversation("person/first")).unwrap_err();
+            let read = watch.follow_remote(&conversation("person/one")).unwrap_err();
             watch.finish();
             if !read.contains("still reading") {
                 break read;
@@ -605,11 +605,11 @@ pub(crate) mod tests {
         assert!(first.contains("on host/prompt-host"), "{first}");
 
         watch.begin();
-        let read = watch.follow_remote(&conversation("person/second")).unwrap_err();
+        let read = watch.follow_remote(&conversation("person/two")).unwrap_err();
         watch.finish();
         assert!(read.contains("still reading"), "{read}");
         let persons = watch.remote.keys().map(|(_, _, person)| person.as_str()).collect::<Vec<_>>();
-        assert_eq!(persons, ["person/second"]);
+        assert_eq!(persons, ["person/two"]);
     }
 
     fn row(answers: Value, call: Value) -> Value {
