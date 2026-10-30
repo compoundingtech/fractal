@@ -65,6 +65,9 @@ pub struct CollectionSubscribe {
     #[serde(default, deserialize_with = "collection_name")]
     pub collection: String,
     pub limit: Option<usize>,
+    /// Opt in to complete revision-fenced agents publications, independently of legacy windows.
+    #[serde(default, deserialize_with = "deserialize_agents_publication_version")]
+    pub agents_publication_version: Option<u8>,
     pub person: Option<String>,
     /// Follow one arrangement instead of the owner's bounded prefix window.
     pub subject: Option<String>,
@@ -73,8 +76,8 @@ pub struct CollectionSubscribe {
     pub agent: Option<String>,
     pub status: Option<String>,
     /// Usage period boundaries; an omitted end follows new usage through the current time.
-    since_ms: Option<u64>,
-    until_ms: Option<u64>,
+    pub since_ms: Option<u64>,
+    pub until_ms: Option<u64>,
     /// Complete process coverage captured by an inventory read, before window truncation.
     #[serde(skip)]
     pub native_processes: Option<Arc<Mutex<Vec<u32>>>>,
@@ -92,6 +95,13 @@ pub struct CollectionSubscribe {
     #[serde(rename = "trace", default, deserialize_with = "deserialize_frame_trace")]
     pub frame_trace: Option<crate::otel::FrameTraceContext>,
 }
+fn deserialize_agents_publication_version<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u8::deserialize(deserializer).map(Some)
+}
+
 fn deserialize_frame_trace<'de, D>(
     deserializer: D,
 ) -> Result<Option<crate::otel::FrameTraceContext>, D::Error>
@@ -202,6 +212,12 @@ pub struct CollectionSubscription {
     /// waits for the view's next change. A paired session's clock still reads it, so an expired
     /// or revoked grant still ends it, but another not-ready read sends nothing.
     pub waiting_for_view: bool,
+    /// The `sync` this window's last frame stated, as its state and the peers it named: a
+    /// changes frame carries `sync` only when it differs. Only attention windows carry one.
+    pub sync: Option<(String, Vec<String>)>,
+    /// The replication flags when that frame was built: a commit that moves them rereads the
+    /// window, so a host that starts or stops catching up or diverging says so at once.
+    pub sync_flags: (bool, bool),
 }
 
 // Observer grace periods and checkpoint waits can enter attention without a new claim.
@@ -592,6 +608,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":EXACT_AGENT_SELECTOR_CAPABILITY, "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
+    capabilities.push(json!({"id":"collections.agents.revisioned.v1", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"custom-subjects", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     // `documents.list`, `document-references.get`, and `document.get` by bare name with its
     // version and changed time.
@@ -4027,6 +4044,10 @@ pub async fn events(
     let (records, oldest, newest) = loop {
         let (records, oldest, newest) =
             super::read_deadline::query(&state.store, "/v1/client/events", || {
+                // No event or cursor past the published index that client snapshots read at, as
+                // an event page (`read_event_page`): a commit is visible here before its writer
+                // publishes it, and the next read of the resource it names must already show it.
+                let through = state.store.index().map_err(ApiError::internal)?;
                 state
                     .store
                     .read_snapshot(|_| {
@@ -4041,11 +4062,11 @@ pub async fn events(
                             return Ok(Err(error));
                         }
                         let records = if query.after.is_some() {
-                            feed_events_after(&state.store, after, limit.saturating_add(1))?
+                            feed_events_after(&state.store, after, through, limit.saturating_add(1))?
                         } else {
-                            feed_events_tail(&state.store, limit)?
+                            feed_events_tail(&state.store, through, limit)?
                         };
-                        Ok(Ok((records, oldest, newest)))
+                        Ok(Ok((records, oldest, newest.min(through))))
                     })
                     .map_err(ApiError::internal)?
             })?;
@@ -4176,10 +4197,13 @@ fn feed_order(event: &FeedEvent) -> (u64, u64) {
     (event.0.store_index, event.1.unwrap_or(0))
 }
 
-/// Claim events and local observation events after `after`, oldest first.
+/// Claim events and local observation events after `after`, oldest first, none past `through`.
+/// The bound is in each query, before its limit, so an unpublished event never takes the
+/// place of a published one.
 fn feed_events_after(
     store: &Store,
     after: EventCursor,
+    through: u64,
     limit: usize,
 ) -> anyhow::Result<Vec<FeedEvent>> {
     let local_after = match after.local {
@@ -4187,13 +4211,13 @@ fn feed_events_after(
         None => store.local_observation_floor_after_claim(after.claim)?,
     };
     let mut events = store
-        .events_after_bounded(after.claim, limit)?
+        .events_after_bounded(after.claim, through, limit)?
         .into_iter()
         .map(|record| (record, None))
         .collect::<Vec<_>>();
     events.extend(
         store
-            .local_observations_after(local_after, limit)?
+            .local_observations_after_through(local_after, through, limit)?
             .into_iter()
             .map(local_feed_event),
     );
@@ -4203,15 +4227,15 @@ fn feed_events_after(
 }
 
 /// The newest `limit` claim and local observation events, oldest first.
-fn feed_events_tail(store: &Store, limit: usize) -> anyhow::Result<Vec<FeedEvent>> {
+fn feed_events_tail(store: &Store, through: u64, limit: usize) -> anyhow::Result<Vec<FeedEvent>> {
     let mut events = store
-        .events_tail_bounded(limit)?
+        .events_tail_bounded(through, limit)?
         .into_iter()
         .map(|record| (record, None))
         .collect::<Vec<_>>();
     events.extend(
         store
-            .local_observations_tail(limit)?
+            .local_observations_tail_through(through, limit)?
             .into_iter()
             .map(local_feed_event),
     );

@@ -337,3 +337,97 @@ fn agents_publication_reset_between_restore_check_and_cas_wins() {
     *store.fractal.agent_roster_restore_checked.lock() = None;
     assert!(!store.agents_publication_demand(), "reset clears even a request restored after the check");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delivery_metrics_worker_keeps_roster_fresh_without_external_readers() {
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+    use std::sync::RwLock;
+
+    async fn expect_state(exporter: &InMemoryMetricExporter, provider: &SdkMeterProvider, state: &str) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                provider.force_flush().unwrap();
+                let finished = exporter.get_finished_metrics().unwrap();
+                let matches = finished.iter().rev().flat_map(|resource| resource.scope_metrics())
+                    .flat_map(|scope| scope.metrics()).find(|metric| metric.name() == "st.delivery.state_age")
+                    .is_some_and(|metric| {
+                        let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = metric.data() else { return false; };
+                        gauge.data_points().any(|point| point.attributes().any(|attribute|
+                            *attribute == opentelemetry::KeyValue::new("st.delivery.state", state.to_owned())))
+                    });
+                if matches { return; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap_or_else(|_| panic!("metrics did not observe {state} without external roster readers"));
+    }
+
+    const SEAT: &str = "agent/example/metrics-no-readers";
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let intent = parse_intent(r#"version 2
+agent "example/metrics-no-readers" { workspace "/tmp"; harness "omp" {} }
+"#, app.store.origin()).unwrap();
+    app.store.apply_internal(&intent, "metrics-no-readers").unwrap();
+    roster_resilience_runtime(&app.store, SEAT, "live");
+    app.store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "harness.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"state":"idle", "driver":"omp", "incarnation_id":"one"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let fence = crate::mailbox::Fence::new(SEAT, "one", "delivery");
+    let heartbeat = || delivery_presence::record_fenced(&fence, &json!({
+        "transport":"omp-channel", "ready":true, "pid":std::process::id(),
+        "image":fractal_drivers::reexec::running_identity().map(|identity| identity.token()),
+    }).to_string());
+    heartbeat();
+    assert!(!app.store.agents_publication_demand());
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone()).build()).build();
+    let worker = delivery_metrics::spawn_worker(&app.store,
+        Arc::new(RwLock::new(delivery_metrics::Summary::default())),
+        provider.meter("st3"), Duration::from_millis(20));
+    assert!(app.store.agents_publication_demand(), "the metrics worker owns the only demand receiver");
+    start_agent_roster(&app);
+    expect_state(&exporter, &provider, "live").await;
+    // Advance the heartbeat beyond the real stale threshold without waiting 45 seconds.
+    delivery_presence::backdate(SEAT, false, Duration::from_secs(46));
+    expect_state(&exporter, &provider, "stale").await;
+    delivery_presence::bind_refused(&fence, "mailbox-runtime-indeterminate");
+    expect_state(&exporter, &provider, "refused").await;
+    delivery_presence::bind_recovered(&fence);
+    heartbeat();
+    expect_state(&exporter, &provider, "live").await;
+    worker.abort();
+    let _ = worker.await;
+    assert!(!app.store.agents_publication_demand(), "no external reader was keeping the owner alive");
+    provider.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn successor_delivery_does_not_report_a_predecessor_bind_refusal_on_messages() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let seat = "agent/example/message-successor";
+    let old = crate::mailbox::Fence::new(seat, "old", "delivery");
+    let new = crate::mailbox::Fence::new(seat, "new", "delivery");
+    delivery_presence::bind_refused(&old, "mailbox-runtime-indeterminate");
+    delivery_presence::bind_recovered(&new);
+    delivery_presence::record_fenced(&new, &json!({
+        "transport":"omp-channel", "ready":true, "pid":std::process::id(),
+        "image":fractal_drivers::reexec::running_identity().map(|identity| identity.token()),
+    }).to_string());
+    app.store.append_claim(&ClaimInput {
+        subject: "message/successor-bind-refusal".into(), kind: "message.sent".into(), actor: Some("person/example".into()),
+        fields: serde_json::from_value(json!({"from":"person/example", "to":seat,
+            "status":"sent", "content":"successor must not inherit refusal"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let known = delivery_presence::known(seat).unwrap();
+    assert_ne!(known.state, "refused");
+    let (status, view) = get_request(router(app), "/v1/messages/delivery/message/successor-bind-refusal").await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert!(!view.to_string().contains("mailbox-runtime-indeterminate"), "{view}");
+}

@@ -6,6 +6,46 @@ import FoundationNetworking
 @testable import FractalClient
 
 final class FractalClientTests: XCTestCase {
+    func testRevisionedAgentsCommandAndGoldenFrames() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<6 { root.deleteLastPathComponent() }
+        func fixture(_ name: String) throws -> Data {
+            try Data(contentsOf: root.appendingPathComponent("docs/st3/client-v0/fixtures/agents-publication-\(name).json"))
+        }
+        let command = try JSONEncoder().encode(AgentsPublicationSubscribe(id: "roster"))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: command) as? NSDictionary,
+            try JSONSerialization.jsonObject(with: fixture("subscribe")) as? NSDictionary)
+        guard case .snapshotChunk(let chunk) = try JSONDecoder().decode(AgentsCollectionEvent.self, from: fixture("chunk")) else {
+            return XCTFail("Expected snapshot chunk")
+        }
+        XCTAssertEqual(chunk.collection, "agents")
+        XCTAssertEqual(chunk.snapshot.publishedAt, "2026-10-10T12:00:00.000Z")
+        XCTAssertEqual(chunk.publication.revision, 42)
+        XCTAssertEqual(chunk.publication.statusWatermark.localFrontier, 17)
+        XCTAssertEqual(chunk.chunkIndex, 0)
+        XCTAssertEqual(chunk.chunkCount, 2)
+        XCTAssertEqual(chunk.order, ["agent/a"])
+        XCTAssertFalse(chunk.hasMore)
+        guard case .changes(let delta) = try JSONDecoder().decode(AgentsCollectionEvent.self, from: fixture("changes")) else {
+            return XCTFail("Expected delta")
+        }
+        XCTAssertEqual(delta.collection, "agents")
+        XCTAssertEqual(delta.snapshot.publishedAt, "2026-10-10T12:00:01.000Z")
+        XCTAssertEqual(delta.publication.revision, 43)
+        XCTAssertEqual(delta.baseRevision, 42)
+        XCTAssertEqual(delta.removes, ["agent/b"])
+        XCTAssertFalse(delta.hasMore)
+        guard case .error(let error) = try JSONDecoder().decode(AgentsCollectionEvent.self, from: fixture("row-too-large")) else {
+            return XCTFail("Expected permanent error")
+        }
+        XCTAssertEqual(error.collection, "agents")
+        XCTAssertEqual(error.code, .agentsPublicationRowTooLarge)
+        XCTAssertEqual(error.retryable, false)
+        let legacy = try JSONDecoder().decode(CollectionNotice.self, from: Data(#"{"kind":"resync","id":"roster"}"#.utf8))
+        XCTAssertNil(legacy.collection)
+        XCTAssertNil(legacy.retryable)
+    }
+
     func testPushRegistrationRoundTripAndRedactedDescription() throws {
         let registration = PushRegistration(token: String(repeating: "ab", count: 32),
             environment: .development, bundleID: "example.push", appVersion: "1.0")
@@ -656,6 +696,26 @@ final class FractalClientTests: XCTestCase {
         file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertNil(request.value(forHTTPHeaderField: "traceparent"), file: file, line: line)
         XCTAssertNil(request.value(forHTTPHeaderField: "tracestate"), file: file, line: line)
+    }
+
+    func testAttentionPresentationDecodesALaunchPreviewAnUnavailableLaunchAndAPrompt() throws {
+        let decode = { (json: String) in try JSONDecoder().decode(AttentionPresentation.self, from: Data(json.utf8)) }
+        let base = #""tier":"today","kind":"launch","agent":null,"raised_by":null,"waiting":null"#
+        let preview = try decode(#"{\#(base),"launch":{"variant":"variant/default","goals":["Audit."],"asks_you":1,"steps":[{"path":"approve","title":"Approve","assignee":{"kind":"st","agent":null,"label":"st"},"after":["prepare"],"asks_you":true}],"agents":[{"id":"agent/example/oak","label":"Oak","harness":"claude","host":null}]}}"#)
+        XCTAssertEqual(preview.launch?.variant, "variant/default")
+        XCTAssertEqual(preview.launch?.steps?.first?.assignee.kind, "st")
+        XCTAssertEqual(preview.launch?.asksYou, 1)
+        XCTAssertNil(preview.launch?.unavailable)
+        let unavailable = try decode(#"{\#(base),"launch":{"unavailable":{"reason":"No mission yet.","diagnostics":["a blocker"]}}}"#)
+        XCTAssertNil(unavailable.launch?.variant)
+        XCTAssertEqual(unavailable.launch?.unavailable?.diagnostics, ["a blocker"])
+        let prompt = try decode(#"{\#(base),"prompt":{"calls":[{"call_id":"call-1","tool":"Bash","input":"{}","input_complete":true}],"answers":["allow","deny"],"allow":true}}"#)
+        XCTAssertEqual(prompt.prompt?.calls?.first?.callID, "call-1")
+        XCTAssertEqual(prompt.prompt?.allow, true)
+        let unread = try decode(#"{\#(base),"prompt":{"calls":null,"answers":[],"allow":false,"unknown_reason":"the timeline cannot be read"}}"#)
+        XCTAssertNil(unread.prompt?.calls)
+        // A row from a daemon that serves neither still decodes.
+        XCTAssertNil(try decode("{\(base)}").launch)
     }
 }
 
