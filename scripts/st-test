@@ -673,13 +673,16 @@ def governed(argv, name):
 
     A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
     (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
-    name or an environment variable a caller could set."""
+    name or an environment variable a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
+    front door reads as "already in a build cap": without it, that front door moves each cargo command into builds.slice, out of
+    the lane. A seat's harness has it from its lane, but a job the seat starts as a unit of its own in the lane does not inherit
+    it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     cap = own_cap()
     if cap:
         print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
-        return argv
+        return [shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1'] + argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
