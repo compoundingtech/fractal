@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn macos_mount_records_use_the_shared_classifier() -> Result<()> {
-        for root in ["/Users/operator/.local/state", "/private/var/operator/state"] {
+        for root in ["/Users/example/.local/state", "/private/var/operator/state"] {
             let old = Path::new(root).join("st3");
             let new = Path::new(root).join("fractal");
             for (suffix, location) in [
@@ -268,7 +268,7 @@ mod tests {
             }
         }
         assert_eq!(data_volume_alias(Path::new("/System/Volumes/Data-other/Users")), None);
-        assert_eq!(data_volume_alias(Path::new("/Users/operator")), None);
+        assert_eq!(data_volume_alias(Path::new("/Users/example")), None);
         Ok(())
     }
 
