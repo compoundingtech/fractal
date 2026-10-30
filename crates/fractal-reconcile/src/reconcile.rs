@@ -120,6 +120,9 @@ const CODEX_CRASH_LOOP_ATTEMPTS: usize = 3;
 const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
 // Claude shows its workspace trust prompt within a few seconds of starting. Rechecking the screen
 // on this grid until readiness finds it well before the readiness deadline.
+/// The incremental key for the fleet's member hosts, observed each pass. A stop owned by another
+/// host reads it, so a host joining or leaving marks every such stop at once.
+const FLEET_MEMBER_HOSTS: &str = "fleet-member-hosts";
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
@@ -210,6 +213,18 @@ fn schedule_admission_ready(
     let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
         && schedule_requires_complete_history(store, schedule)?;
     Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+/// The fleet's member hosts and whether each is still a member, as one value to observe.
+fn fleet_member_hosts(store: &Store) -> Result<String> {
+    let membership = store.fleet_membership()?;
+    Ok(membership
+        .incarnations()
+        .map(|member| format!("{} {}", member.name, if member.end.is_none() { "member" } else { "left" }))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
@@ -1214,6 +1229,10 @@ pub struct Reconciler<R = NativeRuntime> {
     /// This pass's tasks of each stopped root, by root subject. A root is not settled while
     /// one of them still runs on this host.
     stopped_root_tasks: Mutex<BTreeMap<String, Vec<RootTask>>>,
+    /// Stop items whose last evaluation found another host owns the stop. A full pass leaves
+    /// them out: they are evaluated again only when something they read changed, which
+    /// includes a change in the fleet's member hosts ([`FLEET_MEMBER_HOSTS`]).
+    foreign_stops: Mutex<BTreeSet<String>>,
     /// When each batched subscription may next send what it collected.
     batch_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// When a failed `checkout` may run Git again, and why it failed, by agent subject.
@@ -1424,6 +1443,7 @@ impl Reconciler<NativeRuntime> {
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             stopped_root_tasks: Mutex::new(BTreeMap::new()),
+            foreign_stops: Mutex::new(BTreeSet::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -1595,6 +1615,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             stopped_root_tasks: Mutex::new(BTreeMap::new()),
+            foreign_stops: Mutex::new(BTreeSet::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -3162,6 +3183,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // and on every full pass. Without a PTY snapshot every stop waits on the next one anyway.
         // Seen first: what this pass already wrote, such as render receipts.
         self.incremental.observe(&self.store)?;
+        self.incremental.observe_value(FLEET_MEMBER_HOSTS, fleet_member_hosts(&self.store)?);
         let skip_stops = self.skip_unneeded
             && ptys.is_some()
             && !self.incremental.take_full_pass("stop", now_ms());
@@ -3183,7 +3205,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let item = format!("stop:{}", subject.subject);
             stops.insert(item.clone());
-            if skip_stops && !self.incremental.needs(&item, now_ms()) {
+            if self.skip_stop(&item, skip_stops) {
                 continue;
             }
             if !self.owned_desired_ready(subject) {
@@ -3238,7 +3260,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if subject.kind == "stop" {
                 let item = format!("stop:{}", subject.subject);
                 stops.insert(item.clone());
-                if skip_stops && !self.incremental.needs(&item, now_ms()) {
+                if self.skip_stop(&item, skip_stops) {
                     continue;
                 }
                 if !self.owned_desired_ready(subject) {
@@ -3736,6 +3758,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         drop(members_span);
         self.incremental.retain("stop:", &stops);
+        self.foreign_stops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|item| stops.contains(item));
         self.incremental.retain("away:", &stops);
         self.incremental.retain("member:", &members);
         self.member_wakes
@@ -6202,6 +6228,19 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Evaluate one stop this host owns, or skip it when `skip` and nothing it read changed and
     /// its time has not come. As with mission runs, an evaluation that writes a claim although its
     /// stop was not marked is counted as an incremental correction.
+    /// Whether this pass leaves stop `item` alone: when nothing it read changed and it is not
+    /// due, on a pass that skips settled stops, and on a full pass too when its last evaluation
+    /// found another host owns it.
+    fn skip_stop(&self, item: &str, skip_stops: bool) -> bool {
+        let foreign = self.skip_unneeded
+            && self
+                .foreign_stops
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(item);
+        (skip_stops || foreign) && !self.incremental.needs(item, now_ms())
+    }
+
     fn reconcile_stop_item(
         &self,
         subject: &DesiredSubject,
@@ -6220,6 +6259,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         let wrote_mark = smallclaims::touched::wrote_len();
         let ((outcome, due), reads) = smallclaims::touched::record(|| {
             smallclaims::touched::record_due(|| -> Result<Option<Result<()>>> {
+                // Who owns the stop follows from the subject's own claims (its declaration, the
+                // stop's member, its actual origin), read here even when the declaration names
+                // the member, so a claim on the subject marks it.
+                smallclaims::touched::note_read(|| subject.subject.clone());
                 // A stop's actual origin is read once here and reused by `reconcile_stop`.
                 let (owner, actual_origin) = match &subject.member {
                     Some(member) => (Some(member.host.clone()), None),
@@ -6235,6 +6278,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                 };
                 if owner.as_deref() != Some(self.host.as_str()) {
+                    // Which hosts are members decides nothing here today, but a host joining
+                    // or leaving is when ownership could move without a claim on the subject.
+                    smallclaims::touched::note_read(|| FLEET_MEMBER_HOSTS.to_owned());
                     return Ok(None);
                 }
                 Ok(Some(caught(|| -> Result<()> {
@@ -6253,6 +6299,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             let wrote = smallclaims::touched::wrote_since(wrote_mark);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
+            }
+        }
+        {
+            let mut foreign = self.foreign_stops.lock().unwrap_or_else(PoisonError::into_inner);
+            if matches!(outcome, Ok(None)) {
+                foreign.insert(item.to_owned());
+            } else {
+                foreign.remove(item);
             }
         }
         match outcome {
@@ -19880,6 +19934,7 @@ pub mod tests {
     mod gate_on_demand;
     mod github_watch_selection;
     mod helper_launcher;
+    mod foreign_stops;
     mod incremental_deadlines;
     #[cfg(test)]
     mod schedule_standby_parent;
