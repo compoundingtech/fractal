@@ -921,7 +921,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && (needs.evidence-gate-fractal-web.outputs.skip == 'true' || needs.evidence-gate-fractal-web.outputs.refuse == 'true')) }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && needs.evidence-gate-fractal-web.outputs.skip != 'true' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.refuse == 'true') }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -997,8 +997,8 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
-    // Only a PR's explicit evidence decision permits job-level skipping. Queue and manual runs
-    // still require execution and, when sharded, complete exact-index receipts.
+    // Explicit trusted evidence covers PR and merge-group trees; all other relevant runs
+    // require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
@@ -1040,9 +1040,8 @@ export const fractalWebJobs = {
       },
       {
         name: 'Require every kit shard and exact full-index coverage',
-        // Never conditioned on the evidence gate: only merge groups and manual runs shard, a skip is for pull requests
-        // only (the policy's events), and a skip taken anyway leaves no receipts, so this step would fail the check.
-        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true'`,
+        // A trusted evidence skip produces no receipts, just as it suppresses execution and download.
+        if: `${kitSharded} && needs.fractal-web-changes.outputs.relevant == 'true' && needs.evidence-gate-fractal-web.outputs.skip != 'true'`,
         run: `node packages/fractal-ui/scripts/kit-play-shards.mjs "$RUNNER_TEMP/kit-play-receipts" ${kitShardCount}`,
       },
     ],
