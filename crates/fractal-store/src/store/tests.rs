@@ -12300,6 +12300,8 @@ fn unchanged_harness_reports_stay_local_once_every_member_can_ask_the_seats_host
         66,
         "the local log keeps every report"
     );
+}
+
 /// A roster's freshness read takes every seat's newest local report in one statement: 12 seats
 /// cost what 2 do, and a seat with no local report adds nothing.
 #[test]
