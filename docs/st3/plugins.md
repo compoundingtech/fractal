@@ -36,6 +36,10 @@ observer's poll cursor:
 - `mirror_heads`: every head SHA a pull request has had, when it was first and last seen, and the
   checks last seen on it.
 - `mirror_events`: the keyed events each change held (below), kept for 30 days.
+- `mirror_event_keys`: every event subject the mirror has handed out, so a repeated event never
+  takes an earlier one's key, even after that event aged out or the repository was forgotten.
+  It is never pruned; each row is one short subject. Step 3b, which writes each event as a graph
+  claim, is to check the graph's `github.event` subjects instead, so this table can be pruned.
 
 Each look's recorded items go into the mirror right after the look's graph write. The first time
 a daemon process mirrors a repository, it first seeds the mirror from the graph's recorded items,
