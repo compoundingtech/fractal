@@ -1136,16 +1136,27 @@ impl Store {
     }
 
     /// A person looked at a trim that stopped because the graph would change. The rows stay
-    /// as they are, and checkpoints go on from the next one. On a member that trims locally the
-    /// stop alerts the operations agent, which may resume it too.
+    /// as they are, and checkpoints go on from the next one.
     pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+        self.resume_checkpoints_allowing(actor, reason, None)
+    }
+
+    /// As [`Self::resume_checkpoints`], and on a member that trims locally `agent` may resume
+    /// too: the agent its stop alerts (`[trim] notify`), which owns the fault. Resuming past a
+    /// stop is the safety decision, so no other agent may.
+    pub fn resume_checkpoints_allowing(
+        &self,
+        actor: &str,
+        reason: &str,
+        agent: Option<&str>,
+    ) -> Result<(), St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
-        let allowed = actor.starts_with("person/") || (self.trims_locally() && actor.starts_with("agent/"));
+        let allowed = actor.starts_with("person/") || (self.trims_locally() && agent == Some(actor.as_str()));
         if !allowed || reason.trim().is_empty() {
             return Err(St3Error::new(
                 "invalid-checkpoint-resume",
-                "a person resumes checkpoints, with a reason (or an agent, where trim is local)",
+                "a person resumes checkpoints, with a reason (or, where trim is local, the [trim] notify agent)",
             ));
         }
         let mut connection = self.connection.write();
