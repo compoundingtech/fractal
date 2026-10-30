@@ -376,8 +376,9 @@ enum Step {
     PeerCite(u8),
     /// The citation cache caught up now, all the way or (`partial`) stopped after one page.
     CatchUp(bool),
-    /// The `nth` claim retired as a local trim deletes it; with `stale`, its citation rows are
-    /// put back afterwards, as a binary that kept no cache would leave them.
+    /// The `nth` claim retired as a local trim deletes it, an odd `nth` from the claims that
+    /// cite one, so a claim another still cites loses one of its citers; with `stale`, its
+    /// citation rows are put back afterwards, as a binary that kept no cache would leave them.
     Retire(u8, bool),
     /// Two observations of one observer in one batch: the older is not the newest of its slot
     /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
@@ -519,14 +520,19 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
         Step::Retire(k, stale) => {
             let claims: Vec<ClaimRecord> = {
                 let connection = store.readers.get();
-                let sql = format!("SELECT {} FROM claims WHERE kind IN ('observer.observed', 'resource.observed') ORDER BY store_index", smallclaims::store::CLAIM_COLUMNS);
+                let which = if k % 2 == 1 {
+                    "json_array_length(body, '$.evidence') > 0"
+                } else {
+                    "kind IN ('observer.observed', 'resource.observed')"
+                };
+                let sql = format!("SELECT {} FROM claims WHERE {which} ORDER BY store_index", smallclaims::store::CLAIM_COLUMNS);
                 let mut statement = connection.prepare(&sql).unwrap();
                 statement.query_map([], smallclaims::store::claim_from_row).unwrap().collect::<rusqlite::Result<_>>().unwrap()
             };
             if claims.is_empty() {
                 return;
             }
-            let claim = &claims[usize::from(*k) % claims.len()];
+            let claim = &claims[usize::from(*k / 2) % claims.len()];
             let rows: Vec<(String, String)> = store
                 .readers
                 .get()
@@ -545,7 +551,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                 &[],
                 &[smallclaims::store::checkpoint::ClaimTombstone {
                     id: claim.id.clone(),
-                    operation_id: None,
+                    operation_id: smallclaims::store::operation_parts(&claim.body).map(|(id, _)| id.to_owned()),
                     writer: String::new(),
                     sequence: 0,
                     envelope_hash: String::new(),
@@ -553,7 +559,7 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                     kind: claim.kind.clone(),
                     actor: claim.actor.clone(),
                     predecessors: claim.predecessors.clone(),
-                    request_digest: None,
+                    request_digest: smallclaims::store::operation_parts(&claim.body).map(|(_, digest)| digest.to_owned()),
                     accepted_at_unix_ms: claim.accepted_at_unix_ms,
                 }],
             );
@@ -679,4 +685,41 @@ proptest! {
         let check = store.verify_local_trim_citations().unwrap();
         prop_assert!(check.missing.is_empty() && check.extra.is_empty(), "{:?}", check);
     }
+}
+
+/// A claim two others cite keeps the citer that is still here after the other is retired: the
+/// deleting transaction removes only the retired claim's own citation rows.
+#[test]
+fn a_retired_citer_leaves_what_the_others_cite() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let peer = Store::open_memory("birch").unwrap();
+    for n in 0..2 {
+        take_step(&store, &peer, &Step::Write(Write::Observer { observer: 0, status: n, cursor: None }), usize::from(n));
+    }
+    // Both cite the older observation, the one the cut could drop.
+    take_step(&store, &peer, &Step::Cite(0), 2);
+    take_step(&store, &peer, &Step::Cite(0), 3);
+    store.catch_up_local_trim_citations().unwrap();
+    let citers: Vec<String> = store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims WHERE json_array_length(body, '$.evidence') > 0 ORDER BY store_index")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(citers.len(), 2);
+    take_step(&store, &peer, &Step::Retire(1, false), 4);
+    assert!(store.claim_by_id(&citers[0]).unwrap().is_none(), "the first citer is retired");
+    store.seal_local_batches().unwrap();
+    let check = store.verify_local_trim_citations().unwrap();
+    assert!(check.missing.is_empty() && check.extra.is_empty(), "{check:?}");
+    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+    let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+    assert_eq!(scoped, full);
+    assert!(scoped.2.iter().any(|answer| answer.contains("cited=1")), "{:?}", scoped.2);
 }
