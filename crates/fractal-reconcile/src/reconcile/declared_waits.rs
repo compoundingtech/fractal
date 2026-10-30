@@ -4,7 +4,8 @@
 //!
 //! - a pull request wakes the seat through the `gh watch` the wait set. The wait ends when that
 //!   watch ends: the pull request merged or closed (the watch's last wake told the seat), the
-//!   watch reached its deadline, or the seat unwatched it.
+//!   watch reached its deadline, or the seat unwatched it. A watch that is gone with no end
+//!   recorded since the wait began told the seat nothing, so st wakes it.
 //! - a step: when it completes, fails or is cancelled, st wakes the seat.
 //! - a time: when it comes, st wakes the seat. Until then the run's evaluation is due at that
 //!   time, so nothing polls.
@@ -34,11 +35,16 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if self.store.live_watch(&watch)?.is_some() {
                     return Ok(false);
                 }
-                let ended = self
-                    .store
-                    .last_watch_end(&watch)?
-                    .unwrap_or_else(|| "it is gone".to_owned());
-                (format!("the watch on {} ended: {ended}", wait.subject), true)
+                // A watch that ended since the wait began woke the seat itself. One that is gone
+                // with no end recorded since then (never set here, or ended before the wait)
+                // told the seat nothing, so st does.
+                match self.store.last_watch_end(&watch, wait.since_unix_ms)? {
+                    Some(ended) => (
+                        format!("the watch on {} ended: {ended}", wait.subject),
+                        true,
+                    ),
+                    None => (format!("the watch on {} is gone", wait.subject), false),
+                }
             }
             "step" => {
                 smallclaims::touched::note_read(|| wait.subject.clone());

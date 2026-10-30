@@ -220,17 +220,19 @@ impl Store {
         Ok(declared_wait_at(&connection, subject, attempt, now_ms())?)
     }
 
-    /// Why a watch last ended: merged, closed, deadline, unwatched or seat-ended.
-    pub fn last_watch_end(&self, watch: &str) -> Result<Option<String>> {
+    /// Why a watch last ended at or after `since_unix_ms`: merged, closed, deadline, unwatched or
+    /// seat-ended.
+    pub fn last_watch_end(&self, watch: &str, since_unix_ms: u128) -> Result<Option<String>> {
         smallclaims::touched::note_read(|| watch.to_owned());
         let connection = self.readers.get();
         Ok(connection
-            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h8ee72e7eb136 owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ &canonical_sql(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf8b71b6de3d1 owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT json_extract(body, '$.fields.reason') FROM claims
                  WHERE subject=?1 AND kind='subscription.watch-ended'
+                   AND (length(accepted_at_unix_ms), accepted_at_unix_ms) >= (length(?2), ?2)
                  ORDER BY CANONICAL_DESC(claims) LIMIT 1",
             ))?
-            .query_row(/* sqlite-large-value: allow-for-now lv-he565a00d965c owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ [watch], |row| row.get::<_, Option<String>>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h4206e271c4ba owner=fractal_store::store::declared_waits TODO=trace-statement-and-value-representation */ params![watch, since_unix_ms.to_string()], |row| row.get::<_, Option<String>>(0))
             .optional()?
             .flatten())
     }
