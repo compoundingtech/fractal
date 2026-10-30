@@ -1121,6 +1121,25 @@ pub fn sealed_records_page_sql() -> String {
     )
 }
 
+/// `sealed_records_page_sql` for the records of one envelope (?1, ?2, ?5), with the cut ?3 and
+/// the seal row ?4.
+pub fn sealed_envelope_records_sql() -> String {
+    let order = super::canonical::components("claims").join(", ");
+    format!(
+        "SELECT {order}, records.writer, records.sequence, records.envelope_hash,
+                records.state, records.position
+         FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+         JOIN batches ON batches.id=claims.batch_id
+         JOIN replica_envelopes envelopes
+           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+             AND envelopes.envelope_hash=records.envelope_hash
+         WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
+           AND records.state<>'repaired'
+           AND envelopes.rowid <= ?4
+           AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
+    )
+}
+
 /// One page of `replica_envelopes` in identity order after the key (?2, ?3, ?4), for a seal.
 /// As in `checkpoint_sealed_set_through`: an envelope is before the cut ?1 when it and every
 /// claim admitted from it, less repaired originals, are dated before the cut, and it is at or

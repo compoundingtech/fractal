@@ -120,7 +120,7 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{CheckpointManifestNeed, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]

@@ -354,3 +354,180 @@ fn local_trim_leaves_resource_observations_whole() {
     assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
 }
+
+/// One step of a history for the capture equivalence test: a write, or something that makes a
+/// guard of the local cut answer for an observer claim.
+#[derive(Clone, Debug)]
+enum Step {
+    Write(Write),
+    /// A claim of another kind whose evidence cites the `nth` observer claim so far.
+    Cite(u8),
+    /// A mission definition naming the `nth` observer claim, which protects it.
+    Protect(u8),
+    /// A repair naming the `nth` observer claim its replacement, by claim or by record.
+    Repair(u8, bool),
+    /// An observer claim and a claim of another kind in one operation, in two envelopes.
+    Shared(u8),
+}
+
+fn step_strategy() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        6 => write().prop_map(Step::Write),
+        1 => any::<u8>().prop_map(Step::Cite),
+        1 => any::<u8>().prop_map(Step::Protect),
+        1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
+        1 => (0..3u8).prop_map(Step::Shared),
+    ]
+}
+
+fn take_step(store: &Store, step: &Step, n: usize) {
+    let observed = || -> Vec<String> {
+        store
+            .readers
+            .get()
+            .prepare("SELECT id FROM claims WHERE kind='observer.observed' ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let nth = |nth: u8| {
+        let ids = observed();
+        (!ids.is_empty()).then(|| ids[usize::from(nth) % ids.len()].clone())
+    };
+    match step {
+        Step::Write(write) => apply(store, write, n),
+        Step::Cite(k) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .append_claim(&ClaimInput {
+                    subject: "resource/pr/9".into(),
+                    kind: "resource.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("kind".into(), json!("vcs.pull-request")),
+                        ("state".into(), json!("open")),
+                        ("observer".into(), json!("observer/watch-0")),
+                    ]),
+                    evidence: vec![id],
+                    expected_subject: None,
+                    idempotency_key: Some(format!("history-{n}")),
+                })
+                .unwrap();
+        }
+        Step::Protect(k) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .connection
+                .write()
+                .execute(
+                    "INSERT OR REPLACE INTO mission_definitions(mission_id, revision, state, claim_id)
+                     VALUES (?1, 'r', 'active', ?2)",
+                    params![format!("mission/protects-{n}"), id],
+                )
+                .unwrap();
+        }
+        Step::Repair(k, true) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("repair/test-{n}"),
+                    kind: "record.repaired".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("record".into(), json!(format!("record/original-{n}"))),
+                        ("replacement".into(), json!(id)),
+                        ("reason".into(), json!("a test repair")),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("history-{n}")),
+                })
+                .unwrap();
+        }
+        Step::Repair(k, false) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .connection
+                .write()
+                .execute(
+                    "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
+                         state, claim_id, replacement_claim_id, updated_at_unix_ms)
+                     VALUES (?1, 'node.elsewhere', ?2, 'repaired', 0, X'', 'repaired', ?3, ?4, '1')",
+                    params![format!("record/repaired-{n}"), n as i64, format!("claim/original-{n}"), id],
+                )
+                .unwrap();
+        }
+        Step::Shared(observer) => {
+            let operation = json!({"id": format!("operation/shared-{n}"), "request_digest": format!("digest-{n}")});
+            for (subject, kind, fields) in [
+                (format!("observer/watch-{observer}"), "observer.observed", json!({"status": "ok"})),
+                (
+                    format!("resource/pr/{observer}"),
+                    "resource.observed",
+                    json!({"kind": "vcs.pull-request", "state": "open", "observer": format!("observer/watch-{observer}")}),
+                ),
+            ] {
+                // One transaction each: two batches, so two envelopes.
+                let mut connection = store.connection.write();
+                let transaction = connection.transaction().unwrap();
+                append_claim_tx(
+                    &transaction,
+                    &store.origin,
+                    &subject,
+                    kind,
+                    None,
+                    &json!({"fields": fields, "_operation": operation}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                transaction.commit().unwrap();
+            }
+        }
+    }
+}
+
+/// Stage `store` at `cut` as a local cut does, fully or scoped, and plan it.
+fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let kinds = smallclaims::store::LOCAL_TRIM_KINDS;
+    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(kinds)).unwrap();
+    staged.protect_all_but(kinds).unwrap();
+    smallclaims::store::checkpoint_staging::without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
+    let claims = staged.dropped_claims(0, usize::MAX >> 1).unwrap().into_iter().map(|claim| claim.id).collect();
+    let envelopes = staged
+        .dropped_envelopes(0, usize::MAX >> 1)
+        .unwrap()
+        .into_iter()
+        .map(|envelope| format!("{}/{}/{}", envelope.writer, envelope.sequence, envelope.envelope_hash))
+        .collect();
+    (claims, envelopes, staged.guard_answers(kinds).unwrap())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+    /// For random histories, a local cut's scoped capture plans the same drop as a full capture
+    /// restricted to the kinds it drops, and every guard answers the same for each claim it
+    /// could drop: newest of slot, writer's newest envelope, operations, envelopes, protections,
+    /// repairs and citations.
+    #[test]
+    fn a_scoped_capture_plans_what_a_full_one_plans(
+        steps in proptest::collection::vec(step_strategy(), 1..60)
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let context = context(scratch.path(), 0);
+        let store = local_member("alder");
+        for (n, step) in steps.iter().enumerate() {
+            take_step(&store, step, n);
+        }
+        store.seal_local_batches().unwrap();
+        let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+        let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+        let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+        prop_assert_eq!(&scoped.0, &full.0, "dropped claims");
+        prop_assert_eq!(&scoped.1, &full.1, "dropped envelopes");
+        prop_assert_eq!(&scoped.2, &full.2, "guard answers");
+    }
+}

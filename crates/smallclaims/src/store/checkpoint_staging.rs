@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS meta(
     bound INTEGER,
     plan TEXT
 );
+-- A scoped capture's envelopes, numbered for its records phase to page through.
+CREATE TABLE IF NOT EXISTS scoped_envelopes(
+    n INTEGER PRIMARY KEY, writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
+    UNIQUE(writer, sequence, envelope_hash));
 CREATE TABLE IF NOT EXISTS envelopes(
     writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
     accepted_at INTEGER NOT NULL, records INTEGER NOT NULL, included INTEGER NOT NULL,
@@ -153,6 +157,10 @@ impl StagedPlan {
     }
 }
 
+/// A record as `sealed_records_page_sql` reads it: its canonical order, its envelope, its state
+/// and position.
+type RecordRow = (i64, String, Option<String>, Option<i64>, String, i64, String, String, u64, String, String, i64);
+
 /// A sealed set captured to a staging file, and its plan once made.
 pub struct StagedSet {
     pub path: PathBuf,
@@ -163,11 +171,16 @@ pub struct StagedSet {
     pub cut_unix_ms: u128,
     pub seal_rowid: i64,
     epoch: i64,
+    /// The claim kinds a local cut drops, when it stages only what judging them needs; `None`
+    /// stages the whole sealed set.
+    scope: Option<Vec<String>>,
 }
 
-/// The name a staging file has for one checkpoint and seal row.
-fn staging_name(cut_unix_ms: u128, seal_rowid: i64) -> String {
-    format!("capture-{}-{seal_rowid}.sqlite3", checkpoint_name(cut_unix_ms).replace('/', "-"))
+/// The name a staging file has for one checkpoint and seal row. A scoped capture has its own,
+/// so a full capture never resumes one, nor one a full capture.
+fn staging_name(cut_unix_ms: u128, seal_rowid: i64, scoped: bool) -> String {
+    let scope = if scoped { "-scoped" } else { "" };
+    format!("capture-{}-{seal_rowid}{scope}.sqlite3", checkpoint_name(cut_unix_ms).replace('/', "-"))
 }
 
 /// Delete every staging file in `dir` but `keep`. A directory holds one capture at a time, so a
@@ -234,6 +247,19 @@ impl Store {
         through_rowid: Option<i64>,
         dir: &Path,
     ) -> Result<StagedSet> {
+        self.checkpoint_staged_set_scoped(cut_unix_ms, through_rowid, dir, None)
+    }
+
+    /// `checkpoint_staged_set`, staging with `scope` only the envelopes that hold a claim of
+    /// those kinds and what the planner's guards read to judge them (`checkpoint_staging/scoped`).
+    pub fn checkpoint_staged_set_scoped(
+        &self,
+        cut_unix_ms: u128,
+        through_rowid: Option<i64>,
+        dir: &Path,
+        scope: Option<&[&str]>,
+    ) -> Result<StagedSet> {
+        let scope = scope.map(|kinds| kinds.iter().map(|kind| (*kind).to_owned()).collect::<Vec<_>>());
         self.runtime.checkpoint_preflight()?;
         let _span = crate::profile::span_with_io("checkpoint.capture");
         // Admit before lock_staging creates the scratch directory or lock file.
@@ -250,7 +276,7 @@ impl Store {
         drop(super::checkpoint_space::ProofOwnership::acquire(proof_root)?);
         let lock = lock_staging(dir)?;
         let seal_rowid = self.register_checkpoint_capture(cut_unix_ms, through_rowid)?;
-        let path = dir.join(staging_name(cut_unix_ms, seal_rowid));
+        let path = dir.join(staging_name(cut_unix_ms, seal_rowid, scope.is_some()));
         remove_other_staging(dir, Some(&path))?;
         let mut lock = Some(lock);
         for _ in 0..3 {
@@ -263,10 +289,11 @@ impl Store {
                 &path,
                 lock.take().expect("each attempt takes the lock back"),
                 space.clone(),
-                self.staging_identity(cut_unix_ms, seal_rowid, epoch)?,
+                self.staging_identity(cut_unix_ms, seal_rowid, epoch, scope.as_deref())?,
                 cut_unix_ms,
                 seal_rowid,
                 epoch,
+                scope.clone(),
             )?;
             let captured = staged.capture(self);
             let space_failed = space.as_ref().is_some_and(|space| space.failed());
@@ -303,16 +330,21 @@ impl Store {
         }
     }
 
-    /// What a staging file must match to be resumed: its format, cut, seal row and epoch, the
-    /// rules, and this executable, since the runtime computes each claim's facts and a build
-    /// that changes how is a different executable.
-    fn staging_identity(&self, cut_unix_ms: u128, seal_rowid: i64, epoch: i64) -> Result<String> {
+    /// What a staging file must match to be resumed: its format, cut, seal row and epoch, its
+    /// scope, the rules, and this executable, since the runtime computes each claim's facts and
+    /// a build that changes how is a different executable. A local cut's file also holds the
+    /// marks `protect_all_but` sets, so a full capture must never resume it.
+    fn staging_identity(&self, cut_unix_ms: u128, seal_rowid: i64, epoch: i64, scope: Option<&[String]>) -> Result<String> {
         let mut digest = Sha256::new();
         digest.update(b"smallclaims-checkpoint-staging-v1\0");
         digest.update(STAGING_FORMAT.to_be_bytes());
         digest.update(cut_unix_ms.to_be_bytes());
         digest.update(seal_rowid.to_be_bytes());
         digest.update(epoch.to_be_bytes());
+        // Only a scoped file names its scope, so a full capture's identity is what it was.
+        if let Some(kinds) = scope {
+            digest_field(&mut digest, Some(&format!("scoped:{}", kinds.join(","))));
+        }
         for field in [
             self.runtime.checkpoint_rules_digest(),
             super::checkpoint_agreement::checkpoint_build(),
@@ -430,6 +462,7 @@ impl StagedSet {
         cut_unix_ms: u128,
         seal_rowid: i64,
         epoch: i64,
+        scope: Option<Vec<String>>,
     ) -> Result<Self> {
         let connect = || -> Result<Connection> {
             let staging = Connection::open(path)?;
@@ -466,6 +499,7 @@ impl StagedSet {
             cut_unix_ms,
             seal_rowid,
             epoch,
+            scope,
         })
     }
 
@@ -505,14 +539,22 @@ impl StagedSet {
                 space.check_now()?;
             }
             let (phase, cursor, bound) = self.position()?;
+            let scoped = self.scope.is_some();
             match phase {
+                ENVELOPES if scoped => self.capture_scoped_envelopes(store, cursor, bound)?,
                 ENVELOPES => self.capture_envelopes(store, cursor)?,
+                RECORDS if scoped => self.capture_scoped_records(store, cursor)?,
                 RECORDS => self.capture_records(store, cursor, bound)?,
                 ORDER => self.order_records()?,
                 CLAIMS => self.capture_claims(store, cursor)?,
+                phase if scoped && (PROTECTED..EARLIER_ENVELOPES).contains(&phase) => {
+                    self.capture_scoped_protection(store, phase, cursor, bound)?
+                }
                 phase if (PROTECTED..EARLIER_ENVELOPES).contains(&phase) => {
                     self.capture_protection(store, phase, cursor, bound)?
                 }
+                EARLIER_ENVELOPES if scoped => self.capture_writer_heads(store)?,
+                EARLIER_CLAIMS if scoped => self.capture_citers(store, cursor, bound)?,
                 EARLIER_ENVELOPES | EARLIER_CLAIMS => self.capture_earlier(store, phase, cursor, bound)?,
                 CAPTURED => {
                     // The last page's epoch check covers every page before it.
@@ -603,8 +645,7 @@ impl StagedSet {
         let upto = after.saturating_add(STAGING_PAGE).min(last);
         let cut = accepted(self.cut_unix_ms)?;
         let sql = sealed_records_page_sql();
-        type Row = (i64, String, Option<String>, Option<i64>, String, i64, String, String, u64, String, String, i64);
-        let page: Vec<Row> = store.checkpoint_capture_page(self.epoch, || {
+        let page: Vec<RecordRow> = store.checkpoint_capture_page(self.epoch, || {
             let connection = store.readers.get();
             let page = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-h29af95d541e4 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &sql)?
@@ -619,26 +660,30 @@ impl StagedSet {
             Ok(page)
         })?;
         let transaction = self.staging.unchecked_transaction()?;
-        {
-            let mut insert = transaction.prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h33ed5804f30f owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            )?;
-            let mut late = transaction.prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h13e038eb95a2 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "UPDATE envelopes SET included=0
-                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-            )?;
-            for row in page {
-                if checkpoint_accepted_time(&row.1, &row.6, 1)? >= self.cut_unix_ms {
-                    late.execute(/* sqlite-large-value: allow-for-now lv-hc2e0a3e9faa7 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ params![row.7, row.8, row.9])?;
-                }
-                insert.execute(/* sqlite-large-value: allow-for-now lv-hd395e63608d9 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ params![
-                    row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
-                    row.11, row.10 == "valid"
-                ])?;
-            }
-        }
+        self.stage_record_rows(&transaction, page)?;
         Self::advance(&transaction, RECORDS, upto, Some(last))?;
         Ok(transaction.commit()?)
+    }
+
+    /// Stage a page of records, marking the envelope of a claim dated at or after the cut late.
+    fn stage_record_rows(&self, transaction: &Connection, page: Vec<RecordRow>) -> Result<()> {
+        let mut insert = transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h33ed5804f30f owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )?;
+        let mut late = transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h13e038eb95a2 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "UPDATE envelopes SET included=0
+             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+        )?;
+        for row in page {
+            if checkpoint_accepted_time(&row.1, &row.6, 1)? >= self.cut_unix_ms {
+                late.execute(/* sqlite-large-value: allow-for-now lv-hc2e0a3e9faa7 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ params![row.7, row.8, row.9])?;
+            }
+            insert.execute(/* sqlite-large-value: allow-for-now lv-hd395e63608d9 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ params![
+                row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9,
+                row.11, row.10 == "valid"
+            ])?;
+        }
+        Ok(())
     }
 
     /// Number the records in canonical order, then by the record's own identity, so a claim held
@@ -767,14 +812,7 @@ impl StagedSet {
             None => self.high(store, table)?,
         };
         if after >= high {
-            let transaction = self.staging.unchecked_transaction()?;
-            if phase + 1 == EARLIER_ENVELOPES {
-                transaction.execute_batch(
-                    /* sqlite-large-value: allow-for-now lv-hdd7330128d54 owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE id IN (SELECT id FROM protected);",
-                )?;
-            }
-            Self::advance(&transaction, phase + 1, 0, None)?;
-            return Ok(transaction.commit()?);
+            return self.end_protection_phase(phase);
         }
         let upto = after.saturating_add(STAGING_PAGE).min(high);
         let cut = accepted(self.cut_unix_ms)?;
@@ -784,14 +822,31 @@ impl StagedSet {
                 .query_map(params![after, upto, cut], |row| row.get::<_, Option<String>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         })?;
+        self.stage_protected(phase, page.into_iter().flatten(), upto, Some(high))
+    }
+
+    /// The end of a protection phase. After the last, the claims they named are marked.
+    fn end_protection_phase(&self, phase: i64) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        if phase + 1 == EARLIER_ENVELOPES {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hdd7330128d54 owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE id IN (SELECT id FROM protected);",
+            )?;
+        }
+        Self::advance(&transaction, phase + 1, 0, None)?;
+        Ok(transaction.commit()?)
+    }
+
+    /// Stage a page of the claims a protection names, and where its phase has got to.
+    fn stage_protected(&self, phase: i64, ids: impl IntoIterator<Item = String>, cursor: i64, bound: Option<i64>) -> Result<()> {
         let transaction = self.staging.unchecked_transaction()?;
         {
             let mut insert = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc2f89e8781f9 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO protected(id) VALUES (?1)")?;
-            for id in page.into_iter().flatten() {
+            for id in ids {
                 insert.execute(/* sqlite-large-value: allow-for-now lv-h5fd695e5b9b0 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ [id])?;
             }
         }
-        Self::advance(&transaction, phase, upto, Some(high))?;
+        Self::advance(&transaction, phase, cursor, bound)?;
         Ok(transaction.commit()?)
     }
 
@@ -1123,6 +1178,35 @@ impl StagedSet {
         Ok(())
     }
 
+    /// What each guard says of each claim of `kinds` the cut could drop (one older than the
+    /// newest of its slot), so a test can compare a scoped capture's answers with a full one's.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn guard_answers(&self, kinds: &[&str]) -> Result<Vec<String>> {
+        Ok(self
+            .staging
+            .prepare(&format!(
+                "SELECT claim.id || ' protected=' || claim.protected || ' valid=' || claim.valid
+                     || ' cited=' || (claim.id IN (SELECT id FROM cited))
+                     || ' duplicate=' || (claim.id IN (SELECT id FROM claims GROUP BY id HAVING COUNT(*) > 1))
+                     || ' writer_newest=' || (claim.sequence=(SELECT MAX(envelopes.sequence) FROM envelopes
+                                                WHERE envelopes.writer=claim.writer AND envelopes.included=1))
+                     || ' operation=' || COALESCE((SELECT group_concat(id, ',') FROM (SELECT other.id FROM claims other
+                                                WHERE other.operation_id=claim.operation_id AND other.pos<>claim.pos
+                                                ORDER BY other.id)), '')
+                     || ' envelope=' || COALESCE((SELECT group_concat(kind || ':' || id, ',') FROM (SELECT other.kind, other.id
+                                                FROM claims other WHERE other.writer=claim.writer
+                                                  AND other.sequence=claim.sequence AND other.envelope_hash=claim.envelope_hash
+                                                ORDER BY other.id)), '')
+                 FROM claims AS claim
+                 WHERE claim.first=1 AND claim.slot IS NOT NULL AND claim.kind IN ({})
+                   AND EXISTS(SELECT 1 FROM claims AS newer WHERE newer.slot=claim.slot AND newer.pos>claim.pos)
+                 ORDER BY claim.id",
+                vec!["?"; kinds.len()].join(", ")
+            ))?
+            .query_map(rusqlite::params_from_iter(kinds), |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
     pub(super) fn drop_newest_for_test(&self) -> Result<()> {
         self.staging.execute(
@@ -1270,6 +1354,8 @@ fn remove_file_set(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+mod scoped;
 
 #[cfg(test)]
 mod headroom_resume_tests {
