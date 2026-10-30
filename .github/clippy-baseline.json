@@ -1,5 +1,23 @@
 {
   "counts": {
+    "smallclaims": {
+      "clippy::empty_line_after_doc_comments": 1,
+      "clippy::filter_next": 1,
+      "clippy::needless_range_loop": 1
+    },
+    "fractal-drivers": {
+      "clippy::cloned_ref_to_slice_refs": 1,
+      "clippy::collapsible_if": 5,
+      "clippy::items_after_test_module": 2,
+      "clippy::needless_borrow": 2,
+      "clippy::too_many_arguments": 12,
+      "clippy::useless_format": 1,
+      "clippy::while_let_loop": 1
+    },
+    "fractal-legacy-runner": {
+      "clippy::obfuscated_if_else": 1,
+      "clippy::too_many_arguments": 2
+    },
     "fractal": {
       "clippy::collapsible_if": 4,
       "clippy::collapsible_match": 1,
@@ -19,15 +37,6 @@
       "clippy::large_enum_variant": 1,
       "clippy::manual_is_multiple_of": 1
     },
-    "fractal-drivers": {
-      "clippy::cloned_ref_to_slice_refs": 1,
-      "clippy::collapsible_if": 5,
-      "clippy::items_after_test_module": 2,
-      "clippy::needless_borrow": 2,
-      "clippy::too_many_arguments": 12,
-      "clippy::useless_format": 1,
-      "clippy::while_let_loop": 1
-    },
     "fractal-feed": {
       "clippy::filter_map_bool_then": 1,
       "clippy::if_same_then_else": 1,
@@ -35,10 +44,6 @@
     },
     "fractal-github-base": {
       "clippy::type_complexity": 3
-    },
-    "fractal-legacy-runner": {
-      "clippy::obfuscated_if_else": 1,
-      "clippy::too_many_arguments": 2
     },
     "fractal-missions": {
       "clippy::cloned_ref_to_slice_refs": 1,
@@ -63,6 +68,9 @@
       "clippy::redundant_closure": 1,
       "clippy::too_many_arguments": 1
     },
+    "fractal-ui-model": {
+      "clippy::field_reassign_with_default": 4
+    },
     "fractal-tui": {
       "clippy::cloned_ref_to_slice_refs": 2,
       "clippy::double_ended_iterator_last": 1,
@@ -74,14 +82,6 @@
       "clippy::type_complexity": 1,
       "dead_code": 3,
       "unused_assignments": 1
-    },
-    "fractal-ui-model": {
-      "clippy::field_reassign_with_default": 4
-    },
-    "smallclaims": {
-      "clippy::empty_line_after_doc_comments": 1,
-      "clippy::filter_next": 1,
-      "clippy::needless_range_loop": 1
     }
   },
   "toolchain": {
