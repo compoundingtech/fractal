@@ -21,7 +21,7 @@ struct Series {
     state: &'static str,
     incarnation: Option<String>,
     clock: StateClock,
-    attributes: [KeyValue; 3],
+    attributes: [KeyValue; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,8 +59,8 @@ fn summarize_rows(agents: Vec<String>, rows: &[Value], previous: &Summary, now: 
         let state = match delivery.and_then(|delivery| delivery["state"].as_str()) {
             Some("refused") => "refused",
             Some("current" | "outdated" | "legacy") => "live",
-            // No confirmed delivery evidence is explicitly stale, even during startup or
-            // while stopped. Never-bound and temporarily unpublished seats do not disappear.
+            // No confirmed delivery evidence is stale, even during startup or suspension.
+            // Never-bound and temporarily unpublished declared agents do not disappear.
             _ => "stale",
         };
         let reason = if state == "refused" {
@@ -78,7 +78,8 @@ fn summarize_rows(agents: Vec<String>, rows: &[Value], previous: &Summary, now: 
                     u64::try_from(now.saturating_sub(since)).unwrap_or(u64::MAX)) }
             }, |previous| previous.clock);
         let attributes = [KeyValue::new("st.agent", agent.clone()),
-            KeyValue::new("st.delivery.state", state), KeyValue::new("st.delivery.reason", reason)];
+            KeyValue::new("st.delivery.state", state), KeyValue::new("st.delivery.reason", reason),
+            KeyValue::new("st.agent.desired", "running")];
         (agent, Series { state, incarnation: incarnation.map(str::to_owned), clock, attributes })
     }).collect();
     Summary { series }
@@ -87,8 +88,17 @@ fn summarize_rows(agents: Vec<String>, rows: &[Value], previous: &Summary, now: 
 fn summarize(store: &Store, previous: &Summary) -> anyhow::Result<Summary> {
     let agents = super::mailbox_metrics::managed_agents_owned_by_local_host(store)?;
     let publication = store.agents_publication();
-    Ok(summarize_rows(agents, publication.as_ref().map_or(&[], |publication| publication.rows()),
-        previous, client_now_ms(), Instant::now()))
+    let mut summary = summarize_rows(agents, publication.as_ref().map_or(&[], |publication| publication.rows()),
+        previous, client_now_ms(), Instant::now());
+    for (agent, series) in &mut summary.series {
+        // Use the reconciler's authoritative hold, not harness/runtime liveness.
+        // Membership already excludes stopped declarations; no unknown state is needed.
+        let desired = if crate::suspension::current(store, agent)?
+            .is_some_and(|suspension| suspension.holds_seat())
+        { "suspended" } else { "running" };
+        series.attributes[3] = KeyValue::new("st.agent.desired", desired);
+    }
+    Ok(summary)
 }
 
 pub fn register_metrics(meter: &Meter, summary: Arc<RwLock<Summary>>) {
@@ -156,6 +166,51 @@ pub(super) fn spawn_worker(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn desired_lifecycle_uses_authoritative_suspension_and_omits_stopped_agents() {
+        use crate::SeatsStoreCore;
+        const AGENT: &str = "agent/example/desired-metric";
+        let store = Store::open_memory("node").unwrap();
+        let source = "version 2\nagent \"example/desired-metric\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n";
+        let declare = |source: &str, key: &str| {
+            store.apply_internal(&crate::graph::parse_intent(source, "node").unwrap(), key).unwrap();
+        };
+        let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
+            store.append_claim(&crate::model::ClaimInput {
+                subject: AGENT.into(), kind: kind.into(), actor: Some("person/operator".into()),
+                fields: serde_json::from_value(fields).unwrap(), evidence,
+                expected_subject: None, idempotency_key: key,
+            }).unwrap()
+        };
+        let expect = |desired: &str| {
+            let summary = summarize(&store, &Summary::default()).unwrap();
+            let series = &summary.series[AGENT];
+            assert_eq!(series.attributes[3], KeyValue::new("st.agent.desired", desired.to_owned()));
+            // Neither a publication nor a runtime heartbeat exists: liveness cannot select intent.
+            assert_eq!(series.state, "stale");
+        };
+        declare(source, "desired-initial");
+        expect("running");
+        let token = store.selected_desired_token(AGENT).unwrap().unwrap();
+        let suspend = append("runtime.action.requested",
+            json!({"action":"suspend","incarnation_id":"one"}), vec![token.clone()], None);
+        expect("suspended"); // quiescing is already an authoritative hold
+        append("runtime.action.succeeded", json!({"action":"suspend","operation_status":"suspended"}),
+            vec![suspend.id.clone()], Some(crate::suspension::suspend_completed_key(&suspend.id)));
+        expect("suspended");
+        let resume = append("runtime.action.requested", json!({"action":"resume","host":"node"}),
+            vec![token, suspend.id.clone()], None);
+        expect("suspended"); // transfer/restore/verify holds remain until resume completes
+        append("runtime.action.succeeded", json!({"action":"resume","operation_status":"resumed"}),
+            vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
+        expect("running");
+        declare("version 2\nstop \"agent/example/desired-metric\"\n", "desired-stop");
+        assert!(summarize(&store, &Summary::default()).unwrap().series.is_empty(),
+            "stopped declarations are outside the unchanged shared metric membership");
+        declare(source, "desired-start");
+        expect("running");
+    }
 
     #[test]
     fn every_owned_agent_has_a_series_and_only_refused_has_a_bounded_reason() {
@@ -229,7 +284,7 @@ mod tests {
             } else {
                 assert!(point.value() >= 700., "an API timestamp seeds the initial age");
             }
-            assert_eq!(point.attributes().count(), 3);
+            assert_eq!(point.attributes().count(), 4);
             assert!(point.attributes().any(|attribute| agents.iter().any(|agent| *attribute == KeyValue::new("st.agent", agent.clone()))));
         }
         provider.shutdown().unwrap();

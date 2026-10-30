@@ -13,13 +13,13 @@ export interface TestGateway {
   readonly client: FoldersClient
   readonly sdk: FractalClient
   readonly calls: { url: string; body?: unknown }[]
-  readonly state: { current: Arrangement; accepted: boolean; loseNextReply: boolean; capability: boolean; afterAccept?: () => void }
+  readonly state: { current: Arrangement; accepted: boolean; loseNextReply: boolean; capability: boolean; capabilityVersion: number; afterAccept?: () => void }
   close(): Promise<void>
 }
 /** Local HTTP implementation of the exercised wire fixture, not a live daemon proof. */
 export const createTestGateway = async (): Promise<TestGateway> => {
   const calls: { url: string; body?: unknown }[] = []
-  const state: TestGateway['state'] = { current: testArrangement(), accepted: false, loseNextReply: false, capability: true }
+  const state: TestGateway['state'] = { current: testArrangement(), accepted: false, loseNextReply: false, capability: true, capabilityVersion: 1 }
   const server = createServer((request, response) => { void (async () => {
     const url = request.url ?? ''
     let body: unknown
@@ -30,7 +30,7 @@ export const createTestGateway = async (): Promise<TestGateway> => {
     }
     calls.push({ url, ...(body === undefined ? {} : { body }) })
     const send = (value: unknown): void => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot: testSnapshot, value })) }
-    if (url === '/v1/client/capabilities') { send({ ...testCapabilities, capabilities: state.capability ? testCapabilities.capabilities : [] }); return }
+    if (url === '/v1/client/capabilities') { send({ ...testCapabilities, capabilities: state.capability ? [{ id: 'arrangements', state: 'granted', version: state.capabilityVersion }] : [] }); return }
     if (url === '/v1/client/actions') {
       if (!state.accepted) { state.accepted = true; state.afterAccept?.() }
       if (state.loseNextReply) { state.loseNextReply = false; response.destroy(); return }

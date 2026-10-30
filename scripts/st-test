@@ -15,7 +15,11 @@ The tree: HEAD, the commit you are pushing. The CI gate looks up the note for th
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
 When the gate would judge the merge instead (the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or protected files moved on
 main since the branch point), a signing run first merges the base into the branch here, as a new head commit, and signs that head; with
---push it then pushes the branch at that merge (merge_base_in, push_branch; docs/st3/gate-evidence.md).
+--push it then pushes the branch at that merge (merge_base_in, push_branch; docs/st3/gate-evidence.md). A green --push run of the whole suite,
+or one that merged, is topped up before it pushes: main moved during the run, so it merges the base in again when the gate would judge the merge,
+signs whatever check or crate the head now lacks (every check of the suite, after any merge), and pushes the branch the moment nothing is missing;
+after TOP_UP_ROUNDS rounds main is moving too fast and it fails, the branch not pushed. Before any wait it checks that nix can be found and, with
+--push, that git has an identity for a merge (preflight).
 A check this tree already has a passing signature for (the verifier's answer, the one asked after a run) is not run again: it
 prints `already signed`, so re-running on an unchanged tree is near instant (with --push its note is pushed as it is, so
 the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
@@ -241,7 +245,7 @@ CHECK_PATH = ('~/.local/bin', '~/.cargo/bin', '/run/current-system/sw/bin', '/ni
 
 def check_path():
     entries = [os.path.expanduser(entry) for entry in CHECK_PATH]
-    nix = shutil.which('nix')
+    nix = resolve_nix()
     if nix:
         entries.append(os.path.dirname(nix))
     kept = []
@@ -277,6 +281,20 @@ def git(*args, cwd=None, env=None, check=True, stdin=None):
     if check and done.returncode != 0:
         raise Failure(f'git {args[0]} failed: {done.stderr.decode(errors="replace").strip()[-400:]}')
     return done
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for base runners copied alone.
+def config_path(base, name):
+    for directory in ('.fractal', '.st'):
+        path = f'{directory}/{name}'
+        if git('ls-tree', '--full-tree', '-z', base, '--', path).stdout:
+            return path
+    return None
+
+
+def config_blob(base, name):
+    path = config_path(base, name)
+    return git('show', f'{base}:{path}').stdout if path is not None else None
 
 
 def text(done):
@@ -372,7 +390,7 @@ def fallback_reason(head, base_commit):
     return None
 
 
-def merge_base_in(base):
+def merge_base_in(base, purpose='before it signs'):
     """When the CI gate would judge the merge tree (fallback_reason), merge the base into the branch in this checkout first, as a new head
     commit, and return it (None when the head is signed as it is). The tree then signed is the head's own, which stays the tree CI judges
     for HEAD_TREE_MAX_BEHIND more commits of main; a signed merge tree is void at main's next commit, and a run that waited hours for a
@@ -387,7 +405,7 @@ def merge_base_in(base):
     if not reason:
         return None
     if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
-        raise Failure(f'{reason}, so fractal-test merges {base} into the branch before it signs, but the checkout now has uncommitted changes '
+        raise Failure(f'{reason}, so fractal-test merges {base} into the branch {purpose}, but the checkout now has uncommitted changes '
                       'to tracked files: commit them and run again')
     branch = text(git('symbolic-ref', '-q', '--short', 'HEAD', check=False))
     message = (f'Merge {base} into {branch or "HEAD"}\n\nfractal-test merged {base} ({base_commit[:12]}) before signing: {reason}, so CI would '
@@ -396,33 +414,89 @@ def merge_base_in(base):
     if done.returncode != 0:
         conflicts = text(git('diff', '--name-only', '--diff-filter=U', check=False)).split()
         git('merge', '--abort', check=False)
-        raise Failure(f'{reason}, so fractal-test merges {base} into the branch before it signs, and it does not merge cleanly'
+        raise Failure(f'{reason}, so fractal-test merges {base} into the branch {purpose}, and it does not merge cleanly'
                       f'{" (" + ", ".join(conflicts[:6]) + ")" if conflicts else " (" + (text(done) + " " + done.stderr.decode(errors="replace")).strip()[-300:] + ")"}'
-                      f': merge {base} into the branch yourself, then run again')
+                      f': merge {base} into the branch yourself, then run again' + ('' if purpose == 'before it signs' else '; the branch is not pushed'))
     merged = head_commit()
     print(f'fractal-test: {reason}: merged {base} ({base_commit[:12]}) into {branch or "the detached HEAD"} as {merged}; '
           'the head tree is what is signed', flush=True)
     return merged
 
 
-def push_branch(remote, base, merged):
-    """Push the merge commit merge_base_in made to the branch of the same name on `remote`, never forced, as any push (the pre-push hook
-    asks --status). A detached HEAD, or a branch named as the base's, is not pushed: the command is printed. A remote branch with commits
-    this one lacks stops the run (Failure), and nothing is pushed."""
+def push_branch(remote, base, merged, what='the merge'):
+    """Push the branch at `merged` (the merge commit merge_base_in made, or with `what` its own head: a green run's branch is pushed the
+    moment the top-up finds it covered, so main has no time to move a protected file before the push) to the branch of the same name on
+    `remote`, never forced, as any push (the pre-push hook asks --status). A detached HEAD, or a branch named as the base's, is not pushed:
+    the command is printed. A remote branch with commits this one lacks stops the run (Failure), and nothing is pushed."""
     branch = text(git('symbolic-ref', '-q', '--short', 'HEAD', check=False))
     if not branch or branch in (base, base.partition('/')[2]):
-        print(f'fractal-test: the merge {merged[:12]} is not pushed ({"a detached HEAD" if not branch else f"{branch} is the base branch"}); push it yourself: '
+        print(f'fractal-test: {what} {merged[:12]} is not pushed ({"a detached HEAD" if not branch else f"{branch} is the base branch"}); push it yourself: '
               f'git push {remote} {merged}:refs/heads/<branch>', flush=True)
         return
     if git('fetch', '-q', remote, f'refs/heads/{branch}', check=False).returncode == 0:
         theirs = text(git('rev-parse', 'FETCH_HEAD'))
         if git('merge-base', '--is-ancestor', theirs, merged, check=False).returncode != 0:
-            raise Failure(f'{remote}/{branch} has commits this branch lacks ({theirs[:12]}), so the merge {merged[:12]} is not pushed: '
+            raise Failure(f'{remote}/{branch} has commits this branch lacks ({theirs[:12]}), so {what} {merged[:12]} is not pushed: '
                           f'bring them in, then run again (never force)')
     done = git('push', remote, f'{merged}:refs/heads/{branch}', check=False)
     if done.returncode != 0:
-        raise Failure(f'pushing the merge {merged[:12]} to {remote}/{branch} failed: {done.stderr.decode(errors="replace").strip()[-400:]}')
-    print(f'fractal-test: pushed {branch} at the merge {merged[:12]} to {remote}', flush=True)
+        raise Failure(f'pushing {what} {merged[:12]} to {remote}/{branch} failed: {done.stderr.decode(errors="replace").strip()[-400:]}')
+    print(f'fractal-test: pushed {branch} at {what} {merged[:12]} to {remote}', flush=True)
+
+
+# The top-up (docs/st3/gate-evidence.md, "A signing run that main overtakes"): after a green --push run, up to this many more rounds of
+# merging the base in and signing what the new tree lacks before the run gives up with "main is moving too fast".
+TOP_UP_ROUNDS = 3
+
+
+def base_remote(base):
+    """The remote a --base names (`origin` of origin/main), or origin when it names none: a commit ID or a local branch has no `remote/`
+    prefix, and the text before its first slash is no remote (an unguarded --base SHA once took the SHA for one, found no repository and
+    crashed asking for the policy without it)."""
+    prefix, slash, _ = base.partition('/')
+    if slash and prefix in text(git('remote', check=False)).split():
+        return prefix
+    return 'origin'
+
+
+# Where nix is found when PATH has none, in this order: a `systemd-run --user` unit starts with the user manager's PATH, which has neither
+# ~/.local/bin nor the user's nix profile, and the member step died after the whole wait with FileNotFoundError 'nix'.
+NIX_CANDIDATES = ('/run/current-system/sw/bin/nix', '~/.nix-profile/bin/nix', '/nix/var/nix/profiles/default/bin/nix')
+
+
+def resolve_nix():
+    """The absolute path of nix: from PATH, else the first of NIX_CANDIDATES that is an executable file; None when there is none."""
+    found = shutil.which('nix')
+    if found:
+        return os.path.abspath(found)
+    for candidate in NIX_CANDIDATES:
+        path = os.path.expanduser(candidate)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def needs_nix(checks):
+    """Whether a run of `checks` starts nix: a check whose command does, the rust-tests run, or the members of a tree with a megarepo.lock."""
+    return (any(LOCAL[name][:1] == ['nix'] for name in checks) or RUST_TESTS in checks
+            or git('cat-file', '-e', 'HEAD:megarepo.lock', check=False).returncode == 0)
+
+
+def preflight(checks, merges):
+    """What a run needs that it would otherwise find missing only after its wait for a pool tree, checked before that wait (Failure):
+    nix, when a check starts it (resolve_nix), and, when the run may merge the base in (`merges`: every signing run but --seed), a git
+    identity for that merge. The identity comes from git config: the GIT_AUTHOR_*/GIT_COMMITTER_* variables are dropped
+    (scrub_git_environment), so a systemd unit that had only those lost its merge after hours of waiting."""
+    if needs_nix(checks) and not resolve_nix():
+        raise Failure('nix is not on PATH nor at ' + ', '.join(NIX_CANDIDATES) + '; from a systemd-run --user unit pass --setenv=PATH="$PATH" '
+                      '(the unit starts with the user manager\'s PATH)')
+    if merges:
+        for kind in ('GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT'):
+            done = git('var', kind, check=False)
+            if done.returncode != 0:
+                raise Failure(f'git has no identity for the merge a run may make ({kind}: '
+                              f'{done.stderr.decode(errors="replace").strip().splitlines()[-1:] or ["unknown"]}); set user.name and user.email '
+                              '(git config), since fractal-test drops the GIT_AUTHOR_*/GIT_COMMITTER_* variables')
 
 
 REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_base_copy started: it never re-executes again
@@ -496,18 +570,16 @@ def branch_point(commit, base):
     since then, the base: the verifier holds a head to its branch point only while that check's own entry is the base's.
     """
     point = text(git('merge-base', commit, base))
-    texts = [git('show', f'{at}:.st/required-lanes.json', check=False) for at in (point, base)]
-    if any(done.returncode != 0 for done in texts):
-        return point if all(done.returncode != 0 for done in texts) else base
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — compare normalized selected entries, not layout-dependent blob IDs.
+    blobs = [config_blob(at, 'required-lanes.json') for at in (point, base)]
 
-    def entries(done):
-        try:
-            lanes = json.loads(done.stdout)['lanes']
-        except (ValueError, KeyError, TypeError):
+    def entries(blob):
+        if blob is None:
             return None
+        lanes = json.loads(blob)['lanes']
         return {name: json.dumps(lanes.get(name), sort_keys=True) for name in (CHECKS or lanes)}
-    here, there = (entries(done) for done in texts)
-    return point if here is not None and here == there else base
+    here, there = (entries(blob) for blob in blobs)
+    return point if here == there else base
 
 
 def size_gb(path):
@@ -666,24 +738,20 @@ def edited_lanes_unsigned(base):
 
 
 def lane_names(base):
-    """The lanes the accepted base defines in .st/required-lanes.json (none when the file is absent or unreadable: then nothing changes)."""
-    done = git('show', f'{base}:.st/required-lanes.json', check=False)
-    if done.returncode != 0:
+    """The lanes defined by the accepted base; an absent historical definition names none."""
+    blob = config_blob(base, 'required-lanes.json')
+    if blob is None:
         return set()
-    try:
-        lanes = json.loads(done.stdout.decode())['lanes']
-        return set(lanes) if isinstance(lanes, dict) else set()
-    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
-        return set()
+    lanes = json.loads(blob)['lanes']
+    if not isinstance(lanes, dict):
+        raise Failure('accepted base lanes must be an object')
+    return set(lanes)
 
 
 def policy_checks(base):
-    """The checks the accepted base's skip policy names (none when it is absent or unreadable)."""
-    done = git('show', f'{base}:.st/evidence-skip-policy.json', check=False)
-    try:
-        return list(json.loads(done.stdout.decode())['checks']) if done.returncode == 0 else []
-    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
-        return []
+    """The checks named by the accepted base's skip policy."""
+    blob = config_blob(base, 'evidence-skip-policy.json')
+    return list(json.loads(blob)['checks']) if blob is not None else []
 
 
 def lane_edits(verifier_path, directory, base, check, tree):
@@ -693,7 +761,10 @@ def lane_edits(verifier_path, directory, base, check, tree):
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(verifier)
     try:
-        rules = verifier.lane_rules(git('show', f'{base}:{verifier.LANES_PATH}').stdout.decode(), check)
+        blob = config_blob(base, 'required-lanes.json')
+        if blob is None:
+            raise Failure(f'no lane file at accepted base {base}')
+        rules = verifier.lane_rules(blob.decode(), check)
         base_tree = text(git('rev-parse', '--verify', '--end-of-options', base + '^{tree}'))
         return verifier.lane_definition(str(directory), base_tree, tree, rules)['changed']
     except verifier.Failure:
@@ -1160,7 +1231,7 @@ def members_command(directory):
     rev = json.loads((directory / 'flake.lock').read_text())['nodes']['effect-utils']['locked']['rev']
     if not re.fullmatch(r'[0-9a-f]{40}', rev):
         raise ValueError(f'effect-utils rev {rev!r} is not a commit id')
-    return ['nix', 'run', f'github:overengineeringstudio/effect-utils/{rev}#megarepo', '--',
+    return [resolve_nix() or 'nix', 'run', f'github:overengineeringstudio/effect-utils/{rev}#megarepo', '--',
             'apply', '--worktree-mode', 'commit', '--git-protocol', 'https']
 
 
@@ -1237,7 +1308,10 @@ def reap_stale():
 
 def base_input_values(verifier, directory, tree, check, base, repository):
     """{input: value} for the base policy's base_inputs of `check`, from the base's verifier (--project); {} when it has none or
-    cannot say (a note without them then covers no run whose policy asks for them: nothing is wrongly covered)."""
+    cannot say (a note without them then covers no run whose policy asks for them: nothing is wrongly covered). Without a repository the
+    policy is not applied, so it has none to ask for."""
+    if not repository:
+        return {}
     done = subprocess.run([sys.executable, verifier, '--repo', str(directory), '--tree', tree, '--check', check, '--project',
                            '--policy-from', base, '--repository', repository], capture_output=True, text=True)
     try:
@@ -1271,6 +1345,44 @@ def ask_verifier(verifier, directory, tree, check, base, repository, lane_base=N
 
 def covered(verifier, directory, tree, check, base, repository, lane_base=None, crate_key=None):
     return ask_verifier(verifier, directory, tree, check, base, repository, lane_base, crate_key)[:2]
+
+
+def coverage(args, checks, commit, base_commit, repository, scratch, crates=()):
+    """[(check, covered, label, why, crates to run)]: what --status prints for `commit`, judged by the base as it is now, and what a top-up
+    round signs. `crates to run` is the uncovered rust-tests crates (None for any other check). A tree that edits a check's lane counts as
+    covered when the base's wrapper cannot sign it (CI runs that check), and so does the web lane when no web input changed."""
+    tree = text(git('rev-parse', f'{commit}^{{tree}}'))
+    lane_base = branch_point(commit, base_commit)
+    verifier = Path(scratch) / 'evidence-verify'
+    verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
+    lanes, rows = lane_names(args.base) if edited_lanes_unsigned(args.base) else set(), []
+    for name in checks:
+        # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
+        # Otherwise a lane edit is signed, and asked about, like any other tree.
+        edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
+        unchanged = web_unchanged(args.base) if name == WEB else None
+        if edits:
+            rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})', None))
+        elif name == RUST_TESTS:
+            keys, error = crate_keys(args.base, Path('.'), tree, scratch)
+            if not error:
+                keys, error = only_crates(keys, crates)
+            if error:
+                rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}', []))
+            else:
+                fetch_crate_notes(args.push or 'origin', keys)
+                missing, have = uncovered_crates(str(verifier), Path('.'), tree, args.base,
+                                                 repository if judged_by_policy(args.base) else None, lane_base, keys)
+                rows.append((name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
+                             f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
+                                                                         + (' ...' if len(missing) > 6 else '') if missing else ''),
+                             [crate for crate, _ in missing]))
+        elif unchanged:
+            rows.append((name, True, 'not relevant', unchanged, None))
+        else:
+            is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
+            rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why, None))
+    return rows
 
 
 def push_record(directory, remote, tree, record):
@@ -1337,7 +1449,7 @@ def repository_of(remote):
 
 
 RUST_TEST_KEYS = 'scripts/rust-test-keys'
-RUST_TEST_INPUTS = '.st/rust-test-inputs.json'
+RUST_TEST_INPUTS = 'rust-test-inputs.json'
 
 
 def only_crates(keys, names):
@@ -1359,9 +1471,12 @@ def crate_keys(base, directory, tree, scratch):
     while the base's policy does not name rust-tests, so nothing judges a note yet, are the tree's own used: the change that introduces them
     is judged by itself. Once the base's policy names it, a base without them is an error, never a fallback. Returns (keys, error)."""
     tool = Path(scratch) / 'rust-test-keys'
-    shown = git('show', f'{base}:{RUST_TEST_KEYS}', check=False)
+    shown = git('show', f'{base}:{RUST_TEST_KEYS}') if git('ls-tree', '--full-tree', '-z', base, '--', RUST_TEST_KEYS).stdout else None
     inputs_at = base
-    if shown.returncode == 0 and git('cat-file', '-e', f'{base}:{RUST_TEST_INPUTS}', check=False).returncode == 0:
+    inputs = config_blob(base, RUST_TEST_INPUTS)
+    if inputs is not None:
+        json.loads(inputs)  # Malformed selected configuration cannot enter the historical producer bootstrap.
+    if shown is not None and inputs is not None:
         tool.write_bytes(shown.stdout)
     elif judged_by_policy(base):
         return None, f'the accepted base judges rust-tests but has no {RUST_TEST_KEYS} and {RUST_TEST_INPUTS}: only the base\'s tool and inputs may key a note'
@@ -1429,13 +1544,12 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
 
 
 def listed_no_tests(base):
-    """The crates the accepted base lists under no_tests in .st/rust-test-inputs.json (reviewed: they have no test to run); empty when unreadable."""
-    done = git('show', f'{base}:{RUST_TEST_INPUTS}', check=False)
-    try:
-        listed = json.loads(done.stdout.decode()).get('no_tests', []) if done.returncode == 0 else []
-    except (ValueError, AttributeError, UnicodeDecodeError):
-        return []
-    return [name for name in listed if isinstance(name, str)] if isinstance(listed, list) else []
+    """The crates the accepted base explicitly lists as having no tests."""
+    blob = config_blob(base, RUST_TEST_INPUTS)
+    listed = json.loads(blob).get('no_tests', []) if blob is not None else []
+    if not isinstance(listed, list) or any(not isinstance(name, str) for name in listed):
+        raise Failure('accepted base no_tests must be a list of crate names')
+    return listed
 
 
 PUSH_CHUNK = 40  # refs per `git push`: a rejected or failed ref is retried on its own, and no one request carries hundreds
@@ -2116,7 +2230,9 @@ def main(argv):
         args.check = [RUST_TESTS]
         if not args.out:
             args.push = args.push or 'origin'
-    checks = args.check or [name for name in LOCAL if name not in OPT_IN]
+    default_checks = [name for name in LOCAL if name not in OPT_IN]
+    checks = args.check or default_checks
+    all_checks = default_checks + [name for name in checks if name not in default_checks]  # what a top-up asks about: the whole suite
     global CHECKS
     CHECKS = tuple(checks)
     if args.list:
@@ -2126,44 +2242,14 @@ def main(argv):
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
-    remote = args.base.partition('/')[0]
+    remote = base_remote(args.base)
     base_commit = fetch_base(args.base)
     if args.status:
         commit, why_merge = gate_commit(args.base)
         if why_merge:
             print(f'fractal-test: {why_merge}')
-        tree = text(git('rev-parse', f'{commit}^{{tree}}'))
-        lane_base = branch_point(commit, base_commit)
         with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
-            verifier = Path(scratch) / 'evidence-verify'
-            verifier.write_bytes(git('show', f'{args.base}:scripts/evidence-verify').stdout)
-            repository = args.repository or repository_of(remote or 'origin')
-            lanes, rows = lane_names(args.base) if edited_lanes_unsigned(args.base) else set(), []
-            for name in checks:
-                # Against an older base a tree that edits a check's lane cannot be signed (its evidence-wrap refuses it): CI runs that check.
-                # Otherwise a lane edit is signed, and asked about, like any other tree.
-                edits = lane_edits(str(verifier), Path('.'), lane_base, name, tree) if name in lanes else []
-                unchanged = web_unchanged(args.base) if name == WEB else None
-                if edits:
-                    rows.append((name, True, 'lane edit: CI runs it', f'this tree edits its lane ({", ".join(edits[:3])})'))
-                elif name == RUST_TESTS:
-                    keys, error = crate_keys(args.base, Path('.'), tree, scratch)
-                    if not error:
-                        keys, error = only_crates(keys, args.crate)
-                    if error:
-                        rows.append((name, False, 'not covered', f'cannot compute the per-crate keys: {error}'))
-                    else:
-                        fetch_crate_notes(args.push or 'origin', keys)
-                        missing, have = uncovered_crates(str(verifier), Path('.'), tree, args.base,
-                                                         repository if judged_by_policy(args.base) else None, lane_base, keys)
-                        rows.append((name, not missing, 'covered' if not missing else f'{len(missing)} crates to run',
-                                     f'{have} of {len(keys)} crates covered' + (f'; to run: {", ".join(c for c, _ in missing[:6])}'
-                                                                                 + (' ...' if len(missing) > 6 else '') if missing else '')))
-                elif unchanged:
-                    rows.append((name, True, 'not relevant', unchanged))
-                else:
-                    is_covered, why = covered(str(verifier), Path('.'), tree, name, args.base, repository, lane_base)
-                    rows.append((name, is_covered, 'covered' if is_covered else 'not covered', why))
+            rows = [row[:4] for row in coverage(args, checks, commit, base_commit, args.repository or repository_of(remote), scratch, args.crate)]
             if not args.check:
                 # Every check of the skip policy: one without a local command cannot be signed here, so CI runs it.
                 rows += [(name, True, 'CI runs it', 'no local command') for name in policy_checks(args.base) if name not in LOCAL]
@@ -2173,6 +2259,7 @@ def main(argv):
     status = git('status', '--porcelain', '--untracked-files=no').stdout.decode().strip()
     if status:
         raise Failure('the checkout has uncommitted changes to tracked files; commit them first, the note is for the committed tree')
+    preflight(checks if not (args.push and not args.out and not TARGET) else all_checks, merges=bool(args.push) and not TARGET)  # before any wait
     limit = load_limit()
     if limit:
         wait_for_load(limit)
@@ -2206,224 +2293,276 @@ def main(argv):
             else:
                 merged = merge_base_in(args.base)
                 directory, commit = target_worktree(args.base, scratch)
-            tools = {}
-            for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
-                path = Path(scratch) / name
-                path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
-                path.chmod(0o700)
-                tools[name] = str(path)
-            lag = behind(args.base)
-            tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
-            lane_base = branch_point(commit, base_commit)
-            repository = args.repository or repository_of(remote or 'origin')
-            # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
-            signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
-            rows, failed, unsigned = [], False, False
-            lanes = lane_names(args.base)
-            unsignable = lanes if edited_lanes_unsigned(args.base) else set()  # lanes whose edits the base's wrapper refuses to sign
-            target, target_lock = shared_target(tree_target) if any(name in BUILDS for name in checks) else (None, None)
-            warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
-            # The members are fetched once, and only when a check has to run: a tree whose checks are all signed needs none. The light
-            # lane runs in a thread, so the first caller fetches under a lock.
-            members_lock, members_state = threading.Lock(), []
+            whole = set(default_checks) <= set(checks)  # the whole suite: a green run's branch is pushed (top_up)
+            round_number, round_started = 0, time.monotonic()  # 0: the run itself; then the top-up rounds after it
+            target, target_lock = None, None
+            while True:
+                tools = {}
+                for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
+                    path = Path(scratch) / name
+                    path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
+                    path.chmod(0o700)
+                    tools[name] = str(path)
+                lag = behind(args.base)
+                tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
+                lane_base = branch_point(commit, base_commit)
+                repository = args.repository or repository_of(remote)
+                # -I: the signer's interpreter reads no PYTHON* variable, user site or current directory (evidence-wrap also drops them).
+                signer = os.environ.get('EVIDENCE_SIGNER') or json.dumps([sys.executable, '-I', tools['evidence-sign']])
+                rows, failed, unsigned = [], False, False
+                lanes = lane_names(args.base)
+                unsignable = lanes if edited_lanes_unsigned(args.base) else set()  # lanes whose edits the base's wrapper refuses to sign
+                if target is None and any(name in BUILDS for name in checks):
+                    target, target_lock = shared_target(tree_target)  # once: a top-up round builds in the same target, under the same lock
+                warm = target_warm(target) if any(name in BUILDS for name in checks) else None  # before anything builds in it
+                # The members are fetched once, and only when a check has to run: a tree whose checks are all signed needs none. The light
+                # lane runs in a thread, so the first caller fetches under a lock.
+                members_lock, members_state = threading.Lock(), []
 
-            def members():
-                with members_lock:
-                    if not members_state:
-                        members_state.append(materialize_members(directory))
-                    return members_state[0]
+                def members():
+                    with members_lock:
+                        if not members_state:
+                            members_state.append(materialize_members(directory))
+                        return members_state[0]
 
-            setup_seconds = round(time.monotonic() - main_started)  # fetch and the clean tree (the members are fetched when a check first needs them)
-            gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
-            stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
-            def run_one(name, output=None):
-                """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
-                edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in unsignable else []
-                if edits:
-                    return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
-                if name == RUST_TESTS:
+                setup_seconds = round(time.monotonic() - (round_started if round_number else main_started))  # fetch and the clean tree (the members are fetched when a check first needs them)
+                gate_report = Path(scratch) / 'linux-gate-nextest-junit.xml'
+                stages = []  # linux-gate's stages, from scripts/ci-local's closing table, for the run's record
+                def run_one(name, output=None):
+                    """(row, failed, unsigned) for one check; its output goes to `output` (a file) when given, else to this terminal."""
+                    edits = lane_edits(tools['evidence-verify'], directory, lane_base, name, tree) if name in unsignable else []
+                    if edits:
+                        return (name, 'not signed', 0, f'this tree edits its lane ({", ".join(edits[:3])}); CI runs it'), False, True
+                    if name == RUST_TESTS:
+                        problem = members()
+                        if problem:
+                            return (name, 'NOT RUN', 0, problem), True, False
+                        # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
+                        new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
+                                                       target, report=gate_report)
+                        return new_rows, bad, any(row[1] == UNCOVERED for row in new_rows)  # a crate left for CI: exit 4, not 1
+                    unchanged = web_unchanged(args.base) if name == WEB else None
+                    if unchanged:
+                        return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
+                    if not args.rerun:
+                        # Already signed for this tree (or its input key): nothing to measure again. Asked the way it is asked after a run.
+                        signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                        if signed:
+                            # With --push the covering note must also be on the remote (an earlier run may not have pushed it): push it as it is.
+                            failure = push_record(directory, args.push, tree, record) if args.push else None
+                            return (name, 'already signed' if not failure else 'push failed', 0, why if not failure else failure), bool(failure), False
                     problem = members()
                     if problem:
                         return (name, 'NOT RUN', 0, problem), True, False
-                    # One run, one row for the run and one for each crate that did not sign (a list: the collector below takes either).
-                    new_rows, bad = run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, lane_base, repository, signer, lanes,
-                                                   target, report=gate_report)
-                    return new_rows, bad, any(row[1] == UNCOVERED for row in new_rows)  # a crate left for CI: exit 4, not 1
-                unchanged = web_unchanged(args.base) if name == WEB else None
-                if unchanged:
-                    return (name, 'not relevant', 0, unchanged), False, False  # nothing to run, nothing to sign: not a failure
-                if not args.rerun:
-                    # Already signed for this tree (or its input key): nothing to measure again. Asked the way it is asked after a run.
-                    signed, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
-                    if signed:
-                        # With --push the covering note must also be on the remote (an earlier run may not have pushed it): push it as it is.
-                        failure = push_record(directory, args.push, tree, record) if args.push else None
-                        return (name, 'already signed' if not failure else 'push failed', 0, why if not failure else failure), bool(failure), False
-                problem = members()
-                if problem:
-                    return (name, 'NOT RUN', 0, problem), True, False
-                wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
-                        '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
-                if name in lanes:
-                    # The branch point defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not
-                    # signed. It is the base itself when the branch holds the base's tip.
-                    wrap += ['--lanes-from', lane_base]
-                if args.toolchain_sha256:
-                    wrap += ['--toolchain-sha256', args.toolchain_sha256]
-                if args.push:
-                    wrap += ['--push', args.push]
-                if args.out:
-                    wrap += ['--out', args.out]
-                environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
-                environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
-                if target and name in BUILDS:
-                    environment['CARGO_TARGET_DIR'] = str(target)
-                # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
-                # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
-                if name in BUILDS:
-                    environment.pop('BUILD_ADMISSION_CLASS', None)
-                else:
-                    environment['BUILD_ADMISSION_CLASS'] = 'light'
-                if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
-                    # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
-                    environment['CI_TEST_JUNIT'] = str(gate_report)
-                if name in BUILDS:
-                    # A test that cannot run on this host (no unprivileged user namespace, say) skips outside CI and writes its id here;
-                    # the note records the list as env_skips, so the evidence says which tests did not run on this machine. rust-tests
-                    # reads linux-gate's list for its per-crate records, so it is written even under a base wrapper without --input-file.
-                    skips = env_skips_file(scratch, name)
-                    environment['CI_TEST_ENV_SKIPS'] = str(skips)
-                    if takes_input_files(tools['evidence-wrap']):
-                        wrap += ['--input-file', f'env_skips={skips}']
-                if name == 'linux-gate' and 'tests' in LOCAL[name] and takes_input_files(tools['evidence-wrap']):
-                    # The tests that passed only on a retry (scripts/ci-nextest-flaky writes them after the tests stage): the whole-tree note
-                    # still signs, as CI's gate counts a retried pass, and records them as flaky_tests so the evidence says so. rust-tests
-                    # does not sign a crate with one (run_rust_tests), as CI's own per-crate notes do not.
-                    flaky = Path(scratch) / 'flaky-linux-gate.txt'
-                    environment['CI_TEST_FLAKY'] = str(flaky)
-                    wrap += ['--input-file', f'flaky_tests={flaky}']
-                if name in BASE_BOUND:
-                    # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
-                    # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
-                    wrap += ['--input', f'clippy_base_sha={base_commit}']
-                    environment['CLIPPY_BASE_SHA'] = base_commit
-                # The policy's base_inputs (a file at the base the verdict depends on: linux-clippy's clippy-baseline), as the base's
-                # verifier computes them for this base, the one the stage compared against.
-                wrap += [argument for key, value in base_input_values(tools['evidence-verify'], directory, tree, name, args.base,
-                                                                      repository).items() for argument in ('--input', f'{key}={value}')]
-                if name == WEB:
-                    wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
-                started = time.monotonic()
-                streams = output is None and CI_LOCAL in LOCAL[name]
-                limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
-                environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
-                pre_start = None
-                if streams and takes_input_files(tools['evidence-wrap']):
-                    # The seconds it waited before ci-local started, recorded in the note: a FIFO the wrapper reads after the check ended,
-                    # answered once it does (answer_pre_start).
-                    pre_start = pre_start_fifo(Path(scratch) / f'pre-start-{name}.txt')
-                    wrap += ['--input-file', f'pre_start_s={pre_start}']
-                command = wrap + ['--'] + LOCAL[name]
-                print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
-                command = governed(command, name) if name in BUILDS else command
-                if streams:
-                    # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
-                    # so the run's record can carry the stages.
-                    log = Path(scratch) / f'{name}-output.log'
-                    code = streamed(command, log, limit, cwd=directory, env=environment, pre_start=pre_start)
-                    stages[:] = ci_local_stages(log)
-                    blocked[name] = (round(limit.waiting()), round(blocked_seconds(limit.queue_log, stages)))
-                else:
-                    code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
-                                       stderr=subprocess.STDOUT if output else None)
-                seconds = round(time.monotonic() - started)
-                ok = code == 0
-                if args.out:
-                    why = 'packs exported, not imported or verified' if ok else 'export failed'
-                else:
-                    is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
-                    if args.push and is_covered and record:
-                        CLAIMED.extend(record_refs(directory, record))
-                return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
+                    wrap = [sys.executable, tools['evidence-wrap'], '--check', name, '--attempt', args.attempt,
+                            '--signer', signer, '--verifier', tools['evidence-verify'], '--keys-from', args.base]
+                    if name in lanes:
+                        # The branch point defines this lane: the note carries the digest of its definition, and a tree that edits the lane is not
+                        # signed. It is the base itself when the branch holds the base's tip.
+                        wrap += ['--lanes-from', lane_base]
+                    if args.toolchain_sha256:
+                        wrap += ['--toolchain-sha256', args.toolchain_sha256]
+                    if args.push:
+                        wrap += ['--push', args.push]
+                    if args.out:
+                        wrap += ['--out', args.out]
+                    environment = dict(os.environ) if os.environ.get('ST_EVIDENCE_PATH') == 'keep' else dict(os.environ, PATH=check_path())
+                    environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
+                    if target and name in BUILDS:
+                        environment['CARGO_TARGET_DIR'] = str(target)
+                    # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
+                    # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
+                    if name in BUILDS:
+                        environment.pop('BUILD_ADMISSION_CLASS', None)
+                    else:
+                        environment['BUILD_ADMISSION_CLASS'] = 'light'
+                    if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
+                        # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
+                        environment['CI_TEST_JUNIT'] = str(gate_report)
+                    if name in BUILDS:
+                        # A test that cannot run on this host (no unprivileged user namespace, say) skips outside CI and writes its id here;
+                        # the note records the list as env_skips, so the evidence says which tests did not run on this machine. rust-tests
+                        # reads linux-gate's list for its per-crate records, so it is written even under a base wrapper without --input-file.
+                        skips = env_skips_file(scratch, name)
+                        environment['CI_TEST_ENV_SKIPS'] = str(skips)
+                        if takes_input_files(tools['evidence-wrap']):
+                            wrap += ['--input-file', f'env_skips={skips}']
+                    if name == 'linux-gate' and 'tests' in LOCAL[name] and takes_input_files(tools['evidence-wrap']):
+                        # The tests that passed only on a retry (scripts/ci-nextest-flaky writes them after the tests stage): the whole-tree note
+                        # still signs, as CI's gate counts a retried pass, and records them as flaky_tests so the evidence says so. rust-tests
+                        # does not sign a crate with one (run_rust_tests), as CI's own per-crate notes do not.
+                        flaky = Path(scratch) / 'flaky-linux-gate.txt'
+                        environment['CI_TEST_FLAKY'] = str(flaky)
+                        wrap += ['--input-file', f'flaky_tests={flaky}']
+                    if name in BASE_BOUND:
+                        # clippy's ratchet compares with the base, as CI compares with the event's base: the base as just fetched,
+                        # given to the stage and recorded in the note, so the base it was measured against is part of what is signed.
+                        wrap += ['--input', f'clippy_base_sha={base_commit}']
+                        environment['CLIPPY_BASE_SHA'] = base_commit
+                    # The policy's base_inputs (a file at the base the verdict depends on: linux-clippy's clippy-baseline), as the base's
+                    # verifier computes them for this base, the one the stage compared against.
+                    wrap += [argument for key, value in base_input_values(tools['evidence-verify'], directory, tree, name, args.base,
+                                                                          repository).items() for argument in ('--input', f'{key}={value}')]
+                    if name == WEB:
+                        wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
+                    started = time.monotonic()
+                    streams = output is None and CI_LOCAL in LOCAL[name]
+                    limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
+                    environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+                    pre_start = None
+                    if streams and takes_input_files(tools['evidence-wrap']):
+                        # The seconds it waited before ci-local started, recorded in the note: a FIFO the wrapper reads after the check ended,
+                        # answered once it does (answer_pre_start).
+                        pre_start = pre_start_fifo(Path(scratch) / f'pre-start-{name}.txt')
+                        wrap += ['--input-file', f'pre_start_s={pre_start}']
+                    command = wrap + ['--'] + LOCAL[name]
+                    print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
+                    command = governed(command, name) if name in BUILDS else command
+                    if streams:
+                        # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
+                        # so the run's record can carry the stages.
+                        log = Path(scratch) / f'{name}-output.log'
+                        code = streamed(command, log, limit, cwd=directory, env=environment, pre_start=pre_start)
+                        stages[:] = ci_local_stages(log)
+                        blocked[name] = (round(limit.waiting()), round(blocked_seconds(limit.queue_log, stages)))
+                    else:
+                        code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
+                                           stderr=subprocess.STDOUT if output else None)
+                    seconds = round(time.monotonic() - started)
+                    ok = code == 0
+                    if args.out:
+                        why = 'packs exported, not imported or verified' if ok else 'export failed'
+                    else:
+                        is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                        if args.push and is_covered and record:
+                            CLAIMED.extend(record_refs(directory, record))
+                    return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
 
-            # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
-            # their own: they wait on network, Nix and Node rather than the Rust build, and run after it they added minutes to every
-            # run. Their output is kept and printed in order once the build lane is done, so the two never interleave. ST_EVIDENCE_SERIAL=1
-            # runs every check one after another, as before.
-            builds = [name for name in checks if name in BUILDS]
-            light = [name for name in checks if name not in BUILDS]
-            results = {}
-            parallel = bool(builds and light and os.environ.get('ST_EVIDENCE_SERIAL') != '1')
-            if parallel:
-                logs = {name: Path(scratch) / f'{name}.log' for name in light}
+                # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
+                # their own: they wait on network, Nix and Node rather than the Rust build, and run after it they added minutes to every
+                # run. Their output is kept and printed in order once the build lane is done, so the two never interleave. ST_EVIDENCE_SERIAL=1
+                # runs every check one after another, as before.
+                builds = [name for name in checks if name in BUILDS]
+                light = [name for name in checks if name not in BUILDS]
+                results = {}
+                parallel = bool(builds and light and os.environ.get('ST_EVIDENCE_SERIAL') != '1')
+                if parallel:
+                    logs = {name: Path(scratch) / f'{name}.log' for name in light}
 
-                def light_lane():
+                    def light_lane():
+                        for name in light:
+                            with open(logs[name], 'w') as output:
+                                try:
+                                    results[name] = run_one(name, output)
+                                except Exception as error:  # a lane that dies is a failed check, never a silent pass
+                                    results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
+
+                    lane = threading.Thread(target=light_lane, name='st-test-light')
+                    print(f'fractal-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
+                    lane.start()
+                    for name in builds:
+                        results[name] = run_one(name)
+                    lane.join()
                     for name in light:
-                        with open(logs[name], 'w') as output:
-                            try:
-                                results[name] = run_one(name, output)
-                            except Exception as error:  # a lane that dies is a failed check, never a silent pass
-                                results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
-
-                lane = threading.Thread(target=light_lane, name='st-test-light')
-                print(f'fractal-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
-                lane.start()
-                for name in builds:
-                    results[name] = run_one(name)
-                lane.join()
-                for name in light:
-                    print(f'\n----- fractal-test: {name} output -----', flush=True)
-                    sys.stdout.write(logs[name].read_text(errors='replace') if logs[name].exists() else '(no output)\n')
-                    sys.stdout.flush()
-            else:
+                        print(f'\n----- fractal-test: {name} output -----', flush=True)
+                        sys.stdout.write(logs[name].read_text(errors='replace') if logs[name].exists() else '(no output)\n')
+                        sys.stdout.flush()
+                else:
+                    for name in checks:
+                        results[name] = run_one(name)
                 for name in checks:
-                    results[name] = run_one(name)
-            for name in checks:
-                row, check_failed, check_unsigned = results[name]
-                rows += row if isinstance(row, list) else [row]
-                failed = failed or check_failed
-                unsigned = unsigned or check_unsigned
-            confirm = sorted(set(CLAIMED)) if args.push and not args.out else []
-            if confirm:
-                # "pushed" meant git said so at the time; this asks the remote now, once, before the summary says what is covered.
-                confirming = time.monotonic()
-                result, why = confirm_pushed(directory, args.push, confirm)
-                rows.append(('on-remote', result, round(time.monotonic() - confirming), why))
-                failed = failed or result == 'FAILED'
-            print(f'\nfractal-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
-            rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
-            for name, result, seconds, why in rows:
-                print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
-            if tree_target and target and target == tree_target and target.exists():
-                print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB; the pool is capped at the sum of all, '
-                      f'ST_TEST_POOL_MAX_GB)')
-            if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
-                line = nudge_log()
-                if line:
-                    print(f'  {line}')
-            code = 1 if failed else (4 if unsigned else 0)
-            held = {}
-            if tree_taken is not None:
-                # What the run's tree did for it: how long the run waited for it and held it, and how much of that the build lane spent
-                # blocked in it (before ci-local started: build admission and the dev shell; then every stage waiting for a build slot).
-                pre, slots = (sum(values) for values in zip(*blocked.values())) if blocked else (0, 0)
-                held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_slot_wait_s': tree_waits.get('slot_wait_s'),
-                        'tree_held_s': round(time.monotonic() - tree_taken), 'tree_blocked_s': pre + slots, 'tree_pre_start_s': pre,
-                        'tree_slot_blocked_s': slots}
-                print(f'  tree-{n}: waited {held["tree_wait_s"]}s for it ({held["tree_slot_wait_s"]}s of that free, waiting for a build slot), held it '
-                      f'{held["tree_held_s"]}s, blocked in it {held["tree_blocked_s"]}s ({pre}s before ci-local started: admission, dev shell; '
-                      f'{slots}s with every build stage waiting for a slot)')
-            # One line per run for the time objective (scripts/fractal-test-report): only a run of the whole suite (no --check, no --crate) counts.
-            record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
-                        'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
-                        'full': not args.check and not args.crate, 'checks': checks, 'pool_tree': n, 'warm': warm,
-                        'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
-                        'exit': code, 'stages': stages, **held})
-            if merged and args.push and code == 0:
-                push_branch(args.push, args.base, merged)
-            elif merged:
-                print(f'fractal-test: the merge {merged[:12]} is on the branch here, not pushed' + (f' (exit {code})' if code else ''), flush=True)
-            return code
+                    row, check_failed, check_unsigned = results[name]
+                    rows += row if isinstance(row, list) else [row]
+                    failed = failed or check_failed
+                    unsigned = unsigned or check_unsigned
+                confirm = sorted(set(CLAIMED)) if args.push and not args.out else []
+                if confirm:
+                    # "pushed" meant git said so at the time; this asks the remote now, once, before the summary says what is covered.
+                    confirming = time.monotonic()
+                    result, why = confirm_pushed(directory, args.push, confirm)
+                    rows.append(('on-remote', result, round(time.monotonic() - confirming), why))
+                    failed = failed or result == 'FAILED'
+                print(f'\nfractal-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
+                rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
+                for name, result, seconds, why in rows:
+                    print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
+                if tree_target and target and target == tree_target and target.exists():
+                    print(f'  target-{n}: {du_gb(target):.1f} GB (emptied before a run past {TARGET_MAX_GB:g} GB; the pool is capped at the sum of all, '
+                          f'ST_TEST_POOL_MAX_GB)')
+                if args.push and any(result != 'NOT RUN' for _, result, _, _ in rows):
+                    line = nudge_log()
+                    if line:
+                        print(f'  {line}')
+                code = 1 if failed else (4 if unsigned else 0)
+                held = {}
+                if tree_taken is not None:
+                    # What the run's tree did for it: how long the run waited for it and held it, and how much of that the build lane spent
+                    # blocked in it (before ci-local started: build admission and the dev shell; then every stage waiting for a build slot).
+                    pre, slots = (sum(values) for values in zip(*blocked.values())) if blocked else (0, 0)
+                    held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_slot_wait_s': tree_waits.get('slot_wait_s'),
+                            'tree_held_s': round(time.monotonic() - tree_taken), 'tree_blocked_s': pre + slots, 'tree_pre_start_s': pre,
+                            'tree_slot_blocked_s': slots}
+                    print(f'  tree-{n}: waited {held["tree_wait_s"]}s for it ({held["tree_slot_wait_s"]}s of that free, waiting for a build slot), held it '
+                          f'{held["tree_held_s"]}s, blocked in it {held["tree_blocked_s"]}s ({pre}s before ci-local started: admission, dev shell; '
+                          f'{slots}s with every build stage waiting for a slot)')
+                # One line per run for the time objective (scripts/fractal-test-report): only a run of the whole suite (no --check, no --crate) counts.
+                record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
+                            'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
+                            'full': not args.check and not args.crate and not round_number, 'top_up': round_number, 'checks': checks, 'pool_tree': n, 'warm': warm,
+                            'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
+                            'exit': code, 'stages': stages, **held})
+                if code or not args.push or args.out or TARGET or not (merged or whole):
+                    # Nothing more to push: a failure, no --push, an export or --seed, or a narrowed run that merged nothing pushes only
+                    # its notes, as before.
+                    if merged:
+                        print(f'fractal-test: the merge {merged[:12]} is on the branch here, not pushed' + (f' (exit {code})' if code else ''), flush=True)
+                    return code
+                # The top-up: main moved during the run, so the branch is judged by the base as it is now. When the gate would judge the
+                # merge (protected files moved, or the branch fell past the bound), the base is merged in; then EVERY check is asked
+                # about the head (after any merge this run made, a narrowed run's whole-tree checks are not covered for the new tree), and
+                # only what is missing is signed in the same pool tree. Covered: the branch is pushed at once, before main moves again.
+                CHECKS = tuple(all_checks)
+                round_base, base_commit = base_commit, fetch_base(args.base)
+                again = merge_base_in(args.base, purpose='to bring the green run up to the base')
+                merged = again or merged
+                commit = gate_commit(args.base)[0]
+                with tempfile.TemporaryDirectory(prefix='st-test-coverage-') as judged:
+                    uncovered = missing = [row for row in coverage(args, all_checks, commit, base_commit, repository, judged) if not row[1]]
+                if not missing:
+                    push_branch(args.push, args.base, commit, 'the merge' if merged else 'its head')
+                    return 0
+                if base_commit == round_base and not again:
+                    # The base did not move: signing again what this round signed would sign the same tree against the same base, so what
+                    # it left uncovered stays so (a note the verifier finds too old, say). Only what the round did not try is signed: the
+                    # checks a narrowed run did not select, once it merged (#4252). With nothing left the run ends as it did before the
+                    # top-up: a merge it made is pushed, a head that is not covered is not.
+                    tried = lambda row: row[0] in checks and (row[0] != RUST_TESTS or not args.crate or set(row[4] or ()) <= set(args.crate))
+                    missing = [row for row in uncovered if not tried(row)]
+                    if not missing:
+                        if merged:
+                            push_branch(args.push, args.base, merged)
+                        else:
+                            print(f'fractal-test: its head {commit[:12]} is not pushed: {", ".join(f"{row[0]} ({row[3]})" for row in uncovered)} '
+                                  'not covered for it', flush=True)
+                        return code
+                listed = ', '.join(row[0] + (f' ({len(row[4])} crates: {", ".join(row[4][:6])}{" ..." if len(row[4]) > 6 else ""})' if row[4] else '')
+                                   for row in missing)
+                if round_number == TOP_UP_ROUNDS:
+                    raise Failure(f'main is moving too fast; run again: after {TOP_UP_ROUNDS} top-up rounds {args.base} ({base_commit[:12]}) has moved '
+                                  f'again and {commit[:12]} still lacks {listed}; the signed notes are pushed, the branch is not'
+                                  + (f' (the merge {merged[:12]} is on the branch here)' if merged else ''))
+                round_number, round_started = round_number + 1, time.monotonic()
+                checks = [row[0] for row in missing]
+                rust = next((row for row in missing if row[0] == RUST_TESTS), None)
+                args.crate = rust[4] if rust and rust[4] else []
+                CLAIMED.clear()
+                print(f'\nfractal-test: top-up round {round_number} of {TOP_UP_ROUNDS}: {args.base} is at {base_commit[:12]}'
+                      + (f', merged into the branch as {again[:12]}' if again else '') + f'; signing what {commit[:12]} lacks: {listed}', flush=True)
+                if pool_trees:
+                    directory = prepare_tree(root, n, commit)
+                else:
+                    git('worktree', 'remove', '--force', str(directory), check=False)
+                    directory, commit = target_worktree(args.base, scratch)
         finally:
             if not pool_trees and directory.exists():
                 git('worktree', 'remove', '--force', str(directory), check=False)
