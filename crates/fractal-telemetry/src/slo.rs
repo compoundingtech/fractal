@@ -351,6 +351,11 @@ pub fn verdict(windows: &Value, p99: bool) -> Verdict {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct DatabaseSize {
     pub measured_at_unix_ms: u128,
+    /// Cached SQLite mode: 0=NONE, 1=FULL, 2=INCREMENTAL.
+    pub auto_vacuum: u64,
+    /// Newest checkpoint identity, local state and last state-change time.
+    pub checkpoint: Option<(String, String, u64)>,
+    pub last_trim_unix_ms: Option<u64>,
     /// The store's pages, including free ones and those committed to the WAL but not yet copied
     /// into the main file.
     pub file_bytes: u64,
@@ -390,6 +395,52 @@ pub fn database_size() -> Option<DatabaseSize> {
     DATABASE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
+static CHECKPOINT_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Publish the effective daemon configuration, not the caller's CLI configuration.
+pub fn note_checkpoint_enabled(enabled: bool) {
+    CHECKPOINT_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Numeric gauge for consumers of the performance database row (1 means disabled).
+pub fn checkpoint_disabled() -> u8 {
+    u8::from(!CHECKPOINT_ENABLED.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Retention diagnostics use only the hourly sample; no SQL or proof runs on this path.
+pub fn store_retention_check() -> (&'static str, String) {
+    retention_check(database_size().as_ref(), checkpoint_disabled() != 0)
+}
+
+fn retention_check(size: Option<&DatabaseSize>, disabled: bool) -> (&'static str, String) {
+    let enabled = if disabled { "disabled" } else { "enabled" };
+    let Some(size) = size else {
+        return ("warn", format!("checkpoint {enabled}; hourly store sample unavailable"));
+    };
+    let age = size.last_trim_unix_ms.map(|at| size.measured_at_unix_ms.saturating_sub(u128::from(at)));
+    let overdue = disabled && age.is_some_and(|age| age > 7 * 86_400_000);
+    let checkpoint = size.checkpoint.as_ref().map_or_else(
+        || "none recorded".into(),
+        |(id, state, at)| format!("{id} {state} at unix_ms={at}"),
+    );
+    let mut message = format!(
+        "checkpoint {enabled}; last checkpoint: {checkpoint}; last trim age_ms={age:?}; \
+         auto_vacuum={}; database={} bytes (live={} bytes); growth={:?} bytes/day \
+         (physical={:?} bytes/day); sampled at unix_ms={}",
+        size.auto_vacuum, size.physical_bytes, size.live_bytes, size.growth_bytes_per_day,
+        size.physical_growth_bytes_per_day, size.measured_at_unix_ms,
+    );
+    if overdue {
+        message.push_str("; WARNING: checkpoint disabled and no trim for more than 7 days");
+    } else if disabled && age.is_none() {
+        message.push_str("; disabled duration unknown: no last trim time recorded");
+    }
+    if size.auto_vacuum == 0 {
+        message.push_str("; WARNING: auto_vacuum=0 prevents filesystem reclamation");
+    }
+    (if overdue || size.auto_vacuum == 0 { "warn" } else { "pass" }, message)
+}
+
 /// The store's windows and the member's CPU minutes (`CpuMinutes::report`), and the store's size,
 /// with their targets.
 pub fn store_report(cpu: Value) -> Vec<Value> {
@@ -419,6 +470,7 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "max_live_gb": targets.database.max_live_gb,
             "max_growth_mb_per_day": targets.database.max_growth_mb_per_day,
             "size": database_size().map_or(Value::Null, |size| json!(size)),
+            "checkpoint_disabled": checkpoint_disabled(),
         }),
     ]
 }
@@ -1064,4 +1116,64 @@ mod tests {
         assert_eq!(doctor_lines(&report(target))[0].1,"info");
     }
 
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    fn sample() -> DatabaseSize {
+        DatabaseSize {
+            measured_at_unix_ms: 20 * 86_400_000,
+            auto_vacuum: 2,
+            checkpoint: Some(("checkpoint/recent".into(), "trimmed".into(), 19 * 86_400_000)),
+            last_trim_unix_ms: Some(19 * 86_400_000),
+            file_bytes: 100,
+            live_bytes: 80,
+            growth_bytes_per_day: Some(10),
+            growth_span_ms: Some(86_400_000),
+            wal_bytes: 5,
+            main_file_bytes: 95,
+            physical_bytes: 100,
+            physical_growth_bytes_per_day: Some(12),
+            physical_growth_span_ms: Some(86_400_000),
+        }
+    }
+
+    #[test]
+    fn disabled_more_than_seven_days_warns() {
+        let mut size = sample();
+        size.last_trim_unix_ms = Some(13 * 86_400_000);
+        assert_eq!(retention_check(Some(&size), true).0, "pass");
+        size.measured_at_unix_ms += 1;
+        let (status, message) = retention_check(Some(&size), true);
+        assert_eq!(status, "warn");
+        assert!(message.contains("more than 7 days"));
+    }
+
+    #[test]
+    fn enabled_recent_trim_is_quiet() {
+        let (status, message) = retention_check(Some(&sample()), false);
+        assert_eq!(status, "pass");
+        assert!(message.contains("checkpoint enabled"));
+        assert!(message.contains("trimmed"));
+        assert!(!message.contains("WARNING"));
+    }
+
+    #[test]
+    fn no_auto_vacuum_flags_reclamation() {
+        let mut size = sample();
+        size.auto_vacuum = 0;
+        let (status, message) = retention_check(Some(&size), false);
+        assert_eq!(status, "warn");
+        assert!(message.contains("prevents filesystem reclamation"));
+    }
+
+    #[test]
+    fn absent_history_is_unknown_not_a_fabricated_age() {
+        let mut size = sample();
+        size.last_trim_unix_ms = None;
+        assert!(retention_check(Some(&size), true).1.contains("duration unknown"));
+        assert_eq!(retention_check(None, false).0, "warn");
+    }
 }

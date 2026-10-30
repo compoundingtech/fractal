@@ -121,6 +121,23 @@ impl Store {
 
     /// Measure the store and remember the sample. The daemon calls it hourly.
     pub fn record_database_size(&self, now: u128) -> Result<DatabaseSize> {
+        let (auto_vacuum, checkpoint, last_trim) = {
+            let connection = self.readers.get();
+            let auto_vacuum = connection.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+            // The primary key orders checkpoint identities; never read claims or replay a proof.
+            let checkpoint = connection.query_row(
+                "SELECT id, state, updated_at_unix_ms FROM checkpoints ORDER BY id DESC LIMIT 1",
+                [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?;
+            // Match the existing partial cut index, not a scan of checkpoint history.
+            let last_trim = connection.query_row(
+                "SELECT updated_at_unix_ms FROM checkpoints
+                 WHERE state IN ('trimming','trimmed') AND drop_digest IS NOT NULL
+                   AND state='trimmed' ORDER BY cut_unix_ms DESC LIMIT 1",
+                [], |row| row.get(0),
+            ).optional()?;
+            (auto_vacuum, checkpoint, last_trim)
+        };
         let (page_size, pages, free) = {
             let connection = self.readers.get();
             let pragma = |name: &str| -> Result<u64> {
@@ -172,6 +189,9 @@ impl Store {
         transaction.commit()?;
         Ok(DatabaseSize {
             measured_at_unix_ms: now,
+            auto_vacuum,
+            checkpoint,
+            last_trim_unix_ms: last_trim,
             file_bytes,
             live_bytes,
             growth_bytes_per_day: growth.map(|(per_day, _)| per_day),
@@ -190,6 +210,20 @@ mod tests {
     use super::*;
 
     const HOUR: u128 = 60 * 60 * 1000;
+
+    #[test]
+    fn retention_sample_reads_checkpoint_metadata_without_claims() {
+        let store = Store::open_memory("node").unwrap();
+        store.connection.write().execute_batch(
+            "INSERT INTO checkpoints(id, cut_unix_ms, state, drop_digest, updated_at_unix_ms)
+             VALUES ('checkpoint/2026-10-01', 1, 'trimmed', 'digest', 100),
+                    ('checkpoint/2026-10-02', 2, 'verified', NULL, 200);",
+        ).unwrap();
+        let size = store.record_database_size(300).unwrap();
+        assert_eq!(size.checkpoint, Some(("checkpoint/2026-10-02".into(), "verified".into(), 200)));
+        assert_eq!(size.last_trim_unix_ms, Some(100));
+        assert!(size.auto_vacuum <= 2);
+    }
 
     #[test]
     fn growth_is_measured_from_a_day_ago_or_extrapolated_from_an_hour() {

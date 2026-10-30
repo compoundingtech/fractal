@@ -12,6 +12,19 @@ fleet must apply the same rules: the rules render the rules description, whose h
 and the checkpoint waits for it, so no member drops a claim its peers keep. See
 [Checkpoints and trimming](checkpoints.md) for the agreement, the proof and the trim.
 
+`fractal doctor` includes a `store-retention` check from the daemon's cached hourly
+database sample. It reports the effective checkpoint switch, newest checkpoint's
+local state and state-change time, last trim age, SQLite `auto_vacuum`, database
+bytes and daily growth derived from `database_size_samples`. No claims scan or
+checkpoint proof runs for this check. Times are Unix milliseconds; ages are as of
+the displayed sample time. Missing samples and missing trim history are explicit.
+A disabled checkpoint with a last trim more than seven days old warns; that age
+is a no-trim duration, not proof of when configuration changed. `auto_vacuum=0`
+also warns because free pages cannot be returned to the filesystem. The performance
+database row exposes numeric `checkpoint_disabled` (1 disabled, 0 enabled), also
+exported as the `st.db.checkpoint.disabled` gauge for alert consumers. Neither
+surface changes retention configuration.
+
 ## Classes
 
 | Class | What it holds | How it is kept |
