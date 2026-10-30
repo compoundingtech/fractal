@@ -203,9 +203,10 @@ mod tests {
 
     const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const NEXT: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const FLEET: &str = "68d50a41-99c6-443a-8791-b09fa2b8e468";
 
     fn progress(phase: Phase, deadline: u64) -> Progress {
-        Progress { fleet_id:"fleet".into(), member_key:"own-key".into(),
+        Progress { fleet_id:FLEET.into(), member_key:"own-key".into(),
             old_node:OLD.into(), next_node:NEXT.into(), deadline, phase }
     }
 
@@ -259,7 +260,7 @@ esac
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
             let config = Config { node:"local".into(), state_dir:root.path().to_path_buf(), ..Config::default() };
             fractal_daemon::config::FleetFile {
-                fleet_id:"fleet".into(), node:Some("local".into()),
+                fleet_id:FLEET.into(), node:Some("local".into()),
                 transports:vec!["fabric".into()], fabric:Some(program), ..Default::default()
             }.save(root.path()).unwrap();
             let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
