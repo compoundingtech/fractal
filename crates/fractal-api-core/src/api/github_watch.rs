@@ -829,6 +829,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let state = super::super::tests::state(root.path());
             let store = state.store.clone();
+            store.bind_fleet("fleet/renamed-watch-test").unwrap();
             let original = "agent/example-watch-original/worker";
             let renamed = "agent/example-watch-renamed/worker";
             let intent = crate::graph::parse_test_intent(
@@ -887,7 +888,14 @@ mod tests {
             let replica_root = tempfile::tempdir().unwrap();
             let mut replica = super::super::tests::state(replica_root.path());
             replica.store = Arc::new(Store::open_memory("watch-replica").unwrap());
-            replica.store.import_replication(store.origin(), &store.export_replication(0).unwrap()).unwrap();
+            replica.store.bind_fleet("fleet/renamed-watch-test").unwrap();
+            let exchange = store.export_replication_exchange_answering(
+                "fleet/renamed-watch-test", &replica.store.replication_inventory().unwrap(),
+                &replica.store.replication_signature_requests().unwrap(),
+            ).unwrap();
+            replica.store.receive_replication_exchange(store.origin(), "fleet/renamed-watch-test", &exchange).unwrap();
+            replica.store.validate_replication_backlog().unwrap();
+            replica.store.project_replication_backlog().unwrap();
             assert_eq!(replica.store.messages(Some(original), false).unwrap().len(), 1);
             for reader in [app.clone(), router(replica)] {
                 let mut listed_before = None;
