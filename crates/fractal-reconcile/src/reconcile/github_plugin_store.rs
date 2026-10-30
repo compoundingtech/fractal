@@ -135,7 +135,7 @@ impl GithubPluginStore {
         );
         if mirror < 1 {
             connection.execute_batch(
-                /* sqlite-large-value: allow-for-now lv-ha6daa92ac54c owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */ "BEGIN;
+                /* sqlite-large-value: allow-for-now lv-h4b94ad1aa193 owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */ "BEGIN;
                  CREATE TABLE IF NOT EXISTS mirror_repositories(
                      repository TEXT PRIMARY KEY,
                      observer TEXT NOT NULL,
@@ -297,7 +297,7 @@ impl GithubPluginStore {
             write_item(&transaction, repository, number, item, at)?;
         }
         transaction.execute(
-            "UPDATE mirror_repositories SET filled_at_unix_ms=?2 WHERE repository=?1",
+            /* sqlite-large-value: allow-for-now lv-hfdf8ce3fb8e1 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET filled_at_unix_ms=?2 WHERE repository=?1",
             params![repository, at as i64],
         )?;
         transaction.commit()?;
@@ -333,7 +333,7 @@ impl GithubPluginStore {
         upsert_repository(&transaction, repository, observer, locator)?;
         if !current {
             transaction.execute(
-                "UPDATE mirror_repositories SET filled_at_unix_ms=NULL WHERE repository=?1",
+                /* sqlite-large-value: allow-for-now lv-h620c9051c434 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET filled_at_unix_ms=NULL WHERE repository=?1",
                 [repository],
             )?;
         }
@@ -381,7 +381,7 @@ impl GithubPluginStore {
             write_item(&transaction, repository, number, item, at)?;
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h8cd0425703e2 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET mirrored_at_unix_ms=?2, cursor_digest=?3 WHERE repository=?1",
+            /* sqlite-large-value: allow-for-now lv-h59e349f46b8d owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET mirrored_at_unix_ms=?2, cursor_digest=?3 WHERE repository=?1",
             params![repository, at as i64, cursor_digest(cursor)],
         )?;
         transaction.execute(

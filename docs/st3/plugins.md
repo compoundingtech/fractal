@@ -41,10 +41,55 @@ observer's poll cursor:
   It is never pruned; each row is one short subject. Step 3b, which writes each event as a graph
   claim, is to check the graph's `github.event` subjects instead, so this table can be pruned.
 
-Each look's recorded items go into the mirror right after the look's graph write. The first time
-a daemon process mirrors a repository, it first seeds the mirror from the graph's recorded items,
-leaving out the items this look recorded. So a mirror that a rollback, a crash or a change of
-poller left behind catches up, and the look's own changes are still events.
+Each look's recorded items go into the mirror right after the look's graph write, with the poll
+cursor the look started from and the one it ended at.
+
+**Filling from GitHub.** The mirror is filled from GitHub itself, never from the graph, because from
+step 3b the graph keeps only compact state. A mirror is *filled* once a fill completes, and it
+stays filled only while it follows every look the poller records. It is not filled when:
+
+- it is new, because the member just started polling the repository, took polling over, or was
+  restored from a backup (the plugin store is not in it);
+- its file was set aside;
+- a look finds it behind the poll cursor, as after a rollback to a build that polled without it, or
+  a crash between the graph write and the mirror write.
+
+After any look that leaves a mirror unfilled, once the observer's listing has caught up, the
+poller fills it with one fresh look by the repository provider:
+
+- It reads what a new poller's first look reads: the open items, each open pull request's
+  details, and the newest comments.
+- It runs under the observer's own request budget.
+- It records nothing in the graph and moves no cursor, so the observer's own looks keep
+  delivering from where they read to.
+- Its items replace the mirror's rows without events. A fill that fails is tried again after
+  the next look.
+
+On a repository of 731 open items (148 open pull requests), a fill costs about:
+
+- 8 REST pages of `issues?state=open` (100 items each);
+- 8 GraphQL pages of open pull requests (20 each);
+- 1 REST page of comments.
+
+Conditional requests and the shared GraphQL answer make a repeat cheaper. A fill reads at most 10
+pages of open items, so on a repository with more than 1,000 open items it fills the first
+1,000; the rest join as their looks record them.
+
+Until the mirror is filled, its member answers reads from the graph and says the poller is refilling
+its mirror. Once filled, the mirror holds the open items of its fill and every item changed since.
+An older closed item it never saw is answered from the graph, which says so.
+
+**No backup.** The plugin store is not in the graph's backup, and needs not be:
+
+- GitHub is its source, and a restored member refills from it.
+- The graph keeps every delivery and every fact other members read, compact from step 3b.
+- The poll cursor's read position is in each observer's claim.
+
+What a lost mirror loses is only:
+
+- the head history of pull requests closed before the refill;
+- events older than the refill;
+- the full facts of closed items it never saw again.
 
 The cursor table keeps `PRAGMA user_version` 1. The mirror's version is the `mirror_version` row
 of `plugin_meta`. So a build from before the mirror still opens the file after a rollback and

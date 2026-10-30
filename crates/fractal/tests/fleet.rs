@@ -5967,6 +5967,30 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     let human = poller.st_ok(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
     assert!(human.contains("from the GitHub plugin mirror on host/fixture-poller"), "{human}");
 
+    // A lost mirror refills from GitHub itself, not the graph, and serves full facts again;
+    // until then the poller answers from its graph and says so.
+    poller.stop();
+    let plugin = poller.state_dir().join("plugins/github");
+    for entry in fs::read_dir(&plugin).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_string_lossy().starts_with("github.sqlite3") {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the poller refills its lost mirror from GitHub", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move {
+            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+            answer["source"]["kind"] == "mirror"
+        }
+    }).await;
+    let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
+    assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
+    assert!(refilled["source"]["filled_at_unix_ms"].is_i64(), "{refilled}");
+
     // Another member relays to the poller.
     wait_until("the reader relays to the poller's mirror", 90, || {
         let answer = gh_prs(&reader, PERSON);
@@ -5992,7 +6016,8 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
 
 /// An older poller beside a member of this build: the member answers from its graph and says the
 /// poller runs a build without the plugin, and both keep replicating. Upgrading the poller in
-/// place seeds its mirror from the history the older build recorded, and the member then relays
+/// place refills its mirror from GitHub while it reads on from the history the older build
+/// recorded, and the member then relays
 /// to it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
@@ -6032,7 +6057,7 @@ async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade()
     poller.binary = PathBuf::from(st3());
     poller.start().await;
     poller.wait_listening().await;
-    wait_until("the upgraded poller seeds its mirror", 120, || {
+    wait_until("the upgraded poller refills its mirror from GitHub", 120, || {
         let answer = gh_prs(&poller, PERSON);
         async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
     }).await;

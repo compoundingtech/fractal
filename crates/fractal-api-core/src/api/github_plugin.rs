@@ -208,20 +208,42 @@ async fn answer(
                 .into_iter()
                 .find(|row| row["resource"] == resource.as_str());
             match held {
-                Some(row) => Ok(Some((row, from_mirror(&mirror, &resource, &read_mirror).map_err(internal_error)?))),
+                // Until it is filled from GitHub, and again once it falls behind, a mirror may be
+                // missing or stale facts; it answers nothing.
+                Some(row) if mirror.filled(&resource).map_err(internal_error)? => {
+                    Ok(Some((row, from_mirror(&mirror, &resource, &read_mirror).map_err(internal_error)?)))
+                }
+                Some(_) => Ok(Some((Value::Null, Value::Null))),
                 None => Ok(None),
             }
         })
         .await?;
-        if let Some((row, body)) = mirrored {
-            envelope["source"] = json!({
-                "kind": "mirror",
-                "host": client_host_id(&here),
-                "mirrored_at_unix_ms": row["mirrored_at_unix_ms"],
-                "seeded_at_unix_ms": row["seeded_at_unix_ms"],
-            });
-            merge(&mut envelope, body);
-            return Ok(Json(envelope));
+        match mirrored {
+            Some((row, body)) if !row.is_null() => {
+                // The mirror holds the open items it was filled with and every item a look
+                // recorded since; an older closed item it never saw is the graph's to answer.
+                let unseen = matches!(read, Read::Pull(_) | Read::Checks(_))
+                    && body.as_object().and_then(|body| body.values().next()).is_some_and(Value::is_null);
+                if unseen {
+                    return fallback(
+                        "the poller's mirror holds the open items it was filled with and the items changed since; this one is not among them".into(),
+                        None,
+                    )
+                    .await;
+                }
+                envelope["source"] = json!({
+                    "kind": "mirror",
+                    "host": client_host_id(&here),
+                    "mirrored_at_unix_ms": row["mirrored_at_unix_ms"],
+                    "filled_at_unix_ms": row["filled_at_unix_ms"],
+                });
+                merge(&mut envelope, body);
+                return Ok(Json(envelope));
+            }
+            Some(_) => {
+                return fallback("the poller is refilling its mirror from GitHub".into(), None).await;
+            }
+            None => {}
         }
         let reason = if polled_here {
             "this member polls the repository, and its mirror has not taken a look since it started"
@@ -428,8 +450,14 @@ mod tests {
             facts: facts.as_object().unwrap().clone(),
             claim: Some(claim.into()),
         };
-        mirror.seed("resource/github/acme/garden", "observer/github/acme/garden", "acme/garden", &[item(7, facts.clone(), &claim)]).unwrap();
-        mirror.mirror("resource/github/acme/garden", "observer/github/acme/garden", "acme/garden", &[item(7, json!({
+        let resource = "resource/github/acme/garden";
+        let observer = "observer/github/acme/garden";
+        mirror.mirror(resource, observer, "acme/garden", None, Some("c1"), &[item(7, facts.clone(), &claim)]).unwrap();
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls").await;
+        assert_eq!(answer["source"]["kind"], "graph", "an unfilled mirror answers nothing: {answer}");
+        assert_eq!(answer["source"]["reason"], "the poller is refilling its mirror from GitHub");
+        assert!(mirror.fill(resource, observer, "acme/garden", Some("c1"), &[item(7, facts.clone(), &claim)]).unwrap());
+        mirror.mirror(resource, observer, "acme/garden", Some("c1"), Some("c2"), &[item(7, json!({
             "number": 7, "title": "Garden paths", "state": "open", "head_sha": "b", "required_checks": {"state": "fail", "failed": ["build"]}}), "c2")]).unwrap();
         let (_, answer) = get(&state, "/v1/plugins/github/repos/ACME/garden/pulls?state=all").await;
         assert_eq!(answer["source"]["kind"], "mirror", "{answer}");
@@ -441,6 +469,10 @@ mod tests {
         assert_eq!(answer["checks"]["heads"].as_array().unwrap().len(), 2);
         let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls/9").await;
         assert!(answer["pull"].is_null());
+        // A closed item the mirror never saw is the graph's to answer.
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls/8").await;
+        assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+        assert_eq!(answer["pull"]["facts"]["title"], "Old path");
         let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/events?number=7").await;
         let events: Vec<_> = answer["events"].as_array().unwrap().iter().map(|event| event["event"].as_str().unwrap()).collect();
         assert_eq!(events, ["checks-failed", "head-changed"]);
