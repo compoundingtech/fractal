@@ -5627,7 +5627,7 @@ mod tests {
                 .lines()
                 .nth(2)
                 .unwrap()
-                .contains("◆ Atlas Builder"),
+                .contains("Atlas Builder ◆"),
             "it needs the person"
         );
         // Up and Down scroll the agent's pane; they never move to another agent.
