@@ -665,7 +665,10 @@ impl Glasses {
                     // A stable tab can move out of its recorded group, even removing that group.
                     let Some((group_index, group, tab_index)) =
                         groups.iter().enumerate().find_map(|(index, group)| {
-                            group.tabs.iter().position(|tab| &tab.id == id)
+                            group
+                                .tabs
+                                .iter()
+                                .position(|tab| &tab.id == id)
                                 .map(|tab| (index, *group, tab))
                         })
                     else {
