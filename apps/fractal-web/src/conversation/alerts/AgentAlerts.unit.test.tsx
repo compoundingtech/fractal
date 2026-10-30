@@ -122,6 +122,13 @@ describe('AgentAlerts', () => {
     const terminal = render([alert('attention/t', [], 'Codex asks a question')], [])
     expect(terminal).toContain('Answer it in the seat&#x27;s terminal.')
   })
+
+  it('offers a trust prompt\'s own answers, and a denied call allowed once, for its kind or dismissed', () => {
+    const trust = render([alert('attention/trust', ['trust', 'exit'], 'Claude asks whether to trust its workspace /work/example.')], [])
+    for (const label of ['Trust', 'Exit']) expect(trust).toContain(`>${label}<`)
+    const denied = render([alert('attention/denied', ['approve-once', 'approve-kind', 'dismiss'], 'Auto mode denied a Bash call.')], [])
+    for (const label of ['Allow once', 'Allow this kind', 'Dismiss']) expect(denied).toContain(`>${label}<`)
+  })
 })
 
 describe('gatewayPromptAnswers', () => {

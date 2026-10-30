@@ -204,11 +204,13 @@ def read_reports(directory, shards, attempt):
     return union, described[0], failed_before
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — accepted base only, including probes.
 def base_file(base, path):
-    try:
-        return git('show', f'{base}:{path}')
-    except Refused:
-        return None
+    preferred = path.replace('.st/', '.fractal/', 1)
+    listing = git('ls-tree', '-z', '--full-tree', base, '--', preferred, path)
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}
+    selected = preferred if preferred in names else path if path in names else None
+    return git('show', f'{base}:{selected}') if selected is not None else None
 
 
 def crate_keys(base, tree, scratch):

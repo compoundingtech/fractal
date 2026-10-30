@@ -180,14 +180,14 @@ const refusedStep = (gate: string) => ({
 })
 const gateRecord = (gate: string) => `\${{ needs.evidence-gate-${gate}.outputs.record }}`
 // The test jobs also skip when every workspace crate has a note for its own key (rust-tests, per crate: docs/per-crate-test-signing.md);
-// clippy also skips on a note for its own input key (linux-clippy: docs/keyed-clippy.md); fleet compatibility is covered only by
-// linux-gate's own note. While a policy entry is shadow (enforce false) its gate never says skip, so this changes nothing until that
-// entry is flipped on its own trigger.
+// clippy and fleet compatibility also skip on a note for their own input key (linux-clippy, linux-fleet-compat: docs/keyed-clippy.md).
+// While a policy entry is shadow (enforce false) its gate never says skip, so this changes nothing until that entry is flipped on its
+// own trigger.
 const testJobs = ['linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4']
 const jobSkips: Record<string, { gates: string[]; skip: string }> = Object.fromEntries([
   ...testJobs.map((id) => [id, { gates: ['linux-gate', 'rust-tests'], skip: `${gateSkip('linux-gate')} || ${gateSkip('rust-tests')}` }]),
   ['linux-clippy', { gates: ['linux-gate', 'linux-clippy'], skip: `${gateSkip('linux-gate')} || ${gateSkip('linux-clippy')}` }],
-  ['linux-fleet-compat', { gates: ['linux-gate'], skip: gateSkip('linux-gate') }],
+  ['linux-fleet-compat', { gates: ['linux-gate', 'linux-fleet-compat'], skip: `${gateSkip('linux-gate')} || ${gateSkip('linux-fleet-compat')}` }],
 ])
 // The aggregate's RESULTS are positional. Exactly the stages skipped at job level may report `skipped` under an
 // evidence skip (derived here from the same list that skips them); every other stage, `upgrade-impact` among them,
@@ -266,7 +266,7 @@ const skipIfCovered = (check: string, steps: readonly any[]) => {
 // Shadow mode: for each required check, ask the verifier from the accepted base whether a trusted note
 // exists for this run's tree and record the outcome in a fixed step name a collector can count.
 // It never skips a check, never fails, and is not itself a required check.
-const evidenceGateChecks = ['linux-gate', 'linux-clippy', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web', 'rust-tests']
+const evidenceGateChecks = ['linux-gate', 'linux-clippy', 'linux-fleet-compat', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web', 'rust-tests']
 const evidenceGateOutcomes = [
   ['satisfied', 'evidence satisfied by existing note'],
   ['degraded', 'evidence existing note is degraded'],
@@ -649,7 +649,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         BASE_INPUTS_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
         // linux-clippy's own run checks what its compiles read against its input key (scripts/dep-info-check); linux-gate's local run
         // of the same stage does not, so linux-gate never depends on the policy file.
-        CI_KEYED_CLIPPY_POLICY: '.st/evidence-skip-policy.json',
+        // arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve the checkout layout at execution, not generation.
+        CI_KEYED_CLIPPY_POLICY: 'auto:.st/evidence-skip-policy.json',
       },
     }),
     'linux-fleet-compat': linuxStageJob({
@@ -657,6 +658,10 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       stage: 'fleet-compat',
       setup: commonSetupSteps,
       description: 'Run fleet compatibility against the pinned older st3',
+      // linux-fleet-compat's own run checks what its compile reads against its input key (scripts/dep-info-check); linux-gate's local
+      // run of the same stage does not, so linux-gate never depends on the policy file.
+      // arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve the checkout layout at execution, not generation.
+      env: { CI_KEYED_FLEET_COMPAT_POLICY: 'auto:.st/evidence-skip-policy.json' },
     }),
     'linux-gate': {
       name: 'linux-gate',
@@ -718,7 +723,7 @@ exit 1`,
     'evidence-note-linux-gate': {
       name: 'evidence-note-linux-gate',
       // The fractal-web jobs and gate are for the web lane's own whole-check note; the linux-gate note leaves them out.
-      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', ...evidenceStepNames, 'fractal-web-changes', 'fractal-web-execution', 'fractal-web', 'evidence-gate-linux-gate', 'evidence-gate-linux-clippy', 'evidence-gate-genie-freshness', 'evidence-gate-ci-script-tests', 'evidence-gate-typescript-client', 'evidence-gate-fractal-web', 'evidence-gate-rust-tests'],
+      needs: ['linux-gate', 'linux-test-build', 'upgrade-impact', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat', ...evidenceStepNames, 'fractal-web-changes', 'fractal-web-execution', 'fractal-web', 'evidence-gate-linux-gate', 'evidence-gate-linux-clippy', 'evidence-gate-linux-fleet-compat', 'evidence-gate-genie-freshness', 'evidence-gate-ci-script-tests', 'evidence-gate-typescript-client', 'evidence-gate-fractal-web', 'evidence-gate-rust-tests'],
       // The merge queue, main and pull requests from this repository sign; a fork never gets the key.
       if: "${{ always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) }}",
       'runs-on': 'ubuntu-latest',
@@ -807,7 +812,11 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
-          run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          run: `# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+key_path=.st/evidence-keys
+if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
   --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"`,
         },
@@ -906,7 +915,11 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sig
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `[ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
-git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+key_path=.st/evidence-keys
+if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \\
   --checks rust-tests --limit 400 --remote origin`,
         },
@@ -918,4 +931,4 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...fractalWebJobs,
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))
+}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."})))))

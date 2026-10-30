@@ -49,6 +49,40 @@ fn push(from: &Store, to: &Store) {
 }
 
 #[test]
+fn a_claim_a_repair_replaced_counts_on_no_member() {
+    let alder = node("alder");
+    let birch = node("birch");
+    let original = state(&alder, "item/a", "one");
+    let replacement = state(&alder, "item/a", "two");
+    push(&alder, &birch);
+    // birch found the original's record invalid and repaired it with the newer claim. birch had
+    // admitted the original already, and alder wrote it, so both keep its claim row; a member
+    // that received the repair first never admits the original at all.
+    let record = {
+        let connection = birch.connection.write();
+        let record: String = connection
+            .query_row("SELECT record_ref FROM replica_records WHERE claim_id=?1", [&original], |row| row.get(0))
+            .unwrap();
+        connection.execute("UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record]).unwrap();
+        record
+    };
+    birch.repair_replica_record(&record, &replacement, "replace the original", "person/example", "repair-1").unwrap();
+    let back = birch.export_replication_exchange(FLEET, &alder.replication_inventory().unwrap()).unwrap();
+    alder.receive_replication_exchange("birch", FLEET, &back).unwrap();
+    alder.validate_replication_backlog().unwrap();
+    alder.project_replication_backlog().unwrap();
+    alder.apply_replication_repairs().unwrap();
+
+    let cut = cut();
+    for store in [&alder, &birch] {
+        assert!(store.claim_by_id(&original).unwrap().is_some(), "{} keeps the original's row", store.origin);
+        let answers = store.answers_summary(cut).unwrap().kinds["example.state"].clone();
+        assert_eq!((answers.keys, answers.claims), (1, 1), "{} counts only the replacement", store.origin);
+    }
+    assert_eq!(alder.answers_summary(cut).unwrap().kinds, birch.answers_summary(cut).unwrap().kinds);
+}
+
+#[test]
 fn members_with_the_same_claims_answer_the_same_and_a_missing_claim_is_named() {
     let source = node("alder");
     let target = node("birch");
@@ -95,7 +129,8 @@ fn fixture() -> Connection {
              CREATE INDEX claims_kind_index ON claims(kind, store_index);
              CREATE INDEX claims_batch_index ON claims(batch_id, store_index);
              CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER);
-             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);",
+             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+             CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);",
         )
         .unwrap();
     connection
@@ -138,10 +173,59 @@ fn a_key_answers_with_its_newest_claim_older_than_the_cut() {
     claim(&connection, "b1", "example.state", "item/b", "alder", 10, 3);
     claim(&connection, "b2", "example.state", "item/b", "alder", 100, 4);
     let keys = all_keys(&connection, "example.state", 50);
-    let answers = keys.iter().map(|key| (key.subject.as_str(), key.origin.as_str(), key.claim.as_str())).collect::<Vec<_>>();
-    assert_eq!(answers, [("item/a", "alder", "a2"), ("item/a", "birch", "a3")]);
+    let answers = keys
+        .iter()
+        .map(|key| (key.subject.as_str(), key.origin.as_str(), key.claim.as_str(), key.moving))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answers,
+        [("item/a", "alder", "a2", false), ("item/a", "birch", "a3", false), ("item/b", "alder", "b2", true)]
+    );
     let answers = kind_answers(&connection, "example.state", 50).unwrap();
     assert_eq!((answers.keys, answers.claims), (2, 4));
+}
+
+#[test]
+fn a_key_moving_on_either_member_is_no_difference() {
+    // alder computed after item/b's newer claim arrived and birch before.
+    let ours = fixture();
+    claim(&ours, "a1", "example.state", "item/a", "alder", 10, 1);
+    claim(&ours, "b1", "example.state", "item/b", "alder", 10, 2);
+    claim(&ours, "b2", "example.state", "item/b", "alder", 100, 3);
+    let theirs = fixture();
+    claim(&theirs, "a1", "example.state", "item/a", "alder", 10, 1);
+    claim(&theirs, "b1", "example.state", "item/b", "alder", 10, 2);
+    let (ours, theirs) = (all_keys(&ours, "example.state", 50), all_keys(&theirs, "example.state", 50));
+    assert_eq!(differing_keys(&ours, &theirs), []);
+    assert_eq!(differing_keys(&theirs, &ours), []);
+
+    // Both still hold item/b's claim before the cut, so the kind agrees without narrowing.
+    let summary = |connection: &Connection| {
+        let mut summary = AnswersSummary { cut_unix_ms: 50, ..AnswersSummary::default() };
+        summary.kinds.insert("example.state".into(), kind_answers(connection, "example.state", 50).unwrap());
+        summary
+    };
+    let (moved, behind) = (fixture(), fixture());
+    for connection in [&moved, &behind] {
+        claim(connection, "a1", "example.state", "item/a", "alder", 10, 1);
+        claim(connection, "b1", "example.state", "item/b", "alder", 10, 2);
+    }
+    claim(&moved, "b2", "example.state", "item/b", "alder", 100, 3);
+    assert_eq!(differing_kinds(&summary(&moved), &summary(&behind), true), []);
+    // A member that trimmed item/b's older claim no longer agrees on the claims before the cut,
+    // so the kind differs until narrowing finds only the moving key.
+    delete(&moved, "b1");
+    assert_eq!(differing_kinds(&summary(&moved), &summary(&behind), false).len(), 1);
+    let keys = |connection: &Connection| all_keys(connection, "example.state", 50);
+    assert_eq!(differing_keys(&keys(&moved), &keys(&behind)), []);
+
+    // A fold reader's moving subject is listed but not counted.
+    let key = |subject: &str, moving| AnswerKey { subject: subject.into(), origin: String::new(), claim: String::new(), moving };
+    let (_, with_moving, buckets) = reader_answers("status_history", 50, vec![key("agent/a", false), key("agent/b", true)]);
+    let (_, without, _) = reader_answers("status_history", 50, vec![key("agent/a", false)]);
+    assert_eq!(with_moving, without);
+    assert_eq!(buckets.keys.len(), 2);
+    assert_eq!(differing_keys(&buckets.keys, &[key("agent/a", false), key("agent/b", false)]), []);
 }
 
 #[test]
@@ -277,7 +361,7 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
     cache.set_readers(Arc::new(|_: &Connection, _: u128| {
         Ok(BTreeMap::from([(
             "status_history".to_owned(),
-            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into() }],
+            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into(), moving: false }],
         )]))
     }));
     let cut = cut();
@@ -299,7 +383,7 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
 
 #[test]
 fn readers_compare_only_between_members_that_both_run_them() {
-    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into() };
+    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into(), before_cut: String::new() };
     let summary = |kinds: &[(&str, &str)]| AnswersSummary {
         kinds: kinds.iter().map(|(kind, digest)| (kind.to_string(), answers(digest))).collect(),
         ..AnswersSummary::default()

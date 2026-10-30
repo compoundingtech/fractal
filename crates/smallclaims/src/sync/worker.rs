@@ -3479,7 +3479,7 @@ async fn exchange_inner<B: Backend>(
     let mut progressed = pulled || pulled_follow_up || pushed || adopted;
     // Walking differing claim ranges is the lowest-priority sync work: it runs only once
     // envelope transport has nothing left to move.
-    if let Some(comparison) = claim_ranges.filter(|comparison| !comparison.same && !progressed) {
+    if let Some(comparison) = claim_ranges.filter(|comparison| !all_same(comparison) && !progressed) {
         progressed = walk_claim_ranges(
             http, backend, node, peer, auth, fleet, telemetry, carrier, attempt, &query, &comparison,
         )
@@ -3496,11 +3496,19 @@ static CLAIM_WALKS: std::sync::LazyLock<std::sync::Mutex<BTreeMap<(String, Strin
 /// the next exchange.
 const CLAIM_WALK_ROUND_TRIPS: usize = 4;
 
+/// Whether a comparison found both the retained claims and, where compared, the retired claim
+/// IDs the same.
+fn all_same(comparison: &crate::replication::ClaimRangeComparison) -> bool {
+    comparison.same && comparison.retired.as_ref().is_none_or(|retired| retired.same)
+}
+
 /// One walk over the claim ranges that differ between this node and a peer, for one pair of
 /// whole-set digests: the tops, then the leaves of differing tops, then the IDs of differing
 /// leaves, then the claims this node lacks. A walk that finishes is not repeated until either
 /// side's claims change, so claims this node retired, or holds that the peer lacks, cost one
-/// walk, not one per exchange.
+/// walk, not one per exchange. Between members that trim locally, a second walk over the
+/// retired claim IDs rides in the same queries; what it finds missing is recorded as retired
+/// when the answer is received, so it fetches nothing.
 #[derive(Debug, Default)]
 pub(crate) struct ClaimWalk {
     pair: String,
@@ -3508,6 +3516,7 @@ pub(crate) struct ClaimWalk {
     tops: std::collections::VecDeque<u32>,
     leaves: std::collections::VecDeque<u32>,
     missing: BTreeSet<String>,
+    retired: Option<Box<ClaimWalk>>,
 }
 
 impl ClaimWalk {
@@ -3515,8 +3524,36 @@ impl ClaimWalk {
         Self { pair: pair.to_owned(), ..Default::default() }
     }
 
-    /// The next question for the peer: fetch what was found missing first, then descend.
+    /// Start, continue or drop the retired walk for a comparison's retired part. Recording what
+    /// it finds changes this node's retired digest, so an unfinished walk continues under the
+    /// new pair rather than starting again from the tops.
+    pub(crate) fn follow_retired(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
+        self.retired = match comparison.retired.as_deref() {
+            Some(retired) if !retired.same => Some(
+                self.retired
+                    .take()
+                    .filter(|walk| walk.pair == retired.pair || walk.unfinished())
+                    .unwrap_or_else(|| Box::new(ClaimWalk::new(&retired.pair))),
+            ),
+            _ => None,
+        };
+    }
+
+    fn unfinished(&self) -> bool {
+        !self.asked_tops || !self.tops.is_empty() || !self.leaves.is_empty() || !self.missing.is_empty()
+    }
+
+    /// The next question for the peer: this walk's step, with the retired walk's step beside it.
     pub(crate) fn next_query(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
+        let mut query = self.next_step();
+        if let Some(retired) = self.retired.as_mut().and_then(|walk| walk.next_step()) {
+            query.get_or_insert_with(Default::default).retired = Some(Box::new(retired));
+        }
+        query
+    }
+
+    /// This walk's next question: fetch what was found missing first, then descend.
+    fn next_step(&mut self) -> Option<crate::replication::ClaimRangeQuery> {
         use crate::replication::*;
         let mut query = ClaimRangeQuery::default();
         if !self.missing.is_empty() {
@@ -3544,9 +3581,19 @@ impl ClaimWalk {
         Self { pair: pair.to_owned(), asked_tops: true, ..Default::default() }
     }
 
+    fn finish(&mut self) {
+        self.asked_tops = true;
+        self.tops.clear();
+        self.leaves.clear();
+        self.missing.clear();
+    }
+
     /// Ask `query` again later: an index was still folding claims in, so the answer showed
     /// nothing.
     pub(crate) fn retry(&mut self, query: crate::replication::ClaimRangeQuery) {
+        if let (Some(walk), Some(retired)) = (self.retired.as_mut(), query.retired) {
+            walk.retry(*retired);
+        }
         self.asked_tops &= !query.tops;
         for top in query.leaves_of.into_iter().rev() {
             self.tops.push_front(top);
@@ -3557,11 +3604,33 @@ impl ClaimWalk {
         self.missing.extend(query.claims);
     }
 
-    /// Take in what one answer showed.
-    pub(crate) fn absorb(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
-        self.tops.extend(&comparison.tops);
-        self.leaves.extend(&comparison.leaves);
-        self.missing.extend(comparison.missing.iter().cloned());
+    /// Take in what the answer to `query` showed. A retired step the answer left out, because
+    /// the peer's retired ranges were still folding, is asked again.
+    pub(crate) fn absorb(
+        &mut self,
+        query: crate::replication::ClaimRangeQuery,
+        comparison: &crate::replication::ClaimRangeComparison,
+    ) {
+        if comparison.same {
+            self.finish();
+        } else {
+            self.tops.extend(&comparison.tops);
+            self.leaves.extend(&comparison.leaves);
+            self.missing.extend(comparison.missing.iter().cloned());
+        }
+        match (self.retired.as_mut(), comparison.retired.as_deref()) {
+            (Some(walk), Some(retired)) if retired.same => walk.finish(),
+            (Some(walk), Some(retired)) => {
+                walk.tops.extend(&retired.tops);
+                walk.leaves.extend(&retired.leaves);
+            }
+            (Some(walk), None) => {
+                if let Some(asked) = query.retired {
+                    walk.retry(*asked);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -3588,7 +3657,10 @@ async fn walk_claim_ranges<B: Backend>(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&key)
         .filter(|walk| walk.pair == comparison.pair)
-        .unwrap_or_else(|| ClaimWalk::new(&comparison.pair));
+        .unwrap_or_else(|| {
+            if comparison.same { ClaimWalk::finished(&comparison.pair) } else { ClaimWalk::new(&comparison.pair) }
+        });
+    walk.follow_retired(comparison);
     let mut fetched = false;
     let mut result = Ok(());
     for _ in 0..CLAIM_WALK_ROUND_TRIPS {
@@ -3628,11 +3700,7 @@ async fn walk_claim_ranges<B: Backend>(
                 walk.retry(query);
                 break;
             }
-            Some(comparison) if comparison.same => {
-                walk = ClaimWalk::finished(&walk.pair);
-                break;
-            }
-            Some(comparison) => walk.absorb(comparison),
+            Some(comparison) => walk.absorb(query, comparison),
         }
     }
     CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);

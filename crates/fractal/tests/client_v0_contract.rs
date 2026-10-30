@@ -182,6 +182,56 @@ fn consumers_accept_future_enum_cases_but_producers_reject_them() {
 }
 
 #[test]
+fn ordered_membership_frames_and_pages_match_only_their_membership_variants() {
+    let fixture = json(Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients/ordered-memberships-v2.json"));
+    for validator in [contract_validator("CollectionFrame"), consumer_validator("CollectionFrame")] {
+        assert_conforms(&validator, "membership snapshot", &fixture["snapshot_frame"]);
+        assert_conforms(&validator, "membership changes", &fixture["changes_frame"]);
+        assert_conforms(&validator, "outside-window membership changes", &fixture["outside_window_changes_frame"]);
+        // Every membership window frame carries the whole container's strict state.
+        for frame in ["snapshot_frame", "changes_frame"] {
+            let mut missing_state = fixture[frame].clone();
+            missing_state.as_object_mut().unwrap().remove("membership");
+            assert!(!validator.is_valid(&missing_state), "{frame} without membership state");
+            for field in ["container", "live_count", "changed_index"] {
+                let mut partial = fixture[frame].clone();
+                partial["membership"].as_object_mut().unwrap().remove(field);
+                assert!(!validator.is_valid(&partial), "{frame} membership without {field}");
+            }
+            let mut negative = fixture[frame].clone();
+            negative["membership"]["changed_index"] = serde_json::json!(-1);
+            assert!(!validator.is_valid(&negative), "{frame} with a negative changed_index");
+        }
+        // Empty windows stay unambiguous: the collection, not the rows, picks the variant.
+        let mut empty = fixture["snapshot_frame"].clone();
+        empty["items"] = serde_json::json!([]);
+        empty["order"] = serde_json::json!([]);
+        assert_conforms(&validator, "empty membership snapshot", &empty);
+        empty["collection"] = serde_json::json!("agents");
+        assert!(!validator.is_valid(&empty), "resource windows carry no membership state");
+        empty.as_object_mut().unwrap().remove("membership");
+        assert_conforms(&validator, "empty resource snapshot", &empty);
+        let mut missing_bucket = fixture["changes_frame"].clone();
+        missing_bucket["upserts"][0]["position"].as_object_mut().unwrap().remove("bucket");
+        assert!(!validator.is_valid(&missing_bucket), "a missing bucket is not the root");
+        let mut resource_rows = fixture["snapshot_frame"].clone();
+        resource_rows["collection"] = serde_json::json!("agents");
+        assert!(!validator.is_valid(&resource_rows), "membership rows are not resources");
+    }
+    for validator in [contract_validator("Envelope"), consumer_validator("Envelope")] {
+        assert_conforms(&validator, "empty membership page", &fixture["envelope"]);
+        let mut nonempty = fixture["envelope"].clone();
+        nonempty["value"] = fixture["page"].clone();
+        assert_conforms(&validator, "membership page", &nonempty);
+        let mut resources = fixture["envelope"].clone();
+        resources["value"]["collection"] = serde_json::json!("agents");
+        assert_conforms(&validator, "empty resource page", &resources);
+        nonempty["value"]["items"][0]["position"].as_object_mut().unwrap().remove("bucket");
+        assert!(!validator.is_valid(&nonempty), "a missing bucket is not the root");
+    }
+}
+
+#[test]
 fn future_resources_remain_readable_without_bypassing_known_resource_validation() {
     let consumer = consumer_validator("Resource");
     let producer = contract_validator("Resource");
@@ -385,6 +435,8 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
     let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
         legacy_request: None,
         person: "person/avery".into(),
         title: "Choose a release date".into(),
@@ -1385,6 +1437,8 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose date".into(),
@@ -2383,6 +2437,8 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let ask = |person: &str| {
         store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: person.into(),
                 title: format!("Decision for {person}"),
@@ -2769,6 +2825,8 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/ada".into(),
             title: "Decision for Ada".into(),
@@ -3601,6 +3659,8 @@ mission "ios-proof" state="ready" {
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/alex".into(),
             title: "Repair simulator components".into(),
@@ -3718,6 +3778,8 @@ mission "release-proof" state="ready" {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Allocate capacity?".into(),

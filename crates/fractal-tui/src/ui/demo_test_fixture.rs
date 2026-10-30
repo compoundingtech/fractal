@@ -93,7 +93,6 @@ pub fn world() -> World {
             },
         ]),
         conversations,
-        pending_calls: BTreeMap::new(),
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
@@ -101,6 +100,7 @@ pub fn world() -> World {
         agent_messages: None,
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
+        slo_stale: None,
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),

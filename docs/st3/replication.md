@@ -799,6 +799,8 @@ Each exchange also carries a claim-range summary: claim-range protocol version 1
 
 When the claims differ and an exchange moved no envelopes, the dialing worker walks the difference as the lowest-priority sync work, at most four round trips per exchange. Each round trip is an ordinary summary exchange whose inventory carries one bounded `claim_range_query`, and the peer answers in its exchange's `claim_ranges`: every non-empty top range (64 tops by the first six bits of a claim ID), then the leaves of at most 4 differing tops (4,096 leaves by the first three hex digits), then the IDs of at most 8 differing leaves (at most 4,096 IDs beyond the first leaf), then the envelopes carrying at most 512 claims the walker found it lacks. Those envelopes travel with the peer's ordinary exchange and are admitted like any other; no projection image or peer result is installed. A claim the walker has retired is never asked for, and a range the peer holds nothing in is not descended, since only the peer's claims can be missing here. A walk runs once for each pair of whole-set digests, so claims one side retired, or holds that the other lacks, cost one walk until either side's claims change; an answer from an index still folding claims in is asked again at the next exchange. A peer without the claim-range protocol ignores the query and is never walked.
 
+Between members that trim locally (`[trim] local`), the summary also carries `retired`: the same summary of the claim IDs the sender retired (`retired_claim_ids`, namespace 1 of the range index), sent only once that namespace has folded. A member that also trims locally compares it, and the walk descends the retired ranges beside the retained ones, in the same queries (`claim_range_query.retired`). A retired ID the peer lists and this member lacks is recorded as retired here when the answer arrives; nothing is fetched. So the set travels: a member never admits, asks for or serves a claim another member deleted, even when the claim comes from a member that still holds it or runs an older build. Recording one changes this member's retired digest, so an unfinished retired walk continues under the new pair. Ordinary members and older builds neither send nor read `retired`.
+
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
@@ -1162,9 +1164,18 @@ summarizes that per claim kind, at a cut, so members can compare it:
   in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
 - A key counts once its newest claim is older than the cut. A key with a newer claim is still
   moving and is left out; the cut never selects an older claim, which a trimmed member may no
-  longer hold.
+  longer hold. A member that computes before a key's newer claim arrives still counts the key,
+  so two members that computed minutes apart can differ only in such keys. Each kind also
+  reports `before_cut`, a digest over every key's newest claim older than the cut, moving keys
+  included: members that still hold those claims agree on it whenever they computed, and a kind
+  whose `before_cut` agrees is no difference. Where it does not, because one member trimmed a
+  moving key's older claim, the keys a narrowing lists carry each moving key, marked `moving`,
+  and a key moving on either member is no difference.
 - Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
   keys and answers. `claims` is compared only between members that trim the same way.
+- A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
+  depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
+  leaves out every claim in `projection_digest_repaired_claims`.
 - Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
   difference narrows to a bucket and then to its keys without listing a whole kind.
 
@@ -1182,7 +1193,10 @@ them, so a request never waits for a pass over the store.
 
 When a kind differs the member compares again every half hour, when both members have computed
 again and counted any claim that arrived late. A difference that lasts two hours is narrowed:
-bucket digests for each differing kind, then the keys of the differing buckets. The member records
+bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
+kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
+where those compare, is no difference. The member records
 one `operational.failure` on its own `daemon/NODE` subject with the condition
 `answers-disagreement`, an episode per member pair, and a `reproduction` that names every
 differing kind with its counts and up to twenty keys, each with both members' answers. The fault
@@ -1341,16 +1355,43 @@ checkpoint agreement. It is off by default. The member then seals, verifies and 
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
 and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
-members until a person excuses it. No claim family is trimmed locally yet.
+members until a person excuses it.
+
+Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
+it captures the set before the cut, plans the drop with the same audited rules and guards a shared
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
+and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+rules stay out because a reader reads the history they drop, which no projection digest covers.
+`harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
+needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
+and a watch walks those observations back to find when the pull request left the merge queue. Two checks stand in for the
+proof. A plan that would drop the newest claim of any subject and kind is refused before anything
+is recorded. While deleting, every chunk compares the projection digests before and after and
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
+an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
+trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
+disk cannot hold.
+Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
+and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
+at once.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
 the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
-recorded, was not a deletion and leaves it. Admission then refuses a retired envelope or claim from
+recorded, was not a deletion and leaves it. From then on an identity enters the ledger only as it is
+deleted, in the deleting transaction, never when a cut records it: a cut that stops before trimming,
+or a chunk that rolls back, retires nothing a peer could learn. Admission then refuses a retired envelope or claim from
 any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
 peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
 held. It still syncs everything else with every peer as before. Turning the setting off stops
-reading the ledger as the authority.
+reading the ledger as the authority. The retired claim IDs travel between such members by claim-range walk, as
+"Protocol" describes.
 
 `[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
 finds this member and a peer answering differently; see [Answers across members](#answers-across-members).

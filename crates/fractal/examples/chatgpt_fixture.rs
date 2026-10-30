@@ -32,9 +32,9 @@ async fn main() -> anyhow::Result<()> {
     let source=format!("version 2\nagent \"prototype.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"prototype-mission\" state=\"ready\" {{ goal \"Prototype mission\"; }}",root);
     let intent=fractal_daemon::graph::parse_intent(&source,"prototype")?;
     store.apply_internal(&intent,"prototype-seed")?;
-    let ask=store.ask_person(&PersonAskRequest {legacy_request:None,person:"person/ada".into(),title:"Choose a prototype answer".into(),reason:"Exercise approved typed answer".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("prototype-ask".into()),incarnation:None,
+    let ask=store.ask_person(&PersonAskRequest {legacy_request:None,deadline_ms:None,default_answer:None,person:"person/ada".into(),title:"Choose a prototype answer".into(),reason:"Exercise approved typed answer".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("prototype-ask".into()),incarnation:None,
         request:Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"The owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),idempotency_key:"prototype-ask-seed".into()})?;
-    let expiry_ask=store.ask_person(&PersonAskRequest {legacy_request:None,person:"person/ada".into(),title:"Choose an expiry-test answer".into(),reason:"Exercise expiry after owner approval".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("expiry-ask".into()),incarnation:None,
+    let expiry_ask=store.ask_person(&PersonAskRequest {legacy_request:None,deadline_ms:None,default_answer:None,person:"person/ada".into(),title:"Choose an expiry-test answer".into(),reason:"Exercise expiry after owner approval".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("expiry-ask".into()),incarnation:None,
         request:Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"The owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),idempotency_key:"expiry-ask-seed".into()})?;
     let home=root.join("home");
     let transcript=home.join(".codex/sessions/2026/10/14/prototype.jsonl");
