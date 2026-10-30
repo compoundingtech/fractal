@@ -2710,6 +2710,7 @@ impl Ui {
 
     pub(super) fn refresh_tab_statuses(&mut self) {
         self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
+        self.refresh_recent_labels();
     }
 
 
@@ -3117,12 +3118,9 @@ impl Ui {
                 glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
             }
             KeyCode::Char('g') if control => self.open_glasses_palette(),
-            // Next and previous tab in the focused split: Ctrl+PgDn/PgUp, Ctrl+Tab where the
-            // terminal reports it, and ] and [ whenever nothing is being typed.
-            KeyCode::PageDown | KeyCode::Tab if control => self.show_tab((current + 1) % tabs),
-            KeyCode::PageUp | KeyCode::BackTab if control => {
-                self.show_tab((current + tabs - 1) % tabs)
-            }
+            // Tabs keep Ctrl+PgDn/PgUp and quiet [ ]; Ctrl+Tab belongs to recent places.
+            KeyCode::PageDown if control => self.show_tab((current + 1) % tabs),
+            KeyCode::PageUp if control => self.show_tab((current + tabs - 1) % tabs),
             KeyCode::Char(']') if quiet && key.modifiers.is_empty() => {
                 self.show_tab((current + 1) % tabs)
             }
@@ -3131,8 +3129,12 @@ impl Ui {
             }
             // Tab and Shift+Tab are tab keys here too. Left to the old layout, Tab switched its
             // section (Home, Agents…) under the focused conversation (Nathan, 2026-10-03).
-            KeyCode::Tab if quiet => self.show_tab((current + 1) % tabs),
-            KeyCode::BackTab if quiet => self.show_tab((current + tabs - 1) % tabs),
+            KeyCode::Tab if quiet && key.modifiers.is_empty() => {
+                self.show_tab((current + 1) % tabs)
+            }
+            KeyCode::BackTab if quiet && !control && !alt => {
+                self.show_tab((current + tabs - 1) % tabs)
+            }
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down if alt => {
                 self.move_focus(key.code)
             }

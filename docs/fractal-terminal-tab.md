@@ -119,6 +119,10 @@ Ctrl+^ (Ctrl+6, 0x1E) opens the recent-place popup when detached, on every termi
 While attached it reaches the program unchanged (for example, Vim's alternate-file key).
 Ctrl+\ then r opens the popup over an attached program. It preselects the previous
 destination; Enter opens, Escape cancels, and typing filters.
+Enhanced Ctrl+Tab cycles recent places outside attached programs, not tabs. It commits on
+Control release only after such modifier releases have actually been observed; otherwise
+the same popup requires Enter. Ctrl+Shift+Tab cycles backward. Direct Ctrl+Tab remains
+program input while attached. Tabs keep quiet [ ] and Ctrl+PageUp/PageDown.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

@@ -1,6 +1,6 @@
 //! Recent content destinations share the navigation history, not a second MRU list.
 use super::{Ui, glass_store::StoredPlace, theme};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -9,6 +9,7 @@ use ratatui::{
 
 #[derive(Default)]
 pub(super) struct RecentState {
+    control_release_seen: bool,
     popup: Option<Popup>,
 }
 
@@ -23,6 +24,7 @@ struct Popup {
     matches: Vec<usize>,
     selected: usize,
     query: String,
+    commit_on_release: bool,
 }
 
 impl Popup {
@@ -55,6 +57,8 @@ impl Popup {
     fn filter(&mut self) {
         self.refresh_matches();
         self.selected = 0;
+        // Typing deliberately switches to the explicit Enter/Esc interaction.
+        self.commit_on_release = false;
     }
 }
 
@@ -63,8 +67,41 @@ impl Ui {
         self.recent.popup.is_some()
     }
 
+    /// Refresh the open snapshot only when the shared tab-status observations change.
+    /// This is not typing: keep both the selected destination and release-to-commit mode.
+    pub(in crate::ui) fn refresh_recent_labels(&mut self) {
+        let Some(mut popup) = self.recent.popup.take() else {
+            return;
+        };
+        let selected_entry = popup.matches.get(popup.selected).copied();
+        let mut old_index = 0;
+        let mut new_index = 0;
+        let mut surviving_selection = None;
+        popup.entries.retain_mut(|entry| {
+            let keep = self.place_exists(&entry.place);
+            if keep {
+                if selected_entry == Some(old_index) {
+                    surviving_selection = Some(new_index);
+                }
+                entry.label = self.place_label(&entry.place);
+                entry.search = entry.label.to_lowercase();
+                new_index += 1;
+            }
+            old_index += 1;
+            keep
+        });
+        popup.refresh_matches();
+        popup.selected = surviving_selection
+            .and_then(|entry| popup.matches.iter().position(|index| *index == entry))
+            .unwrap_or(0);
+        self.recent.popup = Some(popup);
+    }
     /// Explicit popup with the previous destination selected, also on legacy Ctrl+6/Ctrl+^.
     pub(super) fn open_recent(&mut self) {
+        self.start_recent(false, false);
+    }
+
+    fn start_recent(&mut self, commit_on_release: bool, backwards: bool) {
         let entries: Vec<_> = self
             .recent_places()
             .into_iter()
@@ -83,8 +120,9 @@ impl Ui {
             entries,
             selected: 0,
             query: String::new(),
+            commit_on_release,
         };
-        popup.cycle(false);
+        popup.cycle(backwards);
         self.recent.popup = Some(popup);
     }
 
@@ -97,9 +135,39 @@ impl Ui {
         }
     }
 
+    /// Run before dropping release events, including while an attached program has focus.
+    /// Observation alone never captures a program's key. Only an active hold switcher
+    /// consumes its Control release. Negotiated enhancement is not evidence of releases.
+    pub(super) fn observe_recent_key(&mut self, key: KeyEvent) -> bool {
+        // crossterm 0.29 represents kitty modifier releases as Modifier(LeftControl /
+        // RightControl) + Release, not Char('c') or a released Tab carrying CONTROL.
+        let control_release = key.kind == KeyEventKind::Release
+            && matches!(
+                key.code,
+                KeyCode::Modifier(ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl)
+            );
+        if !control_release {
+            return false;
+        }
+        self.recent.control_release_seen = true;
+        if self
+            .recent
+            .popup
+            .as_ref()
+            .is_some_and(|popup| popup.commit_on_release)
+        {
+            self.commit_recent();
+            return true;
+        }
+        false
+    }
+
     /// Dispatch after the parent's attached-program passthrough gate (unless already open).
     /// Returns true exactly when the recent surface owns this event.
     pub(super) fn recent_key(&mut self, key: KeyEvent) -> bool {
+        if self.observe_recent_key(key) {
+            return true;
+        }
         if key.kind == KeyEventKind::Release {
             return self.recent_open();
         }
@@ -107,12 +175,23 @@ impl Ui {
         let shortcut_modifiers = !key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::SUPER);
+        let cycle =
+            control && shortcut_modifiers && matches!(key.code, KeyCode::Tab | KeyCode::BackTab);
+        let backwards = key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::BackTab;
         if self.recent.popup.is_none() {
             if control && shortcut_modifiers && matches!(key.code, KeyCode::Char('6' | '^')) {
                 self.open_recent();
                 return true;
             }
+            if cycle && self.keyboard_enhanced {
+                self.start_recent(self.recent.control_release_seen, backwards);
+                return true;
+            }
             return false;
+        }
+        if cycle {
+            self.recent.popup.as_mut().unwrap().cycle(backwards);
+            return true;
         }
         match key.code {
             KeyCode::Esc => self.recent.popup = None,
@@ -147,12 +226,12 @@ impl Ui {
         }
         let width = area.width.saturating_sub(4).min(88);
         let height = area.height.saturating_sub(2).min(22);
-        let rect = Rect::new(
-            area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2,
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
             width,
             height,
-        );
+        };
         self.cover(rect);
         Clear.render(rect, buf);
         Block::bordered()
@@ -172,20 +251,49 @@ impl Ui {
         );
         let rows = rect.height.saturating_sub(4) as usize;
         let start = popup.selected.saturating_sub(rows.saturating_sub(1));
-        for (row, (index, &entry)) in popup.matches.iter().enumerate().skip(start).take(rows).enumerate() {
-            let background = if index == popup.selected { theme::ROW_SELECTED } else { theme::MANTLE };
-            let style = theme::text().bg(background);
-            let y = rect.y + 2 + row as u16;
-            buf.set_style(Rect::new(x, y, room, 1), style);
-            buf.set_stringn(x, y, &popup.entries[entry].label, room as usize, style);
+        for (row, (index, &entry)) in popup
+            .matches
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(rows)
+            .enumerate()
+        {
+            let selected = index == popup.selected;
+            let style = theme::text().bg(if selected {
+                theme::ROW_SELECTED
+            } else {
+                theme::MANTLE
+            });
+            let row_rect = Rect {
+                x,
+                y: rect.y + 2 + row as u16,
+                width: room,
+                height: 1,
+            };
+            buf.set_style(row_rect, style);
+            buf.set_stringn(
+                x,
+                row_rect.y,
+                &popup.entries[entry].label,
+                room as usize,
+                style,
+            );
         }
         if popup.matches.is_empty() {
             buf.set_stringn(
-                x, rect.y + 2, "No recent places match", room as usize,
+                x,
+                rect.y + 2,
+                "No recent places match",
+                room as usize,
                 theme::soft().bg(theme::MANTLE),
             );
         }
-        let hint = "↑↓: choose · Enter: open · Esc: cancel · type: filter";
+        let hint = if popup.commit_on_release {
+            "Ctrl+Tab: cycle · release Ctrl: open · Esc: cancel"
+        } else {
+            "↑↓: choose · Enter: open · Esc: cancel · type: filter"
+        };
         buf.set_stringn(
             x,
             rect.bottom() - 2,
@@ -203,6 +311,7 @@ mod tests {
         demo,
         glass::Open,
         pane::Pane,
+        view::{AgentState, AttentionKind, Link, Load},
     };
 
     fn places() -> Ui {
@@ -212,6 +321,187 @@ mod tests {
         ui.open_in_glass(Pane::Documents(Some("recent-gamma".into())), Open::Tab);
         ui
     }
+    }
+
+    fn live_places() -> Ui {
+        let mut world = demo::world();
+        world.link = Link::Live;
+        let template = world.agents.items()[0].clone();
+        world.agents = Load::Ready(
+            ["agent/recent-a", "agent/recent-b"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    let mut agent = template.clone();
+                    agent.id = id.into();
+                    agent.name = format!("Live agent {index}");
+                    agent.state = AgentState::Idle;
+                    agent
+                })
+                .collect(),
+        );
+        world.attention = Load::Ready(Vec::new());
+        let mut ui = Ui::new(world);
+        ui.open_in_glass(Pane::Agent(Some("agent/recent-a".into())), Open::Tab);
+        ui.open_in_glass(Pane::Agent(Some("agent/recent-b".into())), Open::Tab);
+        ui.open_in_glass(Pane::Documents(Some("recent-notes".into())), Open::Tab);
+        ui
+    }
+
+    fn selected_place(ui: &Ui) -> &StoredPlace {
+        let popup = ui.recent.popup.as_ref().unwrap();
+        &popup.entries[popup.matches[popup.selected]].place
+    }
+
+    fn add_live_question(ui: &mut Ui) {
+        let mut world = ui.world.clone();
+        if let Load::Ready(agents) = &mut world.agents {
+            for agent in agents {
+                agent.state = AgentState::Working;
+                agent.name.push_str(" updated");
+            }
+        }
+        let mut alert = demo::world().attention.items()[0].clone();
+        alert.id = "attention/recent-question".into();
+        alert.agent = Some("agent/recent-b".into());
+        alert.conversations = vec!["agent/recent-b".into()];
+        alert.kind = AttentionKind::Prompt {
+            seat: "Live agent 1".into(),
+            seat_id: "agent/recent-b".into(),
+            text: "Choose".into(),
+            question: true,
+            answers: Vec::new(),
+            episode: "episode/recent-question".into(),
+            call: None,
+            calls: Ok(Vec::new()),
+            allow: true,
+        };
+        world.attention = Load::Ready(vec![alert]);
+        ui.set_world(world);
+    }
+
+    #[test]
+    fn world_refresh_updates_open_labels_activity_and_questions_without_ending_hold() {
+        let mut ui = live_places();
+        ui.keyboard_enhanced = true;
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        ui.recent_key(ctrl_tab(false));
+        let selected = selected_place(&ui).clone();
+        assert_eq!(selected.pane, "agent:agent/recent-b");
+        let before = ui.recent.popup.as_ref().unwrap().entries[1].label.clone();
+
+        add_live_question(&mut ui);
+
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(selected_place(&ui), &selected);
+        assert_eq!(
+            popup.selected, 1,
+            "refresh must not reset to the first match"
+        );
+        assert!(popup.commit_on_release);
+        let entry = &popup.entries[popup.matches[popup.selected]];
+        assert_eq!(entry.label, ui.place_label(&selected));
+        assert_ne!(entry.label, before);
+        assert!(entry.label.contains("updated"));
+        assert!(entry.label.contains('>'), "working activity is live");
+        assert!(entry.label.contains('?'), "live question is visible");
+        assert_eq!(entry.search, entry.label.to_lowercase());
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buffer = Buffer::empty(area);
+        ui.draw_recent(&mut buffer, area);
+        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("updated"));
+        assert!(rendered.contains('?'));
+        assert!(ui.observe_recent_key(release(ModifierKeyCode::LeftControl)));
+        assert_eq!(ui.focused_pane().unwrap().key(), selected.pane);
+    }
+
+    #[test]
+    fn world_refresh_keeps_query_selected_match_and_explicit_commit_mode() {
+        let mut ui = live_places();
+        ui.keyboard_enhanced = true;
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        ui.recent_key(ctrl_tab(false));
+        for ch in "live agent".chars() {
+            ui.recent_key(key(KeyCode::Char(ch)));
+        }
+        ui.recent_key(key(KeyCode::Down));
+        let selected = selected_place(&ui).clone();
+        assert_eq!(ui.recent.popup.as_ref().unwrap().selected, 1);
+
+        add_live_question(&mut ui);
+
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(popup.query, "live agent");
+        assert_eq!(popup.matches.len(), 2);
+        assert_eq!(popup.selected, 1);
+        assert_eq!(selected_place(&ui), &selected);
+        assert!(!popup.commit_on_release);
+        assert!(!ui.observe_recent_key(release(ModifierKeyCode::LeftControl)));
+        assert!(ui.recent_open());
+    }
+
+    #[test]
+    fn world_refresh_refilters_current_query_and_prunes_disappeared_destinations() {
+        let mut ui = live_places();
+        ui.open_recent();
+        ui.recent_key(key(KeyCode::Char('?')));
+        assert!(ui.recent.popup.as_ref().unwrap().matches.is_empty());
+
+        add_live_question(&mut ui);
+
+        assert_eq!(ui.recent.popup.as_ref().unwrap().matches.len(), 1);
+        assert_eq!(selected_place(&ui).pane, "agent:agent/recent-b");
+        let mut world = ui.world.clone();
+        if let Load::Ready(items) = &mut world.attention {
+            for item in items {
+                if let AttentionKind::Prompt { question, .. } = &mut item.kind {
+                    *question = false;
+                }
+            }
+        }
+        ui.set_world(world);
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(popup.query, "?");
+        assert!(popup.matches.is_empty());
+        assert_eq!(popup.selected, 0);
+        assert!(!popup.commit_on_release);
+
+        let mut world = ui.world.clone();
+        if let Load::Ready(agents) = &mut world.agents {
+            agents.retain(|agent| agent.id != "agent/recent-b");
+        }
+        ui.set_world(world);
+        assert!(
+            ui.recent
+                .popup
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| { entry.place.pane != "agent:agent/recent-b" })
+        );
+        ui.recent_key(key(KeyCode::Esc));
+        ui.set_world(ui.world.clone());
+        assert!(!ui.recent_open(), "refreshing a closed popup is a no-op");
+    }
+
+    #[test]
+    fn ui_dispatch_legacy_control_tab_does_not_switch_a_detached_quiet_pane() {
+        let mut ui = places();
+        assert!(!ui.keyboard_enhanced);
+        assert!(!ui.terminal_focused());
+        let before = ui.current_place().unwrap();
+        for event in [
+            ctrl_tab(false),
+            ctrl_tab(true),
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL),
+        ] {
+            ui.key(event);
+            assert_eq!(ui.current_place().unwrap(), before);
+            assert!(!ui.recent_open());
+            assert!(!ui.terminal_focused());
+        }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -226,6 +516,14 @@ mod tests {
                 } else {
                     KeyModifiers::NONE
                 },
+        )
+    }
+
+    fn release(modifier: ModifierKeyCode) -> KeyEvent {
+        KeyEvent::new_with_kind(
+            KeyCode::Modifier(modifier),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
         )
     }
 
@@ -256,6 +554,98 @@ mod tests {
             Some(Pane::Documents(Some("recent-alpha".into())))
         );
     }
+    }
+
+    #[test]
+    fn fallback_does_not_commit_on_first_observed_release_and_escape_cancels() {
+        let mut ui = places();
+        ui.keyboard_enhanced = true;
+        let before = ui.focused_pane();
+        assert!(ui.recent_key(ctrl_tab(false)));
+        assert!(!ui.recent.popup.as_ref().unwrap().commit_on_release);
+        assert!(!ui.observe_recent_key(release(ModifierKeyCode::LeftControl)));
+        assert!(ui.recent_open());
+        assert_eq!(ui.focused_pane(), before);
+        ui.recent_key(key(KeyCode::Esc));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.focused_pane(), before);
+    }
+
+    #[test]
+    fn observed_control_release_enables_forward_backward_hold_cycle_and_commit() {
+        for modifier in [ModifierKeyCode::LeftControl, ModifierKeyCode::RightControl] {
+            let mut ui = places();
+            ui.keyboard_enhanced = true;
+            assert!(!ui.observe_recent_key(release(modifier)));
+            let before = ui.focused_pane();
+            let previous = ui.recent_places()[1].pane.clone();
+            assert!(ui.recent_key(ctrl_tab(false)));
+            assert!(ui.recent.popup.as_ref().unwrap().commit_on_release);
+            ui.recent_key(ctrl_tab(false));
+            ui.recent_key(ctrl_tab(true));
+            assert_eq!(ui.focused_pane(), before, "cycling is only a preview");
+            assert!(!ui.observe_recent_key(KeyEvent::new_with_kind(
+                KeyCode::Tab,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Release
+            )));
+            assert!(ui.recent_open(), "Tab release is not Control release");
+            assert!(ui.observe_recent_key(release(modifier)));
+            assert!(!ui.recent_open());
+            assert_eq!(ui.focused_pane().unwrap().key(), previous);
+        }
+    }
+
+    #[test]
+    fn typing_in_hold_mode_requires_explicit_commit_and_empty_filter_is_safe() {
+        let mut ui = places();
+        ui.keyboard_enhanced = true;
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        ui.recent_key(ctrl_tab(false));
+        let before = ui.focused_pane();
+        for ch in "not-a-recent-place".chars() {
+            ui.recent_key(key(KeyCode::Char(ch)));
+        }
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        assert!(ui.recent_open());
+        assert!(ui.recent.popup.as_ref().unwrap().matches.is_empty());
+        ui.recent_key(key(KeyCode::Down));
+        ui.recent_key(key(KeyCode::Enter));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.focused_pane(), before);
+    }
+
+    #[test]
+    fn legacy_popup_never_becomes_hold_mode_and_plain_keys_are_not_captured() {
+        let mut ui = places();
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        assert!(!ui.recent_key(key(KeyCode::Char('x'))));
+        assert!(
+            !ui.recent_key(ctrl_tab(false)),
+            "legacy terminals do not distinguish Ctrl+Tab"
+        );
+        assert!(ui.recent_key(KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL)));
+        assert!(!ui.recent.popup.as_ref().unwrap().commit_on_release);
+        ui.observe_recent_key(release(ModifierKeyCode::RightControl));
+        assert!(ui.recent_open());
+        ui.recent_key(key(KeyCode::Esc));
+    }
+
+    #[test]
+    fn backward_first_cycle_wraps_and_other_modifier_releases_do_not_enable_hold() {
+        let mut ui = places();
+        ui.keyboard_enhanced = true;
+        assert!(!ui.observe_recent_key(release(ModifierKeyCode::LeftShift)));
+        let oldest = ui.recent_places().last().unwrap().pane.clone();
+        ui.recent_key(ctrl_tab(true));
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert!(!popup.commit_on_release);
+        assert_eq!(
+            popup.entries[popup.matches[popup.selected]].place.pane,
+            oldest
+        );
+        ui.recent_key(key(KeyCode::Enter));
+        assert_eq!(ui.focused_pane().unwrap().key(), oldest);
 
     #[test]
     fn popup_uses_shared_history_and_labels_across_spaces_without_duplicate_panes() {

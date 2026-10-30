@@ -256,11 +256,15 @@ Closed and snoozed items are excluded. The flash gives `n/m · reason`; after th
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
 
 The recent-place switcher uses that same history across all spaces, de-duplicated by content.
-Rows show the content title and space name. On every terminal type, Ctrl+^
+Rows show live state/attention marks and the space name. On every terminal type, Ctrl+^
 (legacy Ctrl+6, 0x1E) opens the popup when detached, with the previous place selected.
 Ctrl+\ then r opens it even over an attached program. Enter opens the selected destination
 in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
-flips between the last two places. Direct Ctrl+^ reaches attached programs unchanged.
+flips between the last two places. Enhanced Ctrl+Tab cycles forward and Ctrl+Shift+Tab backward.
+Once this terminal has actually reported a Control modifier release, releasing Control commits
+that cycling selection; until then Ctrl+Tab uses the explicit Enter/Escape popup.
+Ctrl+^ and Ctrl+Tab both reach attached programs unchanged. Tabs retain [ ], Ctrl+PageUp
+and Ctrl+PageDown.
 
 
 
