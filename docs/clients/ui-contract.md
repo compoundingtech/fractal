@@ -143,7 +143,7 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 Terminal workspace tabs derive presentation identity from their existing pane keys,
 like the web strip's `data-tab-kind` (never from the displayed or custom title).
 Agent tabs have one activity glyph immediately before the title: `●` working/compacting,
-`○` idle or awaiting a person/login, `×` down/stopped/retired, `!` fault, and `~`
+`○` idle or awaiting a person or login, `×` down/stopped/retired, `!` fault, and `~`
 starting/unknown. Other tabs have no activity prefix; kind letters are not shown.
 One mauve attention suffix follows the title: `?` when an open item is a live question,
 otherwise `◆` when alerts or the subject's needs-person projection need attention.

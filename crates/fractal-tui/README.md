@@ -70,7 +70,7 @@ text). Reads go through `document.get`, `documents.list` and `document-reference
 page is `fractal_ui_model::documents`, the model the phone and web read.
 
 Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
-or waiting on a person/login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
+or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
 Mission, Inbox and other tabs have no prefix. One attention suffix follows the title:
 `?` for a live open question, otherwise `◆` for open alerts or a needs-person state.
 Only counts above one are shown (`?2`, `◆3`); loading attention has no placeholder.
