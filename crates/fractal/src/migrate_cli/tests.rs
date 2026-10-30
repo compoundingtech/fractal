@@ -115,6 +115,7 @@ impl Fixture {
             profiles: Some(vec![root.path().join("profiles"), root.path().join("legacy-profiles")]),
             directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
             daemon_state: state.join("st3"),
+            store_dir: None,
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
         };
@@ -176,7 +177,7 @@ impl Fixture {
     }
 
     async fn run(&mut self, dry_run: bool, rollback: bool) -> Result<Receipt> {
-        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback }).await
+        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback, config: None, state_dir: None, store_dir: None }).await
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -352,6 +353,93 @@ fn configured_state_must_remain_within_the_product_root() -> Result<()> {
     ] {
         assert!(fixture.layout.configure_state(&rejected).is_err());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_store_moves_only_with_legacy_root_or_stays_external() -> Result<()> {
+    for nested in [false, true] {
+        let mut fixture = Fixture::new()?;
+        let (old, new) = fixture.layout.directories[1].clone();
+        let store = if nested { old.join("store") } else { fixture.root.path().join("external-store") };
+        fs::create_dir(&store)?;
+        for name in fractal_daemon::config::STORE_DATABASE_FILES { fs::write(store.join(name), name)?; }
+        let inode = fs::metadata(&store)?.ino();
+        let config = Config { state_dir: old.clone(), store_dir: Some(store.clone()), ..Config::default() };
+        fixture.layout.configure_store(&config);
+        let target = if nested { new.join("store") } else { store.clone() };
+        assert_eq!(fixture.layout.target_store_dir(), Some(target.clone()));
+        fixture.run(true, false).await?;
+        assert!(!fixture.manager.changed_services());
+        fixture.run(false, false).await?;
+        assert_eq!(fs::metadata(&target)?.ino(), inode);
+        for name in fractal_daemon::config::STORE_DATABASE_FILES {
+            assert_eq!(fs::read(target.join(name))?, name.as_bytes());
+        }
+        assert!(new.join("node-identity.lock").is_file());
+        assert!(!target.join("node-identity.lock").exists());
+        fixture.run(true, false).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unreachable_store_refuses_before_service_or_journal_changes() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let store = fixture.root.path().join("missing-store");
+    fixture.layout.store_dir = Some(store.clone());
+    let error = fixture.run(false, false).await.unwrap_err();
+    assert_eq!(error.to_string(), format!("configured store_dir {} is not reachable; mount or restore it before host migration", store.display()));
+    assert!(!fixture.layout.journal.exists());
+    assert!(!fixture.manager.changed_services());
+    Ok(())
+}
+
+#[test]
+fn explicit_store_refuses_destination_and_symlinked_legacy_paths() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let (old, new) = fixture.layout.directories[1].clone();
+    fs::create_dir_all(new.join("store"))?;
+    fixture.layout.store_dir = Some(new.join("store"));
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} is inside the destination product root {}; keep it outside both product roots or in an ordinary directory below the legacy root before cutover",
+        new.join("store").display(), new.display()));
+    let external = fixture.root.path().join("external");
+    fs::create_dir_all(external.join("store"))?;
+    symlink(&external, old.join("linked"))?;
+    fixture.layout.store_dir = Some(old.join("linked/store"));
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} must be an ordinary directory below the product root without symlinked ancestors", old.join("linked/store").display()));
+    Ok(())
+}
+
+#[test]
+fn store_path_validation_and_target_reachability_have_exact_refusals() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let old = fixture.layout.directories[1].0.clone();
+    for store in [PathBuf::from("relative-store"), old.join("../store")] {
+        fixture.layout.store_dir = Some(store.clone());
+        assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+            "host migration requires an absolute store_dir without parent traversal; configured store_dir is {}", store.display()));
+    }
+    let link = fixture.root.path().join("linked-store");
+    symlink(&old, &link)?;
+    fixture.layout.store_dir = Some(link.clone());
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} must be an ordinary directory or an external mount, not a symlink", link.display()));
+    let alias = fixture.root.path().join("alias");
+    symlink(&old, &alias)?;
+    fs::create_dir(old.join("store"))?;
+    fixture.layout.store_dir = Some(alias.join("store"));
+    assert_eq!(fixture.layout.check_store(false).unwrap_err().to_string(), format!(
+        "configured store_dir {} resolves inside product root {}; configure its ordinary path before host migration", alias.join("store").display(), old.display()));
+    fixture.layout.store_dir = Some(old.join("store"));
+    let target = fixture.layout.target_store_dir().unwrap();
+    assert_eq!(fixture.layout.check_store(true).unwrap_err().to_string(), format!(
+        "configured store_dir {} is not reachable; mount or restore it before host migration", target.display()));
+    let config = Config { state_dir: old.clone(), store_dir: Some(old), ..Config::default() };
+    fixture.layout.configure_store(&config);
+    assert_eq!(fixture.layout.store_dir, None);
     Ok(())
 }
 
