@@ -206,6 +206,16 @@ class ReviewRisk(unittest.TestCase):
                 self.assertIn("store-schema-trim-checkpoints", self.areas(result))
                 self.assertTrue(result["needs_factory_read"], result)
 
+    def test_the_resync_and_ivm_root_modules_are_the_concurrency_area(self):
+        for path in ("crates/fractal-drivers/src/resync.rs", "crates/smallclaims/src/ivm.rs"):
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write(".github/workflows/x.yml", "name: x\n")
+                result = self.risk()
+                self.assertIn("concurrency", self.areas(result))
+                self.assertEqual(result["needs_factory_read"], result["level"] == "medium", result)
+
     def test_a_plain_medium_change_does_not_need_a_factory_read(self):
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
         result = self.risk()
