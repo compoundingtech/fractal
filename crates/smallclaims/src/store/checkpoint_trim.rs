@@ -53,6 +53,8 @@ pub enum TrimFault {
     AfterTombstones,
     /// This many chunks are deleted.
     AfterChunk(usize),
+    /// This many pages of a local cut's citation catch-up are committed.
+    AfterCitationPages(usize),
     /// Every row is deleted and the checkpoint is not yet marked trimmed.
     BeforeFinish,
     /// The first deletion chunk starts with its time budget already spent.
@@ -445,7 +447,8 @@ impl Store {
             self.forget_recording_tombstones(&checkpoint)?;
         }
         let _completion = super::checkpoint_completion::Completion::outer();
-        let staged = self.checkpoint_staged_set(cut, None, &context.scratch)?;
+        // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
+        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
         staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
@@ -844,6 +847,9 @@ impl Store {
                 let mut connection = self.connection.write();
                 let transaction = connection.transaction()?;
                 mark(&transaction, "recording")?;
+                if self.trims_locally() {
+                    start_local_walk_tx(&transaction, checkpoint)?;
+                }
                 transaction.commit()?;
             }
             // Recording again changes nothing, so a restart records what is missing. The
@@ -897,6 +903,36 @@ impl Store {
         self.finish_trim(checkpoint, actions)
     }
 
+    /// A member that trims locally walks only `checkpoint`'s own tombstones: from where its walk
+    /// stopped, or else from the first of them, found once on a reader outside the writer (a cut
+    /// an older build recorded). A cut with none starts past the end and is done at once.
+    fn local_walk(&self, checkpoint: &str) -> Result<Option<LocalWalk>> {
+        if !self.trims_locally() {
+            return Ok(None);
+        }
+        let connection = self.readers.get();
+        let saved: Option<String> = connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [local_walk_key(checkpoint)], |row| row.get(0))
+            .optional()?;
+        let (envelope, claim) = match saved.as_deref().and_then(|saved| saved.split_once(' ')) {
+            Some((envelope, claim)) => (envelope.parse()?, claim.parse()?),
+            None => {
+                let start = |table: &str| -> Result<i64> {
+                    Ok(connection.query_row(
+                        /* sqlite-large-value: allow-for-now lv-h5fcb25afca0e owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ &format!(
+                            "SELECT COALESCE((SELECT MIN(rowid) - 1 FROM {table} WHERE checkpoint=?1),
+                                             (SELECT MAX(rowid) FROM {table}), 0)"
+                        ),
+                        [checkpoint],
+                        |row| row.get(0),
+                    )?)
+                };
+                (start("checkpoint_envelopes")?, start("checkpoint_claims")?)
+            }
+        };
+        Ok(Some(LocalWalk { checkpoint: checkpoint.to_owned(), envelope, claim }))
+    }
+
     /// Delete every row a tombstone stands for, in chunks, then mark the checkpoint trimmed.
     /// Running it again after a crash deletes only what is left. A chunk deletes one envelope at
     /// a time and stops starting new steps after `TRIM_CHUNK_BUDGET`. Chunks use background
@@ -917,7 +953,7 @@ impl Store {
         let mut chunks = 0;
         let mut deleted_envelopes = 0;
         let mut deleted_claims = 0;
-        let mut cursor = TrimCursor::default();
+        let mut cursor = TrimCursor { local: self.local_walk(checkpoint)?, ..TrimCursor::default() };
         let delete = crate::profile::span("trim.delete");
         loop {
             let mut connection = self.connection.write_background();
@@ -985,6 +1021,11 @@ impl Store {
                 });
                 return Ok(());
             }
+            if let Some(walk) = &cursor.local {
+                transaction
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h90aea7898bf3 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-hde0878901e21 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
+            }
             transaction.commit()?;
             let held = held_since.elapsed();
             drop(connection);
@@ -1009,6 +1050,7 @@ impl Store {
                 /* sqlite-large-value: allow-for-now lv-ha26d7ebb680b owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='trimmed', updated_at_unix_ms=?2 WHERE id=?1",
                 params![checkpoint, i64::try_from(now_ms())?],
             )?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h51f966c0da12 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [local_walk_key(checkpoint)])?;
             // Every snapshot and page cursor taken before the trim expires, since the claims
             // they read may be gone.
             transaction.execute(
@@ -1102,6 +1144,33 @@ struct TrimCursor {
     envelope: (String, i64, String),
     envelopes_done: bool,
     claim: String,
+    local: Option<LocalWalk>,
+}
+
+/// Where a member that trims locally has got in its own cut's tombstones. They were recorded
+/// after every earlier checkpoint's, so the walk goes by rowid from the first of them and never
+/// visits the older ones. It is kept in `meta` with each chunk, so a restart goes on from it.
+#[derive(Debug, Default)]
+struct LocalWalk {
+    checkpoint: String,
+    envelope: i64,
+    claim: i64,
+}
+
+/// The `meta` key of a local cut's walk.
+fn local_walk_key(checkpoint: &str) -> String {
+    format!("local_trim_walk/{checkpoint}")
+}
+
+/// Record where a local cut's tombstones begin, before the first of them is recorded.
+fn start_local_walk_tx(transaction: &Transaction<'_>, checkpoint: &str) -> Result<()> {
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hd6e8a46ee987 owner=smallclaims::store::checkpoint_trim TODO=stage-generation-and-keyed-reclamation */ "INSERT OR IGNORE INTO meta(key, value) VALUES (?1,
+             (SELECT COALESCE(MAX(rowid), 0) FROM checkpoint_envelopes) || ' ' ||
+             (SELECT COALESCE(MAX(rowid), 0) FROM checkpoint_claims))",
+        [local_walk_key(checkpoint)],
+    )?;
+    Ok(())
 }
 
 /// Inspect one indexed tombstone, advancing even when its row is already gone. An empty pair
@@ -1113,34 +1182,42 @@ fn next_trim_rows(
     cursor: &mut TrimCursor,
 ) -> Result<Option<(Option<EnvelopeTombstone>, Vec<ClaimTombstone>)>> {
     if !cursor.envelopes_done {
-        let envelope = transaction
-            .prepare_cached(
-                "SELECT tombstone.writer, tombstone.sequence, tombstone.envelope_hash,
-                        tombstone.accepted_at_unix_ms
-                 FROM checkpoint_envelopes AS tombstone
-                 WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
-                       > (?1, ?2, ?3)
-                 ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
-                 LIMIT 1",
-            )?
-            .query_row(
-                /* sqlite-large-value: allow-for-now lv-h75e67f417bdf owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
-                |row| {
-                    Ok(EnvelopeTombstone {
-                        writer: row.get(0)?,
-                        sequence: row.get(1)?,
-                        envelope_hash: row.get(2)?,
-                        accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
-                    })
-                },
-            )
-            .optional()?;
+        let envelope = match &mut cursor.local {
+            Some(walk) => next_local_envelope(transaction, walk)?,
+            None => {
+                let envelope = transaction
+                    .prepare_cached(
+                        "SELECT tombstone.writer, tombstone.sequence, tombstone.envelope_hash,
+                                tombstone.accepted_at_unix_ms
+                         FROM checkpoint_envelopes AS tombstone
+                         WHERE (tombstone.writer, tombstone.sequence, tombstone.envelope_hash)
+                               > (?1, ?2, ?3)
+                         ORDER BY tombstone.writer, tombstone.sequence, tombstone.envelope_hash
+                         LIMIT 1",
+                    )?
+                    .query_row(
+                        /* sqlite-large-value: allow-for-now lv-h75e67f417bdf owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![cursor.envelope.0, cursor.envelope.1, cursor.envelope.2],
+                        |row| {
+                            Ok(EnvelopeTombstone {
+                                writer: row.get(0)?,
+                                sequence: row.get(1)?,
+                                envelope_hash: row.get(2)?,
+                                accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
+                            })
+                        },
+                    )
+                    .optional()?;
+                if let Some(envelope) = &envelope {
+                    cursor.envelope = (
+                        envelope.writer.clone(),
+                        i64::try_from(envelope.sequence)?,
+                        envelope.envelope_hash.clone(),
+                    );
+                }
+                envelope
+            }
+        };
         if let Some(envelope) = envelope {
-            cursor.envelope = (
-                envelope.writer.clone(),
-                i64::try_from(envelope.sequence)?,
-                envelope.envelope_hash.clone(),
-            );
             let held: bool = transaction.prepare_cached(
                 "SELECT EXISTS(SELECT 1 FROM replica_envelopes
                  WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
@@ -1164,25 +1241,71 @@ fn next_trim_rows(
         }
         cursor.envelopes_done = true;
     }
-    let claim = transaction
-        .prepare_cached(
-            "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
-             WHERE tombstone.id > ?1
-             ORDER BY tombstone.id LIMIT 1",
-        )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
-            Ok(deletable_claim(row.get(0)?, row.get(1)?))
-        })
-        .optional()?;
+    let claim = match &mut cursor.local {
+        Some(walk) => next_local_claim(transaction, walk)?,
+        None => {
+            let claim = transaction
+                .prepare_cached(
+                    "SELECT tombstone.id, tombstone.operation_id FROM checkpoint_claims AS tombstone
+                     WHERE tombstone.id > ?1
+                     ORDER BY tombstone.id LIMIT 1",
+                )?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h0c032884ac26 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&cursor.claim], |row| {
+                    Ok(deletable_claim(row.get(0)?, row.get(1)?))
+                })
+                .optional()?;
+            if let Some(claim) = &claim {
+                cursor.claim = claim.id.clone();
+            }
+            claim
+        }
+    };
     Ok(match claim {
         Some(claim) => {
-            cursor.claim = claim.id.clone();
             let held: bool = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?
                 .query_row(/* sqlite-large-value: allow-for-now lv-h12c2aa291add owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get(0))?;
             Some((None, if held { vec![claim] } else { Vec::new() }))
         }
         None => None,
     })
+}
+
+/// A local cut's next envelope tombstone, by rowid. Past the last, the walk stays at the end.
+fn next_local_envelope(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> Result<Option<EnvelopeTombstone>> {
+    let next = transaction
+        .prepare_cached(
+            "SELECT rowid, writer, sequence, envelope_hash, accepted_at_unix_ms FROM checkpoint_envelopes
+             WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hbdfea6a33a89 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.envelope, walk.checkpoint], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                EnvelopeTombstone {
+                    writer: row.get(1)?,
+                    sequence: row.get(2)?,
+                    envelope_hash: row.get(3)?,
+                    accepted_at_unix_ms: u128::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                },
+            ))
+        })
+        .optional()?;
+    walk.envelope = next.as_ref().map_or(i64::MAX, |(rowid, _)| *rowid);
+    Ok(next.map(|(_, envelope)| envelope))
+}
+
+/// A local cut's next claim tombstone, by rowid. Past the last, the walk stays at the end.
+fn next_local_claim(transaction: &Transaction<'_>, walk: &mut LocalWalk) -> Result<Option<ClaimTombstone>> {
+    let next = transaction
+        .prepare_cached(
+            "SELECT rowid, id, operation_id FROM checkpoint_claims
+             WHERE rowid > ?1 AND checkpoint=?2 ORDER BY rowid LIMIT 1",
+        )?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h42e6c69fa763 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![walk.claim, walk.checkpoint], |row| {
+            Ok((row.get::<_, i64>(0)?, deletable_claim(row.get(1)?, row.get(2)?)))
+        })
+        .optional()?;
+    walk.claim = next.as_ref().map_or(i64::MAX, |(rowid, _)| *rowid);
+    Ok(next.map(|(_, claim)| claim))
 }
 
 /// What `delete_dropped_rows_tx` needs of a claim it deletes.

@@ -400,19 +400,24 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
                 .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
+        if authoritative {
+            // What a deleted claim cites, or what cites it, a local cut never needs again.
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h60426679c653 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE citer=?1")?.execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b4af7f83e06 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE cited=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h22fa37082c14 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+        }
         super::principals::forget_claim_tx(transaction, &claim.id)?;
         // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
         // compiles every trigger program again. Per row that cost several times the delete.
         // A local cut may drop a claim whose envelope stays: its raw record goes with it, and
         // the payload keeps the envelope whole for peers. Shared checkpoints drop whole envelopes.
         if authoritative {
-            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2943e551c4ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2943e551c4ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h2eb3b0d71dfa owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
         }
         transaction
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
-            .execute(/* sqlite-large-value: allow-for-now lv-h22fa37082c14 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-h2851fd201348 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
         if authoritative {
-            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5601e378d957 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h2eb3b0d71dfa owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5601e378d957 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h857dc7d68cf2 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
         }
     }
     for envelope in envelopes {
@@ -1124,6 +1129,25 @@ pub fn sealed_records_page_sql() -> String {
            ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
              AND envelopes.envelope_hash=records.envelope_hash
          WHERE records.rowid > ?1 AND records.rowid <= ?2 AND records.state<>'repaired'
+           AND envelopes.rowid <= ?4
+           AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
+    )
+}
+
+/// `sealed_records_page_sql` for the records of one envelope (?1, ?2, ?5), with the cut ?3 and
+/// the seal row ?4.
+pub fn sealed_envelope_records_sql() -> String {
+    let order = super::canonical::components("claims").join(", ");
+    format!(
+        "SELECT {order}, records.writer, records.sequence, records.envelope_hash,
+                records.state, records.position
+         FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+         JOIN batches ON batches.id=claims.batch_id
+         JOIN replica_envelopes envelopes
+           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+             AND envelopes.envelope_hash=records.envelope_hash
+         WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
+           AND records.state<>'repaired'
            AND envelopes.rowid <= ?4
            AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
     )
@@ -1868,7 +1892,9 @@ impl Store {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let connection = if let Some(vfs) = vfs {
+        let connection = if let Some(admitted) = &self.admitted {
+            admitted.open_connection_with_vfs(flags, vfs.map(super::checkpoint_space::ProofVfs::name))?
+        } else if let Some(vfs) = vfs {
             Connection::open_with_flags_and_vfs(&self.path, flags, vfs.name())?
         } else {
             Connection::open_with_flags(&self.path, flags)?

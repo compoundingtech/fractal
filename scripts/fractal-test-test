@@ -1513,7 +1513,9 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
         self.assertNotIn('merged origin/main', out)
-        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')  # st-test pushes a branch only when it merged
+        # Not merged, but green and covered: the branch is pushed at its own head at once, before main can move a protected file (the top-up).
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertIn(f'pushed feature at its head {head[:12]} to origin', out)
 
     def test_main_moving_a_protected_file_outside_the_check_s_ci_inputs_does_not_merge_main_in(self):
         def lanes(ci_inputs):
@@ -1580,6 +1582,134 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn('is not pushed (a detached HEAD); push it yourself', out)
         self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+
+    def main_moves_during_the_run(self, *moves):
+        """record_run, called once per round just before the top-up looks at the base, with main moving first: each of `moves` is the list
+        of (name, content) commits main gets in one round, until they run out."""
+        real, left = st_test.record_run, list(moves)
+        def record_run(record):
+            if left:
+                for name, content in left.pop(0):
+                    self.main_commits(name, content)
+            return real(record)
+        return mock.patch.object(st_test, 'record_run', side_effect=record_run)
+
+    def test_a_green_push_run_whose_base_did_not_move_pushes_its_head_once_and_merges_nothing(self):
+        head = self.branch_behind(0)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('top-up', out)
+        self.assertNotIn('merged origin/main', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertEqual(len(self.statements()), 1)
+
+    def test_main_moving_without_uncovering_anything_merges_nothing_signs_nothing_more_and_pushes_the_head(self):
+        head = self.branch_behind(0)
+        with self.main_moves_during_the_run([('later.txt', 'not a protected file')]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertNotIn('top-up round', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)  # within the bound and nothing protected: the head tree is still judged
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertEqual(len(self.statements()), 1)
+
+    def test_main_moving_a_protected_file_during_a_green_run_is_merged_signed_and_pushed_not_lost(self):
+        head = self.branch_behind(0)
+        with self.main_moves_during_the_run([('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        self.assertEqual(git(self.work, 'rev-list', '--parents', '-n1', 'HEAD').split(), [merge, head, git(self.work, 'rev-parse', 'origin/main')])
+        self.assertIn(f'top-up round 1 of 3: origin/main is at {git(self.work, "rev-parse", "origin/main")[:12]}, merged into the branch as {merge[:12]}; '
+                      f'signing what {merge[:12]} lacks: demo', out)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], merge)
+        self.assertIn(f'pushed feature at the merge {merge[:12]} to origin', out)
+        signed = [json.dumps(statement) for statement in self.statements()]
+        self.assertEqual(len(signed), 2)
+        for tree in (git(self.work, 'rev-parse', f'{head}^{{tree}}'), git(self.work, 'rev-parse', 'HEAD^{tree}')):  # the run, then its top-up
+            self.assertTrue(any(tree in statement for statement in signed), tree)
+        self.assertEqual(self.run_st_test('--status')[0], 0, 'the tree CI judges now is covered')
+
+    def test_a_top_up_merge_that_conflicts_stops_says_so_and_pushes_no_branch(self):
+        head = self.branch_behind(0)
+        with self.main_moves_during_the_run([('b.txt', 'main wrote it too'), ('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))]):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn('failure: protected files differ from the branch point, so fractal-test merges origin/main into the branch to bring the green '
+                      'run up to the base, and it does not merge cleanly (b.txt): merge origin/main into the branch yourself, then run again; '
+                      'the branch is not pushed', str(code))
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+        self.assertFalse((self.work / '.git/MERGE_HEAD').exists())
+        self.assertEqual(git(self.work, 'status', '--porcelain', '--untracked-files=no'), '')
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+
+    def test_a_main_that_moves_a_protected_file_every_round_fails_after_three_top_ups_without_pushing_the_branch(self):
+        self.branch_behind(0)
+        moves = [[('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=i + 1))] for i in range(4)]
+        with self.main_moves_during_the_run(*moves):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn('failure: main is moving too fast; run again: after 3 top-up rounds origin/main', str(code))
+        self.assertIn('still lacks demo; the signed notes are pushed, the branch is not', str(code))
+        self.assertEqual([line.split(':')[1].strip() for line in out.splitlines() if line.startswith('fractal-test: top-up round')],
+                         ['top-up round 1 of 3', 'top-up round 2 of 3', 'top-up round 3 of 3'])
+        self.assertEqual(len(self.statements()), 4)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
+
+    def test_a_push_run_without_a_git_identity_fails_before_it_waits_for_a_tree(self):
+        self.branch_behind(0)
+        git(self.work, 'config', '--unset', 'user.name')
+        git(self.work, 'config', '--unset', 'user.email')
+        git(self.work, 'config', 'user.useConfigOnly', 'true')  # git may otherwise make one up from the host name
+        with mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('waited for a tree')):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn('failure: git has no identity for the merge a run may make (GIT_AUTHOR_IDENT', str(code))
+        self.assertIn('set user.name and user.email', str(code))
+
+    def test_a_run_that_needs_nix_and_finds_none_fails_before_it_waits_and_one_off_path_is_used(self):
+        self.commit('b.txt', 'two')
+        bin_dir = Path(self.tmp.name) / 'only-git'
+        bin_dir.mkdir()
+        # The git binary itself (git's own exec path), not whatever wraps it on this PATH, and nothing else: no nix.
+        exec_path = subprocess.run(['git', '--exec-path'], capture_output=True, text=True, env=GIT_ENV, check=True).stdout.strip()
+        (bin_dir / 'git').symlink_to(Path(exec_path) / 'git')
+        with mock.patch.object(st_test, 'NIX_CANDIDATES', (str(Path(self.tmp.name) / 'no-nix'),)), \
+                mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('waited for a tree')):
+            code, out, err = self.run_st_test('--check', 'demo', command=['nix', 'develop', '-c', 'true'], extra_env={'PATH': str(bin_dir)})
+        self.assertIn('failure: nix is not on PATH nor at', str(code))
+        self.assertIn('--setenv=PATH="$PATH"', str(code))
+        nix = Path(self.tmp.name) / 'profile-nix'
+        nix.write_text('#!/bin/sh\n')
+        nix.chmod(0o755)
+        with mock.patch.object(st_test, 'NIX_CANDIDATES', (str(Path(self.tmp.name) / 'no-nix'), str(nix))), \
+                mock.patch.dict(os.environ, {'PATH': str(bin_dir)}):
+            self.assertEqual(st_test.resolve_nix(), str(nix))
+            directory = Path(self.tmp.name) / 'pin'
+            directory.mkdir()
+            (directory / 'flake.lock').write_text(json.dumps({'nodes': {'effect-utils': {'locked': {'rev': 'a' * 40}}}}))
+            self.assertEqual(st_test.members_command(directory)[0], str(nix))
+            self.assertIn(str(Path(self.tmp.name)), st_test.check_path().split(':'))
+
+    def test_a_base_given_as_a_commit_without_repository_reads_the_policy_through_origin(self):
+        self.commit('b.txt', 'two')
+        base = git(self.work, 'rev-parse', 'origin/main')
+        asked = []
+        def repository_of(remote):
+            asked.append(remote)
+            return 'org/repo'
+        out, err = io.StringIO(), io.StringIO()
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.object(st_test, 'repository_of', side_effect=repository_of), \
+                    mock.patch.dict(os.environ, dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE), clear=True), \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = st_test.main(['--base', base, '--check', 'demo', '--toolchain-sha256', hashlib.sha256(b'drv').hexdigest()])
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertEqual(set(asked), {'origin'})
+        self.assertEqual(st_test.base_remote(base), 'origin')
+        self.assertEqual(st_test.base_remote('origin/main'), 'origin')
 
     def test_a_branch_runs_the_self_contained_base_copy_once(self):
         stub = ('import json, os, sys\n'
@@ -2085,7 +2215,8 @@ class StTest(unittest.TestCase):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+        # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).
@@ -2217,7 +2348,7 @@ class StTest(unittest.TestCase):
         code, out, err = self.run_st_test()
         self.assertEqual(code, 0, out + err)
         record, = self.runs()
-        self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'checks',
+        self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
                                                  'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
                                                  'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s']))
         # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
@@ -2448,6 +2579,58 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 0)
         got[0][1].close()
 
+    def test_a_best_ticket_that_never_takes_the_free_tree_does_not_stop_the_next_waiter(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        stuck = queue / f'003.{time.time_ns():019d}.{os.getpid()}'            # alive, best in this waiter's order, and never going to try a tree (an old copy deferring to us)
+        stuck.touch()
+        got = []
+        began = time.monotonic()
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 1.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            time.sleep(0.8)
+            self.assertEqual(got, [])                                           # the tree is free but not yet for the fallback time
+            worse.join(8)
+        self.assertEqual(len(got), 1)                                           # within the fallback time plus a poll or two the next waiter has it
+        self.assertLess(time.monotonic() - began, 6)
+        self.assertGreaterEqual(time.monotonic() - began, 1.5)
+        got[0][1].close()
+
+    def test_the_fallback_never_takes_a_tree_that_is_in_use(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        (queue / f'003.{time.time_ns():019d}.{os.getpid()}').touch()
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)), daemon=True)
+            worse.start()
+            time.sleep(2.5)
+            self.assertEqual(got, [])                                           # tree-0 is held, so the flock refuses however long the wait
+            holder.close()
+            worse.join(8)
+        self.assertEqual(len(got), 1)
+        got[0][1].close()
+
+    def test_the_fallback_waits_for_a_build_slot_like_the_head_does(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        (queue / f'003.{time.time_ns():019d}.{os.getpid()}').touch()
+        ready = [False]
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=lambda: (ready[0], 'no slot'))), daemon=True)
+            worse.start()
+            time.sleep(2.5)
+            self.assertEqual(got, [])                                           # free for longer than the fallback time, but a build would wait for a slot
+            ready[0] = True
+            worse.join(8)
+        self.assertEqual(len(got), 1)
+        got[0][1].close()
+
     def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
         self.root.mkdir(parents=True)
         holder = open(self.root / 'tree-0.lock', 'w')
@@ -2469,7 +2652,7 @@ class PoolQueue(unittest.TestCase):
         queue.mkdir()
         now = 10_000 * 10**9
         live = os.getpid()
-        names = {'old-50': f'050.{now - 200 * 60 * 10**9:019d}.{live}',   # 200 minutes: aged to the floor, 5
+        names = {'old-50': f'050.{now - 100 * 60 * 10**9:019d}.{live}',   # 100 minutes (inside the 2 hour maximum wait): aged to the floor, 5
                  'p0': f'003.{now - 10**9:019d}.{live}',                  # under the floor: never aged, always first
                  'new-12': f'012.{now - 10**9:019d}.{live}',
                  'young-50': f'050.{now - 5 * 60 * 10**9:019d}.{live}',  # 5 minutes: 48
@@ -2480,6 +2663,46 @@ class PoolQueue(unittest.TestCase):
             order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
         self.assertFalse((queue / names['dead']).exists())
+
+    def test_a_stream_of_rank_3_tickets_cannot_hold_a_rank_50_ticket_past_the_maximum_wait(self):
+        queue = Path(self.tmp.name) / 'queue-max-wait'
+        queue.mkdir()
+        live = os.getpid()
+        limit = st_test.PRIORITY_MAX_WAIT_SECONDS * 10**9
+        start = 10_000_000 * 10**9
+        starved = f'050.{start - 1:019d}.{live}'                                  # one nanosecond older than the first rank-3 ticket: no tie
+        (queue / starved).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            for minute in range(0, 200):                                         # a new rank-3 ticket every minute for more than three hours
+                now = start + minute * 60 * 10**9
+                fresh = f'003.{now:019d}.{live}'
+                (queue / fresh).touch()
+                order = [name for _, _, name in st_test.tree_queue(queue, now)]
+                if now - (start - 1) < limit:
+                    self.assertNotEqual(order[0], starved, minute)                # inside the limit the ranks decide
+                else:
+                    self.assertEqual(order[0], starved, minute)                   # at the limit the old ticket is first, ahead of every younger rank-3 ticket
+                    break
+            else:
+                self.fail('the rank-50 ticket never reached the front')
+        self.assertGreaterEqual(minute * 60, st_test.PRIORITY_MAX_WAIT_SECONDS)
+
+    def test_tickets_past_the_maximum_wait_go_first_and_oldest_first_among_themselves(self):
+        queue = Path(self.tmp.name) / 'queue-overdue'
+        queue.mkdir()
+        live = os.getpid()
+        now = 10_000_000 * 10**9
+        limit = st_test.PRIORITY_MAX_WAIT_SECONDS * 10**9
+        names = {'overdue-3-older': f'003.{now - limit - 5 * 10**9:019d}.{live}',
+                 'overdue-50': f'050.{now - limit - 2 * 10**9:019d}.{live}',
+                 'overdue-12-newest': f'012.{now - limit:019d}.{live}',
+                 'p0-young': f'003.{now - 10**9:019d}.{live}',
+                 'young-50': f'050.{now - 60 * 10**9:019d}.{live}'}
+        for name in names.values():
+            (queue / name).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        self.assertEqual(order, [names['overdue-3-older'], names['overdue-50'], names['overdue-12-newest'], names['p0-young'], names['young-50']])
 
     def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
         queue = self.root / 'queue'
@@ -2768,6 +2991,36 @@ class PerCrate(StTest):
         self.commit('crates/base/src/lib.rs', '// changed\n')
         self.run_crates()
         self.assertEqual(self.ran()[-1], 'base,top')
+
+    def test_main_re_keying_one_crate_during_a_green_run_signs_that_crate_alone_and_pushes_the_head(self):
+        self.commit('b.txt', 'two')
+        head = git(self.work, 'rev-parse', 'HEAD')
+        inputs = {'global': ['Cargo.toml', 'Cargo.lock'], 'crates': {'base': {'extra': []}, 'top': {'extra': ['a.txt']}}}
+        env = {'FAKE_CALLS': str(self.calls), 'ST_EVIDENCE_GOVERN': 'off', 'ST_EVIDENCE_TARGET': 'off'}
+        with self.main_moves_during_the_run([('.st/rust-test-inputs.json', json.dumps(inputs))]):  # main's inputs move top's key, not base's
+            code, out, err = self.run_st_test('--push', 'origin', extra_env=env)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.ran(), ['base,top', 'top'])
+        self.assertIn(f'top-up round 1 of 3: origin/main is at {git(self.work, "rev-parse", "origin/main")[:12]}; signing what {head[:12]} lacks: '
+                      'rust-tests (1 crates: top)', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)  # nothing protected moved: no merge
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], head)
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 0), ('top', 0)])
+
+    def test_a_narrowed_run_that_merges_main_signs_the_whole_tree_checks_of_the_merge_before_it_pushes(self):
+        self.branch_from_a_base_with_the_gate()
+        for i in range(30):
+            self.main_commits(f'main-{i}.txt', str(i))  # past the head-tree bound: the run merges main in
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        self.assertIn('merged origin/main', out)
+        self.assertIn(f'signing what {merge[:12]} lacks: demo', out)  # the whole-tree check the narrowed run did not select
+        demo = [s for s in self.statements() if 'demo' in s['predicate']['observed']['checks']]
+        self.assertEqual(len(demo), 1)
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(demo[0]))
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], merge)
+        self.assertEqual(self.run_st_test('--status')[0], 0, 'every check of the pushed merge is covered')
 
     def test_a_change_outside_every_crate_runs_nothing(self):
         self.run_crates()

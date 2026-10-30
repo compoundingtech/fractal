@@ -447,6 +447,12 @@ impl AttentionListStore for Store {
         if index < previous.cut {
             return Ok(AttentionDelta::Refold("older cut".into()));
         }
+        // Deadlines turned on or off, or a new default: no claim says so.
+        if fractal_store::store::person_work::ask_deadline_policy(&self.readers.get())?
+            != previous.ask_deadline_policy
+        {
+            return Ok(AttentionDelta::Refold("ask deadline policy".into()));
+        }
         let mut seats = SeatChecks::new(self, previous);
         let projection = self.attention_projection_frontier()?;
         let mut due = None;
