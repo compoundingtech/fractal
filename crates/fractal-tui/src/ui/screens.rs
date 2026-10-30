@@ -321,6 +321,8 @@ pub struct Drafts<'a> {
     pub needs_words: Option<String>,
     /// "Chat about this": who it goes to, the draft, and the thread so far.
     pub chat: Option<Chat<'a>>,
+    /// A prompt's form: its mark, whether it has the keys, and a question's choices.
+    pub form: super::alerts::FormState<'a>,
 }
 
 pub struct Chat<'a> {
@@ -1312,43 +1314,28 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             );
         }
         AttentionKind::Prompt {
-            seat,
-            text: prompt,
-            answers,
-            call,
-            ..
+            seat, text: prompt, ..
         } => {
             card.line(Line::from(vec![
                 span("waits  ", theme::dim()),
                 span(seat.clone(), theme::strong(theme::PERSON)),
             ]));
             card.blank();
-            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
-            card.blank();
-            // A gated answer (allow, approve, answer) goes only beside the call st names.
-            let unnamed = call.is_none()
-                && answers.iter().any(|answer| matches!(answer.as_str(), "allow" | "approve" | "answer"));
-            if answers.is_empty() || unnamed {
-                card.wrap(
-                    &text::inline(
-                        if answers.is_empty() {
-                            "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered."
-                        } else {
-                            "Fractal does not say which call this asks about: answer it in the seat's terminal (Ctrl+]), or deny it from its conversation. This clears when the prompt is gone, however it was answered."
-                        },
-                        theme::dim(),
-                    ),
-                    inner,
-                );
-            } else {
-                card.wrap(
-                    &text::inline(
-                        "The call it would make is the pending one in the seat's conversation: open the conversation to read it in full, then allow or deny it there. This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
+            // A prompt the form asks in its own words is said once, as the form's question.
+            if !super::alerts::form_asks(world, item, prompt) {
+                card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+                card.blank();
             }
+            // The same form the band in its conversation expands to, with the call in full.
+            super::alerts::prompt_form(
+                &mut card,
+                world,
+                item,
+                drafts.form,
+                inner,
+                None,
+                super::alerts::Place::Inbox,
+            );
         }
         AttentionKind::Login { text: login, seats } => {
             card.lines(text::markdown(&spaced(login), inner, theme::text()));
@@ -1521,6 +1508,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             needs_words: None,
             confirm: None,
             chat: None,
+            form: Default::default(),
         };
         text_box(
             &mut card,
@@ -3469,7 +3457,7 @@ mod tree_tests {
         let id = item.id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
-            answering: None, needs_words: None, chat: None,
+            answering: None, needs_words: None, chat: None, form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -3497,7 +3485,7 @@ mod tree_tests {
         let id = item.id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
-            answering: None, needs_words: None, chat: None,
+            answering: None, needs_words: None, chat: None, form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
