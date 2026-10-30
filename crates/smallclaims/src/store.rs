@@ -877,6 +877,8 @@ pub struct Store {
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
     pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
+    /// Wakes the stopped signature bootstrap job after an explicit resume.
+    pub signature_migration_resumed: tokio::sync::Notify,
     pub origin: String,
     /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
     /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
@@ -1228,6 +1230,7 @@ impl Store {
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
             signature_migration_work: Mutex::new(None),
+            signature_migration_resumed: tokio::sync::Notify::new(),
             origin,
             path,
             shared_memory,

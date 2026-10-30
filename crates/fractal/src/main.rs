@@ -2467,6 +2467,26 @@ enum ReplicationCommand {
         #[command(subcommand)]
         command: CheckpointCommand,
     },
+    /// The claim signature migration on this member.
+    Signatures {
+        #[command(subcommand)]
+        command: SignaturesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SignaturesCommand {
+    /// Clear this member's persisted signature-state-corrupt fault and let the migration go on.
+    /// If the defect it named is still there, the next page persists the same fault again.
+    Resume {
+        /// What was repaired, or why the fault was not local corruption.
+        #[arg(long)]
+        reason: String,
+        /// The person resuming, or the fleet's fault agent.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -19352,51 +19372,69 @@ async fn build_transport_observation_index(store: Arc<Store>) {
 }
 
 /// A finite bootstrap job: committed pages yield the background writer to live requests.
-/// Local corruption is persisted and visible through doctor/faults; it stops this job.
+/// Local corruption is persisted and visible through doctor/faults; it stops this job until
+/// `st replication signatures resume` clears it. A transient SQLite error (busy, locked, cannot
+/// open) is not corruption: it is logged and the job retries after `SIGNATURE_BOOTSTRAP_RETRY`.
 /// Background inventory/judgment gets one quiet unit per unit of page wall time.
-/// This bounds duty to 50%; it neither retries nor suppresses a local failure.
+/// This bounds duty to 50%.
 const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
+const SIGNATURE_BOOTSTRAP_RETRY: Duration = Duration::from_secs(30);
 
 async fn migrate_signature_candidates(store: Arc<Store>) {
-    let worker = store.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<()> {
-        let initial = worker.signature_migration()?;
-        let mut phase = initial.phase.clone();
-        if !initial.done() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
-        loop {
-            let page_started = std::time::Instant::now();
-            let report = worker.advance_signature_migration()?;
-            if report.phase != phase {
-                stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
-                phase = report.phase.clone();
-            }
-            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
-                anyhow::bail!("{reason}");
-            }
-            if report.phase == "judging" {
-                worker.advance_signature_judgment()?;
-            }
-            // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
-            // each page gets an equally long quiet interval (at most 50% worker duty).
-            let page_elapsed = page_started.elapsed();
-            std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-            if worker.signature_migration()?.done() {
-                let complete = worker.signature_migration()?;
-                if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
-                loop {
-                    let retired_started = std::time::Instant::now();
-                    if !worker.retire_legacy_signature_page()? { break; }
-                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+    loop {
+        let worker = store.clone();
+        // Ok(Some(fault)): the job stopped on a fault already persisted, which it must not rewrap.
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let initial = worker.signature_migration()?;
+            let mut phase = initial.phase.clone();
+            if !initial.done() && initial.fault.is_none() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
+            loop {
+                let page_started = std::time::Instant::now();
+                let report = worker.advance_signature_migration()?;
+                if report.phase != phase {
+                    stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
+                    phase = report.phase.clone();
                 }
-                return Ok(());
+                if let Some(fault) = report.fault {
+                    return Ok(Some(fault));
+                }
+                if report.phase == "judging" {
+                    worker.advance_signature_judgment()?;
+                }
+                // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
+                // each page gets an equally long quiet interval (at most 50% worker duty).
+                let page_elapsed = page_started.elapsed();
+                std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                if worker.signature_migration()?.done() {
+                    let complete = worker.signature_migration()?;
+                    if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
+                    loop {
+                        let retired_started = std::time::Instant::now();
+                        if !worker.retire_legacy_signature_page()? { break; }
+                        std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    return Ok(None);
+                }
+            }
+        }).await;
+        match result {
+            Ok(Ok(None)) => return,
+            Ok(Ok(Some(fault))) => {
+                stderr_message("st3", format_args!("signature candidate migration stopped on a persisted fault; repair it, then run `st replication signatures resume`: {fault}"));
+            }
+            Ok(Err(error)) if smallclaims::store::principals::transient_storage_error(&error) => {
+                stderr_message("st3", format_args!("signature candidate migration retrying in {}s after a transient storage error: {error:#}", SIGNATURE_BOOTSTRAP_RETRY.as_secs()));
+                tokio::time::sleep(SIGNATURE_BOOTSTRAP_RETRY).await;
+                continue;
+            }
+            result => {
+                if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+                    stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
+                }
+                stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
             }
         }
-    }).await;
-    if !matches!(result, Ok(Ok(()))) {
-        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
-            stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
-        }
-        stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
+        store.signature_migration_resumed.notified().await;
     }
 }
 

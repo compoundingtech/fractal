@@ -368,7 +368,9 @@ mod judging;
 mod legacy;
 mod migration;
 pub(crate) use migration::SignatureEnvelopeWork;
-pub use migration::SignatureMigration;
+pub use migration::{
+    SignatureMigration, SignatureResume, SignatureResumeRequest, transient_storage_error,
+};
 pub(crate) use migration::initialize_schema;
 
 /// Keep a signature a device made for the claim this node is about to write on `subject`, so the
@@ -625,7 +627,8 @@ struct StoreFacts<'a> {
     memo: &'a RefCell<BTreeMap<String, Verdict>>,
     /// What the verdict relied on.
     links: RefCell<BTreeSet<String>>,
-    fault: RefCell<Option<String>>,
+    /// The first failed read, kept typed so a transient SQLite error stays retryable.
+    fault: RefCell<Option<anyhow::Error>>,
     incomplete: RefCell<bool>,
 }
 
@@ -634,9 +637,7 @@ impl StoreFacts<'_> {
         match result {
             Ok(value) => value,
             Err(error) => {
-                self.fault
-                    .borrow_mut()
-                    .get_or_insert_with(|| format!("{error:#}"));
+                self.fault.borrow_mut().get_or_insert(error);
                 neutral
             }
         }
@@ -662,10 +663,9 @@ impl StoreFacts<'_> {
         )
         .map(|(verdict, _, _)| verdict)
         .unwrap_or_else(|error| {
-            self.fault
-                .borrow_mut()
-                .get_or_insert_with(|| format!("{error:#}"));
-            Verdict::Held(format!("signature-state-corrupt: {error:#}"))
+            let verdict = Verdict::Held(format!("signature-state-corrupt: {error:#}"));
+            self.fault.borrow_mut().get_or_insert(error);
+            verdict
         });
         self.memo
             .borrow_mut()
@@ -883,7 +883,7 @@ fn judge_candidates(
         }
     }
     if let Some(error) = facts.fault.into_inner() {
-        anyhow::bail!("signature-state-corrupt: {error}");
+        return Err(error.context("signature-state-corrupt"));
     }
     if facts.incomplete.into_inner() {
         return Ok((
@@ -1522,7 +1522,9 @@ impl Store {
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
-        if let Err(error) = &result {
+        if let Err(error) = &result
+            && !migration::transient_storage_error(error)
+        {
             migration::record_fault(
                 &self.connection.write(),
                 &format!("verdict reconciliation: {error:#}"),
