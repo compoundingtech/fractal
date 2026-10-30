@@ -99,7 +99,7 @@ fn property<'a>(text: &'a str, name: &str) -> Result<&'a str> {
 fn linux_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
     inspect_services(
         &["st3.service", "smalltalk.service"],
-        &[("st3-replication.service", "fractal-replication.service"), ("smalltalk-apply.service", "fractal-apply.service")],
+        &[(&["st3-replication.service", "smalltalk-replication.service"], "fractal-replication.service"), (&["smalltalk-apply.service"], "fractal-apply.service")],
         "fractal.service",
         probe,
     )
@@ -107,7 +107,7 @@ fn linux_services(probe: impl FnMut(&str) -> Result<Unit>) -> Result<Services> {
 
 fn inspect_services(
     legacy_daemons: &[&str],
-    auxiliary: &[(&str, &str)],
+    auxiliary: &[(&[&str], &str)],
     target_name: &str,
     mut probe: impl FnMut(&str) -> Result<Unit>,
 ) -> Result<Services> {
@@ -117,10 +117,18 @@ fn inspect_services(
     // Keep a missing primary in the recovery plan after successful retirement.
     if legacy.is_empty() { legacy.push(daemons[0].clone()); }
     let mut target = vec![probe(target_name)?];
-    for (old, new) in auxiliary {
-        let old = probe(old)?;
-        let new = probe(new)?;
-        if old.installed {
+    for (aliases, target_name) in auxiliary {
+        let mut old = None;
+        for name in *aliases {
+            let unit = probe(name)?;
+            if unit.installed {
+                ensure!(old.is_none(),
+                    "multiple legacy definitions exist for {target_name}; resolve which owns the worker before host cutover");
+                old = Some(unit);
+            }
+        }
+        let new = probe(target_name)?;
+        if let Some(old) = old {
             legacy.push(old);
             target.push(new);
         } else if new.running {
@@ -146,7 +154,7 @@ impl Manager for Native {
             let base = home.join("Library/LaunchAgents");
             inspect_services(
                 &["com.compoundingtech.st3", "org.nix-community.home.smalltalk"],
-                &[("com.compoundingtech.st3.replication", "com.compoundingtech.fractal.replication"), ("org.nix-community.home.smalltalk-apply", "com.compoundingtech.fractal-apply")],
+                &[(&["com.compoundingtech.st3.replication"], "com.compoundingtech.fractal.replication"), (&["org.nix-community.home.smalltalk-apply"], "com.compoundingtech.fractal-apply")],
                 "com.compoundingtech.fractal",
                 |name| Self::launchd(name, &base),
             )
