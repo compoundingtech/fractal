@@ -211,7 +211,7 @@ pub(super) const SIGNATURE_RETRY_VISIBLE_MS: u128 = 300_000;
 impl Store {
     /// Remember a transient storage error the signature work is retrying; any other outcome
     /// ends the episode. A permanent cannot-open then surfaces in doctor instead of only on stderr.
-    pub(super) fn note_signature_retry(&self, error: Option<&anyhow::Error>) {
+    pub fn note_signature_retry(&self, error: Option<&anyhow::Error>) {
         let mut retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
         match error.filter(|error| transient_storage_error(error)) {
             Some(error) => {

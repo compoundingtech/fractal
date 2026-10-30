@@ -8744,6 +8744,9 @@ async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() 
         tx.commit().unwrap();
     }
     let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Nothing is pending yet: the job finishes its startup pass and goes idle.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!store.verdicts_pending().unwrap());
     store.judge_claims_slice(true).unwrap();
     assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
     let deadline = Instant::now() + Duration::from_secs(60);

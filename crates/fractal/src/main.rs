@@ -19443,6 +19443,7 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 }
             }
             Ok(Err(error)) if smallclaims::store::principals::transient_storage_error(&error) => {
+                store.note_signature_retry(Some(&error));
                 stderr_message("st3", format_args!("signature candidate migration retrying in {}s after a transient storage error: {error:#}", SIGNATURE_BOOTSTRAP_RETRY.as_secs()));
                 tokio::time::sleep(SIGNATURE_BOOTSTRAP_RETRY).await;
                 continue;
