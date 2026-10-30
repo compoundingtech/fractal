@@ -52,7 +52,7 @@ impl Ui {
         self.recent.popup.is_some()
     }
 
-    /// Explicit popup, including the leader action and the legacy Ctrl+6/Ctrl+^ alias.
+    /// Explicit popup with the previous destination selected, also on legacy Ctrl+6/Ctrl+^.
     pub(super) fn open_recent(&mut self) {
         self.start_recent(false, false);
     }
@@ -358,5 +358,42 @@ mod tests {
             ui.recent_key(key(KeyCode::Backspace));
         }
         assert_eq!(ui.recent.popup.as_ref().unwrap().matches.len(), history.len());
+    }
+
+    #[test]
+    fn previous_recent_tracks_back_visits_instead_of_the_forward_history_tail() {
+        let mut ui = places();
+        ui.open_in_glass(Pane::Documents(Some("recent-delta".into())), Open::Tab);
+        ui.navigate_history(false);
+        ui.navigate_history(false);
+        ui.open_recent();
+        ui.recent_key(key(KeyCode::Enter));
+        assert_eq!(ui.focused_pane(), Some(Pane::Documents(Some("recent-gamma".into()))));
+        ui.open_recent();
+        ui.recent_key(key(KeyCode::Enter));
+        assert_eq!(ui.focused_pane(), Some(Pane::Documents(Some("recent-beta".into()))));
+    }
+
+    #[test]
+    fn ui_dispatch_keeps_terminal_tab_passthrough_but_opens_explicit_popup() {
+        use crate::ui::{Effect, doc::Hit};
+        let mut ui = places();
+        ui.keyboard_enhanced = true;
+        let id = ui.world.agents.items()[0].id.clone();
+        ui.open_in_glass(Pane::Agent(Some(id)), Open::Tab);
+        ui.click(Hit::Attach);
+        ui.effects.clear();
+        let cycle = ctrl_tab(false);
+        ui.key(cycle);
+        assert!(!ui.recent_open());
+        assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(sent)) if *sent == cycle));
+        ui.key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL));
+        assert!(ui.recent_open());
+        ui.key(key(KeyCode::Esc));
+        assert!(ui.terminal_focused());
+        ui.key(KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL));
+        ui.key(key(KeyCode::Enter));
+        assert!(!ui.recent_open());
+        assert!(!ui.terminal_focused());
     }
 }

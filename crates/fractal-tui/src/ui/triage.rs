@@ -1,6 +1,10 @@
 //! A triage pass is independent of navigation history and always opens in the focused split.
 
-use super::{Ui, pane::Pane, view::{Attention, AttentionKind}};
+use super::{
+    Ui,
+    pane::Pane,
+    view::{Attention, AttentionKind},
+};
 use chrono::{DateTime, FixedOffset};
 use std::cmp::Ordering;
 
@@ -21,15 +25,30 @@ struct Position {
 fn class(item: &Attention) -> u8 {
     match &item.kind {
         AttentionKind::Request { .. } => 0,
-        AttentionKind::Prompt { question, call, calls, .. }
-            if *question || call.as_deref().is_some_and(|id| {
-                calls.as_ref().is_ok_and(|calls| calls.iter().any(|call| {
-                    call.id == id
-                        && matches!(call.tool.as_str(), "AskUserQuestion" | "request_user_input")
-                }))
-            }) => 0,
-        AttentionKind::Review { .. } | AttentionKind::Feedback { .. }
-            | AttentionKind::Launch { .. } | AttentionKind::Revision { .. } => 1,
+        AttentionKind::Prompt {
+            question,
+            call,
+            calls,
+            ..
+        } if *question
+            || call.as_deref().is_some_and(|id| {
+                calls.as_ref().is_ok_and(|calls| {
+                    calls.iter().any(|call| {
+                        call.id == id
+                            && matches!(
+                                call.tool.as_str(),
+                                "AskUserQuestion" | "request_user_input"
+                            )
+                    })
+                })
+            }) =>
+        {
+            0
+        }
+        AttentionKind::Review { .. }
+        | AttentionKind::Feedback { .. }
+        | AttentionKind::Launch { .. }
+        | AttentionKind::Revision { .. } => 1,
         AttentionKind::Fault { .. } => 2,
         _ => 3,
     }
@@ -39,7 +58,8 @@ fn compare(
     left: (u8, Option<&DateTime<FixedOffset>>, &str),
     right: (u8, Option<&DateTime<FixedOffset>>, &str),
 ) -> Ordering {
-    left.0.cmp(&right.0)
+    left.0
+        .cmp(&right.0)
         // Unknown timestamps follow known ones; display-age strings never determine order.
         .then_with(|| match (left.1, right.1) {
             (Some(left), Some(right)) => left.cmp(right),
@@ -54,16 +74,28 @@ impl Ui {
     /// Visit the next (or previous) outstanding Inbox item. The boundary is a distinct stop:
     /// leave the last card visible, announce all clear, then wrap on the following command.
     pub(super) fn triage_next(&mut self, forward: bool) {
-        let mut items: Vec<_> = self.world.attention.items().iter()
+        let mut items: Vec<_> = self
+            .world
+            .attention
+            .items()
+            .iter()
             .filter(|item| !self.closed.contains(&item.id) && !self.snoozed.contains(&item.id))
             .map(|item| (class(item), item))
             .collect();
-        items.sort_by(|(left_class, left), (right_class, right)| compare(
-            (*left_class, left.requested_at.as_ref(), &left.id),
-            (*right_class, right.requested_at.as_ref(), &right.id),
-        ));
+        items.sort_by(|(left_class, left), (right_class, right)| {
+            compare(
+                (*left_class, left.requested_at.as_ref(), &left.id),
+                (*right_class, right.requested_at.as_ref(), &right.id),
+            )
+        });
         let next = match &self.triage.last {
-            None => if forward { (!items.is_empty()).then_some(0) } else { items.len().checked_sub(1) },
+            None => {
+                if forward {
+                    (!items.is_empty()).then_some(0)
+                } else {
+                    items.len().checked_sub(1)
+                }
+            }
             Some(last) => {
                 if let Some(index) = items.iter().position(|(_, item)| item.id == last.id) {
                     if forward {
@@ -79,9 +111,17 @@ impl Ui {
                             (*class, item.requested_at.as_ref(), &item.id),
                             (last.class, last.requested_at.as_ref(), &last.id),
                         );
-                        if forward { order.is_gt() } else { order.is_lt() }
+                        if forward {
+                            order.is_gt()
+                        } else {
+                            order.is_lt()
+                        }
                     };
-                    if forward { items.iter().position(beyond) } else { items.iter().rposition(beyond) }
+                    if forward {
+                        items.iter().position(beyond)
+                    } else {
+                        items.iter().rposition(beyond)
+                    }
                 }
             }
         };
@@ -111,8 +151,12 @@ impl Ui {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        demo,
+        glass::Open,
+        view::{Load, PendingCall},
+    };
     use super::*;
-    use super::super::{demo, glass::Open, view::{Load, PendingCall}};
     use ratatui::{Terminal, backend::TestBackend};
 
     fn item(id: &str, kind: AttentionKind, at: &str) -> Attention {
@@ -128,26 +172,36 @@ mod tests {
 
     fn question() -> AttentionKind {
         AttentionKind::Request {
-            from: "Builder".into(), from_id: "agent/example/builder".into(),
-            question: "Which option?".into(), structured: None, images: Vec::new(),
+            from: "Builder".into(),
+            from_id: "agent/example/builder".into(),
+            question: "Which option?".into(),
+            structured: None,
+            images: Vec::new(),
         }
     }
 
     fn decision() -> AttentionKind {
-        AttentionKind::Revision { reason: "Change the plan?".into(), changes: Vec::new() }
+        AttentionKind::Revision {
+            reason: "Change the plan?".into(),
+            changes: Vec::new(),
+        }
     }
 
     fn failure() -> AttentionKind {
         AttentionKind::Fault {
-            what: "Build failed".into(), because: "Compiler error".into(),
-            fix: None, source: "builder".into(),
+            what: "Build failed".into(),
+            because: "Compiler error".into(),
+            fix: None,
+            source: "builder".into(),
         }
     }
 
     fn update() -> AttentionKind {
         AttentionKind::Update {
-            from: "Builder".into(), body: "Finished".into(),
-            about: "message/example".into(), subjects: Vec::new(),
+            from: "Builder".into(),
+            body: "Finished".into(),
+            about: "message/example".into(),
+            subjects: Vec::new(),
         }
     }
 
@@ -160,8 +214,14 @@ mod tests {
     }
 
     fn focused(ui: &Ui, id: &str, message: &str) {
-        assert_eq!(ui.focused_pane(), Some(Pane::Home(Some(format!("attention/{id}")))));
-        assert_eq!(ui.flash.as_ref().map(|(message, _)| message.as_str()), Some(message));
+        assert_eq!(
+            ui.focused_pane(),
+            Some(Pane::Home(Some(format!("attention/{id}"))))
+        );
+        assert_eq!(
+            ui.flash.as_ref().map(|(message, _)| message.as_str()),
+            Some(message)
+        );
     }
 
     #[test]
@@ -270,11 +330,20 @@ mod tests {
     fn native_question_identity_outlives_answer_eligibility() {
         let mut native = item("native", question(), "2026-10-01T00:00:00Z");
         native.kind = AttentionKind::Prompt {
-            seat: "Builder".into(), seat_id: "agent/example/builder".into(), text: "Choose".into(),
-            question: true, answers: Vec::new(), episode: "episode/question".into(),
-            call: None, calls: Err("expired".into()), allow: false,
+            seat: "Builder".into(),
+            seat_id: "agent/example/builder".into(),
+            text: "Choose".into(),
+            question: true,
+            answers: Vec::new(),
+            episode: "episode/question".into(),
+            call: None,
+            calls: Err("expired".into()),
+            allow: false,
         };
-        let mut ui = ui(vec![item("decision", decision(), "2026-10-01T00:00:00Z"), native]);
+        let mut ui = ui(vec![
+            item("decision", decision(), "2026-10-01T00:00:00Z"),
+            native,
+        ]);
         ui.triage_next(true);
         focused(&ui, "native", "1/2 · agent question");
     }
@@ -283,17 +352,25 @@ mod tests {
     fn only_the_exact_named_pending_question_call_establishes_question_priority() {
         let mut native = item("permission", question(), "2026-10-01T00:00:00Z");
         native.kind = AttentionKind::Prompt {
-            seat: "Builder".into(), seat_id: "agent/example/builder".into(), text: "Allow?".into(),
-            question: false, answers: vec!["allow".into()], episode: "episode/permission".into(),
+            seat: "Builder".into(),
+            seat_id: "agent/example/builder".into(),
+            text: "Allow?".into(),
+            question: false,
+            answers: vec!["allow".into()],
+            episode: "episode/permission".into(),
             call: Some("permission".into()),
             calls: Ok(vec![PendingCall {
-                id: "question".into(), tool: "AskUserQuestion".into(),
+                id: "question".into(),
+                tool: "AskUserQuestion".into(),
                 input: serde_json::json!({}),
                 complete: true,
             }]),
             allow: true,
         };
-        let mut ui = ui(vec![native, item("decision", decision(), "2026-10-01T00:00:00Z")]);
+        let mut ui = ui(vec![
+            native,
+            item("decision", decision(), "2026-10-01T00:00:00Z"),
+        ]);
         ui.triage_next(true);
         focused(&ui, "decision", "1/2 · decision");
         if let Load::Ready(items) = &mut ui.world.attention
@@ -309,8 +386,8 @@ mod tests {
 
     #[test]
     fn triage_keymap_separates_legacy_enhanced_and_attached_input() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         use super::super::{Effect, doc::Hit};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         for enhanced in [false, true] {
             let mut ui = ui(vec![
                 item("first", question(), "2026-10-01T00:00:00Z"),
@@ -322,7 +399,10 @@ mod tests {
             ui.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
             focused(&ui, "last", "2/2 · update");
             if enhanced {
-                ui.key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::CONTROL | KeyModifiers::SHIFT));
+                ui.key(KeyEvent::new(
+                    KeyCode::Char('L'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ));
                 focused(&ui, "first", "1/2 · agent question");
             }
             let agent = ui.world.agents.items()[0].id.clone();

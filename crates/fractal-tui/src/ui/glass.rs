@@ -611,11 +611,20 @@ impl Glasses {
         let mut history = Vec::new();
         let mut history_cursor: usize = 0;
         for (index, place) in stored.history.into_iter().enumerate() {
-            if Pane::parse(&place.pane).is_some() && all.iter().any(|glass| {
-                glass.id == place.space && glass.layout.groups().get(place.group)
-                    .is_some_and(|group| place.tab < group.tabs.len() || (group.tabs.is_empty() && place.tab == 0 && place.pane == Pane::List(0).key()))
-            }) {
-                if index <= stored.history_cursor { history_cursor = history.len(); }
+            if Pane::parse(&place.pane).is_some()
+                && all.iter().any(|glass| {
+                    glass.id == place.space
+                        && glass.layout.groups().get(place.group).is_some_and(|group| {
+                            place.tab < group.tabs.len()
+                                || (group.tabs.is_empty()
+                                    && place.tab == 0
+                                    && place.pane == Pane::List(0).key())
+                        })
+                })
+            {
+                if index <= stored.history_cursor {
+                    history_cursor = history.len();
+                }
                 history.push(place);
             }
         }
@@ -3618,7 +3627,12 @@ impl Ui {
     /// not have leaves the group showing what it showed.
     pub(crate) fn show_in(&mut self, group: usize, tab: usize) {
         let before = self.current_place();
-        let changed = self.glasses.glass().layout.groups().get(group)
+        let changed = self
+            .glasses
+            .glass()
+            .layout
+            .groups()
+            .get(group)
             .is_some_and(|shown| tab < shown.tabs.len() && shown.current != tab);
         let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
@@ -4085,15 +4099,23 @@ impl Ui {
         }
         let id = glass.id.clone();
         let old_cursor = glasses.history_cursor;
-        let mut retained_before_cursor = 0;
+        let mut retained_before_cursor: usize = 0;
         let mut index = 0;
         glasses.history.retain_mut(|place| {
-            let keep = place.space != id || place.group != focus || (!removed_group && place.tab != closed_tab);
+            let keep = place.space != id
+                || place.group != focus
+                || (!removed_group && place.tab != closed_tab);
             if keep {
-                if index <= old_cursor { retained_before_cursor += 1; }
+                if index <= old_cursor {
+                    retained_before_cursor += 1;
+                }
                 if place.space == id {
-                    if removed_group && place.group > focus { place.group -= 1; }
-                    if !removed_group && place.group == focus && place.tab > closed_tab { place.tab -= 1; }
+                    if removed_group && place.group > focus {
+                        place.group -= 1;
+                    }
+                    if !removed_group && place.group == focus && place.tab > closed_tab {
+                        place.tab -= 1;
+                    }
                 }
             }
             index += 1;
@@ -4172,14 +4194,6 @@ impl Ui {
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
         }
-    }
-
-    /// The next or previous tab in the focused split.
-    fn step_tab(&mut self, forward: bool) {
-        let glass = self.glasses.glass();
-        let tabs = glass.count(glass.focus).max(1);
-        let current = glass.layout.groups()[glass.focus].current;
-        self.show_tab(if forward { (current + 1) % tabs } else { (current + tabs - 1) % tabs });
     }
 
     /// The leader's list, over the bottom of the screen: what to press next.

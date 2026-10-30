@@ -25,7 +25,6 @@ mod documents;
 pub mod checklist;
 mod edit;
 mod glass;
-mod triage;
 mod recent;
 mod hover;
 mod hyperlinks;
@@ -3775,7 +3774,10 @@ impl Ui {
                     "open or focus Inbox (in a text box it is backspace)",
                 ),
                 ("ctrl+\\ [ ]", "back, forward across spaces"),
-                ("ctrl+[ ]", "back, forward (enhanced keyboard; not in terminals)"),
+                (
+                    "ctrl+[ ]",
+                    "back, forward (enhanced keyboard; not in terminals)",
+                ),
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
                 ("ctrl+^", "recent places; Enter opens, typing filters"),
@@ -4240,16 +4242,6 @@ impl Ui {
         if self.observe_recent_key(key) {
             return;
         }
-        if !self.leader
-            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
-            && (self.recent_open()
-            || !self.terminal_focused()
-            || (key.modifiers.contains(KeyModifiers::CONTROL)
-                && matches!(key.code, KeyCode::Char('6' | '^'))))
-            && self.recent_key(key)
-        {
-            return;
-        }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
             if ctrl_t && key.kind != KeyEventKind::Press {
@@ -4264,6 +4256,16 @@ impl Ui {
                     self.terminal_key(held);
                 }
             }
+        }
+        if !self.leader
+            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+            && (self.recent_open()
+            || !self.terminal_focused()
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('6' | '^'))))
+            && self.recent_key(key)
+        {
+            return;
         }
         if self.leader {
             if key.kind == KeyEventKind::Press {
@@ -4314,10 +4316,14 @@ impl Ui {
         }
         if !self.terminal_focused()
             && key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
             && matches!(key.code, KeyCode::Char('l' | 'L'))
         {
-            self.triage_next(!(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)));
+            self.triage_next(
+                !(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)),
+            );
             return;
         }
         // Retrying a failed initial attach uses the same path as opening its terminal.

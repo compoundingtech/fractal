@@ -61,6 +61,12 @@ pub struct StoredPlace {
     pub group: usize,
     pub tab: usize,
     pub pane: String,
+    /// The Inbox list keeps its selected card without changing the tab's pane kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
+    /// Monotonic device-local visit order, including back/forward visits.
+    #[serde(default)]
+    pub visited: u64,
 }
 
 /// Version 1: a glass was tabs, and each tab a tree of split panes.
@@ -181,9 +187,7 @@ pub fn load(path: &Path) -> Stored {
         Some(1) => serde_json::from_slice::<StoredV1>(&bytes)
             .map(from_v1)
             .unwrap_or_default(),
-        Some(2 | 3) => {
-            serde_json::from_slice::<Stored>(&bytes).unwrap_or_default()
-        }
+        Some(2 | 3) => serde_json::from_slice::<Stored>(&bytes).unwrap_or_default(),
         _ => Stored::default(),
     }
 }
