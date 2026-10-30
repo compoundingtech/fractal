@@ -10417,10 +10417,12 @@ fn normalize_local_projection_timestamps_tx(
                 ],
             )?;
         }
-        "step-run.state" if fields.get("status").and_then(Value::as_str) == Some("ready") => {
+        "step-run.state" => {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h4d599b3326b1 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET activated_at_unix_ms=?2 WHERE subject=?1",
-                params![subject, at],
+                /* sqlite-large-value: allow-for-now lv-h26214094cec7 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET updated_at_unix_ms=?2,
+                    activated_at_unix_ms=CASE WHEN ?3='ready' THEN ?2 ELSE activated_at_unix_ms END
+                 WHERE subject=?1",
+                params![subject, at, fields.get("status").and_then(Value::as_str)],
             )?;
         }
         "planning-session.started" => {
