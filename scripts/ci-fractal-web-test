@@ -327,6 +327,8 @@ for event in ("pull_request", "merge_group", "push"):
         for condition in conditions:
             text = condition.removeprefix('"').removesuffix('"').replace("${{", "").replace("}}", "")
             text = text.replace("github.event_name", repr(event)).replace("!cancelled()", "True")
+            text = text.replace("github.event.pull_request.draft", "False").replace("success()", "True")
+            text = re.sub(r"(?<!['\w])false(?!['\w])", "False", text)
             text = re.sub(r"needs\.[\w-]+\.outputs\.skip", repr(skip), text)
             text = re.sub(r"needs\.[\w-]+\.outputs\.refuse", "'false'", text)
             text = re.sub(r"needs\.[\w-]+\.outputs\.[\w-]+", "'true'", text)
