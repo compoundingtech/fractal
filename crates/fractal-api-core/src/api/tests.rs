@@ -12854,7 +12854,7 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
                 for lifecycle in ["read", "closed"] {
                     for subject in &subjects {
                         let (status, claim) = json_request(app.clone(), &format!(
-                            "/v1/messages/{}/claims", subject.as_str().unwrap(),
+                            "/v1/messages/{}/claims", urlencoding::encode(subject.as_str().unwrap()),
                         ), json!({
                             "actor":actor,"lifecycle":lifecycle,
                             "idempotency_key":format!("mail-{replica}-{mailbox}-{actor}-{subject}-{lifecycle}"),
@@ -12877,7 +12877,7 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         }
         for lifecycle in ["read", "closed"] {
             let (status, denied) = json_request(app.clone(), &format!(
-                "/v1/messages/{}/claims", before["subject"].as_str().unwrap(),
+                "/v1/messages/{}/claims", urlencoding::encode(before["subject"].as_str().unwrap()),
             ), json!({
                 "actor":"agent/example-unrelated","lifecycle":lifecycle,
                 "idempotency_key":format!("mail-denied-{replica}-{lifecycle}"),
