@@ -909,6 +909,28 @@ test('schedule schema tolerates future state strings and retains raw declaration
     assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
 });
 
+test('an attention presentation carries a launch preview, an unavailable launch or a prompt', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const decode = Rich.decodeUnknownSync(Rich.AttentionPresentation, 'strict');
+    const base = { tier: 'today', kind: 'launch', agent: null, raised_by: null, waiting: null };
+    const roundTrips = presentation => assert.deepEqual(Schema.encodeSync(Rich.AttentionPresentation)(decode(presentation)), presentation);
+    roundTrips({ ...base, launch: {
+        variant: 'variant/default', goals: ['Audit the build.'], asks_you: 1,
+        steps: [{ path: 'approve', title: 'Approve', assignee: { kind: 'st', agent: null, label: 'st' }, after: ['prepare'], asks_you: true }],
+        agents: [{ id: 'agent/example/oak', label: 'Oak', harness: 'claude', host: null }],
+    } });
+    roundTrips({ ...base, launch: { unavailable: { reason: 'The planner has not proposed a mission yet.', diagnostics: [] } } });
+    const call = { call_id: 'call-1', tool: 'Bash', input: '{"command":"ls"}', input_complete: true };
+    const prompt = { ...base, tier: 'stopped', kind: 'prompt' };
+    roundTrips({ ...prompt, prompt: { calls: [call], answers: ['allow', 'deny'], allow: true } });
+    roundTrips({ ...prompt, prompt: { calls: null, answers: ['deny'], allow: false, unknown_reason: 'the timeline cannot be read' } });
+    // An input is cut at 4 KiB, and a prompt names at most five calls.
+    assert.throws(() => decode({ ...prompt, prompt: { calls: [{ ...call, input: 'x'.repeat(4097) }], answers: [], allow: false } }));
+    assert.throws(() => decode({ ...prompt, prompt: { calls: Array(6).fill(call), answers: [], allow: false } }));
+    // A row from a daemon that serves neither still decodes.
+    roundTrips(base);
+});
+
 test('optional author and recipients retain closed legacy scalar types', async () => {
     const [{Schema},Rich] = await modules;
     const items = require('../../../docs/st3/client-v0/fixtures/timeline-message-participants.json').value.items;
@@ -920,4 +942,42 @@ test('optional author and recipients retain closed legacy scalar types', async (
         {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
         assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
     }
+});
+
+test('an ask resolved at its deadline decodes, and what the decoder from before deadlines refuses', async () => {
+    const [{ Schema }, Rich] = await modules;
+    // The answer record before deadlines: no resolved_by, and a respondent that is a sender only.
+    const { resolved_by, ...before } = Rich.PersonAnswerRecord.fields;
+    assert.ok(resolved_by);
+    const previous = Schema.Struct({ ...before, respondent: Rich.SenderRef });
+    const record = {
+        ask: 'step-run/run-generation-1/ask-1', status: 'completed', respondent: 'daemon/runtime',
+        answered_at_unix_ms: 1, resolved_by: 'deadline',
+    };
+    const withDefault = {
+        ...record, summary: 'Timed out without an answer; the default applied: Keep it open (keep-open)',
+        answer: { type: 'decision', outcome: 'decline', id: 'keep-open', label: 'Keep it open' },
+    };
+    const withoutAnswer = { ...record, summary: 'Timed out without an answer' };
+    for (const wire of [withDefault, withoutAnswer]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const current = Rich.decodeUnknownSync(Rich.PersonAnswerRecord, mode)(wire);
+            assert.equal(current.respondent, 'daemon/runtime');
+            assert.equal(current.resolved_by, 'deadline');
+            assert.deepEqual(current.answer, wire.answer);
+        }
+        // An older client reads the answer itself as it always did: its outcome is one it knows
+        // and it ignores resolved_by. It refuses daemon/runtime as a respondent, as it already
+        // does for an ask its requester's end cancelled, so [asks] deadlines comes on only once
+        // the web clients run this build.
+        const old = Rich.decodeUnknownSync(previous, 'tolerant');
+        assert.throws(() => old(wire));
+        const read = old({ ...wire, respondent: 'person/avery' });
+        assert.deepEqual(read.answer, wire.answer);
+        assert.equal('resolved_by' in read, false);
+    }
+    // No outcome was added: the one a deadline would otherwise have needed is still refused.
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAnswerRecord, 'strict')({
+        ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
+    }));
 });
