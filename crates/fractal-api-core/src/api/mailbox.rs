@@ -1,11 +1,18 @@
 //! One local daemon stream per delivery component. Ownership and receipts are fenced in SQLite,
 //! so an old channel reconnecting after a replacement cannot consume or acknowledge its mail.
 use crate::SeatsStore;
+use crate::store::messages_shard::mailbox_reads;
 use super::*;
 
 /// Recover only recent mail which has never been offered. A prior staging claim is
 /// already an offer attempt, even when its delivered receipt has not arrived yet.
 pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyhow::Result<bool> {
+    // A stream item's offers are this member's own lifecycle records, not graph claims.
+    if mailbox_reads::is_stream_item(message) {
+        return Ok(message.status == "sent"
+            && mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?.is_none()
+            && mailbox_reads::lifecycle_step(store, &message.subject, "message.delivered")?.is_none());
+    }
     Ok(message.status == "sent"
         && store
             .latest_claim(&message.subject, Some("message.staged"))?
@@ -40,26 +47,44 @@ pub fn hold_pre_boot_mail(
         if crate::silent::waits_for_turn(message) {
             continue;
         }
-        let Some(sent) = store.latest_claim(&message.subject, Some("message.sent"))? else {
+        let Some(sent) = sent_claim(store, message)? else {
             message.status = "closed".into();
             continue;
         };
+        // A stream item's index is past every graph index, so only its accepted time places
+        // it against the boot; its staging is a local record without a graph index.
         let after_boot = message.created_index > through && sent.accepted_at_unix_ms >= since;
         let recent = sent.accepted_at_unix_ms
             > since.saturating_sub(u128::from(super::mail_backlog::THRESHOLD_MS));
         let current_offer = recent
-            && store
-                .latest_claim(&message.subject, Some("message.staged"))?
-                .is_some_and(|claim| {
-                    claim.store_index > through
-                        && claim.accepted_at_unix_ms >= since
-                        && claim.actor.as_deref() == Some(peer.agent.as_str())
-                });
+            && if mailbox_reads::is_stream_item(message) {
+                mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
+                    .is_some_and(|(actor, at)| at >= since && actor == peer.agent)
+            } else {
+                store
+                    .latest_claim(&message.subject, Some("message.staged"))?
+                    .is_some_and(|claim| {
+                        claim.store_index > through
+                            && claim.accepted_at_unix_ms >= since
+                            && claim.actor.as_deref() == Some(peer.agent.as_str())
+                    })
+            };
         if !after_boot && !(recent && (never_offered(store, message)? || current_offer)) {
             message.status = "closed".into();
         }
     }
     Ok(())
+}
+
+/// A message's `message.sent` claim; a stream item's is in the messages shard.
+pub fn sent_claim(
+    store: &Store,
+    message: &crate::model::MessageView,
+) -> anyhow::Result<Option<ClaimRecord>> {
+    if mailbox_reads::is_stream_item(message) {
+        return mailbox_reads::sent_claim(store, &message.subject);
+    }
+    store.latest_claim(&message.subject, Some("message.sent"))
 }
 
 // Unit controls can pause snapshot processing while the real subscription and

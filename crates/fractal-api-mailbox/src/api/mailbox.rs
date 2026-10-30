@@ -466,9 +466,11 @@ fn retain_live_mail(
 ) -> anyhow::Result<()> {
     let mut live = Vec::new();
     for message in messages.drain(..) {
-        let Some(sent) = store.latest_claim(&message.subject, Some("message.sent"))? else {
+        let Some(sent) = sent_claim(store, &message)? else {
             continue;
         };
+        // `through` is a graph index and a stream item's is past them all, so a stream item
+        // counts as after the connection by its accepted time alone.
         let after_connection = through.is_none_or(|index| message.created_index > index)
             && sent.accepted_at_unix_ms >= since;
         if after_connection || recovered.contains(&message.subject) {
@@ -494,7 +496,13 @@ fn raw_snapshot(store: &Store, binding: &Fence) -> anyhow::Result<Snapshot> {
             .into_iter()
             .next();
         let messages = if binding.component == "delivery" {
-            store.messages_for_delivery_through(&binding.subject, through)?
+            // The graph's mail is pinned at `through`; the seat's open stream items follow it.
+            let mut messages = store.messages_for_delivery_through(&binding.subject, through)?;
+            messages.extend(crate::store::messages_shard::mailbox_reads::delivery_items(
+                store,
+                &binding.subject,
+            )?);
+            messages
         } else {
             Vec::new()
         };
@@ -518,9 +526,11 @@ fn filter_messages(
         {
             continue;
         }
-        if store
-            .latest_claim(&message.subject, Some("message.closed"))?
-            .is_some()
+        // A stream item's local close is already its status; a graph message's is a claim.
+        if !crate::store::messages_shard::mailbox_reads::is_stream_item(&message)
+            && store
+                .latest_claim(&message.subject, Some("message.closed"))?
+                .is_some()
         {
             continue;
         }
@@ -4305,6 +4315,137 @@ mod tests {
             1,
             "only the initial snapshot reads the complete mailbox"
         );
+    }
+
+    /// A stream item to the seat is offered like graph mail; its local receipts move it on the
+    /// next incremental read, which matches a full snapshot, and no graph lifecycle is written.
+    #[test]
+    fn stream_items_are_offered_and_their_local_receipts_update_the_mailbox() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        crate::store::mailbox_tests::ready(&store, "session-1");
+        let fence = store
+            .bind_mailbox(&Fence::new("agent/eval.worker", "session-1", "delivery"))
+            .unwrap();
+        let send = |subject: &str, to: &str| {
+            shard
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "message.sent".into(),
+                    actor: Some("agent/fixture.sender".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("sent")),
+                        ("from".into(), json!("agent/fixture.sender")),
+                        ("to".into(), json!(to)),
+                        ("content".into(), json!("A stream fixture.")),
+                    ]),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        };
+        let reads = std::cell::Cell::new(0);
+        let read = |store: &Store, fence: &Fence| {
+            reads.set(reads.get() + 1);
+            raw_snapshot(store, fence)
+        };
+        let (first, second) = ("message/00000000000000e1", "message/00000000000000e2");
+        // Sent before the connection and never offered: recovered, as recent graph mail is.
+        send(first, &fence.subject);
+        let since = client_now_ms();
+        let through = store.index().unwrap();
+        let mut admitted = std::collections::BTreeSet::new();
+        let mut policies = std::collections::BTreeSet::new();
+        let mut order = MailboxOrder::new();
+        let (mark, view, _, _) = update_snapshot(
+            &store, &fence, read, None, (since, through), &mut admitted, &mut policies, &mut order,
+        )
+        .unwrap();
+        let listed = |view: &Snapshot| {
+            view.1
+                .iter()
+                .map(|message| (message.subject.clone(), message.status.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed(&view), [(first.to_owned(), "sent".to_owned())]);
+        let mut previous = Some((mark, view));
+        let cursor = store.mailbox_wake_cursor().unwrap();
+        let status = |status: &str| BTreeMap::from([("status".to_owned(), json!(status))]);
+        let receipt = |subject: &str, lifecycle: &str| {
+            assert!(
+                crate::store::messages_shard::record_fenced_lifecycle(
+                    &store,
+                    &fence,
+                    subject,
+                    &format!("message.{lifecycle}"),
+                    Some(&fence.subject),
+                    &status(lifecycle),
+                )
+                .unwrap()
+            );
+        };
+        for (step, expected) in [
+            ("delivered", vec![(first, "delivered")]),
+            ("sent", vec![(first, "delivered"), (second, "sent")]),
+            ("read", vec![(second, "sent")]),
+            ("closed", vec![]),
+        ] {
+            match step {
+                "delivered" => {
+                    receipt(first, "delivered");
+                    // The receipt is routed to this seat although it wrote no graph claim.
+                    let (_, dependencies, _) = store.mailbox_wake_batch(cursor).unwrap();
+                    assert!(dependencies.contains(&crate::store::mailbox_wakes::Dependency::Recipient(
+                        fence.subject.clone()
+                    )));
+                }
+                "sent" => {
+                    send(second, &fence.subject);
+                    send("message/00000000000000e3", "agent/other");
+                }
+                "read" => receipt(first, "read"),
+                _ => crate::store::messages_shard::record_lifecycle(
+                    &store,
+                    second,
+                    "message.closed",
+                    Some("daemon/runtime"),
+                    &status("closed"),
+                )
+                .map(|_| ())
+                .unwrap(),
+            }
+            let (mark, view, updated, _) = update_snapshot(
+                &store,
+                &fence,
+                read,
+                previous.take(),
+                (since, through),
+                &mut admitted,
+                &mut policies,
+                &mut order,
+            )
+            .unwrap();
+            assert!(updated, "{step}");
+            let expected = expected
+                .into_iter()
+                .map(|(subject, status)| (subject.to_owned(), status.to_owned()))
+                .collect::<Vec<_>>();
+            assert_eq!(listed(&view), expected, "{step}");
+            let mut oracle = snapshot(&store, &fence).unwrap();
+            retain_live_mail(&store, &mut oracle.1, since, Some(through), &mut admitted).unwrap();
+            assert_eq!(
+                serde_json::to_value(&view).unwrap(),
+                serde_json::to_value(&oracle).unwrap(),
+                "{step}"
+            );
+            previous = Some((mark, view));
+        }
+        assert_eq!(reads.get(), 1, "only the initial snapshot reads the complete mailbox");
+        for subject in [first, second] {
+            assert!(store.claims_for(subject, None).unwrap().is_empty(), "{subject} reached the graph");
+        }
     }
 
     #[test]

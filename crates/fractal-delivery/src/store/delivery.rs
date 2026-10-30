@@ -1122,6 +1122,7 @@ impl DeliveryStore for Store {
             desired: connection.prepare_cached("SELECT claim_id FROM desired WHERE subject=?1")
                 .map_err(internal)?.query_row(/* sqlite-large-value: allow-for-now lv-hea5ac5c547c1 owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ [&fence.subject], |row| row.get(0))
                 .optional().map_err(internal)?,
+            stream: fractal_store::store::messages_shard::mailbox_reads::position(self).map_err(internal)?,
         })
     }
 
@@ -1167,7 +1168,10 @@ impl DeliveryStore for Store {
                 |row| row.get(0),
             )
             .map_err(internal)?;
-        Ok(changed != 0 || mailbox_owner_key(&connection, fence)? != mark.owner)
+        let stream = fractal_store::store::messages_shard::mailbox_reads::changed_subjects(
+            self, &recipient, &bare_recipient, messages, mark.stream,
+        ).map_err(internal)?;
+        Ok(changed != 0 || !stream.is_empty() || mailbox_owner_key(&connection, fence)? != mark.owner)
     }
 
     fn claims_since_only_quiet_notifications(&self, after_index: u64) -> Result<bool> {

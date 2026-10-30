@@ -22,6 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
+pub mod mailbox_reads;
+
 /// The shard's ID, its directory under the store root and its name on the replication wire.
 pub const SHARD_ID: &str = "messages";
 
@@ -800,6 +802,75 @@ mod tests {
         let receipt = lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read"));
         assert!(receipt.id.starts_with("offset-receipt/"));
         assert_eq!(receipt.id, lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read")).id);
+    }
+
+    /// A mailbox stream follows the shard by its position: a new item to its recipient and a
+    /// local step on one are reported and routed, and nothing else is.
+    #[test]
+    fn a_mailbox_follows_stream_items_and_their_local_lifecycle_by_position() {
+        use mailbox_reads::*;
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        assert_eq!(position(&graph).unwrap(), StreamPosition::default());
+        assert!(changed_subjects(&graph, "agent/cedar", "cedar", &[], StreamPosition::default()).unwrap().is_empty());
+        let shard = open(&graph, root.path()).unwrap();
+        let send = |subject: &str, to: &str| {
+            let mut sent = input("message.sent", Some("agent/birch"), json!({
+                "from": "agent/birch", "to": to, "content": subject, "status": "sent"
+            }));
+            sent.subject = subject.into();
+            shard.append_claim(&sent).unwrap()
+        };
+        let start = position(&graph).unwrap();
+        let mine = send("message/00000000000000c1", "agent/cedar");
+        send("message/00000000000000c2", "agent/other");
+        let after_sends = position(&graph).unwrap();
+        assert!(after_sends.admitted > start.admitted);
+        assert_eq!(
+            changed_subjects(&graph, "agent/cedar", "cedar", &[], start).unwrap(),
+            ["message/00000000000000c1"]
+        );
+        let (next, routed, more) = wake_batch(&graph, start, 1024).unwrap();
+        assert_eq!((next, more), (after_sends, false));
+        assert_eq!(routed.len(), 2);
+        assert!(routed.contains(&("message/00000000000000c1".into(), "agent/cedar".into())));
+
+        let subject = "message/00000000000000c1";
+        let view = graph.message(subject).unwrap().unwrap();
+        assert!(is_stream_item(&view));
+        assert_eq!(sent_claim(&graph, subject).unwrap().unwrap().accepted_at_unix_ms, mine.accepted_at_unix_ms);
+        assert!(lifecycle_step(&graph, subject, "message.delivered").unwrap().is_none());
+        let status = BTreeMap::from([("status".to_owned(), json!("delivered"))]);
+        assert!(record_lifecycle(&graph, subject, "message.delivered", Some("agent/cedar"), &status).unwrap());
+        let (actor, _) = lifecycle_step(&graph, subject, "message.delivered").unwrap().unwrap();
+        assert_eq!(actor, "agent/cedar");
+        let after_receipt = position(&graph).unwrap();
+        assert_eq!(after_receipt.admitted, after_sends.admitted);
+        assert!(after_receipt.lifecycle > after_sends.lifecycle);
+        assert_eq!(
+            changed_subjects(&graph, "agent/cedar", "cedar", &[], after_sends).unwrap(),
+            [subject]
+        );
+        assert!(changed_subjects(&graph, "agent/other", "other", &[], after_sends).unwrap().is_empty());
+        let (next, routed, _) = wake_batch(&graph, after_sends, 1024).unwrap();
+        assert_eq!(next, after_receipt);
+        assert_eq!(routed, [(subject.to_owned(), "agent/cedar".to_owned())]);
+        assert!(changed_subjects(&graph, "agent/cedar", "cedar", &[], after_receipt).unwrap().is_empty());
+
+        // A delivery snapshot lists the recipient's open items, and a read one leaves it.
+        let open_items = || {
+            delivery_items(&graph, "agent/cedar")
+                .unwrap()
+                .into_iter()
+                .map(|message| (message.subject, message.status))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(open_items(), [(subject.to_owned(), "delivered".to_owned())]);
+        let read = BTreeMap::from([("status".to_owned(), json!("read"))]);
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar"), &read).unwrap());
+        assert!(open_items().is_empty());
+
+        assert!(graph.claims_for(subject, None).unwrap().is_empty(), "lifecycle reached the graph");
     }
 
 }
