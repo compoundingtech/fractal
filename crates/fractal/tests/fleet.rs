@@ -644,6 +644,73 @@ async fn joined_with(
     node
 }
 
+#[tokio::test]
+async fn rename_proofs_export_over_cli_and_verify_without_daemon_or_config() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "proof-source").await;
+    let anchor_value = node.st_json(&["fleet", "anchor", "show"]);
+    let fleet_anchor = anchor_value["fleet_anchor"].as_str().unwrap();
+    assert_eq!(node.st_ok(&["fleet", "anchor", "show"]).trim(), fleet_anchor);
+    let declaration = node.root.join("identities.kdl");
+    fs::write(&declaration, r#"version 2
+agent "proof-original" { command "true"; workspace "/tmp"; restart "never"; }
+mission "proof-original" state="ready" {
+  goal "Prove portable identity history."
+  step "work" { agentless }
+}
+"#).unwrap();
+    node.st_ok(&["apply", declaration.to_str().unwrap(), "--as", PERSON]);
+    let mut proofs = Vec::new();
+    for (kind, prefix) in [("agents", "agent"), ("missions", "mission")] {
+        let original = format!("{prefix}/proof-original");
+        let renamed = format!("{prefix}/proof-renamed");
+        let receipt = node.st_json(&[
+            kind, "rename-id", &original, &renamed,
+            "--as", PERSON, "--reason", "Clarify responsibility",
+        ]);
+        let revision = receipt["naming_revision"].as_str().unwrap().to_owned();
+        let proof = root.path().join(format!("{kind}-proof.json"));
+        node.st_ok(&[
+            kind, "rename-id", "proof", "export", &original,
+            "--revision", &revision, "--out", proof.to_str().unwrap(),
+        ]);
+        let from_file: Value = serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+        let from_stdout = node.st_json(&[
+            kind, "rename-id", "proof", "export", &renamed,
+        ]);
+        for field in ["schema", "identity_kind", "storage_id", "canonical_id", "naming_revision", "declaration", "chain"] {
+            assert_eq!(from_file[field], from_stdout[field], "{field}");
+        }
+        assert_eq!(from_file["schema"], "fractal.rename-proof.v1");
+        proofs.push((kind, proof, renamed, revision));
+    }
+    node.stop();
+    // Deliberately invalid local configuration must be irrelevant to verification.
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for (kind, proof, renamed, revision) in proofs {
+        let offline = [
+            "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify", proof.to_str().unwrap(),
+            "--fleet-anchor", fleet_anchor,
+        ];
+        let verdict = node.st_json(&offline);
+        assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+        assert_eq!(verdict["ok"], true);
+        assert_eq!(verdict["canonical_id"], renamed);
+        let mut stale = offline.to_vec();
+        stale.extend(["--after-revision", &revision]);
+        let rejected = node.st(&stale);
+        assert_eq!(rejected.status.code(), Some(5));
+        let verdict: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(verdict["ok"], false);
+        assert_eq!(verdict["error"]["code"], "stale-revision");
+    }
+}
+
 /// Re-publication and parent revisions must preserve the weekly occurrence, even after its
 /// child finishes. Put the next real weekly tick close enough to exercise it in this daemon.
 #[tokio::test(flavor = "multi_thread")]

@@ -618,6 +618,7 @@ enum FleetCommand {
 
 #[derive(Subcommand)]
 enum FleetAnchorCommand {
+    /// Print the public fleet trust anchor to distribute to offline verifiers.
     Show,
 }
 
