@@ -2588,7 +2588,9 @@ impl Client {
     /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
     /// query, answered from that mirror alone, so a relayed read is never relayed again.
     pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
-        if !path.starts_with("/v1/plugins/github/repos/") || path.contains("..") || path.contains('#') {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path.split(['/', '?']).any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
             return Err(ClientError::Protocol(format!("not a GitHub plugin read: {path}")));
         }
         let separator = if path.contains('?') { '&' } else { '?' };
