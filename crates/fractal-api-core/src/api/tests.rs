@@ -12757,6 +12757,7 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
     let root = tempfile::tempdir().unwrap();
     let owner = state(root.path());
+    owner.store.bind_fleet("fleet/renamed-subject-test").unwrap();
     let original = "agent/example-subject-original/worker";
     let renamed = "agent/example-subject-renamed/worker";
     let intent = crate::graph::parse_test_intent(
@@ -12787,7 +12788,14 @@ async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_rep
     let replica_root = tempfile::tempdir().unwrap();
     let mut replica = state(replica_root.path());
     replica.store = Arc::new(Store::open_memory("subject-replica").unwrap());
-    replica.store.import_replication(owner.store.origin(), &owner.store.export_replication(0).unwrap()).unwrap();
+    replica.store.bind_fleet("fleet/renamed-subject-test").unwrap();
+    let exchange = owner.store.export_replication_exchange_answering(
+        "fleet/renamed-subject-test", &replica.store.replication_inventory().unwrap(),
+        &replica.store.replication_signature_requests().unwrap(),
+    ).unwrap();
+    replica.store.receive_replication_exchange(owner.store.origin(), "fleet/renamed-subject-test", &exchange).unwrap();
+    replica.store.validate_replication_backlog().unwrap();
+    replica.store.project_replication_backlog().unwrap();
     for app in [app, router(replica)] {
         let mut previous_claims = None;
         for requested in [renamed, original] {
