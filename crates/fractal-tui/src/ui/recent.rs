@@ -172,8 +172,19 @@ impl Ui {
         );
         let rows = rect.height.saturating_sub(4) as usize;
         let start = popup.selected.saturating_sub(rows.saturating_sub(1));
-        for (row, (index, &entry)) in popup.matches.iter().enumerate().skip(start).take(rows).enumerate() {
-            let background = if index == popup.selected { theme::ROW_SELECTED } else { theme::MANTLE };
+        for (row, (index, &entry)) in popup
+            .matches
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(rows)
+            .enumerate()
+        {
+            let background = if index == popup.selected {
+                theme::ROW_SELECTED
+            } else {
+                theme::MANTLE
+            };
             let style = theme::text().bg(background);
             let y = rect.y + 2 + row as u16;
             buf.set_style(Rect::new(x, y, room, 1), style);
@@ -181,7 +192,10 @@ impl Ui {
         }
         if popup.matches.is_empty() {
             buf.set_stringn(
-                x, rect.y + 2, "No recent places match", room as usize,
+                x,
+                rect.y + 2,
+                "No recent places match",
+                room as usize,
                 theme::soft().bg(theme::MANTLE),
             );
         }
@@ -199,11 +213,7 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{
-        demo,
-        glass::Open,
-        pane::Pane,
-    };
+    use crate::ui::{demo, glass::Open, pane::Pane};
 
     fn places() -> Ui {
         let mut ui = Ui::new(demo::world());
