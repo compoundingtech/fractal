@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Move repository configuration from .st to .fractal, updating the ci-script-tests and genie-freshness lane definition directories to cover .fractal. All other configuration contents are preserved. Readers continue to prefer .fractal and use .st only when the preferred file is absent at the same pinned revision or checkout root.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, replay or runtime state-directory change. Tracked repository configuration moves, with two lane definition-directory entries updated to the new location."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Configuration schemas are unchanged. The only configuration-content changes are the ci-script-tests and genie-freshness definition_paths directory entries from .st to .fractal."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The existing absence-only .st fallback remains; malformed or unreadable .fractal configuration does not fall back. Pinned readers select configuration from that same revision, never another revision. No CLI, API or wire change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service restart or host mutation is required."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Readiness requires verification of all production configuration readers and accepted bases. Retain the absence-only legacy fallback until consumer adoption is evidenced by the required peer receipts and the owner approves its removal. Nathan Factory sign-off, risk classification, the assigned protected window and owner admission remain required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Revert the config-file move; retained readers still accept the legacy layout."
+  }
+}
