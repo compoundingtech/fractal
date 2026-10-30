@@ -6592,6 +6592,24 @@ async fn run_up(args: UpArgs) -> Result<()> {
         )?))?;
     }
     store.use_key_directory(&keys)?;
+    // The messages shard sits beside the graph's database and takes its fleet from the graph.
+    // A shard that cannot open leaves messaging on graph claims: the daemon then does not
+    // advertise it, so no peer sends it stream items.
+    let messages_shard = fractal_daemon::task_cpu::blocking("startup.open_messages_shard", || {
+        let root = config
+            .store_path()
+            .parent()
+            .map(Path::to_path_buf)
+            .context("the store path has no directory")?;
+        let shard = fractal_store::store::messages_shard::open(&store, &root)?;
+        shard.validate_replication_backlog()?;
+        shard.apply_replication_repairs()?;
+        shard.project_replication_backlog()?;
+        Ok::<_, anyhow::Error>(shard)
+    });
+    if let Err(error) = &messages_shard {
+        stderr_message("st", format_args!("the messages shard did not open; messaging stays on graph claims: {error:#}"));
+    }
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
@@ -6649,7 +6667,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             (
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
-                    "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
+                    "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
+                    "messages_stream": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -6903,7 +6922,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::task_cpu::account("replication.activate", async move {
                 match activation_store.connection.write_workers().spawn_blocking({
                     let store = activation_store.clone();
-                    move || fractal_daemon::task_cpu::blocking("replication.activate", || store.complete_replication_activation())
+                    move || fractal_daemon::task_cpu::blocking("replication.activate", || {
+                        let signed = store.complete_replication_activation()?;
+                        if let Some(shard) = fractal_store::store::messages_shard::shard(&store) {
+                            shard.complete_replication_activation()?;
+                        }
+                        Ok::<_, anyhow::Error>(signed)
+                    })
                 })
                 .await
                 {

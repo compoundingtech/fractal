@@ -839,6 +839,26 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/internal/replication-wake", post(replication::replication_wake))
         .route(
+            "/v1/internal/replication/shard/{shard}/peers",
+            get(replication::shard_replication_peers),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/export",
+            post(replication::shard_replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/receive",
+            post(replication::shard_replication_receive).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/peer-failure",
+            post(replication::shard_replication_peer_failure),
+        )
+        .route(
+            "/v1/internal/replication/shard/{shard}/wake",
+            post(replication::shard_replication_wake),
+        )
+        .route(
             crate::peer::CLIENT_READ_FORWARD_PATH,
             post(forward_client_read).layer(DefaultBodyLimit::max(16_384)),
         )
@@ -927,6 +947,12 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/hosts/{host}/agent-workspace",
             get(host_agent_workspace),
         );
+    // Tests reach the messages shard before anything in the product writes to it.
+    #[cfg(feature = "test-support")]
+    let app = app.route(
+        "/v1/internal/test/messages-shard",
+        get(replication::test_shard_items).post(replication::test_shard_append),
+    );
     let app = families.iter().fold(app, |app, family| family(app));
     app.layer(from_fn_with_state(state.clone(), refuse_while_leaving))
         .layer(from_fn_with_state(
@@ -8697,6 +8723,7 @@ async fn refuse_while_leaving(
     // leaving, because transport observations stop. Everything else that writes waits,
     // including invite redemption and endpoint announcements.
     let allowed = path.starts_with("/v1/internal/fleet/leave/")
+        || path.starts_with("/v1/internal/replication/shard/")
         || matches!(
             path,
             "/v1/health"
