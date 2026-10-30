@@ -7,6 +7,7 @@ fn admit(path: &Path) -> Arc<AdmittedStore> {
     AdmittedStore::from_locked_directory(path, File::open(path).unwrap()).unwrap()
 }
 
+#[cfg(test)]
 fn seed(path: &Path, value: &str) -> Vec<u8> {
     let connection = Connection::open(path.join("claims.sqlite3")).unwrap();
     connection.execute_batch("CREATE TABLE sentinel(value TEXT)").unwrap();
@@ -112,7 +113,7 @@ fn sqlite_trio_symlinks_are_rejected_without_touching_targets() {
 }
 
 #[test]
-fn ancestor_symlink_is_allowed_but_final_directory_symlink_is_not() {
+fn directory_aliases_are_accepted_but_retargeting_is_refused() {
     let root = tempfile::tempdir().unwrap();
     let real = root.path().join("real");
     let child = real.join("store");
@@ -122,7 +123,15 @@ fn ancestor_symlink_is_allowed_but_final_directory_symlink_is_not() {
     let admitted = admit(&alias.join("store"));
     admitted.open_connection(OpenFlags::default()).unwrap();
     drop(admitted);
-    assert!(AdmittedStore::from_locked_directory(&alias, File::open(&alias).unwrap()).is_err());
+    let admitted = admit(&alias);
+    admitted.open_connection(OpenFlags::default()).unwrap();
+    let replacement = root.path().join("replacement");
+    fs::create_dir(&replacement).unwrap();
+    fs::remove_file(&alias).unwrap();
+    symlink(&replacement, &alias).unwrap();
+    assert!(admitted.verify_directory().is_err());
+    assert!(admitted.open_connection(OpenFlags::default()).is_err());
+    assert!(!replacement.join(STORE_DATABASE_FILES[0]).exists());
 }
 
 #[test]

@@ -37,8 +37,8 @@ const ENTRY_NAMES: [[u8; 32]; 3] = {
 };
 
 /// A directory descriptor and its exclusive nonblocking advisory lock, retained for
-/// every connection using this store. Ancestor symlinks are permitted; the directory
-/// itself and the SQLite database/WAL/SHM entries must not be symlinks.
+/// every connection using this store. Directory aliases (including ancestor symlinks)
+/// are permitted; the SQLite database/WAL/SHM entries must not be symlinks.
 ///
 /// Linux retains `/proc/self/fd/<dirfd>` for reader/reopen/sidecar paths, even if
 /// SQLite's VFS resolves its own filename. macOS uses a checked pathname: identity
@@ -93,11 +93,10 @@ impl AdmittedStore {
     }
 
     pub fn verify_directory(&self) -> Result<()> {
-        let current = fs::symlink_metadata(&self.configured)
+        let current = fs::metadata(&self.configured)
             .with_context(|| format!("stat configured store directory {}", self.configured.display()))?;
-        ensure!(current.is_dir() && !current.file_type().is_symlink()
-            && (current.dev(), current.ino()) == self.identity,
-            "configured store directory was replaced or is a symlink: {}", self.configured.display());
+        ensure!(current.is_dir() && (current.dev(), current.ino()) == self.identity,
+            "configured store directory was replaced or its alias retargeted: {}", self.configured.display());
         Ok(())
     }
 
