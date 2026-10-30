@@ -36,7 +36,7 @@ controls its own explicitly paid runs.
 The Docker backend uses the runner's embedded clean-systemd image recipe; `--image` can name
 a prepared equivalent image. Its container uses privileges and supplies no guest-boot proof.
 The small-machine scenarios require Docker so the runner can enforce and inspect their
-actual memory limits. 
+actual memory limits.
 For a real disposable VM, prepare an account that already has Incus and KVM access, a default
 profile with a root disk and network, and capacity for one guest. The runner does not install
 host packages, initialize Incus, change host groups or use sudo. Image download, cloud-init and
