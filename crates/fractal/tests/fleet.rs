@@ -656,7 +656,7 @@ async fn rename_proofs_export_over_cli_and_verify_without_daemon_or_config() {
     assert_eq!(node.st_ok(&["fleet", "anchor", "show"]).trim(), fleet_anchor);
     let declaration = node.root.join("identities.kdl");
     fs::write(&declaration, r#"version 2
-agent "proof-original" { command "true"; workspace "/tmp"; restart "never"; }
+agent "proof-original/worker" { command "true"; workspace "/tmp"; restart "never"; }
 mission "proof-original" state="ready" {
   goal "Prove portable identity history."
   step "work" { agentless }
@@ -664,9 +664,9 @@ mission "proof-original" state="ready" {
 "#).unwrap();
     node.st_ok(&["apply", declaration.to_str().unwrap(), "--as", PERSON]);
     let mut proofs = Vec::new();
-    for (kind, prefix) in [("agents", "agent"), ("missions", "mission")] {
-        let original = format!("{prefix}/proof-original");
-        let renamed = format!("{prefix}/proof-renamed");
+    for (kind, prefix, suffix) in [("agents", "agent", "/worker"), ("missions", "mission", "")] {
+        let original = format!("{prefix}/proof-original{suffix}");
+        let renamed = format!("{prefix}/proof-renamed{suffix}");
         let receipt = node.st_json(&[
             kind, "rename-id", &original, &renamed,
             "--as", PERSON, "--reason", "Clarify responsibility",
@@ -700,7 +700,7 @@ mission "proof-original" state="ready" {
         let verdict = node.st_json(&offline);
         assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
         assert_eq!(verdict["ok"], true);
-        assert_eq!(verdict["canonical_id"], renamed);
+        assert_eq!(verdict["to"], renamed);
         let mut stale = offline.to_vec();
         stale.extend(["--after-revision", &revision]);
         let rejected = node.st(&stale);

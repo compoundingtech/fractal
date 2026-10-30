@@ -188,21 +188,21 @@ fn portable_proof_rejects_claim_fields_and_signatures_inside_valid_member_envelo
 #[test]
 fn renamed_actor_alias_is_proven_against_immutable_signed_actor() {
     let (store, member) = signed_store();
-    publish(&store, "version 2\nagent \"example-actor\" { command \"true\"; }\nagent \"example-target\" { command \"true\"; }\n", "declare-actor-and-target");
-    rename(&store, IdentityKind::Agent, "agent/example-actor", "agent/example-actor-alias", "rename-actor");
+    publish(&store, "version 2\nagent \"example-actor/worker\" { command \"true\"; }\nagent \"example-target/worker\" { command \"true\"; }\n", "declare-actor-and-target");
+    rename(&store, IdentityKind::Agent, "agent/example-actor/worker", "agent/example-actor-alias/worker", "rename-actor");
     let receipt = store.rename_identity(IdentityKind::Agent, &RenameRequest {
-        from: "agent/example-target".into(), to: "agent/example-target-renamed".into(),
-        actor: "agent/example-actor-alias".into(), reason: "Clarify responsibility".into(),
+        from: "agent/example-target/worker".into(), to: "agent/example-target-renamed/worker".into(),
+        actor: "agent/example-actor-alias/worker".into(), reason: "Clarify responsibility".into(),
         expected_naming_revision: None, expected_declaration: None, idempotency_key: "rename-by-alias".into(),
     }, &[]).unwrap();
-    let proof = store.export_rename_proof(IdentityKind::Agent, "agent/example-target-renamed", None).unwrap();
+    let proof = store.export_rename_proof(IdentityKind::Agent, "agent/example-target-renamed/worker", None).unwrap();
     let claim = store.claim_by_id(&receipt.claim_id).unwrap().unwrap();
-    assert_eq!(claim.actor.as_deref(), Some("agent/example-actor"));
-    assert_eq!(claim.body["fields"]["request"]["actor"], "agent/example-actor-alias");
+    assert_eq!(claim.actor.as_deref(), Some("agent/example-actor/worker"));
+    assert_eq!(claim.body["fields"]["request"]["actor"], "agent/example-actor-alias/worker");
     drop(store);
     let verdict = verify_rename_proof(&proof, member.public(), None).unwrap();
-    assert_eq!(verdict.actor, "agent/example-actor-alias");
-    assert_eq!(verdict.request_actor, "agent/example-actor-alias");
+    assert_eq!(verdict.actor, "agent/example-actor-alias/worker");
+    assert_eq!(verdict.request_actor, "agent/example-actor-alias/worker");
 }
 
 #[test]
