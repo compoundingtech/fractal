@@ -4561,8 +4561,22 @@ fn authored_bypasses_hook_trust(authored_args: &[String]) -> Result<bool> {
 /// one the TUI and the hook review use (see [`controlled_hook_cwd`]). The config is the seat's own
 /// `$CODEX_HOME/config.toml`; only a `[projects."<root>"]` entry is appended when it is absent, every
 /// other entry stays, a second start changes nothing, and no login or `auth.json` is read or written.
+///
+/// Finding the root is best effort: the argv parser fails closed on an option it does not know and
+/// on a `--cd` that does not exist, and a start that works today must not stop at this step. In
+/// those cases the declared workspace (the process's own directory) is trusted instead, and Codex
+/// itself reports the argv or directory problem. Writing the entry is not best effort: a config that
+/// cannot be written fails the start, as it does for Claude.
 fn admit_controlled_workspace_at(config: &Path, authored_args: &[String]) -> Result<PathBuf> {
-    let workspace = controlled_hook_cwd(authored_args)?;
+    let workspace = match controlled_hook_cwd(authored_args) {
+        Ok(workspace) => workspace,
+        Err(_) => {
+            let declared = std::env::current_dir().context("reading controlled Codex workspace")?;
+            fs::canonicalize(&declared).with_context(|| {
+                format!("resolving controlled Codex workspace {}", declared.display())
+            })?
+        }
+    };
     crate::pretrust::pretrust_codex_at(config, std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Codex workspace {}", workspace.display()))?;
     Ok(workspace)

@@ -9585,14 +9585,44 @@ fn a_seat_start_creates_a_missing_config_and_trusts_only_the_last_work_root() {
 }
 
 #[test]
-fn a_seat_start_with_a_missing_work_root_fails_and_writes_nothing() {
+fn a_seat_start_trusts_the_declared_workspace_when_the_argv_names_no_usable_root() {
     let tmp = tempfile::tempdir().unwrap();
-    let config = tmp.path().join("config.toml");
-    let args = vec![
-        "--cd".to_string(),
-        tmp.path().join("absent").display().to_string(),
+    let declared = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    let cases: [Vec<String>; 2] = [
+        // A `--cd` whose directory does not exist: Codex reports it, the start is not stopped here.
+        vec![
+            "--cd".to_string(),
+            tmp.path().join("absent").display().to_string(),
+        ],
+        // An option this parser does not know fails closed there; the start must still get a root.
+        vec!["--an-option-from-a-newer-codex".to_string(), "boot".to_string()],
     ];
 
-    assert!(admit_controlled_workspace_at(&config, &args).is_err());
-    assert!(!config.exists());
+    for (index, args) in cases.into_iter().enumerate() {
+        let config = tmp.path().join(format!("config-{index}.toml"));
+        let admitted = admit_controlled_workspace_at(&config, &args).unwrap();
+        assert_eq!(admitted, declared, "case {index}");
+        let parsed: toml::Value = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(
+            parsed["projects"][declared.to_str().unwrap()]["trust_level"].as_str(),
+            Some("trusted"),
+            "case {index}"
+        );
+    }
+}
+
+#[test]
+fn a_seat_start_fails_when_the_config_cannot_be_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("work");
+    fs::create_dir_all(&root).unwrap();
+    // The config's parent is a regular file, so the entry cannot be written.
+    let blocker = tmp.path().join("blocker");
+    fs::write(&blocker, "").unwrap();
+    let config = blocker.join("config.toml");
+    let args = vec!["--cd".to_string(), root.display().to_string()];
+
+    let error = admit_controlled_workspace_at(&config, &args).unwrap_err();
+
+    assert!(format!("{error:#}").contains("admitting Codex workspace"), "{error:#}");
 }
