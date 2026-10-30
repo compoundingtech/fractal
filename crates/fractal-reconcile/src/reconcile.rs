@@ -1377,16 +1377,20 @@ impl Reconciler<NativeRuntime> {
         notify: Arc<Notify>,
         event_notify: watch::Sender<u64>,
         recorder: Option<PathBuf>,
+        unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     ) -> Result<Self> {
         let selected_pty_root = pty_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| state_dir.join("pty"));
         Ok(Self {
             store,
-            runtime: Arc::new(
-                NativeRuntime::new(state_dir, Some(&selected_pty_root), pty_binary)
-                    .with_recorder(recorder),
-            ),
+            runtime: Arc::new({
+                let mut runtime = NativeRuntime::new(state_dir, Some(&selected_pty_root), pty_binary)
+                    .with_recorder(recorder);
+                runtime.pty = runtime.pty.with_unlaned_seat(unlaned_seat.clone());
+                runtime.exec = runtime.exec.with_unlaned_seat(unlaned_seat);
+                runtime
+            }),
             host,
             endpoint,
             driver_state_dir: state_dir.join("drivers"),

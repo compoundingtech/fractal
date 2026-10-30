@@ -128,6 +128,7 @@ pub struct PtyRuntime {
     spawn_timeout: Duration,
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
+    unlaned_seat: Option<crate::UnlanedSeatPlacement>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -150,7 +151,14 @@ impl PtyRuntime {
             spawn_timeout: SPAWN_PUBLICATION_TIMEOUT,
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
+            unlaned_seat: None,
         }
+    }
+
+    /// Set only by the daemon's seat runtime, never inferred from ambient environment.
+    pub fn with_unlaned_seat(mut self, policy: Option<crate::UnlanedSeatPlacement>) -> Self {
+        self.unlaned_seat = policy;
+        self
     }
 
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
@@ -559,6 +567,7 @@ impl PtyRuntime {
                 &argument_refs,
                 launcher_environment.as_ref(),
                 lane.as_ref(),
+                self.unlaned_seat.as_ref(),
             );
             if launcher_environment.is_none() {
                 command.envs(&terminal_env);
@@ -1342,6 +1351,15 @@ fn session_incarnation(session: &SessionInfo) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_pty_runtime_has_no_unlaned_seat_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("pty"));
+        assert!(runtime.unlaned_seat.is_none());
+        let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
+        assert!(configured.unlaned_seat.is_some());
+    }
     use std::fs;
     use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixListener;
