@@ -8,6 +8,62 @@ One immutable record represents one observation; its trust tier is explicit. The
 `review`. `produced-by` is reserved as a name for a future trusted observer's
 verified trace receipt; v1 rejects it until its predicate and verifier exist.
 
+## Evidence configuration directory bridge
+
+During `arn:lmig:smalltalk:2026-10-27-dot-fractal-config`, configuration readers
+select `.fractal/<file>` first and `.st/<file>` only when the new path is absent,
+at the same pinned revision (or the same checkout root for checkout tools).
+An unreadable or malformed new file, missing Git object, or transport failure
+does not permit falling back to the old file or to candidate trust data. If both
+files exist, the new one wins; writers update only the selected layout.
+The `scripts/review` orchestrator also applies the bridge to accepted-base
+harness configuration, verdict schema and risk-file presence probes. Its
+historical bootstrap applies only to genuinely absent configuration, never to
+a selected file's read or parse failure.
+
+The gate resolves the accepted-base `evidence-signed-only.json` list through the
+same bridge; a selected list that cannot be read or decoded refuses hosted
+execution. GC likewise resolves and prefetches main's selected `rust-test-inputs.json`
+before computing the per-crate keys it must retain.
+
+For keyed Clippy, the workflow source/generated `linux-clippy` environment and
+`scripts/ci-clippy-keyed` use `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`:
+the keyed caller supplies the policy path, and the stage resolves its checkout
+layout at execution time under this migration ARN. The linux-gate/rust-tests
+static script closures contain no policy-file literal. This does not imply
+hosted dependency isolation: as on main, the hosted linux-clippy job still
+supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explicit
+policy path remains explicit; malformed or unreadable preferred configuration
+never selects the legacy file. The generated workflow environment is a bridge
+site documented here because its comments come from generator output.
+The newly keyed `linux-fleet-compat` workflow and `scripts/ci-fleet-compat-keyed`
+use the same `auto:` bridge through `CI_KEYED_FLEET_COMPAT_POLICY`. Both keyed
+stages share the argument-based missing-only resolver; their existing hosted
+policy dependencies are retained, not introduced by the directory migration.
+
+Configuration selectors in lane `ci_inputs` resolve through the same bridge
+at each pinned tree; checkout closure validation selects at its own root.
+The projection records the actual selected path, so equal bytes moved from
+`.st/` to `.fractal/` still change the key. Whole-file and directory projection
+paths remain literal; no path/hash normalization is introduced.
+
+
+The configuration remains in `.st/` in this expand stage. Both directories are
+protected equally and included in the script-test projection. The paired `.st`
+and `.fractal` entries in `.st/required-lanes.json` `ci-script-tests.tree_inputs`
+and `.st/evidence-skip-policy.json` `ci-script-tests.inputs`, plus the paired
+policy paths in `.st/rust-test-inputs.json` `fractal-kernel.extra`, are bridge
+sites under the same migration ARN. Closed JSON schemas do not allow marker
+metadata. Sparse copies accept either layout without requiring both.
+Required lane definition paths
+still name the existing `.st/` directory: adding an absent definition would
+invalidate accepted-base evidence. Directory names remain part of signed
+projections, so moving identical bytes does not preserve path-sensitive keys.
+The bridge is removed only after the accepted-base rollout and installed-reader
+observations specified in [the rollout plan](https://github.com/compoundingtech/fractal/issues/3032#issuecomment-6445632509);
+historical replay uses the tools from the historical accepted base.
+
+
 ## Record and transport
 
 The record is an in-toto v1 statement with one subject: `name` is the observed
@@ -124,7 +180,8 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   a fork's head works too) whatever its age; and the trees of main's first-parent commits within `main_days` of
   `as_of`, main's tip always.
 - **live keys**: the input key each live tree projects to, for every check whose policy declares inputs, and every live tree's
-  per-crate `rust-tests` keys. Those keys come from main's `scripts/rust-test-keys` over main's `.st/rust-test-inputs.json`, as the gate keys a pull request
+  per-crate `rust-tests` keys. Those keys come from main's `scripts/rust-test-keys` over main's selected `rust-test-inputs.json`
+  (`.fractal/` first, `.st/` only if absent under the bridge), as the gate keys a pull request
   against its base. Until 2026-10-28 the per-crate keys were left out (the `rust-tests` policy declares no `inputs`), so a plan deleted
   the crate keys that open pull requests' `rust-tests` decisions still chose. A live tree whose crates cannot be keyed, because a
   manifest is unreadable, keeps every `rust-tests` key. In a partial clone (`--fetch`), the manifests the live trees lack are fetched
@@ -1525,8 +1582,8 @@ whole file must declare it whole; an excluded path is left out. It also fails an
 read with the verifier's own selector. Files only ever read at the base (`BASE_READ`) don't count. Notes carry
 nothing new: a head-tree note is about the head tree whichever way the gate decides, so older notes need no special case.
 
-`.st/rust-test-inputs.json` is not protected. It is data that changes with ordinary code, and the verifier reads it only at the base when it
-computes the per-crate keys.
+The selected `rust-test-inputs.json` in either layout is not protected. It is data that changes with ordinary code,
+and the verifier reads it only at the base when it computes the per-crate keys.
 
 ### Which lane definition a pull request is held to
 

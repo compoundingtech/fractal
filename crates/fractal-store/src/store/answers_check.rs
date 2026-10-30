@@ -105,12 +105,16 @@ impl Store {
     /// The `reviewer` of a fault local trimming raises: the agent `[trim] notify` names, which
     /// then owns the fault, or the operator, which leaves it to the fleet's fault agent.
     pub fn trim_fault_reviewer(&self) -> String {
+        self.trim_notify().unwrap_or_else(|| "person/operator".into())
+    }
+
+    /// The agent `[trim] notify` names, if any.
+    pub fn trim_notify(&self) -> Option<String> {
         self.extension::<TrimSettings>()
             .notify
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .unwrap_or_else(|| "person/operator".into())
     }
 
     /// Open a fault for a check that found differences, unless the pair's fault is still open,
