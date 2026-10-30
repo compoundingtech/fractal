@@ -1263,6 +1263,14 @@
       "verification": "real CLI with private HTTP fixture covers pass/wait/broken and obsolete refs across daemon restarts"
     },
     {
+      "command": "st gh checks",
+      "description": "Show a pull request's required checks and every head it has had",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member"
+      ],
+      "verification": "real CLI/daemons with private HTTP fixture; poller mirror, relay from a member, graph answer with the poller down"
+    },
+    {
       "command": "st gh comment",
       "tests": [
         "crates/fractal/tests/fleet.rs::action_coverage_github_watch_cli_uses_private_http_and_survives_restart"
@@ -1283,6 +1291,24 @@
         "crates/fractal/tests/fleet.rs::action_coverage_github_watch_cli_uses_private_http_and_survives_restart"
       ],
       "verification": "real CLI/daemon with private HTTP fixture; ownership refusal, disk restart and idempotent registration"
+    },
+    {
+      "command": "st gh pr",
+      "description": "Show one pull request's facts from the poller's mirror",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member",
+        "crates/fractal/tests/fleet.rs::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade"
+      ],
+      "verification": "real CLI/daemons with private HTTP fixture; relay from a member and an older poller upgraded in place"
+    },
+    {
+      "command": "st gh prs",
+      "description": "List a repository's pull requests from the poller's mirror",
+      "tests": [
+        "crates/fractal/tests/fleet.rs::action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member",
+        "crates/fractal/tests/fleet.rs::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade"
+      ],
+      "verification": "real CLI/daemons with private HTTP fixture; mirror, relay, labelled graph answer beside an older poller and after its upgrade"
     },
     {
       "command": "st gh unwatch",

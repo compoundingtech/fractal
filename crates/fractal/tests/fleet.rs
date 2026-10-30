@@ -5912,9 +5912,14 @@ async fn fake_github_with_pull_request(head: std::sync::Arc<std::sync::Mutex<Str
     api
 }
 
-/// `st gh prs` as `actor` on `node`, as JSON.
+/// `st gh prs` as `actor` on `node`, as JSON, or null while it fails, as it does until the
+/// repository's observer is declared.
 fn gh_prs(node: &Node, actor: &str) -> Value {
-    node.st_json(&["gh", "prs", "fixture/app", "--state", "all", "--as", actor])
+    let output = node.st(&["--json", "gh", "prs", "fixture/app", "--state", "all", "--as", actor]);
+    if !output.status.success() {
+        return Value::Null;
+    }
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 /// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
