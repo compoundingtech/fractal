@@ -2092,8 +2092,9 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    // Graph sync never waits on the shard: a daemon that answers the peers route at all holds
-    // the shard, and one that fails it for another reason is followed from an empty peer set.
+    // Graph sync never waits on the shard. A 404 or 405 means this daemon holds none. Any other
+    // failure is taken as passing on a daemon that holds it: the shard is followed from an empty
+    // peer set, and if that guess is wrong the sync stays idle and dials nobody.
     let held = match shard_peers(&main, MESSAGES_SHARD).await {
         Ok(peers) => peers,
         Err(error) => {
