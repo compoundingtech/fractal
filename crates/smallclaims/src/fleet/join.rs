@@ -919,6 +919,7 @@ mod tests {
 
     #[test]
     fn migrate_anchor_options_preserve_default_and_admitted_stores() {
+        let fleet_id = uuid::Uuid::new_v4().to_string();
         for explicit in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let state = root.path().join("state");
@@ -929,7 +930,7 @@ mod tests {
             let runtime: Arc<dyn Runtime> = Arc::new(crate::store::runtime::Plain);
             {
                 let store = Store::open(&database, "anchor", runtime.clone()).unwrap();
-                store.bind_fleet("fixture-fleet").unwrap();
+                store.bind_fleet(&fleet_id).unwrap();
             }
             let admitted = explicit.then(|| AdmittedStore::from_locked_directory(
                 &directory, fs::File::open(&directory).unwrap(),
@@ -941,10 +942,10 @@ mod tests {
             let secret = state.join("legacy-secret");
             let founded = migrate_anchor(MigrateAnchorOptions {
                 state_dir: &state, store_path: &database, admitted_store: admitted.clone(),
-                node: "anchor", fleet_id: "fixture-fleet", secret_file: &secret,
+                node: "anchor", fleet_id: &fleet_id, secret_file: &secret,
                 settings: &settings, fabric_protocol: Some("fixture-protocol".into()), runtime,
             }).unwrap();
-            assert_eq!(founded.fleet_id, "fixture-fleet");
+            assert_eq!(founded.fleet_id, fleet_id);
             let membership = FleetFile::load(&state).unwrap().unwrap();
             assert_eq!(membership.node.as_deref(), Some("anchor"));
             assert_eq!(membership.fabric_protocol.as_deref(), Some("fixture-protocol"));
