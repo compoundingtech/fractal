@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retire the st2 agent migration guide and its dedicated rehearsal.",
+  "replay": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Retires the st2-to-st agent migration guide and its dedicated rehearsal, with their index entries and fixture-specific test. Current runtime, APIs, stored records and supported evals are unchanged."
+  }
+}
