@@ -145,6 +145,7 @@ pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
 mod launch_card;
+mod prompt_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
@@ -1769,7 +1770,7 @@ pub fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot 
 }
 
 /// The snapshot at `store_index` when its acceptance time (`projection_time_at`) is already known.
-fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
+pub fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
     let created_at = client_timestamp(unix_ms);
     let fingerprint = hex::encode(Sha256::digest(
         format!(
@@ -1856,6 +1857,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "agents-publication-row-too-large"
         | "identity-cycle"
         | "identity-occupied"
         | "identity-retired-source"

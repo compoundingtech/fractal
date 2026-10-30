@@ -138,10 +138,59 @@ fn a_key_answers_with_its_newest_claim_older_than_the_cut() {
     claim(&connection, "b1", "example.state", "item/b", "alder", 10, 3);
     claim(&connection, "b2", "example.state", "item/b", "alder", 100, 4);
     let keys = all_keys(&connection, "example.state", 50);
-    let answers = keys.iter().map(|key| (key.subject.as_str(), key.origin.as_str(), key.claim.as_str())).collect::<Vec<_>>();
-    assert_eq!(answers, [("item/a", "alder", "a2"), ("item/a", "birch", "a3")]);
+    let answers = keys
+        .iter()
+        .map(|key| (key.subject.as_str(), key.origin.as_str(), key.claim.as_str(), key.moving))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        answers,
+        [("item/a", "alder", "a2", false), ("item/a", "birch", "a3", false), ("item/b", "alder", "b2", true)]
+    );
     let answers = kind_answers(&connection, "example.state", 50).unwrap();
     assert_eq!((answers.keys, answers.claims), (2, 4));
+}
+
+#[test]
+fn a_key_moving_on_either_member_is_no_difference() {
+    // alder computed after item/b's newer claim arrived and birch before.
+    let ours = fixture();
+    claim(&ours, "a1", "example.state", "item/a", "alder", 10, 1);
+    claim(&ours, "b1", "example.state", "item/b", "alder", 10, 2);
+    claim(&ours, "b2", "example.state", "item/b", "alder", 100, 3);
+    let theirs = fixture();
+    claim(&theirs, "a1", "example.state", "item/a", "alder", 10, 1);
+    claim(&theirs, "b1", "example.state", "item/b", "alder", 10, 2);
+    let (ours, theirs) = (all_keys(&ours, "example.state", 50), all_keys(&theirs, "example.state", 50));
+    assert_eq!(differing_keys(&ours, &theirs), []);
+    assert_eq!(differing_keys(&theirs, &ours), []);
+
+    // Both still hold item/b's claim before the cut, so the kind agrees without narrowing.
+    let summary = |connection: &Connection| {
+        let mut summary = AnswersSummary { cut_unix_ms: 50, ..AnswersSummary::default() };
+        summary.kinds.insert("example.state".into(), kind_answers(connection, "example.state", 50).unwrap());
+        summary
+    };
+    let (moved, behind) = (fixture(), fixture());
+    for connection in [&moved, &behind] {
+        claim(connection, "a1", "example.state", "item/a", "alder", 10, 1);
+        claim(connection, "b1", "example.state", "item/b", "alder", 10, 2);
+    }
+    claim(&moved, "b2", "example.state", "item/b", "alder", 100, 3);
+    assert_eq!(differing_kinds(&summary(&moved), &summary(&behind), true), []);
+    // A member that trimmed item/b's older claim no longer agrees on the claims before the cut,
+    // so the kind differs until narrowing finds only the moving key.
+    delete(&moved, "b1");
+    assert_eq!(differing_kinds(&summary(&moved), &summary(&behind), false).len(), 1);
+    let keys = |connection: &Connection| all_keys(connection, "example.state", 50);
+    assert_eq!(differing_keys(&keys(&moved), &keys(&behind)), []);
+
+    // A fold reader's moving subject is listed but not counted.
+    let key = |subject: &str, moving| AnswerKey { subject: subject.into(), origin: String::new(), claim: String::new(), moving };
+    let (_, with_moving, buckets) = reader_answers("status_history", 50, vec![key("agent/a", false), key("agent/b", true)]);
+    let (_, without, _) = reader_answers("status_history", 50, vec![key("agent/a", false)]);
+    assert_eq!(with_moving, without);
+    assert_eq!(buckets.keys.len(), 2);
+    assert_eq!(differing_keys(&buckets.keys, &[key("agent/a", false), key("agent/b", false)]), []);
 }
 
 #[test]
@@ -277,7 +326,7 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
     cache.set_readers(Arc::new(|_: &Connection, _: u128| {
         Ok(BTreeMap::from([(
             "status_history".to_owned(),
-            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into() }],
+            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into(), moving: false }],
         )]))
     }));
     let cut = cut();
@@ -299,7 +348,7 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
 
 #[test]
 fn readers_compare_only_between_members_that_both_run_them() {
-    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into() };
+    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into(), before_cut: String::new() };
     let summary = |kinds: &[(&str, &str)]| AnswersSummary {
         kinds: kinds.iter().map(|(kind, digest)| (kind.to_string(), answers(digest))).collect(),
         ..AnswersSummary::default()
