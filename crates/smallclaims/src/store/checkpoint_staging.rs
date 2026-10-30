@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS meta(
     bound INTEGER,
     plan TEXT
 );
+-- A row here lets the planner drop claims of an envelope it keeps: a local cut only.
+CREATE TABLE IF NOT EXISTS split_envelopes(id INTEGER PRIMARY KEY CHECK(id=1));
 CREATE TABLE IF NOT EXISTS envelopes(
     writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
     accepted_at INTEGER NOT NULL, records INTEGER NOT NULL, included INTEGER NOT NULL,
@@ -1119,6 +1121,17 @@ impl StagedSet {
             rusqlite::params_from_iter(kinds),
         )?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-he7052689cff7 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Let the plan drop a claim whose envelope it keeps, and forget any plan made without that.
+    /// Only a member that trims locally does: the envelope stays whole and servable, and only
+    /// this member's own copies of the claim go. A shared checkpoint's envelopes stay atomic.
+    pub fn split_envelopes(&self) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        transaction.execute("INSERT OR IGNORE INTO split_envelopes(id) VALUES (1)", [])?;
+        transaction.execute("UPDATE meta SET plan=NULL WHERE id=1", [])?;
         transaction.commit()?;
         Ok(())
     }

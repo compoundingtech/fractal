@@ -403,9 +403,17 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
         super::principals::forget_claim_tx(transaction, &claim.id)?;
         // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
         // compiles every trigger program again. Per row that cost several times the delete.
+        // A local cut may drop a claim whose envelope stays: its raw record goes with it, and
+        // the payload keeps the envelope whole for peers. Shared checkpoints drop whole envelopes.
+        if authoritative {
+            transaction.prepare_cached("DELETE FROM replica_records WHERE claim_id=?1")?.execute([&claim.id])?;
+        }
         transaction
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
             .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+        if authoritative {
+            transaction.prepare_cached("DELETE FROM claim_positions WHERE claim_id=?1")?.execute([&claim.id])?;
+        }
     }
     for envelope in envelopes {
         if authoritative {
