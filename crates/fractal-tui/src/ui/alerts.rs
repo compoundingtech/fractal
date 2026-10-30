@@ -964,6 +964,24 @@ impl Ui {
             // A form that still does not fit is never cut: its card says so and opens it in Inbox.
             if card.lines.len() > left {
                 card = self.unfit_card(item, width, place);
+                // Where not even that card's first rows fit, the bar's own label opens it.
+                if left == 0 {
+                    let label = format!(" ◆ {count} alert{} · answer in Inbox ", if count == 1 { "" } else { "s" });
+                    let cut = text::width(&label).min(width);
+                    let gap = width.saturating_sub(cut + text::width(right));
+                    rows[0] = BandRow {
+                        line: Line::from(vec![
+                            Span::styled(label, bar(theme::strong(theme::PERSON))),
+                            Span::styled(" ".repeat(gap), bar(Style::default())),
+                            Span::styled(right, bar(theme::dim())),
+                        ]),
+                        hits: vec![
+                            (0, cut as u16, Hit::Alert(item.id.clone(), AlertTap::Open)),
+                            (cut as u16, width.saturating_sub(cut) as u16, Hit::Alert(agent.to_owned(), AlertTap::Toggle)),
+                        ],
+                        edge: None,
+                    };
+                }
             }
             rows.extend(BandRow::from_doc(card));
             shown += 1;
@@ -1016,6 +1034,16 @@ impl Ui {
             card,
             width,
         );
+        // Every row of it opens it, its border too, so whatever rows fit carry the way in.
+        doc.targets.clear();
+        for line in 0..doc.lines.len() {
+            doc.targets.push(Target {
+                line,
+                column: 0,
+                width: width as u16,
+                hit: Hit::Alert(item.id.clone(), AlertTap::Open),
+            });
+        }
         doc
     }
 
@@ -1958,8 +1986,35 @@ mod tests {
         press(&mut ui, KeyCode::Char('n'), KeyModifiers::CONTROL);
         press(&mut ui, KeyCode::Char('9'), KeyModifiers::NONE);
         assert!(ui.effects.is_empty(), "{:?}", ui.effects);
-        ui.click(open);
+        ui.click(open.clone());
         assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
+        // However little room the band has, a row that fits opens it: the card's own rows, or,
+        // when only the bar fits, the bar's label.
+        let mut ui = in_conversation(questions_world(4, 4));
+        ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
+        for place in [Place::Band, Place::Terminal] {
+            for room in 1..=6 {
+                let rows = ui.alert_band(SEAT, 60, room, place);
+                let fits = &rows[..rows.len().min(room)];
+                assert!(
+                    fits.iter().any(|row| row.hits.iter().any(|(_, _, hit)| *hit == open)),
+                    "{place:?} room {room}: {:?}",
+                    fits.iter().map(|row| text::plain(&row.line)).collect::<Vec<_>>()
+                );
+                assert!(!fits.iter().any(|row| row.hits.iter().any(|(_, _, hit)| matches!(hit, Hit::Alert(_, AlertTap::Answer(_))))));
+            }
+        }
+        // And in a drawn frame of a short conversation, the way in is on screen whenever the band
+        // is (a conversation too short for it draws none; the top bar's count opens Inbox then).
+        let mut drawn = 0;
+        for height in [10, 12, 14, 16, 18] {
+            let shown = render(&ui, 60, height);
+            if shown.contains("▾ fold") {
+                drawn += 1;
+                assert!(ui.frame.borrow().hits.iter().any(|(_, hit)| *hit == open), "height {height}:\n{shown}");
+            }
+        }
+        assert!(drawn > 0, "no height drew the band");
         // With room, the whole form shows in place.
         let mut ui = in_conversation(questions_world(4, 4));
         ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
