@@ -508,4 +508,37 @@ mod tests {
         ui.key(KeyCode::Enter.into());
         assert!(ui.terminal.is_none());
     }
+
+    #[test]
+    fn automatic_stops_ignore_focus_only_and_keep_content_identity() {
+        let mut ui = Ui::new(demo::test_world());
+        ui.open_in_glass(Pane::Document("doc/a".into()), Open::Tab);
+        let first = ui.current_place().unwrap();
+        ui.open_in_glass(Pane::Document("doc/b".into()), Open::Right);
+        let count = ui.glasses.history.len();
+        ui.focus_group(first.group);
+        assert_eq!(ui.glasses.history.len(), count);
+        assert_eq!(ui.current_place(), Some(first));
+        for n in 0..60 {
+            ui.open_in_glass(Pane::Document(format!("doc/history-{n}")), Open::Tab);
+        }
+        assert_eq!(ui.glasses.history.len(), 50);
+        assert_eq!(ui.glasses.history_cursor, 49);
+    }
+
+    #[test]
+    fn automatic_history_persists_and_closed_tabs_are_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("glasses.json");
+        let mut ui = Ui::new(demo::test_world());
+        ui.glasses = Glasses::open(None, Some(path.clone()));
+        ui.open_in_glass(Pane::Document("doc/a".into()), Open::Tab);
+        ui.open_in_glass(Pane::Document("doc/b".into()), Open::Tab);
+        let reopened = Glasses::open(None, Some(path));
+        assert_eq!(reopened.history, ui.glasses.history);
+        assert_eq!(reopened.history_cursor, ui.glasses.history_cursor);
+        let closed = ui.current_place().unwrap().tab_id;
+        ui.close_tab();
+        assert!(ui.glasses.history.iter().all(|place| place.tab_id != closed));
+    }
 }

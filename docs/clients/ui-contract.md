@@ -256,7 +256,6 @@ Closed and snoozed items are excluded. The flash gives `n/m · reason`; after th
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
 
 
-
 ### Starting a mission
 
 Missions has **New mission**: the person writes what they want (and picks a workspace), and the
