@@ -14,6 +14,10 @@ use notify::Watcher as _;
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
 
+/// The longest a prompt card shows the calls it read from a transcript here without reading it
+/// again, though no change to it was seen: a change whose event was lost shows within this.
+const CALLS_HERE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How far back st looks for a call without a result: the conversation's newest entries, a page
 /// as a client or a peer reads it. A harness waits on the calls it made last, so an older one
 /// without a result was abandoned.
@@ -317,8 +321,9 @@ pub(crate) fn source_pending_calls(
 /// its card says so and offers no answer.
 ///
 /// A transcript here is read again only after a change to it, a lost event, a change to what is
-/// watched, or a refresh in which no card read it; until then each refresh takes the calls it
-/// read last, so a fold does not reread every card's conversation.
+/// watched, a refresh in which no card read it, or a minute since its last read (in case an event
+/// was lost unreported); until then each refresh takes the calls it read last, so a fold does not
+/// reread every card's conversation.
 ///
 /// A conversation another member keeps is followed through the client-read relay by a task of
 /// its own: it reads the conversation, waits on its changes from where it was before that read,
@@ -336,9 +341,11 @@ pub struct PromptWatch {
     /// read as, and those the refresh in progress read.
     remote: std::collections::HashMap<RemoteKey, RemoteFollower>,
     remote_read: HashSet<RemoteKey>,
-    /// The calls without a result each followed transcript held when it was last read. An entry
-    /// stands only while no change to its transcript has been seen since that read.
-    calls: std::collections::HashMap<PathBuf, Vec<Value>>,
+    /// The calls without a result each followed transcript held when it was last read, and when.
+    /// An entry stands only while no change to its transcript has been seen since that read, and
+    /// for at most `calls_max_age`.
+    calls: std::collections::HashMap<PathBuf, (std::time::Instant, Vec<Value>)>,
+    calls_max_age: std::time::Duration,
     /// How many times the watcher was made again after a delivery failure.
     rebuilds: usize,
 }
@@ -447,6 +454,7 @@ impl PromptWatch {
             remote: std::collections::HashMap::new(),
             remote_read: HashSet::new(),
             calls: std::collections::HashMap::new(),
+            calls_max_age: CALLS_HERE_MAX_AGE,
             rebuilds: 0,
         };
         // A watcher that cannot be made now is made again when a card first follows a seat.
@@ -511,8 +519,9 @@ impl PromptWatch {
     }
 
     /// The calls without a result in a followed transcript here. A change seen since the last
-    /// read, or a watcher that lost events, has it read again; a change during the read leaves it
-    /// to be read again at the next refresh, which that change wakes.
+    /// read, a watcher that lost events, or a read older than `calls_max_age` has it read again; a
+    /// change during the read leaves it to be read again at the next refresh, which that change
+    /// wakes.
     fn calls_here(&mut self, source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>, String> {
         let mut changed = false;
         let mut dirty = self.shared.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -522,14 +531,16 @@ impl PromptWatch {
         drop(dirty);
         if !changed
             && !self.shared.broken.load(Ordering::Acquire)
-            && let Some(calls) = self.calls.get(&source.transcript)
+            && let Some((read_at, calls)) = self.calls.get(&source.transcript)
+            && read_at.elapsed() < self.calls_max_age
         {
             return Ok(calls.clone());
         }
+        let read_at = std::time::Instant::now();
         match tail(source) {
             Ok(items) => {
                 let calls = pending_calls(&items);
-                self.calls.insert(source.transcript.clone(), calls.clone());
+                self.calls.insert(source.transcript.clone(), (read_at, calls.clone()));
                 Ok(calls)
             }
             Err(error) => {
@@ -1014,6 +1025,8 @@ pub(crate) mod tests {
         codex_lines(&elm.transcript, &[("call-e", false)]);
         let wake = Arc::new(tokio::sync::Notify::new());
         let mut watch = PromptWatch::new(Arc::clone(&wake));
+        // Only changes reread here, however slowly the test runs.
+        watch.calls_max_age = Duration::from_secs(3600);
         let start = reads();
         assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [["call-a"], ["call-e"]]);
         assert_eq!(reads() - start, 2);
@@ -1040,6 +1053,26 @@ pub(crate) mod tests {
         watch.shared.deliver(Err(notify::Error::generic("inotify queue overflowed")));
         assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [vec!["call-b"], vec![]]);
         assert_eq!(reads() - start, 6);
+    }
+
+    /// An event can be lost without the watcher saying so. A card whose transcript changed no
+    /// file it saw still reads it again once its last read is older than the most a card shows
+    /// a read, so a new prompt is never hidden for longer than that.
+    #[tokio::test]
+    async fn a_transcript_here_is_read_again_after_its_read_grows_old_without_an_event() {
+        let root = tempfile::tempdir().unwrap();
+        let oak = transcript_here(root.path(), "oak");
+        codex_lines(&oak.transcript, &[("call-a", false)]);
+        let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
+        watch.calls_max_age = Duration::from_secs(3600);
+        let start = reads();
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
+        assert_eq!(reads() - start, 1, "a fresh read was read again");
+        // No file event: the read is past its age, so the next refresh reads again.
+        watch.calls_max_age = Duration::ZERO;
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
+        assert_eq!(reads() - start, 2, "an old read was served without reading again");
     }
 
     /// A transcript st cannot follow is not read as if it could: its card says why.
