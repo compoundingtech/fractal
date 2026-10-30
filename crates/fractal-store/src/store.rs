@@ -2519,6 +2519,20 @@ impl Store {
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open(path, origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    /// Open only through the directory descriptor retained by explicit-store admission.
+    pub fn open_admitted(
+        admitted: Arc<smallclaims::store::AdmittedStore>,
+        origin: impl Into<String>,
+    ) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_admitted(admitted, origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);

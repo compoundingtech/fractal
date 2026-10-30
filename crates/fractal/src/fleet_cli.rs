@@ -450,16 +450,18 @@ async fn lock_fleet_admission(
     services: bool,
     verb: &str,
 ) -> Result<fractal_daemon::node_identity::StateLock> {
-    if client.get::<Value>("/v1/health").await.is_ok() {
+    let mut state_identity = if client.get::<Value>("/v1/health").await.is_ok() {
         anyhow::ensure!(
             services,
             "stop the running st3 daemon first: nothing may write while this machine {verb}"
         );
         fractal_daemon::service::stop()?;
-        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await
+        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await?
     } else {
-        fractal_daemon::node_identity::lock(&config.state_dir)
-    }
+        fractal_daemon::node_identity::lock(&config.state_dir)?
+    };
+    fractal_daemon::node_identity::lock_store_directory(&mut state_identity, config)?;
+    Ok(state_identity)
 }
 
 /// Pairing credentials travel over the helper's private stdin/stdout, never argv.
@@ -537,6 +539,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     };
     fractal_daemon::service::preflight(manages_services)?;
     let mut config = Config::load_unvalidated(None)?;
+    config.validate()?;
     // Explicit admissions can repair a pin after their prior attempt saved membership.
     // Other controls must use the daemon's resolved identity, including leave's runtime check.
     if !matches!(&command, FleetCommand::Join(_) | FleetCommand::Create(_)) {
@@ -554,15 +557,24 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 config.fleet_id.is_none(),
                 "config.toml already configures a fleet with config peers; move it to membership with fractal fleet migrate"
             );
-            fractal_daemon::node_identity::resolve(&mut config)?;
+            if let Some(node) = args.name.as_deref() {
+                anyhow::ensure!(
+                    fractal_daemon::store::valid_fleet_node_name(node),
+                    "`{node}` cannot name a fleet member; use --name"
+                );
+            }
+            let services = !args.no_service && services_installed()?;
+            let state_identity =
+                lock_fleet_admission(&client, &config, services, "founds a fleet").await?;
+            state_identity.resolve_identity(&mut config)?;
             let node = args.name.unwrap_or_else(|| config.node.clone());
             anyhow::ensure!(
                 fractal_daemon::store::valid_fleet_node_name(&node),
                 "`{node}` cannot name a fleet member; use --name"
             );
-            let services = !args.no_service && services_installed()?;
-            let state_identity =
-                lock_fleet_admission(&client, &config, services, "founds a fleet").await?;
+            fractal_daemon::node_identity::check_store_writer_transition(
+                &config, state_identity.admitted_store().as_deref(), &node,
+            )?;
             let founded =
                 fractal_daemon::fleet::join::found(&config.state_dir, &node, &args.member.settings())?;
             state_identity.record_fleet_found(&founded)?;
@@ -751,8 +763,20 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let use_services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
+            if config.store_dir.is_some() {
+                let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim())?;
+                // Resolve saved admission before fresh-name precedence, just as join does.
+                let name = fractal_daemon::fleet::join::admission_name(
+                    &config.state_dir, &decoded, args.name.as_deref(), &config.node,
+                )?;
+                fractal_daemon::node_identity::check_store_writer_transition(
+                    &config, state_identity.admitted_store().as_deref(), &name,
+                )?;
+            }
             let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
                 state_dir: config.state_dir.clone(),
+                store_path: config.store_path(),
+                admitted_store: state_identity.admitted_store(),
                 configured_node: config.node.clone(),
                 code: code.trim().to_owned(),
                 name: args.name.clone(),
@@ -764,6 +788,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 version: env!("CARGO_PKG_VERSION").into(),
             })
             .await?;
+            if config.store_dir.is_some() {
+                fractal_daemon::node_identity::record_store_writer(
+                    &config, state_identity.admitted_store().as_deref(), &joined.name,
+                )?;
+            }
             state_identity.record_fleet_join(&joined)?;
             drop(state_identity);
             if let Some(path) = code_path {
@@ -1351,19 +1380,21 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         .fleet_id
         .clone()
         .context("this machine has no config-peer fleet to migrate; use fractal fleet join")?;
-    // Read only while the daemon may still be running; the locked migration rechecks
-    // its store before writing. Invalid admission must not stop healthy services.
-    {
+    // Default stores retain their read-only preflight before stopping services.
+    // Explicit stores may only be opened through the locked admission below.
+    let check_bound = |admitted: Option<&smallclaims::store::AdmittedStore>| -> Result<()> {
         use rusqlite::OptionalExtension as _;
-        let database = config.state_dir.join("claims.sqlite3");
+        let database = config.store_path();
         anyhow::ensure!(
             database.exists(),
             "this store is not bound to a fleet yet; run fractal up once first"
         );
-        let connection = rusqlite::Connection::open_with_flags(
-            database,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
+        let connection = match admitted {
+            Some(admitted) => admitted.open_connection(rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?,
+            None => rusqlite::Connection::open_with_flags(
+                database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?,
+        };
         let bound: Option<String> = connection
             .query_row("SELECT value FROM meta WHERE key='fleet_id'", [], |row| {
                 row.get(0)
@@ -1376,6 +1407,10 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             ),
             None => anyhow::bail!("this store is not bound to a fleet yet; run fractal up once first"),
         }
+        Ok(())
+    };
+    if config.store_dir.is_none() {
+        check_bound(None)?;
     }
     // fleet.toml resolves a relative path under STATE/fleet, and --finish removes the
     // config.toml override, so record the secret file's absolute path now.
@@ -1391,10 +1426,16 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     })?;
     let use_services = !args.no_service && services_installed()?;
     let state_identity = lock_fleet_admission(client, config, use_services, "migrates").await?;
+    if config.store_dir.is_some() {
+        let admitted = state_identity.admitted_store().context("explicit store admission is missing")?;
+        check_bound(Some(&admitted))?;
+    }
     let settings = migration_settings(&args.member, config);
     if args.anchor {
         let founded = fractal_daemon::fleet::join::migrate_anchor(
             &config.state_dir,
+            &config.store_path(),
+            state_identity.admitted_store(),
             &config.node,
             &fleet_id,
             &secret_file,
@@ -1424,8 +1465,14 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
                 None => (read_code_without_echo()?, None),
             }
         };
+        // Migration passes an explicit name, so the code's target cannot override it.
+        fractal_daemon::node_identity::check_store_writer_transition(
+            config, state_identity.admitted_store().as_deref(), &config.node,
+        )?;
         let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
             state_dir: config.state_dir.clone(),
+            store_path: config.store_path(),
+            admitted_store: state_identity.admitted_store(),
             configured_node: config.node.clone(),
             code: code.trim().to_owned(),
             name: Some(config.node.clone()),
@@ -1441,6 +1488,11 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             joined.migrate,
             "that code is a join code; use fractal fleet join"
         );
+        if config.store_dir.is_some() {
+            fractal_daemon::node_identity::record_store_writer(
+                config, state_identity.admitted_store().as_deref(), &joined.name,
+            )?;
+        }
         state_identity.record_fleet_join(&joined)?;
         if let Some(path) = code_path {
             let _ = fs::remove_file(path);

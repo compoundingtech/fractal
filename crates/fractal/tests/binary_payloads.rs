@@ -125,7 +125,7 @@ fn upgrade_preserves_signed_backups_retries_and_stream_cursors() {
     let header = store
         .write_backup(&mut std::fs::File::create(&archive).unwrap())
         .unwrap();
-    let restored = fractal_daemon::backup::restore(&archive, &root.path().join("restored.sqlite3")).unwrap();
+    let restored = fractal_daemon::backup::restore(&archive, &root.path().join("restored.sqlite3"), root.path()).unwrap();
     assert!(restored.projections_match);
     assert_eq!(restored.log_digest, header.log_digest);
 }

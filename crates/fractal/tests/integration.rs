@@ -15,6 +15,7 @@ mod assistant_native;
 mod authored_resume;
 mod backup;
 mod binary_payloads;
+mod store_dir;
 mod boot_canaries;
 mod broken_gates;
 mod claude_idle;
