@@ -368,6 +368,9 @@ enum Step {
     Repair(u8, bool),
     /// An observer claim and a claim of another kind in one operation, in two envelopes.
     Shared(u8),
+    /// Two observations of one observer in one batch: the older is not the newest of its slot
+    /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
+    Twice(u8),
 }
 
 fn step_strategy() -> impl Strategy<Value = Step> {
@@ -377,6 +380,7 @@ fn step_strategy() -> impl Strategy<Value = Step> {
         1 => any::<u8>().prop_map(Step::Protect),
         1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
         1 => (0..3u8).prop_map(Step::Shared),
+        1 => (0..3u8).prop_map(Step::Twice),
     ]
 }
 
@@ -458,6 +462,26 @@ fn take_step(store: &Store, step: &Step, n: usize) {
                     params![format!("record/repaired-{n}"), n as i64, format!("claim/original-{n}"), id],
                 )
                 .unwrap();
+        }
+        Step::Twice(observer) => {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let mut batch = None;
+            for status in ["ok", "changed"] {
+                let claim = append_claim_tx(
+                    &transaction,
+                    &store.origin,
+                    &format!("observer/watch-{observer}"),
+                    "observer.observed",
+                    None,
+                    &json!({"fields": {"status": status}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch = Some(claim.batch_id);
+            }
+            transaction.commit().unwrap();
         }
         Step::Shared(observer) => {
             let operation = json!({"id": format!("operation/shared-{n}"), "request_digest": format!("digest-{n}")});

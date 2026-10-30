@@ -368,3 +368,57 @@ impl StagedSet {
         Ok(transaction.commit()?)
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::runtime::Plain;
+    use std::sync::Arc;
+
+    /// A local cut's file holds the marks `protect_all_but` set. Left behind, as after an error,
+    /// a full capture of the same cut must start its own file, not resume those marks.
+    #[test]
+    fn a_full_capture_never_resumes_a_local_cuts_scoped_file() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+        store
+            .connection
+            .write()
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS desired(claim_id TEXT);
+                 CREATE TABLE IF NOT EXISTS mission_definitions(claim_id TEXT);
+                 CREATE TABLE IF NOT EXISTS mission_revisions(claim_id TEXT);
+                 CREATE TABLE IF NOT EXISTS documents(binding_claim_id TEXT);",
+            )
+            .unwrap();
+        for n in 0..3 {
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("note/{n}"),
+                    kind: "example.note".into(),
+                    actor: None,
+                    fields: BTreeMap::from([("text".into(), json!(n))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
+        store.seal_local_batches().unwrap();
+        let cut = now_ms() + 1_000;
+        let protected = |staged: &StagedSet| -> (i64, i64) {
+            staged
+                .staging
+                .query_row("SELECT COUNT(*), COALESCE(SUM(protected), 0) FROM claims", [], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+        };
+        let scoped = store.checkpoint_staged_set_scoped(cut, None, scratch.path(), Some(&["example.note"])).unwrap();
+        scoped.protect_all_but(&["another.kind"]).unwrap();
+        assert_eq!(protected(&scoped), (3, 3));
+        let scoped_path = scoped.path.clone();
+        drop(scoped);
+        let full = store.checkpoint_staged_set(cut, None, scratch.path()).unwrap();
+        assert_ne!(full.path, scoped_path, "a full capture has its own file");
+        assert!(!scoped_path.exists(), "the scoped file is removed, not resumed");
+        assert_eq!(protected(&full), (3, 0), "no mark a local cut set survives into a full capture");
+    }
+}

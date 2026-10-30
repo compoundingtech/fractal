@@ -1366,7 +1366,7 @@ mod headroom_resume_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("capture-checkpoint-2026-10-16-1.sqlite3");
         let first = StagedSet::open(
-            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1, None,
         ).unwrap();
         first.staging.execute(
             "UPDATE meta SET phase=?1, cursor=?2 WHERE id=1",
@@ -1374,7 +1374,7 @@ mod headroom_resume_tests {
         ).unwrap();
         drop(first); // A headroom refusal closes the file without discarding committed pages.
         let resumed = StagedSet::open(
-            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1, None,
         ).unwrap();
         let (phase, cursor, _) = resumed.position().unwrap();
         assert_eq!((phase, cursor), (CLAIMS, 42));
