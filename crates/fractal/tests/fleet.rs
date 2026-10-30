@@ -3291,10 +3291,10 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
         .unwrap();
     drop(reader);
     let archive = directory.join("baseline-claims.jsonl");
-    let header = fractal_daemon::backup::create_from_database(&copy, &directory, &archive).unwrap();
+    let header = fractal_daemon::backup::create_from_database(&copy, directory, &archive).unwrap();
     let source = fractal_daemon::store::Store::open(&copy, "backup-reader").unwrap();
     let target = directory.join("baseline-restored.db");
-    let report = fractal_daemon::backup::restore(&archive, &target, &directory).unwrap();
+    let report = fractal_daemon::backup::restore(&archive, &target, directory).unwrap();
     let restored = fractal_daemon::store::Store::open(&target, &report.writer).unwrap();
     assert!(old_schema <= header.source_schema);
     assert_eq!(report.graph_digest, header.graph_digest);

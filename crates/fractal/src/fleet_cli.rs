@@ -450,16 +450,18 @@ async fn lock_fleet_admission(
     services: bool,
     verb: &str,
 ) -> Result<fractal_daemon::node_identity::StateLock> {
-    if client.get::<Value>("/v1/health").await.is_ok() {
+    let mut state_identity = if client.get::<Value>("/v1/health").await.is_ok() {
         anyhow::ensure!(
             services,
             "stop the running st3 daemon first: nothing may write while this machine {verb}"
         );
         fractal_daemon::service::stop()?;
-        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await
+        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await?
     } else {
-        fractal_daemon::node_identity::lock(&config.state_dir)
-    }
+        fractal_daemon::node_identity::lock(&config.state_dir)?
+    };
+    fractal_daemon::node_identity::lock_store_directory(&mut state_identity, config)?;
+    Ok(state_identity)
 }
 
 /// Pairing credentials travel over the helper's private stdin/stdout, never argv.
@@ -766,6 +768,9 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 version: env!("CARGO_PKG_VERSION").into(),
             })
             .await?;
+            if config.store_dir.is_some() {
+                fractal_daemon::node_identity::record_store_writer(&config.store_path(), &joined.name)?;
+            }
             state_identity.record_fleet_join(&joined)?;
             drop(state_identity);
             if let Some(path) = code_path {
@@ -1445,6 +1450,9 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             joined.migrate,
             "that code is a join code; use fractal fleet join"
         );
+        if config.store_dir.is_some() {
+            fractal_daemon::node_identity::record_store_writer(&config.store_path(), &joined.name)?;
+        }
         state_identity.record_fleet_join(&joined)?;
         if let Some(path) = code_path {
             let _ = fs::remove_file(path);

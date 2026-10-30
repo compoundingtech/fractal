@@ -17,6 +17,8 @@ const FILE: &str = "node-identity.json";
 #[derive(Debug)]
 pub struct StateLock {
     _file: File,
+    _state_directory_lock: File,
+    _store_lock: Option<File>,
     state_dir: PathBuf,
 }
 
@@ -66,6 +68,9 @@ impl StateLock {
 /// The state lock also fences a second daemon using different socket paths on the same state.
 pub fn lock(state_dir: &Path) -> Result<StateLock> {
     fs::create_dir_all(state_dir)?;
+    // Use the directory inode as the shared ownership fence: an explicit store
+    // may be another daemon's default state directory, under a different name.
+    let directory_lock = lock_directory_for(state_dir, "state")?;
     let path = state_dir.join("node-identity.lock");
     let lock = OpenOptions::new()
         .read(true)
@@ -85,8 +90,44 @@ pub fn lock(state_dir: &Path) -> Result<StateLock> {
     }
     Ok(StateLock {
         _file: lock,
+        _state_directory_lock: directory_lock,
+        _store_lock: None,
         state_dir: state_dir.into(),
     })
+}
+
+/// Hold the daemon's store-directory fence without creating any lock or database files.
+pub fn lock_directory(directory: &Path) -> Result<File> {
+    lock_directory_for(directory, "store")
+}
+
+fn lock_directory_for(directory: &Path, kind: &str) -> Result<File> {
+    let file = File::open(directory)
+        .with_context(|| format!("open {kind} directory {} for locking", directory.display()))?;
+    // SAFETY: the returned File owns the descriptor for the lock's entire lifetime.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!("another daemon owns the {kind} directory {}", directory.display())
+        });
+    }
+    Ok(file)
+}
+
+/// Fence an explicitly configured store for daemon startup or fleet admission.
+/// Directory locks add no store files and also conflict with default-state writers.
+pub fn lock_store_directory(guard: &mut StateLock, config: &Config) -> Result<()> {
+    anyhow::ensure!(
+        fs::canonicalize(&guard.state_dir)? == fs::canonicalize(&config.state_dir)?,
+        "store directory lock requires ownership of the configured state directory"
+    );
+    if validate_store_location(config)? {
+        anyhow::ensure!(
+            guard._store_lock.is_none(),
+            "configured store directory is already locked by this state guard"
+        );
+        guard._store_lock = Some(lock_directory(&store_dir(config))?);
+    }
+    Ok(())
 }
 
 /// Service stop can return before the old daemon has closed its file descriptors.
@@ -109,7 +150,8 @@ pub async fn lock_after_stop(state_dir: &Path) -> Result<StateLock> {
 
 pub fn acquire(config: &mut Config) -> Result<StateLock> {
     validate_store_location(config)?;
-    let lock = lock(&config.state_dir)?;
+    let mut lock = lock(&config.state_dir)?;
+    lock_store_directory(&mut lock, config)?;
     resolve(config)?;
     config.validate()?;
     let path = config.state_dir.join(FILE);
@@ -199,13 +241,13 @@ fn validate_store_location(config: &Config) -> Result<bool> {
     let directory = store_dir(config);
     let metadata = fs::metadata(&directory).with_context(|| {
         format!(
-            "configured store directory {} must already exist and be a directory",
+            "configured store directory (store_dir) {} must already exist and be a directory",
             directory.display()
         )
     })?;
     anyhow::ensure!(
         metadata.is_dir(),
-        "configured store directory {} is not a directory",
+        "configured store directory (store_dir) {} is not a directory",
         directory.display()
     );
     let configured = fs::canonicalize(&directory)?;
@@ -312,7 +354,7 @@ fn configured_writer_from(connection: &Connection, requested: &str) -> Result<Op
     if let Some(writer) = restored.as_deref() {
         anyhow::ensure!(
             requested == writer,
-            "restored database requires fresh writer `{writer}`; configure node to that identity before starting"
+            "restored database requires fresh writer `{writer}`, but the configured store expects local writer `{requested}`; restore the matching database and node-identity.json before starting"
         );
     }
     let receipt = previous_local_receipts(connection)?;
@@ -389,6 +431,98 @@ fn previous_local_receipts(connection: &Connection) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_fresh_admission_records_writer_before_any_seat_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = configured_store(root.path());
+        let mut guard = lock(&config.state_dir).unwrap();
+        lock_store_directory(&mut guard, &config).unwrap();
+        let joined = crate::fleet::join::Joined {
+            fleet_id: "11111111-1111-4111-8111-111111111111".into(),
+            name: "orchid-admitted".into(),
+            sponsor: "fern".into(),
+            writer_floor: None,
+            migrate: false,
+            resumed: false,
+        };
+        let membership = crate::config::FleetFile {
+            fleet_id: joined.fleet_id.clone(),
+            node: Some(joined.name.clone()),
+            mode: crate::config::FleetMode::DialOut,
+            ..crate::config::FleetFile::default()
+        };
+        membership.save(&config.state_dir).unwrap();
+        let connection = Connection::open(config.store_path()).unwrap();
+        connection
+            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);")
+            .unwrap();
+        record_store_writer(&config.store_path(), &joined.name).unwrap();
+        guard.record_fleet_join(&joined).unwrap();
+        drop(guard);
+        config.fleet = Some(membership);
+        let _guard = acquire(&mut config).unwrap();
+        assert_eq!(config.node, joined.name);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name='local_observations'",
+                    [],
+                    |row| row.get::<_, u64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn separate_state_roots_cannot_share_one_live_explicit_store() {
+        let root = tempfile::tempdir().unwrap();
+        let mut first = configured_store(root.path());
+        let mut second = first.clone();
+        second.state_dir = root.path().join("second-state");
+        let guard = acquire(&mut first).unwrap();
+        assert!(
+            acquire(&mut second)
+                .unwrap_err()
+                .to_string()
+                .contains("another daemon owns the store directory")
+        );
+        assert!(!second.state_dir.join(FILE).exists());
+        assert!(!first.store_path().exists());
+        assert!(!store_dir(&first).join("node-identity.lock").exists());
+        drop(guard);
+        let _guard = acquire(&mut second).unwrap();
+    }
+
+    #[test]
+    fn explicit_store_fences_default_state_writer_in_both_directions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut external = configured_store(root.path());
+        let mut default = Config {
+            node: "orchid".into(),
+            state_dir: store_dir(&external),
+            ..Config::default()
+        };
+        let external_guard = acquire(&mut external).unwrap();
+        assert!(
+            acquire(&mut default)
+                .unwrap_err()
+                .to_string()
+                .contains("another daemon owns the state directory")
+        );
+        assert!(!default.state_dir.join("node-identity.lock").exists());
+        drop(external_guard);
+        let default_guard = acquire(&mut default).unwrap();
+        assert!(
+            acquire(&mut external)
+                .unwrap_err()
+                .to_string()
+                .contains("another daemon owns the store directory")
+        );
+        drop(default_guard);
+        let _external_guard = acquire(&mut external).unwrap();
+    }
 
     #[test]
     fn explicit_store_without_seats_restarts_using_recorded_local_writer() {

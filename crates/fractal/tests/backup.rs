@@ -172,6 +172,12 @@ async fn a_streamed_export_failure_names_the_cause_and_never_publishes_a_cli_bac
 
 #[tokio::test]
 async fn configured_store_directory_backup_roundtrip_keeps_bodies_in_product_state() {
+    configured_store_directory_roundtrip(false).await;
+    #[cfg(unix)]
+    configured_store_directory_roundtrip(true).await;
+}
+
+async fn configured_store_directory_roundtrip(database_alias: bool) {
     use fractal_daemon::message_body;
     use sha2::{Digest as _, Sha256};
 
@@ -201,7 +207,7 @@ async fn configured_store_directory_backup_roundtrip_keeps_bodies_in_product_sta
             ("status".into(), json!("sent")),
             ("attachments".into(), json!([{
                 "sha256": hash, "media_type": "text/plain",
-                "size": text.len(), "origin": "alder"
+                "size": text.len(), "origin": "host/alder"
             }])),
         ]),
         evidence: vec![],
@@ -209,12 +215,29 @@ async fn configured_store_directory_backup_roundtrip_keeps_bodies_in_product_sta
         idempotency_key: Some("separate-store-body".into()),
     }).unwrap();
     message_body::bodies(&source_state).put("person/alex", subject, text.as_bytes()).unwrap();
+    let message = source.message(subject).unwrap().unwrap();
+    assert_eq!(message.body_bytes, Some(text.len() as u64));
+    assert_eq!(message.body_origin.as_deref(), Some("host/alder"));
     drop(source);
     let archive = root.path().join("separate-store.jsonl");
     let socket = root.path().join("unused.sock");
+    let source_database_argument = if database_alias {
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("source-database-alias");
+            std::os::unix::fs::symlink(&source_database_dir, &alias).unwrap();
+            alias.join("claims.sqlite3")
+        }
+        #[cfg(not(unix))]
+        {
+            unreachable!("database alias coverage requires Unix symlinks")
+        }
+    } else {
+        source_database.clone()
+    };
     let output = backup_cli(&source_root, &socket)
         .args(["backup", "create"]).arg(&archive)
-        .arg("--database").arg(&source_database)
+        .arg("--database").arg(&source_database_argument)
         .output().await.unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(!source_database_dir.join("message-bodies").exists());
