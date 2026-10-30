@@ -387,6 +387,77 @@ impl Store {
         Ok(items.into_iter().map(|(_, item)| item).collect())
     }
 
+    /// The `github.event` claims this member holds for items of the repository resource
+    /// `resource`, or for its item `number`, newest first, at most `limit`.
+    pub fn github_events(&self, resource: &str, number: Option<u64>, limit: usize) -> Result<Vec<Value>> {
+        // Each item's events are `github-event/` + the item subject without `resource/` + a key.
+        let Some(prefix) = resource
+            .strip_prefix("resource/")
+            .map(|rest| format!("{}/{rest}/", fractal_schema::github_plugin::EVENT_FAMILY))
+        else {
+            return Ok(Vec::new());
+        };
+        let upper = prefix_successor(&prefix).unwrap_or_default();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-GITHUB-EVENTS owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */
+            "SELECT subject, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
+             WHERE subject>=?1 AND subject<?2 AND kind='github.event'",
+        )?;
+        let mut events = statement
+            .query_map(params![prefix, upper], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|(subject, fields, accepted)| {
+                let rest = subject.strip_prefix(&prefix)?;
+                let mut parts = rest.splitn(3, '/');
+                let (_family, item, key) = (parts.next()?, parts.next()?.parse::<u64>().ok()?, parts.next()?);
+                if number.is_some_and(|number| number != item) {
+                    return None;
+                }
+                let fields: Value = serde_json::from_str(&fields?).ok()?;
+                Some((accepted.parse::<u128>().unwrap_or_default(), json!({
+                    "subject": subject,
+                    "number": item,
+                    "key": key,
+                    "event": fields.get("event"),
+                    "head_sha": fields.get("head_sha"),
+                    "detail": fields.get("detail"),
+                    "at": fields.get("at"),
+                })))
+            })
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| right.0.cmp(&left.0));
+        events.truncate(limit);
+        Ok(events.into_iter().map(|(_, event)| event).collect())
+    }
+
+    /// What `member`'s newest start, from its own `daemon.started`, advertises for build feature
+    /// `feature`: `None` when it advertised nothing, as an older build does.
+    pub fn advertised_feature(&self, member: &str, feature: &str) -> Result<Option<Value>> {
+        anyhow::ensure!(
+            !feature.is_empty() && feature.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "a feature name is letters, digits and underscores"
+        );
+        let connection = self.readers.get();
+        Ok(connection
+            .query_row(
+                /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ADVERTISED owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
+                    "SELECT json_extract(body, '$.fields.features') FROM claims
+                     WHERE subject=?1 AND kind='daemon.started' AND origin=?2
+                     ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+                ),
+                params![format!("daemon/{member}"), member],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .and_then(|features| serde_json::from_str::<Value>(&features).ok())
+            .and_then(|features| features.get(feature).cloned()))
+    }
+
     /// The cursor in `observer`'s newest `observer.observed` claim. A build before the GitHub
     /// plugin database wrote the whole cursor there; for a repository observer this build writes
     /// only how far it has read, which every member keeps.

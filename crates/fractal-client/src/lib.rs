@@ -2553,6 +2553,15 @@ impl Client {
     ) -> Result<Envelope<Page>, ClientError> {
         self.list_internal("sessions", cursor, limit, history).await
     }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        if !path.starts_with("/v1/plugins/github/repos/") || path.contains("..") || path.contains('#') {
+            return Err(ClientError::Protocol(format!("not a GitHub plugin read: {path}")));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        self.get(&format!("{path}{separator}local=1")).await
+    }
     pub async fn sessions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("sessions", id).await
     }

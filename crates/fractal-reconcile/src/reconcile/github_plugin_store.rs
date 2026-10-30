@@ -395,7 +395,7 @@ impl GithubPluginStore {
         for row in rows {
             let (subject, facts, claim, observed_at) = row?;
             let facts: Map<String, Value> = serde_json::from_str(&facts)?;
-            pulls.push(summary(&subject, &facts, claim, observed_at));
+            pulls.push(summary(&subject, facts, claim, Some(observed_at)));
         }
         Ok(pulls)
     }
@@ -571,8 +571,8 @@ fn forget_repository(connection: &Connection, repository: &str) -> Result<()> {
     Ok(())
 }
 
-/// One pull request as a list shows it.
-fn summary(subject: &str, facts: &Map<String, Value>, claim: Option<String>, observed_at: i64) -> Value {
+/// One pull request as a list shows it. `observed_at` is when the mirror took it, when known.
+pub fn summary(subject: &str, facts: Map<String, Value>, claim: Option<String>, observed_at: Option<i64>) -> Value {
     let mut row = Map::new();
     row.insert("subject".into(), subject.into());
     for name in [
