@@ -1062,6 +1062,7 @@ fn resource_fixture_covers_every_resource_kind_with_stable_unique_ids() {
     let expected = BTreeSet::from([
         "agent",
         "attention",
+        "harness-question",
         "history",
         "launch",
         "launch-approval",
@@ -1249,7 +1250,7 @@ fn test_state(root: &Path) -> AppState {
     configured_peers: Vec::new(),
     client_relay: None,
     native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    planner_default: fractal_daemon::model::PlannerSpec::default(), harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 #[test]

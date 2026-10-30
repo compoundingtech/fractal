@@ -53,6 +53,17 @@ fn age(then: &str, now: &str) -> String {
     label.trim_end_matches(" ago").to_owned()
 }
 
+/// When an ask resolves by itself and what then applies, as the web and phone word it.
+pub(crate) fn ask_deadline(deadline: &str, default: Option<&str>, now: &str) -> String {
+    // How long is left is the age of now seen from the deadline: `0s` once it has passed.
+    let left = crate::age_label(now, deadline);
+    let left = left.trim_end_matches(" ago");
+    match default {
+        Some(label) => format!("answer within {left}, or “{label}” applies"),
+        None => format!("answer within {left}, or it times out"),
+    }
+}
+
 fn loaded<T>(snapshot: bool, items: Vec<T>) -> Load<Vec<T>> {
     if snapshot {
         Load::Ready(items)
@@ -606,6 +617,13 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                     .unwrap_or_else(|| clean_message_text(&item.title)),
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
+                deadline: item.deadline_at.as_deref().map(|deadline| {
+                    ask_deadline(
+                        deadline,
+                        item.default_answer.as_ref().map(|answer| answer.label.as_str()),
+                        now,
+                    )
+                }),
                 mission,
                 kind,
                 actions: item.actions.clone(),

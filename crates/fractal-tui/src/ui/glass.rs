@@ -5090,6 +5090,7 @@ mod tests {
 
     fn alert_prompt(id: &str, agent: &str) -> Attention {
         Attention {
+            deadline: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: format!("{agent} is waiting for a permission"),

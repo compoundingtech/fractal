@@ -1501,19 +1501,24 @@ fn state_on(root: &Path, store: Store) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState { owning_person: None,
-    store: Arc::new(store),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "signing-node".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("unused-pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(store),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "signing-node".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 async fn wait_for_socket(socket: &Path) {
@@ -1878,6 +1883,61 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
 
     http_server.abort();
     local_server.abort();
+}
+
+/// A person's signed send checks its nonce against the signature relations the migration
+/// built, so it needs the migration's state: while a fault stands the send is refused, and a
+/// person's resume restores it.
+#[tokio::test]
+async fn a_signed_send_waits_on_a_persisted_signature_fault_until_a_person_resumes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let socket = root.path().join("st3.sock");
+    let app = fractal_daemon::api::router(state.clone());
+    let served = socket.clone();
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
+    wait_for_socket(&socket).await;
+    let local = Client::unix_as(&socket, PERSON);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let gateway = fractal_daemon::api::fabric_router(state.clone());
+    let http_server = tokio::spawn(async move { axum::serve(listener, gateway).await });
+    let phone = Device::new();
+    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
+    device_name: "Avery's phone".into(),
+    person_id: PERSON.into(),
+    full_control: Some(true),
+    scopes: None, fabric_gateway: None, })
+        .await
+        .unwrap();
+    let paired = Client::fabric_pairing(&base).pairing_complete_person(&challenge.value.pairing_id,
+    &PairingComplete {
+        api_version: fractal_client::API_VERSION.into(),
+        code: challenge.value.code,
+        device_public_key: phone.public(),
+        key_storage: None,
+        fabric_node_id: None,
+    },)
+        .await
+        .unwrap()
+        .value;
+    let chain = paired.device_key_chain.clone();
+    let client = Client::fabric_loopback(&base, &paired.credential);
+    let signed = |key: &str| phone.sign_message(&chain, key, "agent/alder", "on my way", &format!("nonce-{key}"), now_ms());
+
+    state.store.fail_signature_migration("bootstrap job stopped: fixture").unwrap();
+    let message = refused(send(&client, "phone-send-under-fault", "agent/alder", "on my way", signed("phone-send-under-fault")).await);
+    assert!(message.contains("signature-state-corrupt"), "{message}");
+    assert!(state.store.latest_claim(&message_subject("phone-send-under-fault"), Some("message.sent")).unwrap().is_none());
+
+    state.store.resume_signature_migration_as(PERSON, "the fault was a busy writer").unwrap();
+    send(&client, "phone-send-after-resume", "agent/alder", "on my way", signed("phone-send-after-resume")).await.unwrap();
+    let claim = state.store.latest_claim(&message_subject("phone-send-after-resume"), Some("message.sent")).unwrap().unwrap();
+    assert_eq!(claim.actor.as_deref(), Some(PERSON));
+    state.store.replication_snapshot().unwrap();
+    assert_eq!(state.store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
+    local_server.abort();
+    http_server.abort();
 }
 
 fn fixture_path() -> PathBuf {
