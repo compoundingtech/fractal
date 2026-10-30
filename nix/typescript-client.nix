@@ -34,6 +34,7 @@ let
       ../packages/fractal-sdk/package.json
       ../apps/ios/package.json
       ../clients/typescript/fractal-client/package.json
+      ../clients/typescript/fractal-declarations/package.json
       ../clients/typescript/fractal-scenarios/package.json
       ../clients/typescript/fractal-views/package.json
       ../packages/fractal-ui/package.json
