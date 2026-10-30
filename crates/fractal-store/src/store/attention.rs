@@ -567,10 +567,12 @@ impl Store {
         at_index: Option<u64>,
     ) -> Result<Option<UsageSummary>> {
         let connection = self.readers.get();
-        // A current read on the seat's host also folds the rollups not yet replicated.
-        let pending = match at_index {
-            None => crate::store::pending_usage_rollups(&connection, Some(subject))?,
-            Some(_) => Vec::new(),
+        // A current read on the seat's host also folds the rollups not yet replicated. Callers
+        // pass the request's index, the latest one, for a current read.
+        let pending = if at_index.is_none_or(|at| at >= self.index().unwrap_or(u64::MAX)) {
+            crate::store::pending_usage_rollups(&connection, Some(subject))?
+        } else {
+            Vec::new()
         };
         let at_index = at_index.unwrap_or(i64::MAX as u64);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h8c6ff8af9665 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(
@@ -702,9 +704,11 @@ impl Store {
         for (subject, cached) in &folded {
             // A current read on the seat's host also folds the rollups not yet replicated
             // (rollups replicate hourly); the kept fold stays the replicated claims' alone.
-            let pending = match at_index {
-                None => crate::store::pending_usage_rollups(&connection, Some(subject))?,
-                Some(_) => Vec::new(),
+            // Card reads pass the request's snapshot index: a read at the snapshot is current.
+            let pending = if at_index.is_none_or(|at| at >= snapshot) {
+                crate::store::pending_usage_rollups(&connection, Some(subject))?
+            } else {
+                Vec::new()
             };
             let summary = if pending.is_empty() {
                 cached.fold.summary()

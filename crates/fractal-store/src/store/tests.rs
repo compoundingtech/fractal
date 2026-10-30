@@ -8597,7 +8597,13 @@ fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
             .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap())
             .collect::<Vec<_>>()
     };
-    let host_total = || store.usage_summaries_at(&[subject.to_owned()], None).unwrap()[subject].total_tokens;
+    // As the cards read: at the request's snapshot index.
+    let host_total = || {
+        let at = Some(store.index().unwrap());
+        let cards = store.usage_summaries_at(&[subject.to_owned()], at).unwrap()[subject].total_tokens;
+        assert_eq!(store.usage_summary_at(subject, None, at).unwrap().unwrap().total_tokens, cards);
+        cards
+    };
     let mut tokens = 0;
     let mut at = start;
     let end = start + 2 * hour + hour / 2;
@@ -8673,9 +8679,68 @@ fn a_late_native_binding_keeps_the_rollup_waiting_for_its_hour() {
     }
     state("idle", start + 120_000);
     assert_eq!(replicated(), [(10, None)], "the turn end binds nothing that would drop the waiting reading");
-    assert_eq!(store.usage_summaries_at(&[subject.to_owned()], None).unwrap()[subject].total_tokens, 20);
+    assert_eq!(store.usage_summaries_at(&[subject.to_owned()], Some(store.index().unwrap())).unwrap()[subject].total_tokens, 20);
     state("ended", start + 180_000);
     assert_eq!(replicated(), [(10, None), (20, Some("native-example".to_owned()))], "the end replicates it, bound");
+}
+
+/// A held rollup has a deadline and survives the trim. The hourly local trim first replicates a
+/// rollup whose hour is over for a seat that stopped re-stamping, it never deletes a reading its
+/// slot still waits on, and a reading after the seat ended replicates at once.
+#[test]
+fn a_held_rollup_has_a_deadline_and_survives_the_trim() {
+    let store = Store::open_memory("node").unwrap();
+    let hour = 3_600_000_u128;
+    let now = now_ms();
+    let state = |subject: &str, state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |subject: &str, tokens: u64, at: u128| {
+        let reading = ClaimInput {
+            subject: subject.into(),
+            kind: "harness.usage".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-1")),
+                ("semantics".into(), json!("response_rollup")),
+                ("model".into(), json!("example-model")),
+                ("total_tokens".into(), json!(tokens)),
+                ("observed_at_unix_ms".into(), json!(at as u64)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("rollup:{subject}:{tokens}")),
+        };
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = |subject: &str| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    // A seat that died two hours ago, its last rollup still held, and a live one this hour.
+    let (dead, live) = ("agent/node.dead", "agent/node.live");
+    let past = (now / hour - 2) * hour + 1_000;
+    state(dead, "working", past);
+    rollup(dead, 10, past + 1_000);
+    rollup(dead, 20, past + 60_000);
+    state(live, "working", now);
+    rollup(live, 1, now);
+    rollup(live, 2, now);
+    // A newer usage reading of another slot, so the held one is no longer the newest row.
+    store.append_latest_observation(&harness_usage(live, "context_occupancy", 5, 0), now).unwrap();
+    let replicated = |subject: &str| replicated(subject).into_iter().filter(|tokens| *tokens != 0).collect::<Vec<_>>();
+    assert_eq!((replicated(dead), replicated(live)), (vec![10], vec![1]));
+    store.trim_local_observations(u128::MAX, 1, 100).unwrap();
+    assert_eq!(replicated(dead), [10, 20], "the trim replicates a rollup whose hour is over");
+    assert_eq!(replicated(live), [1], "one whose hour is still on waits");
+    let at = Some(store.index().unwrap());
+    assert_eq!(store.usage_summaries_at(&[live.to_owned()], at).unwrap()[live].total_tokens, 2, "and was not trimmed");
+    state(live, "ended", now + 1);
+    assert_eq!(replicated(live), [1, 2]);
+    rollup(live, 3, now + 2);
+    assert_eq!(replicated(live), [1, 2, 3], "a reading after the end replicates at once");
 }
 
 /// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
