@@ -142,10 +142,17 @@ pub(super) async fn run_work(
                     .to_owned(),
                 (None, None) => unreachable!("clap requires --reason or --request"),
             };
+            let deadline_ms = args
+                .deadline
+                .as_deref()
+                .map(|deadline| fractal_daemon::graph::parse_duration(deadline, true))
+                .transpose()?;
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        deadline_ms,
+                        default_answer: args.default_answer,
                         legacy_request: None,
                         person: args.person,
                         title: args.title,
@@ -167,6 +174,8 @@ pub(super) async fn run_work(
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        deadline_ms: None,
+                        default_answer: None,
                         legacy_request: None,
                         person: args.person,
                         title: args.title,

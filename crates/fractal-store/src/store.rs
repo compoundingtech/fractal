@@ -246,6 +246,8 @@ pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod checkpoint_identity_reuse_tests;
 #[cfg(test)]
+mod newest_claim_index_tests;
+#[cfg(test)]
 mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
@@ -674,6 +676,33 @@ impl UsageFold {
     }
 }
 
+
+/// The newest crash-loop raise of each subject in the JSON array ?1 at store index ?2 since its
+/// newest running observation. One seek per subject on (subject, kind, store_index), and only
+/// past that observation: a seat that ran since it was parked has nothing to find. The index is
+/// named because the planner otherwise ranges over every subject's reconcile decisions by kind.
+pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, claims.body, claims.accepted_at_unix_ms
+     FROM json_each(?1) subjects
+     JOIN claims ON claims.id=(
+         SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=subjects.value
+            AND kind='runtime.reconcile-decision' AND store_index<=?2
+            AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                WHERE subject=subjects.value AND kind='runtime.observed'
+                  AND store_index<=?2
+                  AND json_extract(body, '$.fields.status')='running'), 0)
+            AND json_extract(body, '$.fields.decision')='raise'
+            AND (json_extract(body, '$.fields.key') GLOB 'runtime-crash-loop:*'
+              OR json_extract(body, '$.fields.key') GLOB 'codex-crash-loop:*')
+          ORDER BY store_index DESC LIMIT 1)";
+
+/// A seat st stopped restarting after it failed to start: why, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The crash-loop decision that parked it.
+    pub decision: String,
+    pub reason: String,
+    pub parked_at_unix_ms: u128,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentWorkQueue {
@@ -2118,6 +2147,13 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
+    pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
+    /// Whether asks get deadlines: `[asks] deadlines`, off by default.
+    pub ask_deadlines: std::sync::atomic::AtomicBool,
+    /// The store index up to which person answers were checked for overriding a deadline's
+    /// default; in memory, so a restart checks them again and the notice's key keeps it once.
+    pub person_answers_checked: std::sync::atomic::AtomicU64,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2486,7 +2522,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2506,7 +2543,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2518,7 +2556,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -5455,6 +5494,58 @@ impl Store {
         kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
         times.extend(read);
         Ok(times)
+    }
+
+    /// Each of `subjects` that st parked at `at_index` and that has not run since: its newest
+    /// crash-loop raise (after repeated failed starts, or a failed explicit restart) for its
+    /// current launch, with no running observation after it. A new declaration launches afresh,
+    /// so a raise for an earlier launch parks nothing.
+    pub fn parked_seats_for(
+        &self,
+        subjects: &[String],
+        at_index: u64,
+    ) -> Result<BTreeMap<String, ParkedSeat>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he0201008ecc8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ PARKED_SEATS_SQL)?;
+        let mut parked = BTreeMap::new();
+        for chunk in subjects.chunks(256) {
+            let rows = statement
+                .query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (subject, id, body, accepted_at) in rows {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").unwrap_or(&body);
+                let token = fields
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| key.split_once(':'))
+                    .map(|(_, token)| token.to_owned())
+                    .unwrap_or_default();
+                if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
+                    continue;
+                }
+                parked.insert(
+                    subject,
+                    ParkedSeat {
+                        decision: id,
+                        reason: fields
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("st stopped restarting it after repeated failures")
+                            .to_owned(),
+                        parked_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Ok(parked)
     }
 
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
