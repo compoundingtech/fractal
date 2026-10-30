@@ -126,7 +126,7 @@ pub async fn subscribe(
             }
             checked_state.store.bind_argv_mailbox_checked(&binding, member, validate)
         })?.is_some() { return Ok(false); }
-        authority::with_authority(&checked_state, &binding, &checked_peer, |owner, validate| {
+        authority::with_authority(&checked_state, &binding, &checked_peer, || {}, |owner, validate| {
         if checked_state.store.check_mailbox(&binding).is_ok() {
             // Upgrade a still-current pre-lease binding without changing its capability.
             checked_state.store.bind_mailbox_with_lease_checked(&binding, Some(owner), validate).map(|_| ())
@@ -157,13 +157,13 @@ pub async fn bind(
         let _admission = admission;
         let mut primary_admitted = false;
         let bound = authority::with_claude_primary(&bind_state, &request, &peer, None, || {
-        // A nested/non-primary caller cannot change the primary seat's delivery diagnostics.
-        primary_admitted = true;
         if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
+            validate()?;
+            primary_admitted = true;
             bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
         })? { return Ok(bound); }
-        authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
+        authority::with_authority(&bind_state, &request, &peer, || { primary_admitted = true; }, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
     });
@@ -233,7 +233,7 @@ pub async fn attachment(
             "attachment-get unnegotiated"
         });
         if store.has_mailbox_lease(&fence)? {
-            authority::with_authority(&checked_state, &fence, &peer, |owner, validate| {
+            authority::with_authority(&checked_state, &fence, &peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -326,7 +326,7 @@ pub async fn receipt(
         let _admission = admission;
         authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
-            authority::with_authority(&checked_state, &request.fence, &checked_peer, |owner, validate| {
+            authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -925,7 +925,7 @@ async fn stream_with_timers_inner<F, S, H>(
                     crate::otel::record_mailbox_fence_check(caller, started.elapsed());
                     if admitted { return false; }
                     let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
-                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
+                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
                         repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
                     }), Ok(true))
                 })).await {

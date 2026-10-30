@@ -671,8 +671,12 @@ time series.
 `stale-mailbox-session`, `mailbox-binding-conflict`, `mailbox-peer-mismatch`,
 `mailbox-not-authorized`, `recipient-retired`, and `other`. Unrecognized codes
 map to `other`; their original text remains in the warning log and API reason.
-Refusal observation follows primary-caller admission: a rejected nested Claude
-caller cannot mark the primary seat refused or alter its recovery diagnostics.
+Refusal observation follows caller identity proof: the provider, exact live
+physical runtime membership and daemon-selected observation paths must match.
+A nested Claude caller also passes the primary process gate; argv callers must
+pass physical process validation. Wrong-provider and outside-runtime rejections
+cannot mark healthy primary delivery refused. A subsequent session/fence refusal
+encountered by the authenticated caller remains visible.
 
 Free-form diagnostic text is never exported as a label.
 
