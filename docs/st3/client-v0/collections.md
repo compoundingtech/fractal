@@ -201,6 +201,63 @@ restart, open a new socket and subscribe again; the new snapshot is authoritativ
 Each socket subscribes to store changes before taking its first snapshot, so a
 write racing that snapshot is visible in the snapshot or a subsequent frame.
 
+## Revisioned agents publications
+
+To request the complete unfiltered roster instead of a legacy window, send:
+
+```json
+{"kind":"subscribe","id":"roster","collection":"agents","agents_publication_version":1}
+```
+
+Do not include `limit`, window fields or filters. Without this opt-in, HTTP reads
+and collection frames keep their legacy grammar. This section defines the
+contract; it does not advertise server capability availability.
+
+Each snapshot is one or more `snapshot` chunks, including one empty chunk for an
+empty roster. Each chunk carries `id`, `collection: "agents"`, `snapshot`
+(including `published_at`), `publication`, `chunk_index`, `chunk_count`, `items`,
+`order` and `has_more: false`. The publication contains `node_epoch`, `revision`,
+`status_watermark: {store_index, local_frontier}` and `materialized_at_ms`.
+Indices start at zero; the count is positive. Chunk order contains only that
+chunk's item IDs. Chunks repeat identical snapshot, publication and count.
+
+Stage chunks privately. Require consecutive indices, matching envelopes and
+unique IDs across the sequence. Install rows, concatenated order and publication
+metadata together only after the final chunk. `has_more: false` means no window
+truncation, not that one chunk is the whole roster.
+
+A `changes` frame carries the same snapshot/publication, `base_revision`,
+`upserts`, `removes`, the complete target `order` and `has_more: false`, with no
+chunk fields. Apply it atomically only when its epoch and base revision match the
+last complete roster. Revision jumps are valid. Metadata-only changes still
+advance the publication.
+
+Frame consumers ignore unknown extension keys, including on revisioned frames.
+Required fields and values, the reserved snapshot/delta grammar, and the epoch,
+base-revision and contiguous-chunk integrity fences still apply. Producer schema
+validation remains stricter than transport decoding.
+
+Reconnect or resubscribe always starts a full snapshot; there is no replay log.
+Discard incomplete staging on disconnect, replacement, epoch change or newer
+revision. A newer chunk zero can start a new sequence. A gap, duplicate,
+nonzero opening chunk or delta during staging requires a full resubscribe.
+Ignore frames from an old connection generation or lower revision.
+
+The entire encoded JSON text frame must fit 1,048,576 UTF-8 bytes. Whole rows
+are packed into contiguous socket-wide chunks; no other subscription data frame
+interleaves. The complete sequence has an eight-second send deadline. An
+oversized delta becomes a full snapshot. An unrepresentable row ends the
+subscription with `code: "agents-publication-row-too-large"`, the actual
+subscription ID, `collection: "agents"` and `retryable: false`, before any chunk
+is sent. Keep the last complete roster visible.
+
+Rust callers use `CollectionStream::subscribe_agents_publication(id)` and receive
+`CollectionEvent::AgentsSnapshotChunk` or `AgentsChanges`. Snapshot provenance
+includes optional `Snapshot::published_at`; error and resync events retain
+optional collection/retryable fields for older servers. The raw send stays private.
+TypeScript callers use `subscribeAgentsPublication`; `applyWindow` is only for
+legacy windows. Swift callers use `agentsPublicationStream`.
+
 ## Terminals
 
 A terminal is one more subscription on the same socket. Call `terminal.attach`
@@ -342,12 +399,20 @@ projects a different graph than, with the same `SyncPeer` a page's `sync` carrie
 `SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
 `sync` means unknown, as from a daemon that does not send it, never level.
 
+A window an incremental view source reads (the daemon admits one for no collection yet) carries
+none, since such a source's reads say nothing when no row changed.
+
 A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
 frame only when it changed since the subscription's previous frame: its state, or which peers
 (by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a
 change. A client that missed a changes frame learns the current value from the next snapshot,
 which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
 (`GET /v1/client/attention?limit=1`).
+
+The daemon sends a change on the window's next frame. A host that starts or stops catching up or
+diverging rereads its attention windows on that commit, paced like any reread (within 1.5 s).
+Another peer named, or a measurement grown too old to say the host is behind, waits for the
+window's next read, which comes at least every 30 s while it is subscribed.
 
 A state this client does not know, or a shape the schema forbids (`level` with peers, or another
 state without them), reads as unknown, never level, and the frame is kept: the Rust client reads

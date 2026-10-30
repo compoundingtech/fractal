@@ -43,6 +43,8 @@ pub struct Snapshot {
     pub store_index: u64,
     pub projection_version: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 /// Node-local source cut; do not compare across nodes or publication epochs.
@@ -119,11 +121,13 @@ pub enum ErrorCode {
     PeerTooOld,
     ValidationFailed,
     IdempotencyConflict,
+    LegacyActionReceiptUntrusted,
     IssuerRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
     PageCursorExpired,
+    AgentRosterNotReady,
     AgentRosterCutNotReady,
     MessageSelectorsNotReady,
     RateLimited,
@@ -137,6 +141,7 @@ pub enum ErrorCode {
     TerminalEnded,
     TimelineHistoryIncomplete,
     ProjectionDetailTooLarge,
+    AgentsPublicationRowTooLarge,
     ProjectionDetailInvalidSource,
     ConversationContentInvalidated,
     TranscriptUnavailable,
@@ -600,6 +605,12 @@ pub struct AttentionPresentation {
     /// On a revision card: what the candidate revision changes.
     #[serde(default)]
     pub revision: Option<AttentionRevision>,
+    /// On a launch card: the newest variant's mission, or why st cannot preview it.
+    #[serde(default)]
+    pub launch: Option<AttentionLaunch>,
+    /// On a harness-prompt card: the calls the prompt can be about and the answers it takes.
+    #[serde(default)]
+    pub prompt: Option<AttentionPrompt>,
 }
 /// What a candidate mission revision changes.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -617,6 +628,88 @@ pub struct AttentionRevision {
 pub struct AttentionRevisionLine {
     pub op: String,
     pub text: String,
+}
+/// A launch card's preview: the newest variant's mission, or why st has none to show.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum AttentionLaunch {
+    Unavailable {
+        unavailable: AttentionLaunchUnavailableReason,
+    },
+    Preview(AttentionLaunchPreview),
+}
+/// The newest variant's mission, without finally steps.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionLaunchPreview {
+    pub variant: String,
+    #[serde(default)]
+    pub goals: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<AttentionLaunchStep>,
+    #[serde(default)]
+    pub agents: Vec<AttentionLaunchAgent>,
+    /// How many steps stop for a person.
+    #[serde(default)]
+    pub asks_you: u64,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionLaunchStep {
+    pub path: String,
+    pub title: String,
+    pub assignee: AttentionLaunchAssignee,
+    /// The paths of the steps it waits for.
+    #[serde(default)]
+    pub after: Vec<String>,
+    #[serde(default)]
+    pub asks_you: bool,
+}
+/// Who a step's work goes to: `kind` is `agent`, `any`, `st` or `none`; a kind this client does
+/// not know reads by its label.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionLaunchAssignee {
+    pub kind: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub label: String,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionLaunchAgent {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionLaunchUnavailableReason {
+    pub reason: String,
+    /// The planner's first diagnostics, at most three.
+    #[serde(default)]
+    pub diagnostics: Vec<String>,
+}
+/// A harness prompt's pending calls. `calls` is `None` when st cannot read the seat's timeline
+/// (`unknown_reason` says why): the card then says to answer in the terminal.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionPrompt {
+    #[serde(default)]
+    pub calls: Option<Vec<AttentionPromptCall>>,
+    #[serde(default)]
+    pub answers: Vec<String>,
+    /// True only when exactly one call is pending and its input is complete.
+    #[serde(default)]
+    pub allow: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_reason: Option<String>,
+}
+/// A tool call without a result. `input` is its arguments as JSON text, cut at 4 KiB.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AttentionPromptCall {
+    pub call_id: String,
+    pub tool: String,
+    pub input: String,
+    #[serde(default)]
+    pub input_complete: bool,
 }
 /// An agent or other actor, with the name a person reads.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -3858,6 +3951,12 @@ pub struct PersonAskParameters {
     pub new_run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<StructuredRequest>,
+    /// How long the person has to answer; absent, the fleet's default deadline applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// The request's answer id that applies at the deadline; absent, the ask times out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<String>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PersonStepParameters {
@@ -3951,7 +4050,8 @@ pub struct PersonAnswerInput {
 pub struct PersonAnswer {
     #[serde(rename = "type")]
     pub entry_type: String,
-    /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback` or `read`.
+    /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback`, `read` or
+    /// `dismissed`. A default applied at a deadline reads as the answer it stands for.
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -3983,6 +4083,9 @@ pub struct PersonAnswerRecord {
     pub answered_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswer>,
+    /// `deadline` when the ask resolved by itself at its deadline, not by the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }

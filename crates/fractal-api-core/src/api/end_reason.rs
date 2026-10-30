@@ -2,18 +2,48 @@
 use crate::OwnedSetsStore;
 use serde_json::{Value, json};
 use crate::model::{ClaimRecord, CurrentHarnessView, SubjectStatus};
+use crate::store::ParkedSeat;
 use crate::suspension::Suspension;
 
+/// The identity st acts as when it parks a seat on its own.
+pub const ST_RUNTIME_ACTOR: &str = "daemon/runtime";
+
+/// The park that still explains a seat: one on a current, unretired seat declaration that has not
+/// been seen running since. The card's fault and its end reason read the same answer.
+pub fn holding_park<'a>(subject: &SubjectStatus, parked: Option<&'a ParkedSeat>, retired: bool) -> Option<&'a ParkedSeat> {
+    let fields = subject.actual.as_ref().map(|v| v.get("fields").unwrap_or(v));
+    let actual = fields.and_then(|v| v.get("status")).and_then(Value::as_str);
+    parked.filter(|_| subject.projection.layer == "current" && subject.kind.as_deref() != Some("stop") && !retired
+        && !matches!(actual, Some("running" | "ready" | "working" | "idle")))
+}
+
 /// Read-only terminal evidence. An unknown actor/exit never implies success.
-pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarnessView>, suspension: Option<&Suspension>, desired: Option<&ClaimRecord>, retired: bool, updated_at: &str) -> Option<Value> {
+pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarnessView>, suspension: Option<&Suspension>, desired: Option<&ClaimRecord>, parked: Option<&ParkedSeat>, retired: bool, updated_at: &str) -> Option<Value> {
     let fields = subject.actual.as_ref().map(|v| v.get("fields").unwrap_or(v));
     let actual = fields.and_then(|v| v.get("status")).and_then(Value::as_str);
     let stop = subject.kind.as_deref() == Some("stop");
     let terminal_runtime = matches!(actual, Some("stopped" | "exited" | "absent" | "vanished"));
     // Historical stop declarations can explain an observed termination, but never imply success.
     if subject.projection.layer != "current" && !(stop && terminal_runtime) { return None; }
+    // st stopped restarting a seat that failed to start, and it has not run since: that, not its
+    // last exit, is why it is not running.
+    if let Some(parked) = holding_park(subject, parked, retired) {
+        return Some(json!({
+            "kind": "parked",
+            "actor": ST_RUNTIME_ACTOR,
+            "reason": parked.reason,
+            "ended_at": super::client_timestamp(parked.parked_at_unix_ms),
+        }));
+    }
     let suspended = suspension.filter(|s| s.action == "suspend" && s.phase == "suspended");
-    let actor = suspended.and_then(|s| s.requested_by.as_deref()).or_else(|| stop.then(|| desired.and_then(|c| c.actor.as_deref())).flatten());
+    let stop_reason = desired.filter(|_| stop && suspended.is_none())
+        .and_then(|c| c.body.pointer("/desired/reason").or_else(|| c.body.pointer("/fields/desired/reason")))
+        .and_then(Value::as_str);
+    // A mission run stops the seats it owns when it ends, under no person's or agent's name.
+    let run_stop = stop && suspended.is_none() && desired.is_some_and(|c| c.actor.is_none());
+    let actor = suspended.and_then(|s| s.requested_by.as_deref())
+        .or_else(|| stop.then(|| desired.and_then(|c| c.actor.as_deref())).flatten())
+        .or_else(|| run_stop.then_some(subject.owner_run.as_deref()).flatten());
     let harness = subject.harness.as_ref().or(terminal_harness).filter(|h| h.state == "ended");
     let raw_exit = harness.and_then(|h| h.exit.as_deref());
     let runtime_exit_code = fields.and_then(|v| v.get("exit_code")).and_then(Value::as_i64);
@@ -27,6 +57,7 @@ pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarness
         match actor {
             Some(a) if a.starts_with("person/") => "stopped-by-person",
             Some(a) if a.starts_with("agent/") => "stopped-by-agent",
+            Some(a) if run_stop && a.starts_with("mission-run/") => "stopped-by-mission",
             _ => return None,
         }
     } else if harness.is_some() && diagnostic.is_some() { "harness-exited" }
@@ -44,7 +75,7 @@ pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarness
     if let Some(code) = exit_code { object.insert("exit_code".into(), json!(code)); }
     if let Some(signal) = exit_signal { object.insert("exit_signal".into(), json!(signal)); }
     if let Some(diagnostic) = diagnostic { object.insert("diagnostic".into(), json!(diagnostic)); }
-    if let Some(reason) = suspended.and_then(|s| s.reason.as_deref()) { object.insert("reason".into(), json!(reason)); }
+    if let Some(reason) = suspended.and_then(|s| s.reason.as_deref()).or(stop_reason) { object.insert("reason".into(), json!(reason)); }
     Some(result)
 }
 
@@ -64,22 +95,22 @@ mod tests {
     #[test]
     fn completion_requires_explicit_clean_current_evidence() {
         let mut seat = subject(Some("exit 0"));
-        assert_eq!(project(&seat, None, None, None, false, "2026-10-04T00:00:00Z").unwrap()["kind"], "completed");
+        assert_eq!(project(&seat, None, None, None, None, false, "2026-10-04T00:00:00Z").unwrap()["kind"], "completed");
         seat.projection.layer = "historical".into();
-        assert!(project(&seat, None, None, None, false, "2026-10-04T00:00:00Z").is_none());
-        assert!(project(&subject(None), None, None, None, false, "2026-10-04T00:00:00Z").is_none());
+        assert!(project(&seat, None, None, None, None, false, "2026-10-04T00:00:00Z").is_none());
+        assert!(project(&subject(None), None, None, None, None, false, "2026-10-04T00:00:00Z").is_none());
         seat = subject(Some("exit 0"));
         seat.kind = Some("stop".into());
-        assert!(project(&seat, None, None, None, false, "2026-10-04T00:00:00Z").is_none());
+        assert!(project(&seat, None, None, None, None, false, "2026-10-04T00:00:00Z").is_none());
     }
     #[test]
     fn signal_and_diagnostic_never_become_completed() {
         let mut seat = subject(Some("signal 9"));
-        let end = project(&seat, None, None, None, false, "2026-10-04T00:00:00Z").unwrap();
+        let end = project(&seat, None, None, None, None, false, "2026-10-04T00:00:00Z").unwrap();
         assert_eq!(end["kind"], "crashed");
         assert_eq!(end["exit_signal"], "9");
         seat.harness.as_mut().unwrap().reason = Some("auth refused: exact provider text".into());
-        let end = project(&seat, None, None, None, false, "2026-10-04T00:00:00Z").unwrap();
+        let end = project(&seat, None, None, None, None, false, "2026-10-04T00:00:00Z").unwrap();
         assert_eq!(end["kind"], "harness-exited");
         assert_eq!(end["diagnostic"], "auth refused: exact provider text");
     }
@@ -89,7 +120,7 @@ mod tests {
         seat.reachability = "unreachable".into();
         seat.actual = Some(json!({"fields": {"status": "running"}}));
         seat.harness.as_mut().unwrap().reason = Some("Codex launch failed before ready".into());
-        let end = project(&seat, None, None, None, false, "2026-10-26T00:00:00Z").unwrap();
+        let end = project(&seat, None, None, None, None, false, "2026-10-26T00:00:00Z").unwrap();
         assert_eq!(end["kind"], "harness-exited");
         assert_eq!(end["exit_code"], 0);
         assert_eq!(end["diagnostic"], "Codex launch failed before ready");
@@ -99,11 +130,11 @@ mod tests {
         let seat = subject(Some("exit 0"));
         for (actor, kind) in [("person/operator", "stopped-by-person"), ("agent/helper", "stopped-by-agent")] {
             let suspension = Suspension { action: "suspend".into(), phase: "suspended".into(), requested_by: Some(actor.into()), suspended_at_unix_ms: Some(1000), ..Suspension::default() };
-            let end = project(&seat, None, Some(&suspension), None, false, "2026-10-04T00:00:00Z").unwrap();
+            let end = project(&seat, None, Some(&suspension), None, None, false, "2026-10-04T00:00:00Z").unwrap();
             assert_eq!(end["kind"], kind);
             assert_eq!(end["actor"], actor);
         }
-        assert_eq!(project(&seat, None, None, None, true, "2026-10-04T00:00:00Z").unwrap()["kind"], "retired");
+        assert_eq!(project(&seat, None, None, None, None, true, "2026-10-04T00:00:00Z").unwrap()["kind"], "retired");
     }
     fn observe(store: &crate::store::Store, subject: &str, kind: &str, fields: Value) {
         store.append_claim(&crate::model::ClaimInput {
@@ -153,6 +184,79 @@ mod tests {
         assert_eq!(stopped["operational"]["layer"], "history");
         assert_eq!(stopped["end_reason"]["kind"], "stopped-by-person");
         assert_eq!(stopped["end_reason"]["actor"], "person/operator");
+    }
+    #[test]
+    fn a_stop_keeps_its_reason_beside_its_actor() {
+        let store = crate::store::Store::open_memory("node").unwrap();
+        let id = declare(&store, "version 2\nagent \"end\" { command \"sleep 100\" }", "declare", "person/operator");
+        observe(&store, &id, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
+        declare(&store, &format!("version 2\nstop {id:?} {{ reason \"Done for the week.\" }}"), "stop", "agent/example/lead");
+        observe(&store, &id, "runtime.observed", json!({"status":"stopped","incarnation_id":"one"}));
+        let stopped = row(&store, &id, store.index().unwrap());
+        assert_eq!(stopped["end_reason"]["kind"], "stopped-by-agent");
+        assert_eq!(stopped["end_reason"]["actor"], "agent/example/lead");
+        assert_eq!(stopped["end_reason"]["reason"], "Done for the week.");
+        assert!(crate::graph::parse_intent(&format!("version 2\nstop {id:?} {{ reason \" \" }}"), "node").is_err());
+        assert!(crate::graph::parse_intent(&format!("version 2\nstop {id:?} {{ host \"node\" }}"), "node").is_err());
+    }
+    #[test]
+    fn a_seat_its_run_stopped_names_the_run() {
+        let store = crate::store::Store::open_memory("node").unwrap();
+        let run = "mission-run/example/build/one";
+        let apply = |source: &str, key: &str| {
+            let mut intent = crate::graph::parse_internal_intent(source, "node").unwrap();
+            for subject in intent.subjects.values_mut() {
+                subject.owner_run = Some(run.into());
+            }
+            let preview = store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+            store.apply(&intent, &preview.subject_tokens, key).unwrap();
+            intent.subjects.keys().next().unwrap().clone()
+        };
+        let id = apply("version 2\nagent \"example/build/one/builder\" { command \"sleep 100\" }", "declare");
+        observe(&store, &id, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
+        apply(&format!("version 2\nstop {id:?}"), "cleanup");
+        observe(&store, &id, "runtime.observed", json!({"status":"stopped","incarnation_id":"one"}));
+        let stopped = row(&store, &id, store.index().unwrap());
+        assert_eq!(stopped["end_reason"]["kind"], "stopped-by-mission");
+        assert_eq!(stopped["end_reason"]["actor"], run);
+    }
+    #[test]
+    fn a_parked_seat_says_st_parked_it_until_it_runs_again() {
+        let store = crate::store::Store::open_memory("node").unwrap();
+        let id = declare(&store, "version 2\nagent \"end\" { command \"sleep 100\" }", "declare", "person/operator");
+        observe(&store, &id, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
+        observe(&store, &id, "runtime.observed", json!({"status":"exited","incarnation_id":"one","exit_code":1}));
+        let token = store.launch_lineage(&id).unwrap().pop().unwrap();
+        let reason = "the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)";
+        observe(&store, &id, "runtime.observed", json!({"status":"absent","incarnation_id":null}));
+        let raise = |token: &str| observe(&store, &id, "runtime.reconcile-decision", json!({
+            "decision":"raise","reachability":"unreachable","key":format!("runtime-crash-loop:{token}"),"reason":reason,
+        }));
+        raise(&token);
+        let parked = row(&store, &id, store.index().unwrap());
+        assert_eq!(parked["state"], "failed");
+        assert_eq!(parked["fault"], reason);
+        assert_eq!(parked["presentation"]["group"], "fault");
+        assert_eq!(parked["end_reason"]["kind"], "parked");
+        assert_eq!(parked["end_reason"]["actor"], ST_RUNTIME_ACTOR);
+        assert_eq!(parked["end_reason"]["reason"], reason);
+        // A seat seen ready has no running observation to end the park's lookup, yet neither its
+        // fault nor its end reason may still say it is parked.
+        observe(&store, &id, "runtime.observed", json!({"status":"ready","incarnation_id":"two"}));
+        let ready = row(&store, &id, store.index().unwrap());
+        assert_ne!(ready["fault"], reason, "{ready}");
+        assert_ne!(ready["state"], "failed", "{ready}");
+        assert_ne!(ready["end_reason"]["kind"], "parked", "{}", ready["end_reason"]);
+        observe(&store, &id, "runtime.observed", json!({"status":"running","incarnation_id":"two"}));
+        // Running again ends the park. (No reconciler here replaces the raise's `unreachable`,
+        // so this log reads as a lost host instead.)
+        let running = row(&store, &id, store.index().unwrap());
+        assert_ne!(running["end_reason"]["kind"], "parked", "{}", running["end_reason"]);
+        observe(&store, &id, "runtime.observed", json!({"status":"exited","incarnation_id":"two","exit_code":1}));
+        assert_eq!(row(&store, &id, store.index().unwrap())["end_reason"]["kind"], "crashed");
+        // A raise for a launch the seat no longer runs parks nothing.
+        raise("an-earlier-launch");
+        assert_eq!(row(&store, &id, store.index().unwrap())["end_reason"]["kind"], "crashed");
     }
     #[test]
     fn confirmed_one_shot_owned_retirement_survives_history() {

@@ -62,6 +62,8 @@ Use these documents for implementation details:
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
   and tests their harnesses run, on Linux and macOS, and what needs root. It also explains how
   stopping a seat ends every process the seat started, and what a host without systemd misses.
+- [Seat lanes](seat-lanes.md) explains how a seat that declares `capacity` runs with its builds in a
+  CPU and memory cap of its own, behind a per-host switch, and what a host guard must not count.
 - [Subagents](subagents.md) explains how Fractal records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Harness questions](harness-questions.md) explains how Fractal records the questions a seat's harness
@@ -83,8 +85,9 @@ Use these documents for implementation details:
 - [Gate evidence](gate-evidence.md) explains signed test and review records, local checks and CI verification.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
-- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN`: each open step's
-  wait and a run's stalled verdict, read in milliseconds from published state.
+- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN` and `st missions blocked`:
+  each open step's wait, a run's stalled verdict, and the fleet's blocked runs by cause, read in
+  milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
   mission run summaries, and the five-minute performance report in `st doctor`.
 - [Running Fractal with omp](omp.md) covers omp seat setup, behavior, and known limits.
