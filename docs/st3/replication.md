@@ -1377,6 +1377,9 @@ stop is the safety decision. The stopped cut is set aside and the next day's cut
 resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
 The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
 disk cannot hold.
+Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
+and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
+at once.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
