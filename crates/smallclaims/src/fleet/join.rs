@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn migrate_anchor_options_preserve_default_and_admitted_stores() {
-        let fleet_id = uuid::Uuid::new_v4().to_string();
+        let fleet_id = uuid::Uuid::parse_str("6f1c2a7e-0b4d-4c55-9a1e-2d3f4b5c6d7e").unwrap().to_string();
         for explicit in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let state = root.path().join("state");
