@@ -2667,7 +2667,7 @@ class FleetCompatKey(unittest.TestCase):
                '.github/workflows/fleet.yml', '.github/messaging-compat-baseline.json', '.st/rust-test-inputs.json')
 
     def setUp(self):
-        self.inputs = evidence_verify.policy_rules((ROOT / '.st/evidence-skip-policy.json').read_text(), self.CHECK,
+        self.inputs = evidence_verify.policy_rules(root_config('evidence-skip-policy.json').read_text(), self.CHECK,
                                                    'compoundingtech/fractal')['inputs']
         self.f = Fixture()
         self.addCleanup(self.f.tmp.cleanup)
