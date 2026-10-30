@@ -1627,7 +1627,7 @@ fn message_delivery_does_not_hold_stale_or_restarted_native_decisions() {
             let held = message_delivery_value(&store, to, phase, now, now + age).unwrap();
             assert_eq!(held["state"], "waiting");
             assert_eq!(held["phase"], phase);
-            assert_eq!(held["age_ms"], age);
+            assert_eq!(held["age_ms"], json!(age));
             assert!(held["reason"].as_str().unwrap().contains("held outside the native harness"));
         }
     }
