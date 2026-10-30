@@ -552,7 +552,7 @@ mod transient_tests {
     #[tokio::test]
     async fn a_transient_verdict_error_is_returned_unpersisted_and_resume_wakes_the_job() {
         let store = Store::open_memory("node", Arc::new(crate::store::runtime::Plain)).unwrap();
-        // hetz's fault, as `judge_claims` returned it on 2026-10-21.
+        // A member's fault, as `judge_claims` returned it in the field.
         let locked = sqlite(ffi::SQLITE_LOCKED).context("verdict reconciliation");
         assert!(store.record_judgment_failure(Err(locked)).is_err());
         assert_eq!(store.signature_migration().unwrap().fault, None);

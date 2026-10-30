@@ -1921,13 +1921,13 @@ async fn a_signed_send_waits_on_a_persisted_signature_fault_until_a_person_resum
     let signed = |key: &str| phone.sign_message(&chain, key, "agent/alder", "on my way", &format!("nonce-{key}"), now_ms());
 
     state.store.fail_signature_migration("bootstrap job stopped: fixture").unwrap();
-    let message = refused(send(&client, "faulted-send", "agent/alder", "on my way", signed("faulted-send")).await);
+    let message = refused(send(&client, "phone-send-under-fault", "agent/alder", "on my way", signed("phone-send-under-fault")).await);
     assert!(message.contains("signature-state-corrupt"), "{message}");
-    assert!(state.store.latest_claim(&message_subject("faulted-send"), Some("message.sent")).unwrap().is_none());
+    assert!(state.store.latest_claim(&message_subject("phone-send-under-fault"), Some("message.sent")).unwrap().is_none());
 
     state.store.resume_signature_migration_as(PERSON, "the fault was a busy writer").unwrap();
-    send(&client, "resumed-send", "agent/alder", "on my way", signed("resumed-send")).await.unwrap();
-    let claim = state.store.latest_claim(&message_subject("resumed-send"), Some("message.sent")).unwrap().unwrap();
+    send(&client, "phone-send-after-resume", "agent/alder", "on my way", signed("phone-send-after-resume")).await.unwrap();
+    let claim = state.store.latest_claim(&message_subject("phone-send-after-resume"), Some("message.sent")).unwrap().unwrap();
     assert_eq!(claim.actor.as_deref(), Some(PERSON));
     state.store.replication_snapshot().unwrap();
     assert_eq!(state.store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
