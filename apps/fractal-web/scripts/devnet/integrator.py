@@ -120,7 +120,7 @@ def first_break(checkpoints, probe):
     return high
 
 def swap_server(cleanenv):
-    # After the SYSTEM roll, replace this down with up --replace in activate.
+    # Replacement requires a Ready registration; clear one that is not serving.
     subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
 
 def generated(path):
@@ -645,20 +645,27 @@ def activate(previous):
         recovery_retain_builds(previous)
         return healthy_url
     # An old healthy generation is not publication success for this candidate.
+    replacement_completed=False
     try:
-        if previous:
+        if previous and not current_server_url(cleanenv):
             swap_server(cleanenv)
-        subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
+        subprocess.run(['devnet','up','--replace',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
+        replacement_completed=True
         subprocess.run(['devnet','url',purpose,'--remote','--wait'],cwd=C/'apps/fractal-web',env=cleanenv,check=True,timeout=120)
         url=current_server_url(cleanenv,sha)
         if not url:
             raise RuntimeError('published edge does not serve candidate build identity')
     except Exception:
-        subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=False)
+        # A failed replace owns its recovery, including held generations.
+        if replacement_completed:
+            subprocess.run(['devnet','down',purpose],cwd=C/'apps/fractal-web',env=cleanenv,check=False)
         if previous and previous!=current:
             rollback_sha=json.loads(candidate_sandbox.read_regular(pathlib.Path(previous)/'build-receipt.json'))['buildIdentity']['rev']
             recovery_select_build(rollback_sha)
-            subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
+            if replacement_completed:
+                subprocess.run(['devnet','up',purpose,'--ready-path','/','--',str(P/'current/launch.sh'),purpose,str(P/'current')],cwd=C/'apps/fractal-web',env=cleanenv,check=True)
+        if not replacement_completed:
+            raise
         raise RuntimeError('devnet activation failed; previous build rolled back if available')
     recovery_retain_builds(previous)
     return url
