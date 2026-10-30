@@ -44,7 +44,8 @@ assert.equal(sendReason('the full text is too large', false), 'the full text is 
   assert.equal(said('message-too-large', 'a message cannot be longer than 256 KiB; this one is 300 KiB. Shorten it or send it as several messages.'),
     'Not sent: the message is too long for Fractal; shorten it or split it into several messages. Your text is kept.');
   assert.equal(said('recipient-retired', 'Retired: recipient `agent/example` refuses this first send'), 'Not sent: this agent was retired, so it takes no more messages. Your text is kept.');
-  assert.equal(said('forbidden', 'the authenticated client session is not granted `message.send`'), 'Not sent: this phone is not allowed to send messages; pair it again with permission to send. Your text is kept.');
+  assert.equal(said('forbidden', 'the authenticated client session is not granted `message.send`'), 'Not sent: this phone is not allowed to send this message (the authenticated client session is not granted `message.send`). Your text is kept.');
+  assert.equal(sendRefusal(refused('remote-unavailable', 'host/example-box is not reachable')), 'example-box cannot be reached right now');
   assert.equal(said('person-has-no-inbox', 'people do not have inboxes: print your answer in the chat.'), 'Not sent: people do not have inboxes; a message can only go to an agent. Your text is kept.');
   assert.equal(said('message-store-full', 'person/example already has 64 MiB of long messages on this machine'), 'Not sent: this machine is holding as many of your long messages as it can; send a shorter message. Your text is kept.');
   // Not 'Fractal hit a problem': the person looks before sending again, since it may have been recorded.

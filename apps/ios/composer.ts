@@ -63,13 +63,11 @@ const REFUSALS: Record<string, string> = {
   'recipient-retired': 'this agent was retired, so it takes no more messages',
   'lifecycle-unavailable': 'Fractal cannot tell right now whether this agent takes messages; try again shortly',
   'not-found': 'Fractal does not know this agent',
-  'forbidden': 'this phone is not allowed to send messages; pair it again with permission to send',
   'assistant-send-refused': 'this phone is not allowed to send messages; pair it again with permission to send',
   'rate-limited': 'Fractal is busy with other messages; send it again in a moment',
   'database-busy': 'Fractal is busy; send it again in a moment',
   'database-locked': 'Fractal is busy; send it again in a moment',
   'read-deadline': 'Fractal is busy; send it again in a moment',
-  'remote-unavailable': 'the machine this agent lives on cannot be reached right now',
   'stale-fence': 'the conversation changed while the message was on its way; send it again',
   'idempotency-conflict': 'this was already sent once in another form, so it was not sent again',
   'idempotency-mismatch': 'this was already sent once in another form, so it was not sent again',
@@ -90,8 +88,8 @@ const LEGACY_LIMIT = /cannot exceed 4 ?KiB|post a document first/i;
 
 /**
  * Why Fractal did not take a message, in words for the person, by the refusal's code. A refusal
- * about what this app sent (a malformed request a newer Fractal expects differently) asks for an
- * update and keeps Fractal's own words after it, for whoever looks into it.
+ * whose cause only Fractal's sentence names (a request a newer Fractal reads differently, a
+ * permission) keeps that sentence after the phone's words.
  */
 export function sendRefusal(error: unknown): string {
   if (!(error instanceof ClientError)) return plainError(error);
@@ -100,6 +98,9 @@ export function sendRefusal(error: unknown): string {
   const refused = signatureRefusal(code, 'phone') ?? REFUSALS[code];
   if (refused) return refused;
   if (code === 'validation-failed') return `Fractal did not accept the message as this app sent it; the app or Fractal may need an update (${message})`;
+  // A missing grant or a recipient this phone may not write to: Fractal's reason says which.
+  if (code === 'forbidden') return `this phone is not allowed to send this message (${message})`;
+  // remote-unavailable among them: the SDK names the unreachable host.
   return plainError(error);
 }
 
