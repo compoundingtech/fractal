@@ -399,7 +399,7 @@ pub(super) fn prompt_form(
     };
     let count = model.rows.len();
     let numbers = if count > 1 {
-        format!("1–{} to choose", count.min(9))
+        format!("1–{count} to choose")
     } else {
         "1 to choose".into()
     };
@@ -961,6 +961,10 @@ impl Ui {
             if shown > 0 && card.lines.len() > left {
                 break;
             }
+            // A form that still does not fit is never cut: its card says so and opens it in Inbox.
+            if card.lines.len() > left {
+                card = self.unfit_card(item, width, place);
+            }
             rows.extend(BandRow::from_doc(card));
             shown += 1;
         }
@@ -975,6 +979,44 @@ impl Ui {
             });
         }
         rows
+    }
+
+    /// The card of an alert whose form does not fit the band: its title, and a note that a click
+    /// opens it whole in Inbox. Nothing on it answers, so no answer is taken from what is not shown.
+    fn unfit_card(&self, item: &Attention, width: usize, place: Place) -> Doc {
+        let (_, color) = screens::attention_style(&item.kind);
+        let heavy = color == theme::PERSON;
+        let inner = width.saturating_sub(4).max(10);
+        let mut card = Doc::new();
+        card.lines(text::wrap(&[text::run(item.title.clone(), theme::bold())], inner, &[], &[], None));
+        let line = card.lines.len();
+        card.wrap(
+            &[text::run(
+                match place {
+                    Place::Terminal => "Its form does not fit here: click here to answer it in Inbox, or answer it in this terminal.",
+                    Place::Band | Place::Inbox => "Its form does not fit here: click here to answer it in Inbox, or answer it in the terminal (Ctrl+]).",
+                },
+                theme::dim(),
+            )],
+            inner,
+        );
+        for line in line..card.lines.len() {
+            card.targets.push(Target {
+                line,
+                column: 0,
+                width: inner as u16,
+                hit: Hit::Alert(item.id.clone(), AlertTap::Open),
+            });
+        }
+        let mut doc = Doc::new();
+        doc.card(
+            &format!("{} · waiting {}", item.kind.word(), item.age),
+            if heavy { theme::PERSON } else { color },
+            heavy,
+            card,
+            width,
+        );
+        doc
     }
 
     /// Open an alert's whole card in Inbox, selected.
@@ -1084,6 +1126,21 @@ impl Ui {
             .filter(|mark| *mark < rows.len());
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let count = rows.len().max(1);
+        // A digit typed first on a form of ten or more rows waits for a second, or for Enter.
+        let digit = self.prompt_digit.take().filter(|(form, _)| *form == id).map(|(_, first)| first);
+        if let Some(first) = digit {
+            match key.code {
+                KeyCode::Char(second @ '0'..='9') if plain => {
+                    self.take_row(&id, &rows, first * 10 + (second as usize - '0' as usize));
+                    return true;
+                }
+                KeyCode::Enter if plain => {
+                    self.take_row(&id, &rows, first);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Down | KeyCode::Tab | KeyCode::Right if plain => {
                 self.prompt_marks
@@ -1101,7 +1158,7 @@ impl Ui {
                 }
                 Some(FormRow::Answer(_)) | None => self.flash(format!(
                     "Enter takes only an answer about what is shown in full: press its number{}",
-                    if rows.len() > 1 { format!(" (1–{})", rows.len().min(9)) } else { String::new() }
+                    if rows.len() > 1 { format!(" (1–{})", rows.len()) } else { String::new() }
                 )),
             },
             KeyCode::Char(' ') if plain => {
@@ -1110,17 +1167,17 @@ impl Ui {
                 }
             }
             KeyCode::Char(digit @ '1'..='9') if plain => {
-                let index = digit as usize - '1' as usize;
-                match rows.get(index) {
-                    Some(FormRow::Choose(question, option)) => {
-                        self.prompt_marks.insert(id.clone(), index);
-                        self.choose_answer(&id, *question, *option);
-                    }
-                    Some(FormRow::Answer(answer)) => {
-                        self.prompt_marks.insert(id.clone(), index);
-                        self.answer_shown(&id, answer);
-                    }
-                    None => self.flash(format!("There is no {digit} here")),
+                let number = digit as usize - '0' as usize;
+                if number * 10 <= rows.len() {
+                    // Another number starts with it: wait for its second digit, or Enter.
+                    self.prompt_digit = Some((id.clone(), number));
+                    self.flash(format!(
+                        "{number}… another digit for {}–{}, or Enter for {number}",
+                        number * 10,
+                        rows.len().min(number * 10 + 9)
+                    ));
+                } else {
+                    self.take_row(&id, &rows, number);
                 }
             }
             // Typing is never blocked: the key goes to the message box (or Inbox's own keys).
@@ -1142,6 +1199,24 @@ impl Ui {
         true
     }
 
+    /// Take row `number` (from 1) of alert `id`'s form from the keys: choose a question's option,
+    /// or answer, as a click on that row would.
+    fn take_row(&mut self, id: &str, rows: &[FormRow], number: usize) {
+        let index = number.wrapping_sub(1);
+        match rows.get(index) {
+            Some(FormRow::Choose(question, option)) => {
+                self.prompt_marks.insert(id.to_owned(), index);
+                self.choose_answer(id, *question, *option);
+            }
+            Some(FormRow::Answer(answer)) => {
+                self.prompt_marks.insert(id.to_owned(), index);
+                let answer = answer.clone();
+                self.answer_shown(id, &answer);
+            }
+            None => self.flash(format!("There is no {number} here")),
+        }
+    }
+
     /// Answer `answer` on alert `id` from the keys, only when its row is on screen and answers:
     /// the same row a click would take. A call cut short or a question not yet chosen has none.
     fn answer_shown(&mut self, id: &str, answer: &str) {
@@ -1152,7 +1227,7 @@ impl Ui {
         } else if answer == "answer" {
             self.flash("Choose an answer to each question first");
         } else {
-            self.flash("That answer is not in view in full here: scroll to it, or answer it in the terminal (Ctrl+])");
+            self.flash("That answer is not in view in full here: open it in Inbox, or answer it in the terminal (Ctrl+])");
         }
     }
 
@@ -1806,6 +1881,90 @@ mod tests {
                 ui.effects
             );
         }
+    }
+
+    /// A question world whose questions offer `options` choices each, `count` questions in all.
+    fn questions_world(count: usize, options: usize) -> World {
+        let case = &cases()[3];
+        let asked: Vec<serde_json::Value> = (0..count)
+            .map(|question| {
+                serde_json::json!({
+                    "question": format!("Which bed {question}?"), "header": format!("Bed {question}"), "multiSelect": false,
+                    "options": (0..options).map(|option| serde_json::json!({"label": format!("Plot {option}"), "description": ""})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let mut world = world_with(case);
+        world
+            .pending_calls
+            .insert(SEAT.into(), vec![call("AskUserQuestion", serde_json::json!({"questions": asked}))]);
+        world
+    }
+
+    /// Every row has its own key, past nine too: on a form of ten or more rows a digit that starts
+    /// a longer number waits for the second, or for Enter. A refusal is still never under Enter.
+    #[test]
+    fn every_row_past_nine_has_its_number() {
+        // Eight choices, then Submit answers (9) and No (10).
+        let mut ui = in_inbox(questions_world(1, 8));
+        ui.live = true;
+        let shown = render(&ui, 120, 60);
+        assert!(shown.contains("10. No"), "{shown}");
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(render(&ui, 120, 60).contains("1–10 to choose"));
+        // 1 then Enter is row 1: chosen, nothing sent.
+        press(&mut ui, KeyCode::Char('1'), KeyModifiers::NONE);
+        assert!(ui.effects.is_empty());
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.effects.is_empty());
+        assert!(render(&ui, 120, 60).contains("✓ Plot 0"));
+        // 1 then 0 is row 10, the refusal.
+        press(&mut ui, KeyCode::Char('1'), KeyModifiers::NONE);
+        press(&mut ui, KeyCode::Char('0'), KeyModifiers::NONE);
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::Attention { answer: Some(answer), .. }] if answer == "deny"),
+            "{:?}",
+            ui.effects
+        );
+        // A digit no longer number starts with answers at once: 9 is Submit answers.
+        let mut ui = in_inbox(questions_world(1, 8));
+        ui.live = true;
+        render(&ui, 120, 60);
+        press(&mut ui, KeyCode::Char('a'), KeyModifiers::NONE);
+        press(&mut ui, KeyCode::Char('3'), KeyModifiers::NONE);
+        render(&ui, 120, 60);
+        press(&mut ui, KeyCode::Char('9'), KeyModifiers::NONE);
+        assert!(
+            matches!(ui.effects.as_slice(), [Effect::Attention { answer: Some(answer), .. }] if answer.contains("\"0\"")),
+            "{:?}",
+            ui.effects
+        );
+    }
+
+    /// A form too tall for the band is never cut: its card says so, offers nothing to answer, and
+    /// a click opens it whole in Inbox.
+    #[test]
+    fn a_form_too_tall_for_the_band_opens_in_inbox() {
+        let mut ui = in_conversation(questions_world(4, 4));
+        ui.live = true;
+        ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
+        let shown = render(&ui, 80, 24);
+        assert!(shown.contains("Its form does not fit here"), "{shown}");
+        let hits: Vec<Hit> = ui.frame.borrow().hits.iter().map(|(_, hit)| hit.clone()).collect();
+        assert!(!hits.iter().any(|hit| matches!(hit, Hit::Alert(_, AlertTap::Answer(_) | AlertTap::Choose(..)))), "{shown}");
+        let open = Hit::Alert("attention/one".into(), AlertTap::Open);
+        assert!(hits.contains(&open), "{shown}");
+        // The keys take nothing that is not in view.
+        press(&mut ui, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        press(&mut ui, KeyCode::Char('9'), KeyModifiers::NONE);
+        assert!(ui.effects.is_empty(), "{:?}", ui.effects);
+        ui.click(open);
+        assert_eq!(ui.attention_focus().as_deref(), Some("attention/one"));
+        // With room, the whole form shows in place.
+        let mut ui = in_conversation(questions_world(4, 4));
+        ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
+        let shown = render(&ui, 120, 80);
+        assert!(!shown.contains("Its form does not fit here") && shown.contains("Plot 3"), "{shown}");
     }
 
     /// The band keeps a card between frames only while nothing it was drawn from changed.

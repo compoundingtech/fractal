@@ -511,6 +511,8 @@ pub struct Ui {
     prompt_marks: HashMap<String, usize>,
     /// The prompt alert whose form has the keys (Ctrl+N in a conversation, `a` in Inbox).
     prompt_keys: Option<String>,
+    /// The first digit typed on a form of ten or more rows, waiting for a second (or Enter).
+    prompt_digit: Option<(String, usize)>,
     /// Each alert's band card from the last frame, with a hash of what it was drawn from.
     band_cards: RefCell<HashMap<(String, usize, alerts::Place), alerts::KeptCard>>,
     /// The spaces: named layouts of tabs and split panes, the Ctrl+S sidebar, the palette, and
@@ -834,6 +836,7 @@ impl Ui {
             question_choices: HashMap::new(),
             prompt_marks: HashMap::new(),
             prompt_keys: None,
+            prompt_digit: None,
             band_cards: RefCell::new(HashMap::new()),
             // A space kept in memory only; the live loop and the demo open the device's own.
             glasses: glass::Glasses::open(None, None),

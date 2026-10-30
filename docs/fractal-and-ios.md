@@ -19,9 +19,9 @@ A harness prompt's card reads like the harness's own dialog: what it asks about 
 Answering a prompt's card:
 
 - **Click** an option to answer it. A refusal (No, exit, quit) is a plain option and asks nothing more.
-- **Ctrl+N** in a conversation, or **a** on the card in Inbox, gives the card the keys. **↑/↓** and **Tab** move the mark and answer nothing. **1–9** answers that option, or chooses it for a question. **Enter** answers the marked option only when it is a safe one about what is shown in full (allow a call shown whole, approve a plan shown whole, submit your own choices, continue without an MCP server), never a refusal. **Esc** gives the keys back.
+- **Ctrl+N** in a conversation, or **a** on the card in Inbox, gives the card the keys. **↑/↓** and **Tab** move the mark and answer nothing. A number answers that option, or chooses it for a question; on a card of ten or more options, a digit that starts a longer number waits for the second digit, or for **Enter** to take it alone. **Enter** answers the marked option only when it is a safe one about what is shown in full (allow a call shown whole, approve a plan shown whole, submit your own choices, continue without an MCP server), never a refusal. **Esc** gives the keys back.
 - Typing never waits on a card: a letter goes straight to the message box with the keys.
-- A call too long for the band is cut there and its allow withheld; click its note to read it whole on the card in Inbox, which offers it.
+- A call too long for the band is cut there and its allow withheld; click its note to read it whole on the card in Inbox, which offers it. A card whose form does not fit the band at all (several questions on a short terminal) shows only its title and a note: click it to answer in Inbox.
 
 Follow each card's displayed actions; opening a card does not approve it.
 - **Agents** opens a seat's conversation, with messages, the harness transcript, and tool output. Scroll to read earlier entries; type in the message box and press **Enter** to reply.
