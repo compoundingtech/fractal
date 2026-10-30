@@ -3140,6 +3140,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             &subject,
                             "harness.diagnostic",
                             BTreeMap::from([
+                                // An observability code: the warning stays in this node's
+                                // local observation log (retention.toml `local_codes`).
+                                ("code".into(), Value::String("render-warning".into())),
                                 ("status".into(), Value::String("warning".into())),
                                 ("reason".into(), Value::String(warning)),
                             ]),
@@ -8945,9 +8948,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             RestartDecision::Fail { reason } => {
                 if member.driver.as_deref() == Some("codex") {
                     let token = self.launch_token(&subject.subject)?;
+                    // The driver's failure is an observability code: it stays in this node's
+                    // local observation log, and an older driver's arrives as a claim.
                     let diagnostic = self
                         .store
-                        .harness_diagnostics(&subject.subject)?
+                        .observations_for(&subject.subject, "harness.diagnostic")?
                         .iter()
                         .rev()
                         .find(|claim| {
@@ -32943,7 +32948,7 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
             .unwrap();
         assert!(workspace.join("notes.txt").is_file(), "changed work stays");
         let kept = store
-            .latest_claim(&agent.subject, Some("harness.diagnostic"))
+            .latest_observation(&agent.subject, "harness.diagnostic")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -43809,10 +43814,13 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             let sent = usize::from(case == "skip");
             let expected: &[&str] = if sent == 1 { &["escape"] } else { &[] };
             assert_eq!(runtime.keys.lock().unwrap().as_slice(), expected, "{case}");
+            // The prompt is a control claim; the notice is local to the seat's node.
             let claims = store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .observations_for(&subject.subject, "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims.len(), 2);
+            assert_eq!(claims[0].body["fields"]["code"], "provider-update-prompt");
+            assert!(claims[0].store_index > 0);
             assert_eq!(claims[1].body["fields"]["code"], "provider-update-available");
             assert_eq!(claims[1].body["fields"]["status"], "available");
             assert!(claims[1].body["fields"].get("severity").is_none());
@@ -43849,7 +43857,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap();
             assert_eq!(
                 store
-                    .claims_for(&subject.subject, Some("harness.diagnostic"))
+                    .observations_for(&subject.subject, "harness.diagnostic")
                     .unwrap()
                     .len(),
                 2
@@ -43875,7 +43883,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap();
             assert!(store.fault_items(None).unwrap().is_empty());
             let claims = store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .observations_for(&subject.subject, "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims[2].body["fields"]["code"], "provider-update-restored");
             assert_eq!(claims[2].body["evidence"][0], claims[0].id);
@@ -44027,9 +44035,10 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                     .0
             );
             assert_eq!(store.fault_items(None).unwrap().len(), 1);
+            // The update notice is an observability code, local to this node.
             assert_eq!(
                 store
-                    .claims_for("agent/node.seat", Some("harness.diagnostic"))
+                    .observations_for("agent/node.seat", "harness.diagnostic")
                     .unwrap()
                     .len(),
                 if code == "provider-update-prompt" { 2 } else { 1 }

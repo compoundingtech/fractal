@@ -3234,7 +3234,7 @@ fn overlay_agent_resources_at(
             // The seat's host also hears the re-stamps that stay local, read for every card at once.
             let heard_at = harness
                 .as_ref()
-                .map(|harness| heard.heard_at(store, item["id"].as_str().unwrap_or_default(), harness, now));
+                .map(|harness| heard.heard_at(store, item["id"].as_str().unwrap_or_default(), harness));
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
@@ -3276,8 +3276,8 @@ fn overlay_agent_resources_at(
 /// newest local re-stamp of the same incarnation; elsewhere the seat's host's latest answer about
 /// it (`seat_freshness`), whichever is latest. Re-stamps that change nothing stay in the host's
 /// local log, so without them a resting seat reads stale.
-pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView, now: u128) -> anyhow::Result<u128> {
-    Ok(HeardSeats::read(store, &[subject])?.heard_at(store, subject, harness, now))
+pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
+    Ok(HeardSeats::read(store, &[subject])?.heard_at(store, subject, harness))
 }
 
 /// The local log's newest harness report of many seats, read in one statement, so a roster's
@@ -3290,7 +3290,7 @@ impl HeardSeats {
     }
 
     /// [`heard_at`] from the seats read here.
-    pub fn heard_at(&self, store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView, now: u128) -> u128 {
+    pub fn heard_at(&self, store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> u128 {
         let local = self.0.get(subject).filter(|(of, _)| *of == harness.incarnation_id).map(|(_, at)| *at);
         let relayed = store
             .extension::<crate::store::RelayedFreshness>()

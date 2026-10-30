@@ -188,7 +188,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                         serde_json::from_value(agent["_status_source"].clone()).ok();
                     let heard = source
                         .as_ref()
-                        .map(|harness| heard_seats.heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness, now));
+                        .map(|harness| heard_seats.heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness));
                     let age = heard.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
                     // The scalar state rules of overlay_agent_resources/overlay_down, followed
                     // by the same local delivery assessment; no card is built just to count it.
