@@ -450,7 +450,10 @@ mod tests {
             Some(Pane::Home(Some("attention/first".into())))
         );
     }
-    fn unavailable_attention_keeps_the_current_place(attention: Load<Vec<Attention>>, message: &str) {
+    fn unavailable_attention_keeps_the_current_place(
+        attention: Load<Vec<Attention>>,
+        message: &str,
+    ) {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut ui = ui(vec![
             item("first", question(), "2026-10-01T00:00:00Z"),

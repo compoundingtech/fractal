@@ -710,7 +710,10 @@ mod tests {
 
             ui.drop_tab(
                 (source.group, source.tab),
-                Drop::Strip { group: destination.group, index: 0 },
+                Drop::Strip {
+                    group: destination.group,
+                    index: 0,
+                },
             );
             let moved = ui.current_place().unwrap();
             assert_eq!(moved.tab_id, source.tab_id);
@@ -722,7 +725,10 @@ mod tests {
                 if keep_source_group { 2 } else { 1 },
             );
 
-            let expected = ui.glasses.history.iter()
+            let expected = ui
+                .glasses
+                .history
+                .iter()
                 .filter(|place| place.tab_id == source.tab_id)
                 .cloned()
                 .map(|mut place| {
@@ -732,13 +738,25 @@ mod tests {
                     place
                 })
                 .collect::<Vec<_>>();
-            assert!(expected.iter().any(|place| place.pane == Pane::Document("doc/a".into()).key()));
-            assert!(expected.iter().any(|place| place.pane == Pane::Document("doc/b".into()).key()));
-            assert!(expected.iter().any(|place| {
-                place.pane == home.pane && place.selection == home.selection
-            }));
+            assert!(
+                expected
+                    .iter()
+                    .any(|place| place.pane == Pane::Document("doc/a".into()).key())
+            );
+            assert!(
+                expected
+                    .iter()
+                    .any(|place| place.pane == Pane::Document("doc/b".into()).key())
+            );
+            assert!(
+                expected
+                    .iter()
+                    .any(|place| { place.pane == home.pane && place.selection == home.selection })
+            );
             let reopened = Glasses::open(None, Some(path));
-            let actual = reopened.history.iter()
+            let actual = reopened
+                .history
+                .iter()
                 .filter(|place| place.tab_id == source.tab_id)
                 .cloned()
                 .collect::<Vec<_>>();
