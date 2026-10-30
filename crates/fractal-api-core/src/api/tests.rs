@@ -12803,8 +12803,8 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         assert_eq!(status, StatusCode::OK, "{sent}");
         assert_eq!(sent["recipient_identity"], OLD);
         assert_eq!(sent["recipient"], NEW);
-        assert_eq!(sent["message"]["from"], OLD);
-        assert_eq!(sent["message"]["to"], OLD);
+        assert_eq!(sent["from"], OLD);
+        assert_eq!(sent["to"], OLD);
     }
     let peer_root = tempfile::tempdir().unwrap();
     let mut peer = state(peer_root.path());
@@ -12877,7 +12877,7 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         }
         for lifecycle in ["read", "closed"] {
             let (status, denied) = json_request(app.clone(), &format!(
-                "/v1/messages/{}/claims", before["message"]["subject"].as_str().unwrap(),
+                "/v1/messages/{}/claims", before["subject"].as_str().unwrap(),
             ), json!({
                 "actor":"agent/example-unrelated","lifecycle":lifecycle,
                 "idempotency_key":format!("mail-denied-{replica}-{lifecycle}"),

@@ -464,7 +464,7 @@ pub async fn post_message_claim(
         let successor = retirement.as_ref()
             .and_then(|claim| claim.body["fields"]["successor"].as_str())
             .map(|successor| message_party_identity(&store, successor)).transpose()?;
-        let acting_for = retirement.as_ref().and_then(|claim| {
+        let acting_for = retirement.as_ref().and_then(|_| {
             (matches!(kind, "message.read" | "message.closed")
                 && successor.as_deref() == Some(actor.as_str()))
                 .then(|| recipient.clone())
