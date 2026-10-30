@@ -255,6 +255,16 @@ Closed and snoozed items are excluded. The flash gives `n/m · reason`; after th
 `all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
 goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
 
+The recent-place switcher uses that same history across all spaces, de-duplicated by content.
+Rows show live state/attention marks and the space name. Ctrl+^ (legacy Ctrl+6, 0x1E) opens
+the popup everywhere, including over an attached program, with the previous place selected:
+Enter opens it in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
+flips between the last two places. Enhanced Ctrl+Tab cycles forward and Ctrl+Shift+Tab backward.
+Once this terminal has actually reported a Control modifier release, releasing Control commits
+that cycling selection; until then Ctrl+Tab uses the explicit Enter/Escape popup. Ctrl+Tab
+continues to pass through attached programs. Tabs retain [ ], Ctrl+PageUp and Ctrl+PageDown.
+
+
 
 
 ### Starting a mission

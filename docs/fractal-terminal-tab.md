@@ -115,6 +115,12 @@ Tab navigation remains [ and ] (when not typing), and Ctrl+PageUp/PageDown.
 Ctrl+L triages outstanding Inbox items only outside attached programs; inside, it remains
 the program's clear-screen chord. Ctrl+\ then l visits the previous triage item without
 sending either leader key to the program. Enhanced Ctrl+Shift+L is the detached equivalent.
+Ctrl+^ (Ctrl+6, 0x1E) is the recent-place popup shortcut, including over attached programs.
+It preselects the previous destination; Enter opens, Escape cancels, and typing filters.
+Enhanced Ctrl+Tab cycles recent places outside attached programs, not tabs. It commits on
+Control release only after such modifier releases have actually been observed; otherwise
+the same popup requires Enter. Ctrl+Shift+Tab cycles backward. Direct Ctrl+Tab remains
+program input while attached. Tabs keep quiet [ ] and Ctrl+PageUp/PageDown.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

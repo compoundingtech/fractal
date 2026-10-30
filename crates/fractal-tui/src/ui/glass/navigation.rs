@@ -97,6 +97,22 @@ impl Ui {
         true
     }
 
+    pub(in crate::ui) fn recent_places(&self) -> Vec<StoredPlace> {
+        let mut places = Vec::new();
+        let mut seen = HashSet::new();
+        for place in self.current_place().into_iter().chain(self.glasses.history.iter().rev().cloned()) {
+            if seen.insert(place.pane.clone()) && self.place_exists(&place) { places.push(place); }
+        }
+        places
+    }
+
+    pub(in crate::ui) fn place_label(&self, place: &StoredPlace) -> String {
+        let space = self.glasses.all.iter().find(|glass| glass.id == place.space).map_or("", |glass| glass.name.as_str());
+        let Some(pane) = Pane::parse(&place.pane) else { return space.into() };
+        let badge = self.tab_badge(&Tab::pane(&place.pane), Some(&pane));
+        let attention = if badge.ask { "?" } else if badge.needs_person { "◆" } else { "" };
+        format!("{} {}{} · {}", badge.activity, self.pane_title(&pane), attention, space)
+    }
 }
 
 fn history_chord(key: KeyEvent, enhanced: bool) -> Option<bool> {
