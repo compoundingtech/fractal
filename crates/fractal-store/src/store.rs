@@ -4091,6 +4091,30 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Record whether every other member can ask this node about its seats' freshness (see
+    /// `fleet_hears_seats_tx`). Writes only when it changes.
+    pub fn set_fleet_hears_seats(&self, hears: bool) -> Result<()> {
+        let value = if hears { "1" } else { "0" };
+        let current: Option<String> = self
+            .readers
+            .get()
+            .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get(0))
+            .optional()?;
+        if current.as_deref() == Some(value) {
+            return Ok(());
+        }
+        self.connection
+            .batched(|transaction| {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h57ca7f8e343f owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('fleet_hears_seats', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [value],
+                )
+            })
+            .map_err(anyhow::Error::msg)??;
+        Ok(())
+    }
+
     /// The last local observation the OpenTelemetry exporter delivered.
     pub fn otlp_export_cursor(&self) -> Result<u64> {
         let connection = self.readers.get();
@@ -9184,17 +9208,20 @@ fn harness_view_rests_on_tx(
 /// from the subject's latest replicated observation. When the harness stops working, its
 /// usage that is still only local replicates too.
 ///
-/// An unchanged observation refreshes the replicated one at most once a minute, but only while
-/// the harness works or when `heartbeat` is set. A resting native driver re-stamps its state
-/// every five minutes; its event was admitted against the seat's running runtime row, so no
-/// reader needs that re-stamp replicated (a stuck runtime row is what makes the card overlay
-/// read a report's age). Those re-stamps were most of the fleet's `harness.observed` claims.
+/// An unchanged observation (a re-stamp) stays in the local log. Freshness comes from the seat's
+/// host instead: its own cards read its local log, and every other member asks it
+/// (`seat_freshness`). While `fleet_hears` is false, some member cannot ask yet, so an unchanged
+/// report still refreshes the replicated one every [`RESTAMP_FALLBACK_MS`]: that member's
+/// freshness, readiness and down rule (661 seconds) read report ages. A resting native driver's
+/// re-stamp never needed that once its event was admitted against the seat's running runtime
+/// row, unless `heartbeat` says it came from a poster without one.
 fn publish_changed_harness_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
     now: u128,
     heartbeat: bool,
+    fleet_hears: bool,
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
@@ -9242,21 +9269,24 @@ fn publish_changed_harness_state_tx(
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
     let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
-    // Refresh remote freshness at most once a minute, without manufacturing transitions. A
-    // working harness keeps refreshing: a wake counts as taken up by a working report accepted
-    // after it was sent. A resting one replicates its unchanged state only when readers would
-    // otherwise fold the seat to something newer than it.
-    let refreshed = latest
-        .as_ref()
-        .is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000);
-    if unchanged
-        && (refreshed
-            || (resting && !heartbeat
-                && match &latest {
-                    Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
-                    None => false,
-                }))
-    {
+    // An unchanged report never manufactures a transition. A resting one replicates when readers
+    // would otherwise fold the seat to something newer than it, as before at most once a minute.
+    // Otherwise it refreshes the replicated report only for members that cannot ask the seat's
+    // host, at most every five minutes.
+    let age = latest.as_ref().map(|claim| now.saturating_sub(claim.accepted_at_unix_ms));
+    let skip = unchanged && {
+        let view_rests = resting
+            && match &latest {
+                Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
+                None => false,
+            };
+        if resting && !view_rests {
+            age.is_some_and(|age| age < 60_000)
+        } else {
+            (resting && !heartbeat) || fleet_hears || age.is_some_and(|age| age < RESTAMP_FALLBACK_MS)
+        }
+    };
+    if skip {
         if resting {
             publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage), ended)?;
         }
@@ -21832,6 +21862,7 @@ pub fn append_latest_observation_publication(
                 "harness.observed" => {
                     publish_changed_harness_state_tx(
                         transaction, &graph.origin, input, now, event_runtime.is_none(),
+                        fleet_hears_seats_tx(transaction)?,
                     )?
                 }
                 "harness.usage" => {
@@ -22382,4 +22413,21 @@ impl RelayedFreshness {
             .filter(|entry| entry.incarnation == incarnation && now.saturating_sub(entry.answered_at) < RELAYED_FRESHNESS_TTL_MS)
             .map(|entry| entry.heard_at)
     }
+}
+
+/// How often an unchanged harness report still replicates while some member cannot ask the
+/// seat's host how recently it heard the seat. Within an older member's 661-second down rule.
+pub const RESTAMP_FALLBACK_MS: u128 = 5 * 60_000;
+
+/// Whether every other member can ask this node how recently it heard its seats: each advertises
+/// `seat_freshness`, so none reads re-stamp ages from the replicated log. The daemon's seat
+/// freshness poll keeps it in this node's `meta`, which never replicates; until it has, it is
+/// false and re-stamps keep their fallback.
+fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, St3Error> {
+    Ok(transaction
+        .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(internal)?
+        .as_deref()
+        == Some("1"))
 }

@@ -67,11 +67,27 @@ pub fn seat_freshness_targets(store: &Store, node: &str, members: &[String]) -> 
     Ok(targets)
 }
 
-/// Ask each capable host about its seats once, and keep what each answers.
+/// Whether every other member can ask this node about its seats: each advertises the route, and
+/// this node is not a dial-out member, which no other member can dial. Re-stamps then stay local.
+pub fn fleet_hears_seats(store: &Store, node: &str, members: &[String], dial_out: bool) -> anyhow::Result<bool> {
+    if dial_out {
+        return Ok(false);
+    }
+    for member in members.iter().filter(|member| member.as_str() != node) {
+        if !advertises_seat_freshness(store, member)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Ask each capable host about its seats once, and keep what each answers. Record whether every
+/// other member can ask this node in turn.
 pub async fn poll_seat_freshness(store: &Arc<Store>, relay: &ClientRelay, node: &str) -> anyhow::Result<()> {
+    let view = relay.fleet_view();
+    let dial_out = view.members.iter().any(|member| member.name == node && member.mode == "dial-out");
     // Current members, and the configured peers of a fleet that predates membership.
-    let members = relay
-        .fleet_view()
+    let members = view
         .members
         .iter()
         .filter(|member| member.state == "current")
@@ -83,7 +99,11 @@ pub async fn poll_seat_freshness(store: &Arc<Store>, relay: &ClientRelay, node: 
     let targets = {
         let store = Arc::clone(store);
         let node = node.to_owned();
-        tokio::task::spawn_blocking(move || seat_freshness_targets(&store, &node, &members)).await??
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            store.set_fleet_hears_seats(fleet_hears_seats(&store, &node, &members, dial_out)?)?;
+            seat_freshness_targets(&store, &node, &members)
+        })
+        .await??
     };
     for (member, chunk) in targets
         .into_iter()
@@ -116,6 +136,10 @@ pub async fn poll_seat_freshness(store: &Arc<Store>, relay: &ClientRelay, node: 
 /// Ask every capable host about its seats every [`SEAT_FRESHNESS_POLL`], in the background.
 pub fn start_seat_freshness_poll(state: &AppState) {
     let Some(relay) = state.client_relay.clone() else {
+        // Not in a fleet: no other member reads this node's re-stamps.
+        if let Err(error) = state.store.set_fleet_hears_seats(true) {
+            eprintln!("st3: seat freshness: {error:#}");
+        }
         return;
     };
     let store = state.store.clone();

@@ -217,3 +217,30 @@ async fn an_older_member_is_never_asked_and_an_older_worker_answers_none() {
         None
     );
 }
+
+/// Re-stamps stay local only once every other member can ask this node: each advertises the
+/// route in its own `daemon.started`, and this node is not a dial-out member nobody can dial.
+#[test]
+fn the_fleet_hears_a_node_only_when_every_other_member_can_ask_it() {
+    let node = Store::open_memory("conversation-gateway").unwrap();
+    let sources = [("alder", Store::open_memory("alder").unwrap()), ("birch", Store::open_memory("birch").unwrap())];
+    let advertise = |member: &str, feature: bool| {
+        let source = &sources.iter().find(|(name, _)| *name == member).unwrap().1;
+        let features = if feature { json!({"seat_freshness":1}) } else { json!({"schedule_standby":1}) };
+        append(&source, &format!("daemon/{member}"), "daemon.started", None, json!({"status":"running", "features":features}));
+        node.import_replication(member, &source.export_replication(0).unwrap()).unwrap();
+    };
+    let members = ["conversation-gateway".to_owned(), "alder".to_owned(), "birch".to_owned()];
+    let hears = |dial_out| {
+        crate::api::seat_freshness::fleet_hears_seats(&node, "conversation-gateway", &members, dial_out).unwrap()
+    };
+    advertise("alder", true);
+    advertise("birch", false);
+    assert!(!hears(false), "birch runs an older build and reads re-stamp ages");
+    advertise("birch", true);
+    assert!(hears(false), "every other member can ask");
+    assert!(!hears(true), "nobody can dial a dial-out member to ask it");
+    // The flag gates the store's re-stamp rule through this node's meta, which never replicates.
+    node.set_fleet_hears_seats(true).unwrap();
+    node.set_fleet_hears_seats(true).unwrap();
+}

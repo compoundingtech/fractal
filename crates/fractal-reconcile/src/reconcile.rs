@@ -5751,6 +5751,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let messages = self.store.work_wake_messages_for_reconcile(agent)?;
         let work = self.store.work_for_reconcile(agent)?;
         let harness = self.store.current_harness(agent)?;
+        // When this host last heard the seat: an unchanged working re-stamp stays in its local log.
+        let heard_at = match &harness {
+            Some(harness) => self
+                .store
+                .local_harness_observed_at(agent, &harness.incarnation_id)?
+                .map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)),
+            None => 0,
+        };
         let now = now_ms();
         for step in &work {
             if let Some(due) = crate::incremental::step_due(step, now) {
@@ -5780,7 +5788,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             harness.as_ref().is_some_and(|harness| {
                                 step.status == "ready"
                                     && harness.state == "working"
-                                    && harness.observed_at_unix_ms >= requested
+                                    && heard_at >= requested
                             })
                         })
                     });
@@ -47695,6 +47703,59 @@ mission "gated" state="ready" {
                 )
                 .map(|_| ())
         }
+    }
+
+    /// Step 2b: once every member can ask the seat's host, an unchanged working re-stamp stays in
+    /// the host's local log. A wake into a turn that was already working is still taken up by the
+    /// next working report after it was sent, which the host hears locally.
+    #[test]
+    fn a_working_re_stamp_that_stays_local_still_takes_up_a_wake() {
+        let seat = SeatQueueFixture::new();
+        seat.store.set_fleet_hears_seats(true).unwrap();
+        let working = |key: &str| {
+            seat.store
+                .append_claim(&ClaimInput {
+                    subject: SEAT.into(),
+                    kind: "harness.observed".into(),
+                    actor: Some(SEAT.into()),
+                    fields: BTreeMap::from([
+                        ("state".into(), Value::String("working".into())),
+                        ("driver".into(), Value::String("codex".into())),
+                        ("incarnation_id".into(), Value::String("seat-one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap();
+        };
+        working("seat-one-working");
+        seat.start("queued", "local-re-stamp-wake-run");
+        let wake = seat.store.messages(Some(SEAT), false).unwrap().remove(0);
+        seat.store
+            .append_claim(&ClaimInput {
+                subject: wake.subject.clone(),
+                kind: "message.delivered".into(),
+                actor: Some(SEAT.into()),
+                fields: BTreeMap::from([("status".into(), Value::String("delivered".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("local-re-stamp-wake-delivered".into()),
+            })
+            .unwrap();
+        let index = seat.store.index().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        working("seat-one-working-again");
+        assert_eq!(seat.store.index().unwrap(), index, "the unchanged working re-stamp stayed local");
+        seat.reconciler.reconcile_once().unwrap();
+        let after = seat
+            .store
+            .messages(Some(SEAT), true)
+            .unwrap()
+            .into_iter()
+            .find(|message| message.subject == wake.subject)
+            .unwrap();
+        assert_eq!(after.status, "closed", "the local working report took up the wake");
     }
 
     #[test]
