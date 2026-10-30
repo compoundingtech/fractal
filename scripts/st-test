@@ -594,12 +594,39 @@ def size_gb(path):
     return total / 1e9
 
 
-def trim(target):
-    """Empty a target past TARGET_MAX_GB. Only a directory cargo made (it writes CACHEDIR.TAG into a target) is emptied: never one a
-    caller named for something else."""
-    if (target / 'CACHEDIR.TAG').is_file() and size_gb(target) > TARGET_MAX_GB:
+# Cargo's cache directory tag (https://bford.info/cachedir/). Cargo writes it only into a target directory it creates itself, and a kept
+# target exists before cargo runs, so st-test writes it when it creates one: without it trim() never emptied a pool target (one reached
+# 202 GB against the 80 GB cap).
+CACHEDIR_TAG = ('Signature: 8a477f597d28d172789f06886806bc55\n'
+                '# This file is a cache directory tag created by st-test for a cargo target.\n'
+                '# For information about cache directory tags see https://bford.info/cachedir/\n')
+
+
+def make_target(target):
+    """Create a kept target, tagged as cargo tags a target it creates. One that already exists is left as it is."""
+    try:
+        target.mkdir(parents=True)
+    except FileExistsError:
+        return
+    (target / 'CACHEDIR.TAG').write_text(CACHEDIR_TAG)
+
+
+def in_pool(path):
+    """True when `path` is inside st-test's own pool directory (pool_base()), by its resolved path: a sibling whose name only starts
+    the same (~/.cache/st-test-target) or a path that climbs out with .. or a symlink is outside."""
+    try:
+        Path(os.path.realpath(path)).relative_to(os.path.realpath(pool_base()))
+    except ValueError:
+        return False
+    return True
+
+
+def trim(target, owned=False):
+    """Empty a target past TARGET_MAX_GB. Only a directory cargo or st-test made (CACHEDIR.TAG at its root), or one `owned` (a pool
+    tree's target-N inside the pool directory, tagged or not) is emptied: never one a caller named for something else."""
+    if ((target / 'CACHEDIR.TAG').is_file() or owned) and size_gb(target) > TARGET_MAX_GB:
         shutil.rmtree(target, ignore_errors=True)
-        target.mkdir(parents=True, exist_ok=True)
+        make_target(target)
 
 
 def shared_target(tree_target=None):
@@ -609,11 +636,11 @@ def shared_target(tree_target=None):
     if os.environ.get('ST_EVIDENCE_TARGET') == 'off' or os.environ.get('CARGO_TARGET_DIR'):
         return None, None
     if tree_target and not os.environ.get('ST_EVIDENCE_TARGET'):
-        tree_target.mkdir(parents=True, exist_ok=True)
-        trim(tree_target)
+        make_target(tree_target)
+        trim(tree_target, owned=in_pool(tree_target))
         return tree_target, None
     target = Path(os.environ.get('ST_EVIDENCE_TARGET') or Path.home() / '.cache/st-test-target')
-    target.mkdir(parents=True, exist_ok=True)
+    make_target(target)
     lock = open(target.parent / f'{target.name}.lock', 'w')
     # A target several trees share is held EXCLUSIVELY for the whole run, builds and tests: cargo's own lock orders builds, but not
     # one run's builds against another run's tests, and two runs on different trees sharing one target once relinked st3 under each
@@ -2167,10 +2194,11 @@ def streamed(argv, log, timeout, pre_start=None, **options):
 
 def target_warm(target):
     """Whether the cargo target a build check uses already held something before this run (after a trim, which empties it): a warm run. A
-    tree's own target (ST_EVIDENCE_TARGET=off) is never warm, because the tree is cleaned before every run."""
+    tree's own target (ST_EVIDENCE_TARGET=off) is never warm, because the tree is cleaned before every run. The cache directory tag alone
+    (make_target writes it into a new or emptied target) is not a build."""
     target = target or (Path(os.environ['CARGO_TARGET_DIR']) if os.environ.get('CARGO_TARGET_DIR') else None)
     try:
-        return target is not None and any(target.iterdir())
+        return target is not None and any(entry.name != 'CACHEDIR.TAG' for entry in target.iterdir())
     except OSError:
         return False
 

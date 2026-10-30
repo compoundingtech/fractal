@@ -5685,6 +5685,25 @@ impl Store {
     }
 
     /// The newest claim or local observation of `kind` for `subject`.
+    /// When this node last heard `subject`'s harness report for `incarnation`: its newest local
+    /// `harness.observed`, if that is of the incarnation. Local observations never replicate, so
+    /// only the node that runs the seat has one; it hears every re-stamp, replicated or not. One
+    /// seek in `local_observations_subject_kind_index`, whatever the log holds.
+    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        let connection = self.readers.get();
+        let newest: Option<(i64, Option<String>)> = connection
+            .prepare_cached(
+                "SELECT observed_at_unix_ms, json_extract(body, '$.fields.incarnation_id')
+                 FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=?1 AND kind='harness.observed' ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdfe967515468 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        Ok(newest
+            .filter(|(_, of)| of.as_deref() == Some(incarnation))
+            .map(|(at, _)| at.max(0) as u128))
+    }
+
     pub fn latest_observation(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let claim = self.latest_claim(subject, Some(kind))?;
