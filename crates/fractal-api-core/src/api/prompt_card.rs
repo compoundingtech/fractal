@@ -120,11 +120,20 @@ pub(crate) fn seat_pending_calls(
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
     let source = super::client_v0::conversation_blocks::source(state, &session, managed.as_ref())
         .map_err(unreadable)?;
+    source_pending_calls(&source, follow)
+}
+
+/// The tool calls without a result in a conversation `source`, following it from before the
+/// read.
+pub(crate) fn source_pending_calls(
+    source: &crate::external_sessions::ExternalSession,
+    follow: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<Vec<Value>, String> {
     follow(&source.transcript)?;
-    let timeline = crate::external_sessions::LineTimeline::acquire(&source);
+    let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let slice = timeline
         .hold()
-        .slice(&source, crate::external_sessions::TimelineOrder::Sequence, None, TAIL)
+        .slice(source, crate::external_sessions::TimelineOrder::Sequence, None, TAIL)
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
     Ok(pending_calls(&slice.items))
 }
@@ -133,17 +142,51 @@ pub(crate) fn seat_pending_calls(
 /// seat's conversation changes no claim attention reads. It watches each transcript's
 /// directory, so a transcript created or replaced later, and a SQLite source's write-ahead log
 /// and journal beside it, are followed too. An event the watcher could not deliver in full (an
-/// error, or an overflow that asks for a rescan) counts as a change, so the prompts are read
-/// again. A transcript it cannot watch is not followed: its card says so and offers no answer.
+/// error, or an overflow that asks for a rescan) means a change may have been lost and the
+/// subscriptions may no longer hold: the next refresh makes the watcher again and subscribes
+/// each card's conversation anew before reading it. A transcript it cannot watch is not
+/// followed: its card says so and offers no answer.
 pub(crate) struct PromptWatch {
-    wake: Arc<tokio::sync::Notify>,
+    shared: Arc<Delivery>,
     watcher: Option<notify::RecommendedWatcher>,
-    /// The files whose changes wake the refresher: each followed transcript and its siblings.
-    files: Arc<Mutex<HashSet<PathBuf>>>,
     /// The transcripts followed, and those the refresh in progress read.
     followed: HashSet<PathBuf>,
     read: HashSet<PathBuf>,
-    changed: Arc<AtomicBool>,
+}
+
+/// What the watcher's callback shares with the refresher.
+struct Delivery {
+    wake: Arc<tokio::sync::Notify>,
+    /// The files whose changes wake the refresher: each followed transcript and its siblings.
+    files: Mutex<HashSet<PathBuf>>,
+    changed: AtomicBool,
+    /// The watcher reported an error or lost events: no subscription is trusted until made again.
+    broken: AtomicBool,
+}
+
+impl Delivery {
+    fn deliver(&self, event: notify::Result<notify::Event>) {
+        let relevant = match &event {
+            Err(_) => {
+                self.broken.store(true, Ordering::Release);
+                true
+            }
+            Ok(event) if event.need_rescan() => {
+                self.broken.store(true, Ordering::Release);
+                true
+            }
+            Ok(event) => {
+                !matches!(event.kind, notify::EventKind::Access(_)) && {
+                    let files = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    event.paths.iter().any(|path| files.contains(path))
+                }
+            }
+        };
+        if relevant {
+            self.changed.store(true, Ordering::Release);
+            self.wake.notify_one();
+        }
+    }
 }
 
 /// A transcript and the files beside it a SQLite source commits through.
@@ -159,12 +202,15 @@ fn change_files(transcript: &Path) -> [PathBuf; 3] {
 impl PromptWatch {
     pub(crate) fn new(wake: Arc<tokio::sync::Notify>) -> Self {
         let mut watch = Self {
-            wake,
+            shared: Arc::new(Delivery {
+                wake,
+                files: Mutex::default(),
+                changed: AtomicBool::new(false),
+                broken: AtomicBool::new(false),
+            }),
             watcher: None,
-            files: Arc::default(),
             followed: HashSet::new(),
             read: HashSet::new(),
-            changed: Arc::new(AtomicBool::new(false)),
         };
         // A watcher that cannot be made now is made again when a card first follows a seat.
         let _ = watch.watcher();
@@ -173,23 +219,8 @@ impl PromptWatch {
 
     fn watcher(&mut self) -> Result<&mut notify::RecommendedWatcher, String> {
         if self.watcher.is_none() {
-            let (flag, wake, files) = (Arc::clone(&self.changed), Arc::clone(&self.wake), Arc::clone(&self.files));
-            let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let relevant = match &event {
-                    Err(_) => true,
-                    Ok(event) if event.need_rescan() => true,
-                    Ok(event) => {
-                        !matches!(event.kind, notify::EventKind::Access(_)) && {
-                            let files = files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                            event.paths.iter().any(|path| files.contains(path))
-                        }
-                    }
-                };
-                if relevant {
-                    flag.store(true, Ordering::Release);
-                    wake.notify_one();
-                }
-            })
+            let shared = Arc::clone(&self.shared);
+            let watcher = notify::recommended_watcher(move |event| shared.deliver(event))
             .map_err(|error| format!("st cannot follow this seat's conversation: {error}"))?;
             self.watcher = Some(watcher);
         }
@@ -198,17 +229,23 @@ impl PromptWatch {
 
     /// Whether a followed conversation changed since this was last asked.
     pub(crate) fn take_changed(&self) -> bool {
-        self.changed.swap(false, Ordering::AcqRel)
+        self.shared.changed.swap(false, Ordering::AcqRel)
     }
 
     /// Ask again at the next refresh: the refresh that read the change failed.
     pub(crate) fn keep_changed(&self) {
-        self.changed.store(true, Ordering::Release);
+        self.shared.changed.store(true, Ordering::Release);
     }
 
-    /// A refresh is about to present the prompts.
+    /// A refresh is about to present the prompts. After a delivery failure nothing followed is
+    /// trusted: the watcher is made again, and each card subscribes anew before it reads.
     pub(crate) fn begin(&mut self) {
         self.read.clear();
+        if self.shared.broken.swap(false, Ordering::AcqRel) {
+            self.watcher = None;
+            self.followed.clear();
+            self.shared.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        }
     }
 
     /// Follow `transcript` from now on, before it is read.
@@ -224,7 +261,8 @@ impl PromptWatch {
                     .watch(&directory, notify::RecursiveMode::NonRecursive)
                     .map_err(|error| format!("st cannot follow this seat's conversation: {error}"))?;
             }
-            self.files
+            self.shared
+                .files
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .extend(change_files(transcript));
@@ -239,7 +277,7 @@ impl PromptWatch {
         let gone = self.followed.difference(&self.read).cloned().collect::<Vec<_>>();
         for transcript in gone {
             self.followed.remove(&transcript);
-            let mut files = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut files = self.shared.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for file in change_files(&transcript) {
                 files.remove(&file);
             }
@@ -255,7 +293,7 @@ impl PromptWatch {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn row(answers: Value, call: Value) -> Value {
@@ -345,9 +383,17 @@ mod tests {
     }
 
     /// Wait for a followed conversation to change, or say it did not within `within`.
-    async fn changed(watch: &PromptWatch, wake: &tokio::sync::Notify, within: Duration) -> bool {
-        let _ = tokio::time::timeout(within, wake.notified()).await;
-        watch.take_changed()
+    pub(crate) async fn changed(watch: &PromptWatch, wake: &tokio::sync::Notify, within: Duration) -> bool {
+        // A wake left from an earlier event returns at once: wait on until the flag is set.
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            if watch.take_changed() {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, wake.notified()).await.is_err() {
+                return watch.take_changed();
+            }
+        }
     }
 
     fn append(path: &Path) {
@@ -406,6 +452,53 @@ mod tests {
             .execute("INSERT INTO part VALUES ('call-a', '{\"type\":\"tool\"}')", [])
             .unwrap();
         assert_eq!(std::fs::metadata(&database).unwrap().len(), before, "the commit is in the log alone");
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+    }
+
+    /// After the watcher reports an error or lost events, no subscription it holds is trusted:
+    /// the next refresh subscribes each card's conversation anew before reading it, and a card
+    /// whose conversation can no longer be subscribed says so and offers no answer.
+    #[tokio::test]
+    async fn after_a_delivery_failure_each_card_subscribes_again_before_it_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let (oak_directory, elm_directory) = (root.path().join("oak"), root.path().join("elm"));
+        std::fs::create_dir_all(&oak_directory).unwrap();
+        std::fs::create_dir_all(&elm_directory).unwrap();
+        let (oak, elm) = (oak_directory.join("oak.jsonl"), elm_directory.join("elm.jsonl"));
+        std::fs::write(&oak, "{}\n").unwrap();
+        std::fs::write(&elm, "{}\n").unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        watch.begin();
+        watch.follow(&oak).unwrap();
+        watch.follow(&elm).unwrap();
+        watch.finish();
+        let calls = || Ok(vec![json!({"call_id": "call-a", "name": "Bash", "arguments": {"command": "make"}, "complete": true})]);
+        let card = |watch: &mut PromptWatch, transcript: &Path| {
+            prompt_card(&row(json!(["allow", "deny"]), json!("call-a")), || {
+                watch.follow(transcript)?;
+                calls()
+            })
+        };
+        assert_eq!(card(&mut watch, &oak)["allow"], true);
+
+        // The watcher lost events: the refresher is woken to read again.
+        watch.shared.deliver(Err(notify::Error::generic("inotify queue overflowed")));
+        assert!(watch.take_changed());
+        // Oak's directory went away meanwhile, so its card cannot subscribe again.
+        std::fs::remove_dir_all(&oak_directory).unwrap();
+        watch.begin();
+        let prompt = card(&mut watch, &oak);
+        assert_eq!(prompt["calls"], Value::Null);
+        assert!(prompt["unknown_reason"].as_str().unwrap().starts_with("st cannot follow this seat's conversation"), "{prompt}");
+        assert_eq!(prompt["allow"], false);
+        // Elm's subscribes anew, and its changes wake the refresher through the new watcher.
+        assert_eq!(card(&mut watch, &elm)["allow"], true);
+        watch.finish();
+        // Forget what the removal told the old watcher, then change elm.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        watch.take_changed();
+        append(&elm);
         assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
     }
 

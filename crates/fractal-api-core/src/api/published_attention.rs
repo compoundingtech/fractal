@@ -712,34 +712,7 @@ mod tests {
             let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
             writeln!(file, "{line}").unwrap();
         };
-        let store = Store::open_memory("node").unwrap();
-        let wake = store.start_attention_list_refresher().unwrap();
-        refresh_attention_list(&store).unwrap();
-        let (generation, first) = store.newest_attention_list();
-        let first = first.unwrap();
-        let mut rows = (*first.rows).clone();
-        rows.push(json!({
-            "id": "attention/prompt",
-            "attention_kind": "harness-prompt",
-            "source_id": "agent/example/oak",
-            "action_parameters": {"prompt.respond": {"answers": ["allow", "deny"], "call_id": "call-a"}},
-            "presentation": {"kind": "prompt"},
-        }));
-        store.publish_attention_list(
-            generation,
-            AttentionPublication {
-                cut: first.cut,
-                projection: first.projection.clone(),
-                evaluated_at_unix_ms: first.evaluated_at_unix_ms,
-                due_at_unix_ms: first.due_at_unix_ms,
-                future_after: first.future_after,
-                published_at_unix_ms: first.published_at_unix_ms,
-                owners: AttentionPublication::index_owners(&rows),
-                rows: Arc::new(rows),
-                fleet: first.fleet.clone(),
-            },
-            true,
-        );
+        let (store, wake, cut) = with_prompt_card("call-a");
         let prompts = std::sync::Mutex::new(super::super::prompt_card::PromptWatch::new(Arc::clone(&wake)));
         // The first read races the seat: the call lands just after it.
         let racing = std::sync::atomic::AtomicBool::new(true);
@@ -758,12 +731,7 @@ mod tests {
             }
             Ok(calls)
         };
-        let prompt = || {
-            let (_, publication) = store.newest_attention_list();
-            let publication = publication.unwrap();
-            let row = publication.rows.iter().find(|row| row["id"] == "attention/prompt").unwrap();
-            row["presentation"]["prompt"].clone()
-        };
+        let prompt = || published_prompt(&store);
         let refresh = |changed: bool| {
             watching(&prompts).begin();
             let presented =
@@ -774,8 +742,7 @@ mod tests {
             presented
         };
         let woken = || async {
-            tokio::time::timeout(Duration::from_secs(5), wake.notified()).await.expect("woken");
-            assert!(watching(&prompts).take_changed());
+            assert!(super::super::prompt_card::tests::changed(&watching(&prompts), &wake, Duration::from_secs(5)).await);
         };
 
         // Nothing changed: nothing is read.
@@ -793,7 +760,125 @@ mod tests {
         woken().await;
         refresh(true);
         assert_eq!(prompt(), json!({"calls": [], "answers": ["allow", "deny"], "allow": false}));
+        assert_eq!(published_cut(&store), cut, "no claim was read");
+    }
+
+    /// OpenCode keeps a conversation in SQLite and commits to its write-ahead log, leaving the
+    /// database file as it was until a checkpoint. Its call and then its result, committed there
+    /// alone, present the prompt again through the real reader and watch, without a claim or the
+    /// clock.
+    #[tokio::test]
+    async fn an_opencode_call_and_its_result_in_the_write_ahead_log_present_the_prompt_again() {
+        use crate::external_sessions::{ExternalDriver, ExternalSession};
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("opencode.db");
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.pragma_update(None, "journal_mode", "WAL").unwrap();
+        db.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);\
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);\
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);\
+             INSERT INTO session VALUES ('ses_oak', '/work/example', 'Oak', 1, 1);\
+             INSERT INTO message VALUES ('msg_1', 'ses_oak', 2, 2, '{\"role\":\"assistant\"}');",
+        )
+        .unwrap();
+        let source = ExternalSession {
+            id: "session/external-opencode-ses_oak".into(),
+            revision: "revision-test".into(),
+            driver: ExternalDriver::OpenCode,
+            native_id: "ses_oak".into(),
+            transcript: database.clone(),
+            codex_home: None,
+            cwd: None,
+            title: None,
+            started_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            process: None,
+        };
+        let (store, wake, cut) = with_prompt_card("call_oak");
+        let prompts = std::sync::Mutex::new(super::super::prompt_card::PromptWatch::new(Arc::clone(&wake)));
+        let pending = |_: &str| {
+            super::super::prompt_card::source_pending_calls(&source, |transcript| watching(&prompts).follow(transcript))
+        };
+        let refresh = || {
+            watching(&prompts).begin();
+            if refresh_attention_list_reading(&store, |previous| previous.cloned(), Some(&pending), true).unwrap() {
+                watching(&prompts).finish();
+            }
+        };
+        let woken = || async {
+            assert!(super::super::prompt_card::tests::changed(&watching(&prompts), &wake, Duration::from_secs(5)).await);
+        };
+        let part = |state: Value| json!({"type": "tool", "callID": "call_oak", "tool": "bash", "state": state}).to_string();
+
+        refresh();
+        assert_eq!(published_prompt(&store)["calls"], json!([]));
+        let size = std::fs::metadata(&database).unwrap().len();
+        db.execute(
+            "INSERT INTO part VALUES ('part_1', 'msg_1', 'ses_oak', 3, 3, ?1)",
+            [part(json!({"status": "running", "input": {"command": "make release"}}))],
+        )
+        .unwrap();
+        woken().await;
+        refresh();
+        assert_eq!(published_prompt(&store)["calls"][0]["call_id"], "call_oak");
+        assert_eq!(published_prompt(&store)["calls"][0]["input"], r#"{"command":"make release"}"#);
+        assert_eq!(published_prompt(&store)["allow"], true);
+        db.execute(
+            "UPDATE part SET time_updated = 4, data = ?1 WHERE id = 'part_1'",
+            [part(json!({"status": "completed", "input": {"command": "make release"}, "output": "done"}))],
+        )
+        .unwrap();
+        woken().await;
+        refresh();
+        assert_eq!(published_prompt(&store), json!({"calls": [], "answers": ["allow", "deny"], "allow": false}));
+        assert_eq!(std::fs::metadata(&database).unwrap().len(), size, "every commit is in the log alone");
+        assert_eq!(published_cut(&store), cut, "no claim was read");
+    }
+
+    /// A store whose published attention list has one prompt card, for seat `agent/example/oak`,
+    /// asking about `call`; the refresher's wake and the publication's cut.
+    fn with_prompt_card(call: &str) -> (Store, Arc<tokio::sync::Notify>, u64) {
+        let store = Store::open_memory("node").unwrap();
+        let wake = store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        let (generation, first) = store.newest_attention_list();
+        let first = first.unwrap();
+        let mut rows = (*first.rows).clone();
+        rows.push(json!({
+            "id": "attention/prompt",
+            "attention_kind": "harness-prompt",
+            "source_id": "agent/example/oak",
+            "action_parameters": {"prompt.respond": {"answers": ["allow", "deny"], "call_id": call}},
+            "presentation": {"kind": "prompt"},
+        }));
+        store.publish_attention_list(
+            generation,
+            AttentionPublication {
+                cut: first.cut,
+                projection: first.projection.clone(),
+                evaluated_at_unix_ms: first.evaluated_at_unix_ms,
+                due_at_unix_ms: first.due_at_unix_ms,
+                future_after: first.future_after,
+                published_at_unix_ms: first.published_at_unix_ms,
+                owners: AttentionPublication::index_owners(&rows),
+                rows: Arc::new(rows),
+                fleet: first.fleet.clone(),
+            },
+            true,
+        );
+        (store, wake, first.cut)
+    }
+
+    fn published_prompt(store: &Store) -> Value {
         let (_, publication) = store.newest_attention_list();
-        assert_eq!(publication.unwrap().cut, first.cut, "no claim was read");
+        let publication = publication.unwrap();
+        let row = publication.rows.iter().find(|row| row["id"] == "attention/prompt").unwrap();
+        row["presentation"]["prompt"].clone()
+    }
+
+    fn published_cut(store: &Store) -> u64 {
+        store.newest_attention_list().1.unwrap().cut
     }
 }
