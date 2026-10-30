@@ -179,15 +179,16 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
             }
             let mut agent_states = BTreeMap::<&str, u64>::new();
             let local_host = client_host_id(reader.store.origin());
+            let seats = agents.iter().filter_map(|agent| agent["id"].as_str()).collect::<Vec<_>>();
+            let heard_seats = crate::api::HeardSeats::read(&reader.store, &seats).map_err(ApiError::internal)?;
             for agent in agents.iter() {
                 if ident(agent["id"].as_str()).is_some_and(|id| id.starts_with("agent/")) {
                     let reported = agent["harness_state"].as_str();
                     let source: Option<crate::model::CurrentHarnessView> =
                         serde_json::from_value(agent["_status_source"].clone()).ok();
-                    let heard = match &source {
-                        Some(harness) => Some(crate::api::heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness, now).map_err(ApiError::internal)?),
-                        None => None,
-                    };
+                    let heard = source
+                        .as_ref()
+                        .map(|harness| heard_seats.heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness, now));
                     let age = heard.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
                     // The scalar state rules of overlay_agent_resources/overlay_down, followed
                     // by the same local delivery assessment; no card is built just to count it.

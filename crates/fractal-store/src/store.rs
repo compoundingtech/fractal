@@ -5692,6 +5692,33 @@ impl Store {
         Ok(newest.and_then(|(at, incarnation)| Some((incarnation?, at.max(0) as u128))))
     }
 
+    /// [`Self::local_harness_newest`] for many seats in one statement: one seek per seat in
+    /// `local_observations_subject_kind_index`, so a roster read is one query, not one per card.
+    pub fn local_harness_newest_many(&self, subjects: &[&str]) -> Result<HashMap<String, (String, u128)>> {
+        if subjects.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT seats.value, local.observed_at_unix_ms, json_extract(local.body, '$.fields.incarnation_id')
+             FROM json_each(?1) AS seats
+             JOIN local_observations AS local ON local.id=(
+                 SELECT id FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=seats.value AND kind='harness.observed' ORDER BY id DESC LIMIT 1)",
+        )?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        let mut newest = HashMap::new();
+        for row in rows {
+            let (subject, at, incarnation) = row?;
+            if let Some(incarnation) = incarnation {
+                newest.insert(subject, (incarnation, at.max(0) as u128));
+            }
+        }
+        Ok(newest)
+    }
+
     /// When this node last heard `subject`'s harness report for `incarnation`, from its local log.
     pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
         Ok(self
