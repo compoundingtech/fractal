@@ -6363,6 +6363,31 @@ fn begin_admitted_startup(
     Ok(startup)
 }
 
+/// Record `[asks] default_deadline`. A display default never stops a start or a reload: when the
+/// store cannot record it (busy or locked), warn and go on. Asks made from then on carry the new
+/// default; an ask made before deadlines keeps the recorded one until a later start or reload
+/// records it.
+fn record_ask_deadline_default(store: &Store, deadline_ms: u64) {
+    if let Err(error) = store.set_default_ask_deadline_ms(deadline_ms) {
+        tracing::warn!("the ask deadline default could not be recorded: {error:#}");
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_default_deadline_the_store_cannot_record_does_not_stop_the_start() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("claims.sqlite3"), "fern").unwrap();
+    store.connection.write().execute_batch("PRAGMA query_only=ON").unwrap();
+    assert!(store.set_default_ask_deadline_ms(2 * 3_600_000).is_err(), "the write is refused");
+    record_ask_deadline_default(&store, 3 * 3_600_000);
+    assert_eq!(store.default_ask_deadline_ms(), 3 * 3_600_000, "new asks carry it");
+    store.connection.write().execute_batch("PRAGMA query_only=OFF").unwrap();
+    record_ask_deadline_default(&store, 3 * 3_600_000);
+    let recorded = fractal_store::store::person_work::ask_deadline_policy(&store.readers.get()).unwrap().1;
+    assert_eq!(recorded, 3 * 3_600_000, "a later start records it");
+}
+
 #[cfg(test)]
 #[test]
 fn admitted_explicit_state_alias_is_not_recreated_at_startup_boundary() {
@@ -6727,7 +6752,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
-    store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
+    record_ask_deadline_default(&store, config.asks.default_deadline_ms()?);
     store.set_ask_deadlines(config.asks.deadlines);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -19055,9 +19080,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
-                if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
-                    tracing::warn!("the ask deadline default could not be recorded: {error:#}");
-                }
+                record_ask_deadline_default(&store, asks.default_deadline_ms().expect("validated ask deadline"));
                 store.set_ask_deadlines(asks.deadlines);
                 limits = reloaded;
                 last_error = None;

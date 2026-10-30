@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A daemon starts even when the store cannot record the [asks] default_deadline, warning as a reload does",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire or stored-format change. A start whose default-deadline write fails warns and goes on: new asks carry the new default, and asks made before deadlines keep the recorded default until a later start or reload records it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert."
+  }
+}
