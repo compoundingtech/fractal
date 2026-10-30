@@ -1516,7 +1516,15 @@ mod tests {
         }
         #[cfg(target_os = "macos")]
         {
-            fractal_runtime::PeerProcessIdentity::capture_generation(pid).ok()
+            use std::os::fd::AsFd as _;
+            use std::os::unix::net::UnixStream;
+            assert_eq!(pid, std::process::id(), "foreign fixture peers require a real accepted socket");
+            static PAIR: std::sync::LazyLock<(UnixStream, UnixStream)> =
+                std::sync::LazyLock::new(|| UnixStream::pair().unwrap());
+            let pair = &*PAIR;
+            Some(fractal_runtime::PeerProcessIdentity::capture_local_socket(
+                pair.0.as_fd().try_clone_to_owned().unwrap(),
+            ).unwrap())
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -1611,9 +1619,37 @@ mod tests {
             session_dir: state.state_dir.join("sessions"),
         };
         let environment: BTreeMap<_, _> = paths.environment(name).into_iter().collect();
+        #[cfg(target_os = "macos")]
+        let peer_listener = {
+            let listener = std::os::unix::net::UnixListener::bind(state.state_dir.join("title-peer.sock")).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            listener
+        };
+        #[cfg(target_os = "linux")]
+        let launch = fractal_runtime::Launch::Argv(vec!["sleep".into(), "300".into()]);
+        #[cfg(target_os = "macos")]
+        let launch = fractal_runtime::Launch::Argv(vec![
+            "node".into(), "-e".into(),
+            "require('node:net').connect(process.argv[1]); setInterval(() => {}, 1000);".into(),
+            state.state_dir.join("title-peer.sock").to_string_lossy().into_owned(),
+        ]);
         runtime.spawn(&member.runtime_id,
-            &fractal_runtime::Launch::Argv(vec!["sleep".into(), "300".into()]),
+            &launch,
             &state.state_dir, &environment, None, &BTreeMap::new(), None).unwrap();
+        #[cfg(target_os = "macos")]
+        let peer_process = {
+            use std::os::fd::AsFd as _;
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let stream = loop {
+                match peer_listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                    Err(error) => panic!("physical fixture peer did not connect: {error}"),
+                }
+            };
+            fractal_runtime::PeerProcessIdentity::capture_local_socket(stream.as_fd().try_clone_to_owned().unwrap()).unwrap()
+        };
         let physical = runtime.snapshot().unwrap().into_iter()
             .find(|observation| observation.name == member.runtime_id).unwrap();
         let incarnation = format!("{}:{}", physical.pid.unwrap(), physical.created_at.unwrap());
@@ -1635,11 +1671,14 @@ mod tests {
         let sequence = fractal_drivers::harness_state::claim(&dir, name, "claude", &session).unwrap();
         let owner = crate::mailbox::Authority {
             provider: "claude".into(), session, sequence, pid,
-            process_token: fractal_runtime::process_start_token(pid).unwrap(),
+            process_token: fractal_drivers::claude_process::process(pid).unwrap().birth,
         };
         let title = state.store.bind_mailbox_with_lease(&Fence::new(subject, &incarnation, "title"), Some(&owner)).unwrap();
         let delivery = state.store.bind_mailbox(&Fence::new(subject, &incarnation, "delivery")).unwrap();
-        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(pid),
+        #[cfg(target_os = "linux")]
+        let peer_process = fixture_direct_peer_process(pid).unwrap();
+        assert_eq!(peer_process.pid(), pid);
+        let peer = NativeDeliveryPeer { peer_process: Some(peer_process),
             agent: subject.into(), transport: "claude-channel", pid, archives_inbox: true };
         (fixture, title, delivery, peer)
     }
@@ -1807,7 +1846,7 @@ mod tests {
         fractal_drivers::harness_events::enable(&dir, "current").unwrap();
         let sequence = fractal_drivers::harness_state::claim(&dir, "eval.worker", "claude", "protected-fixture").unwrap();
         let owner = crate::mailbox::Authority { provider: "claude".into(), session: "protected-fixture".into(),
-            sequence, pid: std::process::id(), process_token: fractal_runtime::process_start_token(std::process::id()).unwrap() };
+            sequence, pid: std::process::id(), process_token: fractal_drivers::claude_process::process(std::process::id()).unwrap().birth };
         let current=state.store.bind_mailbox_with_lease(&Fence::new(subject,"current","delivery"), Some(&owner)).unwrap();
         let candidate=Fence::new(subject,"current","delivery");
         let peer=NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent:subject.into(),transport:"claude-channel",
@@ -3631,7 +3670,7 @@ mod tests {
             let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: request.subject.clone(), transport: "omp-channel",
                 pid: std::process::id(), archives_inbox: true };
             let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-lock".into(),
-                sequence, pid: peer.pid, process_token: fractal_runtime::process_start_token(peer.pid).unwrap() };
+                sequence, pid: peer.pid, process_token: fractal_drivers::claude_process::process(peer.pid).unwrap().birth };
             let fence = state.store.bind_mailbox_with_lease(&request, Some(&owner)).unwrap();
             let (started, mut entries) = tokio::sync::mpsc::unbounded_channel();
             let (blocking_started, mut blocking_entries) = tokio::sync::mpsc::unbounded_channel();
@@ -3787,7 +3826,7 @@ mod tests {
         // An explicitly already-admitted fixture lease isolates report consumption.
         // This is not a physical bind/launch authentication certificate.
         let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-session".into(),
-            sequence, pid: peer.pid, process_token: fractal_runtime::process_start_token(peer.pid).unwrap() };
+            sequence, pid: peer.pid, process_token: fractal_drivers::claude_process::process(peer.pid).unwrap().birth };
         let fence = state.store.bind_mailbox_with_lease(&Fence::new(&subject, "current", "delivery"), Some(&owner)).unwrap();
         state.store.request_rollout(&subject, &selected.desired_token, member, "current",
             "person/test", &policy, "report-drain").unwrap();

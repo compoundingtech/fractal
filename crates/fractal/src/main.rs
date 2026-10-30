@@ -15347,6 +15347,21 @@ impl NativeObservations {
         // Bound a wake's work so a backlog does not hold back native delivery.
         let mut events = fractal_drivers::harness_events::pending(&self.dir, 64)?;
         for event in &mut events {
+            // Only this agent directory's durable enable boundary establishes ordering.
+            // Dispose before decoding or applying readiness/deadline/provider side effects;
+            // a foreign runtime without that proof still faces the server runtime fence.
+            if fractal_drivers::harness_events::is_older_runtime_event(&self.dir, &self.runtime, event)? {
+                fractal_drivers::harness_events::acknowledge(&self.dir, event.sequence)?;
+                tracing::info!(
+                    sequence = event.sequence,
+                    runtime_incarnation = %event.runtime_incarnation,
+                    current_runtime_incarnation = %self.runtime,
+                    disposed_events = 1,
+                    disposition = "superseded-runtime",
+                    "acknowledged superseded native observation"
+                );
+                continue;
+            }
             // Account binding is outbox metadata, not part of the producer's observation.
             // Preserve it separately for the accounting claim builders below.
             let account_ref = event.payload.as_object_mut()

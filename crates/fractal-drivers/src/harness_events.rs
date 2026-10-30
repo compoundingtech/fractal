@@ -262,12 +262,25 @@ pub fn enable(agent_dir: &Path, runtime_incarnation: &str) -> Result<()> {
             source TEXT NOT NULL, body TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS timeline_source ON timeline(incarnation,source,id);",
     )?;
-    let tx = connection.transaction()?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-h3d3c77531186 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO metadata(key,value)
         SELECT 'pending-bytes', COALESCE(SUM(length(CAST(body AS BLOB))),0) FROM events",
         [],
     )?;
+    let previous: Option<String> = tx
+        .query_row("SELECT value FROM metadata WHERE key='runtime'", [], |row| row.get(0))
+        .optional()?;
+    if previous.as_deref() != Some(runtime_incarnation) {
+        // AUTOINCREMENT retains the high-water mark after acknowledgement. Under the
+        // writer lock every existing event precedes this fresh runtime's enable boundary.
+        tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h408dfca20a79 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata(key,value)
+            SELECT 'runtime-start-sequence', COALESCE((SELECT seq FROM sqlite_sequence WHERE name='events'),0)+1
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [],
+        )?;
+    }
     tx.execute(
         /* sqlite-large-value: allow-for-now lv-hec41a4e102c4 owner=fractal_drivers::harness_events TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO metadata VALUES ('runtime',?1)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -325,6 +338,27 @@ pub fn read_snapshot(agent_dir: &Path, kind: &str) -> Result<Option<Vec<u8>>> {
                 row.get(0)
             })
             .optional()?)
+    })
+}
+
+/// Prove that an event in this directory's durable queue predates the current runtime.
+/// A mismatch alone is not ordering evidence: legacy, unknown and newer events fail closed.
+/// Same-runtime re-enables preserve the boundary recorded by the fresh launch.
+pub fn is_older_runtime_event(agent_dir: &Path, runtime: &str, event: &Event) -> Result<bool> {
+    if event.runtime_incarnation == runtime {
+        return Ok(false);
+    }
+    with_read_connection(agent_dir, |connection| {
+        Ok(connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM metadata AS runtime, metadata AS boundary, events AS event
+                WHERE runtime.key='runtime' AND runtime.value=?1
+                AND boundary.key='runtime-start-sequence'
+                AND event.sequence=?2 AND event.runtime_incarnation=?3
+                AND event.sequence<CAST(boundary.value AS INTEGER))",
+            params![runtime, event.sequence, event.runtime_incarnation],
+            |row| row.get(0),
+        )?)
     })
 }
 
@@ -1214,6 +1248,50 @@ mod protocol_tests {
         assert_eq!(events[0].payload["account_ref"], "ada/one");
         assert_eq!(events[1].runtime_incarnation, "runtime-two");
         assert_eq!(events[1].payload["account_ref"], "ada/two");
+    }
+
+    #[test]
+    fn runtime_enable_boundary_orders_only_its_own_durable_queue_history() {
+        let root = tempfile::tempdir().unwrap();
+        enable(root.path(), "runtime-old").unwrap();
+        let old_seq = claim(root.path(), "example/seat", "claude", "old").unwrap();
+        let mut old = Writer::new(root.path(), "example/seat", "claude", Some("pty".into()))
+            .with_ownership("old", old_seq);
+        old.observe(active()).unwrap();
+        let before = pending(root.path(), 100).unwrap();
+        enable(root.path(), "runtime-new").unwrap();
+        assert!(before.iter().all(|event|
+            is_older_runtime_event(root.path(), "runtime-new", event).unwrap()));
+        assert!(!is_older_runtime_event(root.path(), "unknown-runtime", &before[0]).unwrap());
+        assert!(!is_older_runtime_event(root.path(), "runtime-old", &before[0]).unwrap());
+
+        // A delayed predecessor write after enable is not proven older by runtime mismatch.
+        old.observe(Observation::new(Activity::Idle, BlockedOn::None, InputBuffer::Unknown)).unwrap();
+        let after = pending(root.path(), 100).unwrap();
+        let delayed = after.last().unwrap();
+        assert!(delayed.sequence > before.last().unwrap().sequence);
+        assert!(!is_older_runtime_event(root.path(), "runtime-new", delayed).unwrap());
+        enable(root.path(), "runtime-new").unwrap();
+        assert!(!is_older_runtime_event(root.path(), "runtime-new", delayed).unwrap());
+
+        let other = tempfile::tempdir().unwrap();
+        enable(other.path(), "runtime-new").unwrap();
+        assert!(!is_older_runtime_event(other.path(), "runtime-new", &before[0]).unwrap());
+        open(root.path()).unwrap().execute(
+            "DELETE FROM metadata WHERE key='runtime-start-sequence'", [],
+        ).unwrap();
+        enable(root.path(), "runtime-new").unwrap();
+        assert!(!is_older_runtime_event(root.path(), "runtime-new", &before[0]).unwrap());
+
+        // Acknowledgement does not reset AUTOINCREMENT's enable high-water mark.
+        acknowledge(root.path(), delayed.sequence).unwrap();
+        enable(root.path(), "runtime-next").unwrap();
+        let next_seq = claim(root.path(), "example/seat", "claude", "next").unwrap();
+        Writer::new(root.path(), "example/seat", "claude", Some("pty".into()))
+            .with_ownership("next", next_seq).observe(active()).unwrap();
+        let next = pending(root.path(), 100).unwrap();
+        assert!(next[0].sequence > delayed.sequence);
+        assert!(!is_older_runtime_event(root.path(), "runtime-next", &next[0]).unwrap());
     }
 
     #[test]

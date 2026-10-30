@@ -473,6 +473,6 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "native_role_bootstrap_tests.rs"]
 mod bootstrap_tests;

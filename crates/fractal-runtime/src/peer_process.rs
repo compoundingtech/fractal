@@ -1,28 +1,30 @@
 //! Accept-time process witnesses for authorization, not socket lifetime witnesses.
 
 use anyhow::Result;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use anyhow::Context as _;
 use std::os::fd::OwnedFd;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{os::fd::AsRawFd as _, sync::Arc};
 #[cfg(target_os = "linux")]
 use crate::process::process_identity;
-#[cfg(target_os = "macos")]
-use crate::process::peer_process_identity as process_identity;
 
-/// The original connector's process generation. A socket may outlive this process.
+/// An accept-time process identity. A socket may outlive this process.
 #[derive(Clone, Debug)]
 pub struct PeerProcessIdentity {
     pid: u32,
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     start_token: u64,
     #[cfg(target_os = "linux")]
-    pidfd: Option<Arc<OwnedFd>>,
+    pidfd: Arc<OwnedFd>,
+    #[cfg(target_os = "macos")]
+    pidversion: u32,
+    #[cfg(target_os = "macos")]
+    socket: Arc<OwnedFd>,
 }
 
 impl PeerProcessIdentity {
-    /// Capture immediately at accept using the socket's preferred SO_PEERPIDFD witness.
+    /// Capture immediately at accept using the socket's required SO_PEERPIDFD witness.
     pub fn capture(pid: u32, pidfd: OwnedFd) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -34,7 +36,7 @@ impl PeerProcessIdentity {
                 "socket connector pidfd is exited or invalid at accept");
             let (state, start_token) = process_identity(pid)?;
             anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x'), "socket connector has exited");
-            let identity = Self { pid, start_token, pidfd: Some(Arc::new(pidfd)) };
+            let identity = Self { pid, start_token, pidfd: Arc::new(pidfd) };
             identity.validate()?;
             Ok(identity)
         }
@@ -45,33 +47,28 @@ impl PeerProcessIdentity {
         }
     }
 
-    /// Capture immediately after reading SO_PEERCRED / LOCAL_PEERPID from an
-    /// accepted socket. The caller must supply that PID, never a request PID or
-    /// the PID of a process that merely holds an inherited socket.
+    /// Capture immediately from a duplicated accepted local socket.
     ///
-    /// This fallback checks a live process's start token at capture and on each
-    /// validation. Unlike a kernel pidfd it cannot exclude PID reuse before the
-    /// first lookup, or generations colliding at the platform clock resolution.
-    /// Callers must validate both before and after using process-derived proof.
-    pub fn capture_generation(pid: u32) -> Result<Self> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            let (state, start_token) = process_identity(pid)?;
-            anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x'), "socket connector has exited");
-            let identity = Self {
-                pid,
-                start_token,
-                #[cfg(target_os = "linux")]
-                pidfd: None,
-            };
-            identity.validate()?;
-            Ok(identity)
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            let _ = pid;
-            anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
-        }
+    /// Darwin LOCAL_PEERTOKEN resolves the peer socket's mutable last_pid to
+    /// a live audit token, not a stored connect-time token. This cannot exclude
+    /// PID reuse before capture or identify a pre-accept descriptor transfer.
+    /// Retaining and rechecking the socket refuses observed accessor changes;
+    /// live pidversion checks refuse changes after the captured token.
+    #[cfg(target_os = "macos")]
+    pub fn capture_local_socket(socket: OwnedFd) -> Result<Self> {
+        let token = local_socket_audit_token(&socket)?;
+        Self::capture_audit_token(token, socket)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn capture_audit_token(token: [u32; 8], socket: OwnedFd) -> Result<Self> {
+        let pid = token[5];
+        let pidversion = token[7];
+        let (state, start_token) = crate::process::peer_process_identity(pid, pidversion)?;
+        anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x'), "socket connector has exited");
+        let identity = Self { pid, start_token, pidversion, socket: Arc::new(socket) };
+        identity.validate()?;
+        Ok(identity)
     }
 
     pub fn pid(&self) -> u32 {
@@ -83,10 +80,7 @@ impl PeerProcessIdentity {
         #[cfg(target_os = "linux")]
         {
             crate::procfs::require_matching_procfs()?;
-            let Some(pidfd) = &self.pidfd else {
-                return self.validate_generation();
-            };
-            // An invalid pidfd must never downgrade to start-token authorization.
+            let pidfd = &self.pidfd;
             let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
             let result = unsafe { libc::poll(&mut poll, 1, 0) };
             if result < 0 {
@@ -108,19 +102,45 @@ impl PeerProcessIdentity {
         }
         #[cfg(target_os = "macos")]
         {
-            self.validate_generation()
+            self.validate_socket_token()?;
+            let (state, token) = crate::process::peer_process_identity(self.pid, self.pidversion)?;
+            anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x') && token == self.start_token,
+                "socket connector exited or its process identity changed");
+            self.validate_socket_token()?;
+            Ok(())
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn validate_generation(&self) -> Result<()> {
-        let (state, token) = process_identity(self.pid)?;
-        anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x') && token == self.start_token,
-            "socket connector exited or its PID was reused");
+    #[cfg(target_os = "macos")]
+    fn validate_socket_token(&self) -> Result<()> {
+        let token = local_socket_audit_token(&self.socket)?;
+        anyhow::ensure!(token[5] == self.pid && token[7] == self.pidversion,
+            "socket peer PID or audit-token version changed since accept");
         Ok(())
     }
+
+}
+
+#[cfg(target_os = "macos")]
+fn local_socket_audit_token(socket: &OwnedFd) -> Result<[u32; 8]> {
+    // XNU bsd/sys/un.h: SOL_LOCAL=0, LOCAL_PEERTOKEN=0x006.
+    // osfmk/mach/message.h defines audit_token_t as eight unsigned int words.
+    // bsd/kern/kern_prot.c proc_calc_audit_token sets PID/version at words 5/7.
+    let mut token = [0_u32; 8];
+    let mut length = std::mem::size_of_val(&token) as libc::socklen_t;
+    // SAFETY: token is writable and length is its exact capacity.
+    let result = unsafe {
+        libc::getsockopt(socket.as_raw_fd(), 0, 0x006,
+            token.as_mut_ptr().cast(), &mut length)
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("query local socket audit token");
+    }
+    anyhow::ensure!(length as usize == std::mem::size_of_val(&token),
+        "local socket audit token has an unsupported size");
+    Ok(token)
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -289,7 +309,7 @@ mod tests {
         // socket query nor relabeling its original kernel pidfd gives its identity.
         assert_eq!(accepted_socket_identity(&socket).pid(), connector.id());
         assert!(PeerProcessIdentity::capture(
-            descendant_pid, identity.pidfd.as_ref().unwrap().as_ref().try_clone().unwrap(),
+            descendant_pid, identity.pidfd.as_ref().try_clone().unwrap(),
         ).is_err());
         identity.validate().unwrap();
 
@@ -307,51 +327,113 @@ mod tests {
         // The connector cannot reap a descendant that deliberately outlives it.
         // Wait on the descendant's exact generation instead of a timed probe.
         let mut exited = libc::pollfd {
-            fd: descendant_identity.pidfd.as_ref().unwrap().as_raw_fd(), events: libc::POLLIN, revents: 0,
+            fd: descendant_identity.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0,
         };
         assert_eq!(unsafe { libc::poll(&mut exited, 1, -1) }, 1);
         assert_ne!(exited.revents & libc::POLLIN, 0);
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-mod generation_tests {
+#[cfg(all(test, target_os = "macos"))]
+mod audit_token_tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::AsFd as _;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::process::{Command, Stdio};
 
-    #[test]
-    fn fallback_accepts_live_generation_and_refuses_reuse() {
-        let mut identity = PeerProcessIdentity::capture_generation(std::process::id()).unwrap();
-        identity.validate().unwrap();
-        #[cfg(target_os = "linux")]
-        assert!(identity.pidfd.is_none());
-        // Deterministically model an observed different generation, without
-        // forcing PID reuse or claiming uniqueness within clock resolution.
-        identity.start_token = identity.start_token.wrapping_add(1);
-        assert!(identity.validate().is_err());
+    fn socket_descriptor(stream: &UnixStream) -> OwnedFd {
+        stream.as_fd().try_clone_to_owned().unwrap()
     }
 
     #[test]
-    fn generation_waiting_child() {
-        if std::env::var_os("FRACTAL_GENERATION_WAITING_CHILD").is_some() {
-            use std::io::Read as _;
+    fn live_connection_token_matches_live_pidversion() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("peer.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let _connector = UnixStream::connect(&path).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let token = local_socket_audit_token(&socket_descriptor(&socket)).unwrap();
+        assert_eq!(token[5], std::process::id());
+        assert_eq!(token[7], crate::process::peer_process_pidversion(token[5]).unwrap());
+        let identity = PeerProcessIdentity::capture_local_socket(socket_descriptor(&socket)).unwrap();
+        identity.validate().unwrap();
+        let mut stale = identity.clone();
+        stale.pidversion = stale.pidversion.wrapping_add(1);
+        assert!(stale.validate().is_err());
+    }
+
+    #[test]
+    fn stale_connection_version_is_refused_before_first_process_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("peer.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let _connector = UnixStream::connect(&path).unwrap();
+        let (socket, _) = listener.accept().unwrap();
+        let mut token = local_socket_audit_token(&socket_descriptor(&socket)).unwrap();
+        token[7] = token[7].wrapping_add(1);
+        // This candidate is live and has the same start time, but the original
+        // connection version differs before capture's first taskallinfo read.
+        let error = PeerProcessIdentity::capture_audit_token(token, socket_descriptor(&socket)).unwrap_err();
+        assert!(error.to_string().contains("audit-token version no longer matches"));
+    }
+
+    #[test]
+    fn audit_token_waiting_child() {
+        if let Some(path) = std::env::var_os("FRACTAL_AUDIT_TOKEN_SOCKET") {
+            let mut socket = UnixStream::connect(path).unwrap();
+            socket.write_all(b"r").unwrap();
             std::io::stdin().read_exact(&mut [0_u8]).unwrap();
         }
     }
 
     #[test]
-    fn fallback_refuses_exit_at_capture_and_after_capture() {
-        use std::io::Write as _;
-        use std::process::{Command, Stdio};
+    fn exited_connection_token_cannot_identify_live_reused_pid_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("peer.sock");
+        let listener = UnixListener::bind(&path).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "peer_process::generation_tests::generation_waiting_child"])
-            .env("FRACTAL_GENERATION_WAITING_CHILD", "1")
+            .args(["--exact", "peer_process::audit_token_tests::audit_token_waiting_child"])
+            .env("FRACTAL_AUDIT_TOKEN_SOCKET", &path)
             .stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
-        let pid = child.id();
-        let identity = PeerProcessIdentity::capture_generation(pid).unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.read_exact(&mut [0_u8]).unwrap();
+        let token = local_socket_audit_token(&socket_descriptor(&socket)).unwrap();
+        assert_eq!(token[5], child.id());
+        let mut identity = PeerProcessIdentity::capture_local_socket(socket_descriptor(&socket)).unwrap();
         identity.validate().unwrap();
+        // Even a fully live PID/version/start tuple must match this socket.
+        let mut different_peer = identity.clone();
+        different_peer.pid = std::process::id();
+        different_peer.pidversion = crate::process::peer_process_pidversion(different_peer.pid).unwrap();
+        different_peer.start_token = crate::process::peer_process_identity(
+            different_peer.pid, different_peer.pidversion,
+        ).unwrap().1;
+        let error = different_peer.validate().unwrap_err();
+        assert!(error.to_string().contains("socket peer PID or audit-token version changed"));
         child.stdin.take().unwrap().write_all(b"x").unwrap();
         assert!(child.wait().unwrap().success());
         assert!(identity.validate().is_err());
-        assert!(PeerProcessIdentity::capture_generation(pid).is_err());
+        assert!(PeerProcessIdentity::capture_local_socket(socket_descriptor(&socket)).is_err());
+
+        // Deterministically model the numeric PID now resolving to a live
+        // replacement, including its correct start time, without PID churn.
+        let replacement_pid = std::process::id();
+        let replacement_version = crate::process::peer_process_pidversion(replacement_pid).unwrap();
+        assert_ne!(token[7], replacement_version);
+        identity.pid = replacement_pid;
+        identity.start_token = crate::process::peer_process_identity(
+            replacement_pid, replacement_version,
+        ).unwrap().1;
+        assert!(identity.validate().is_err());
+        let mut reused = token;
+        reused[5] = replacement_pid;
+        assert!(PeerProcessIdentity::capture_audit_token(reused, socket_descriptor(&socket)).is_err());
+    }
+
+    #[test]
+    fn unavailable_socket_token_is_refused() {
+        let descriptor = std::fs::File::open("/dev/null").unwrap();
+        assert!(PeerProcessIdentity::capture_local_socket(descriptor.into()).is_err());
     }
 }

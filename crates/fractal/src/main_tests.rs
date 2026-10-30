@@ -8201,11 +8201,18 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
 #[tokio::test]
 async fn superseded_session_observations_are_disposed_once_before_reopened_queue_publishes() {
     for driver in ["omp", "pi"] {
-        assert_superseded_session_queue_reopens(driver).await;
+        assert_superseded_session_queue_reopens(driver, false).await;
     }
 }
 
-async fn assert_superseded_session_queue_reopens(driver: &'static str) {
+#[tokio::test]
+async fn superseded_runtime_observations_are_disposed_once_before_reopened_queue_publishes() {
+    for driver in ["omp", "pi"] {
+        assert_superseded_session_queue_reopens(driver, true).await;
+    }
+}
+
+async fn assert_superseded_session_queue_reopens(driver: &'static str, replace_runtime: bool) {
     use axum::{Json, Router, routing::post};
     use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
@@ -8228,12 +8235,28 @@ async fn assert_superseded_session_queue_reopens(driver: &'static str) {
     let mut ready = false;
     assert!(observations.drain(&client, "agent/example/seat", driver, &mut ready).await.is_err());
     ready = false;
+    if replace_runtime {
+        // These other native observation kinds share the runtime fence. Neither may
+        // poison the successor queue after its older state entry has been disposed.
+        fractal_drivers::harness_events::write_snapshot(root.path(), "harness-context",
+            &serde_json::to_vec(&json!({"harness": driver, "incarnation": "provider-old"})).unwrap(),
+        ).unwrap();
+        fractal_drivers::harness_events::write_channel_todo(root.path(), "runtime-a",
+            &json!({"driver": driver}),
+        ).unwrap();
+        assert_eq!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().len(), 3);
+        fractal_drivers::harness_events::enable(root.path(), "runtime-b").unwrap();
+        // Re-enabling the same runtime must not move its cutoff past its own events.
+        fractal_drivers::harness_events::enable(root.path(), "runtime-b").unwrap();
+    }
+    let runtime = if replace_runtime { "runtime-b" } else { "runtime-a" };
     let current_sequence = fractal_drivers::harness_state::claim(
         root.path(), "example/seat", driver, "provider-current",
     ).unwrap();
     assert!(current_sequence > old_sequence);
     drop(observations);
-    let mut observations = NativeObservations::start(root.path(), "runtime-a").unwrap();
+    let mut observations = NativeObservations::start(root.path(), runtime).unwrap();
+    let deadline = observations.evidence_deadline.clone();
     observations.drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
     assert!(!ready, "a superseded active observation must not mark this session ready");
     assert!(!observations.native_state_seen);
@@ -8241,6 +8264,7 @@ async fn assert_superseded_session_queue_reopens(driver: &'static str) {
     assert!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
     observations.drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
     assert!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
+    assert_eq!(observations.evidence_deadline, deadline);
 
     let mut current = Writer::new(root.path(), "example/seat", driver, Some("pty".into()))
         .with_ownership("provider-current", current_sequence);
@@ -8258,6 +8282,8 @@ async fn assert_superseded_session_queue_reopens(driver: &'static str) {
             let posted = posted.clone();
             let store = store.clone();
             async move {
+                assert_eq!(request.runtime_incarnation, runtime);
+                assert_eq!(request.claim.fields["incarnation_id"], json!(runtime));
                 assert_eq!(request.claim.fields["evidence_incarnation"], json!("provider-current"));
                 assert_eq!(request.claim.fields["ownership_sequence"], json!(current_sequence));
                 posted.fetch_add(1, Ordering::SeqCst);
@@ -8268,12 +8294,15 @@ async fn assert_superseded_session_queue_reopens(driver: &'static str) {
     }));
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let mut reopened = NativeObservations::start(root.path(), "runtime-a").unwrap();
+    let mut reopened = NativeObservations::start(root.path(), runtime).unwrap();
+    if replace_runtime {
+        fractal_drivers::harness_events::enable(root.path(), runtime).unwrap();
+    }
     reopened.drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
     assert!(ready);
     assert!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
     drop(reopened);
-    NativeObservations::start(root.path(), "runtime-a").unwrap()
+    NativeObservations::start(root.path(), runtime).unwrap()
         .drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
     assert_eq!(posted.load(Ordering::SeqCst), 1, "disposed events never return after reopen");
     assert_eq!(store.local_observations_tail(100).unwrap().len(), 1);

@@ -2454,17 +2454,17 @@ An unowned launcher does not confer person ownership.
 Credential-directory references are local to the launcher's host, so helpers must
 launch on that host. Inheritance also requires kernel-authenticated Unix socket
 peer credentials and proof that the peer descends from the launcher's exact
-daemon-recorded harness PID and Linux process-start token. Linux prefers the
-accepted socket's `SO_PEERPIDFD` witness (kernel 6.5 or newer); the server retains
+daemon-recorded harness PID and Linux process-start token. Linux requires kernel
+6.5 or newer and the accepted socket's `SO_PEERPIDFD` witness; the server retains
 that exact kernel generation and refuses it after exit, even if its socket
-survives. Older Linux kernels fall back only when that socket option is
-unsupported, using `SO_PEERCRED` plus the live `/proc/<pid>/stat` start token.
-Native connector generation proof on macOS uses `LOCAL_PEERPID` plus
-`proc_pidinfo` start time and process state. These fallback witnesses are
-captured at accept and validated before and after process-derived proof use;
-missing, exited, or changed generations refuse rather than skipping proof.
-They are weaker than a kernel pidfd: PID reuse before the first start-time read,
-or a collision within start-time clock resolution, cannot be excluded.
+survives. An unavailable socket witness refuses native connector authorization.
+On macOS, the server captures `LOCAL_PEERTOKEN` from the accepted socket and
+retains that socket for later identity checks. Its captured PID and audit-token
+identity version must match both the socket's current peer identity and live
+`proc_pidinfo` identity-version evidence before and after reading process state
+and start time. Exit, exec, an observed peer change, a changed version, or
+unavailable evidence refuses the connector. Numeric PIDs and timestamps alone
+never establish connector identity.
 Every intermediate ancestor's generation and parent edge is checked
 again before granting. `ST_AGENT`, headers and other environment values cannot
 establish this grant. Old launcher runs without process provenance must be
@@ -2472,10 +2472,10 @@ relaunched. Platforms without verified process ancestry (currently non-Linux),
 missing peer identity, unreadable procfs or unavailable process evidence fail
 closed with a clear refusal; no alternative account or login is selected.
 
-Socket peer credentials and the captured generation identify the original connector, not the
-current writer of each request. A descriptor handed over by the launcher's
-subtree retains that connector's authority while its identity remains live:
-this is delegation. Ancestry trusts the entire launcher subtree; it is not
+Socket peer credentials and the captured identity authorize the accept-time peer;
+they do not independently authenticate each request's writer. Descriptor delegation
+remains subject to process liveness and the platform's socket identity checks.
+Ancestry trusts the entire launcher subtree; it is not
 isolation between its descendants. Do not pass an authenticated descriptor to
 an untrusted process.
 

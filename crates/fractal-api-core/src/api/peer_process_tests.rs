@@ -22,13 +22,13 @@ fn connector_socket_child() {
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = unsafe { libc::CMSG_SPACE(std::mem::size_of_val(&fd) as _) } as usize;
+    message.msg_controllen = unsafe { libc::CMSG_SPACE(std::mem::size_of_val(&fd) as _) } as _;
     unsafe {
         // The aligned control buffer has CMSG_SPACE bytes available.
         let header = libc::CMSG_FIRSTHDR(&message);
         (*header).cmsg_level = libc::SOL_SOCKET;
         (*header).cmsg_type = libc::SCM_RIGHTS;
-        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(&fd) as _) as usize;
+        (*header).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(&fd) as _) as _;
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>(), fd);
         assert_eq!(libc::sendmsg(fd, &message, 0), 1);
     }
@@ -57,9 +57,6 @@ async fn connector_exit_invalidates_witness_while_socket_fd_survives() {
     let identity = local_peer_process(&stream).unwrap();
     assert_eq!(identity.pid(), child.0.id());
     identity.validate().unwrap();
-    // Exercise the older-Linux generation path even on a pidfd-capable kernel.
-    let generation = fractal_runtime::PeerProcessIdentity::capture_generation(local_peer_pid(&stream).unwrap()).unwrap();
-    generation.validate().unwrap();
     let mut stream = stream.into_std().unwrap();
     stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -68,7 +65,6 @@ async fn connector_exit_invalidates_witness_while_socket_fd_survives() {
     stream.write_all(b"x").unwrap();
     assert!(child.0.wait().unwrap().success());
     assert!(identity.validate().is_err());
-    assert!(generation.validate().is_err());
     // The surviving holder can still issue a request, but cannot inherit the
     // original connector's authority. Socket liveness is not process liveness.
     surviving_socket.write_all(b"y").unwrap();
@@ -84,16 +80,22 @@ fn receive_socket(stream: &UnixStream) -> UnixStream {
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = std::mem::size_of_val(&control);
+    message.msg_controllen = std::mem::size_of_val(&control) as _;
     unsafe {
-        assert_eq!(libc::recvmsg(stream.as_raw_fd(), &mut message, libc::MSG_CMSG_CLOEXEC), 1);
+        #[cfg(target_os = "linux")]
+        let flags = libc::MSG_CMSG_CLOEXEC;
+        #[cfg(target_os = "macos")]
+        let flags = 0;
+        assert_eq!(libc::recvmsg(stream.as_raw_fd(), &mut message, flags), 1);
         assert_eq!(message.msg_flags & libc::MSG_CTRUNC, 0);
         let header = libc::CMSG_FIRSTHDR(&message);
         assert!(!header.is_null());
         assert_eq!((*header).cmsg_level, libc::SOL_SOCKET);
         assert_eq!((*header).cmsg_type, libc::SCM_RIGHTS);
-        assert_eq!((*header).cmsg_len, libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize);
+        assert_eq!((*header).cmsg_len, libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _);
         let fd = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>());
+        #[cfg(target_os = "macos")]
+        assert_ne!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), -1);
         UnixStream::from_raw_fd(fd)
     }
 }
@@ -114,7 +116,6 @@ async fn connector_exit_before_first_capture_refuses_surviving_socket_holder() {
     let (stream, _) = listener.accept().await.unwrap();
     assert_eq!(local_peer_pid(&stream), Some(connector_pid));
     assert!(local_peer_process(&stream).is_err());
-    assert!(fractal_runtime::PeerProcessIdentity::capture_generation(local_peer_pid(&stream).unwrap()).is_err());
     let mut stream = stream.into_std().unwrap();
     stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
@@ -130,5 +131,4 @@ async fn connector_exit_before_first_capture_refuses_surviving_socket_holder() {
     let stream = tokio::net::UnixStream::from_std(stream).unwrap();
     assert_eq!(local_peer_pid(&stream), Some(connector_pid));
     assert!(local_peer_process(&stream).is_err());
-    assert!(fractal_runtime::PeerProcessIdentity::capture_generation(local_peer_pid(&stream).unwrap()).is_err());
 }

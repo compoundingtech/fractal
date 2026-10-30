@@ -96,7 +96,7 @@ mod client_blobs;
 mod client_documents;
 #[cfg(test)]
 mod terminal_gate_evidence;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod peer_process_tests;
 mod message_bodies;
 mod client_adapters;
@@ -6756,7 +6756,7 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         } else {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
-                return fractal_runtime::PeerProcessIdentity::capture_generation(pid);
+                anyhow::bail!("native connector custody requires Linux 6.5 or newer with SO_PEERPIDFD: {error}");
             }
             anyhow::bail!("SO_PEERPIDFD failed: {error}");
         };
@@ -6764,8 +6764,10 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
     }
     #[cfg(target_os = "macos")]
     {
-        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
-        fractal_runtime::PeerProcessIdentity::capture_generation(pid)
+        use std::os::fd::AsFd as _;
+        // Capture immediately at accept, before dispatch or request bytes.
+        // Darwin's residual peer-accessor boundary is documented by the witness.
+        fractal_runtime::PeerProcessIdentity::capture_local_socket(stream.as_fd().try_clone_to_owned()?)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {

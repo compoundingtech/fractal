@@ -631,7 +631,11 @@ pub fn process_start_token(pid: u32) -> Result<u64> {
 // Keep the legacy execution token contract above separate from strict peer
 // authorization: a numeric PID alone is never a connector generation proof.
 #[cfg(target_os = "macos")]
-pub(crate) fn peer_process_identity(pid: u32) -> Result<(char, u64)> {
+pub(crate) fn peer_process_identity(pid: u32, pidversion: u32) -> Result<(char, u64)> {
+    // Match the supplied audit-token version before the first process lookup,
+    // and again after reading liveness/start time. Time is not the identity.
+    anyhow::ensure!(peer_process_pidversion(pid)? == pidversion,
+        "socket connector audit-token version no longer matches the live process");
     let pid_arg = i32::try_from(pid)?;
     let mut info = std::mem::MaybeUninit::<libc::proc_taskallinfo>::zeroed();
     let size = std::mem::size_of::<libc::proc_taskallinfo>() as libc::c_int;
@@ -646,7 +650,46 @@ pub(crate) fn peer_process_identity(pid: u32) -> Result<(char, u64)> {
     let token = info.pbi_start_tvsec.checked_mul(1_000_000)
         .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
         .context("Darwin process birth overflow")?;
+    anyhow::ensure!(peer_process_pidversion(pid)? == pidversion,
+        "socket connector audit-token version changed during process lookup");
     Ok((if info.pbi_status == 5 { 'Z' } else { 'R' }, token))
+}
+
+/// Darwin's API struct proc_uniqidentifierinfo is not exposed by libc.
+/// ABI: XNU bsd/sys/proc_info_private.h, PROC_PIDUNIQIDENTIFIERINFO (17).
+/// https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info_private.h
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Default)]
+struct ProcUniqueIdentifierInfo {
+    uuid: [u8; 16],
+    uniqueid: u64,
+    parent_uniqueid: u64,
+    idversion: i32,
+    original_parent_pidversion: i32,
+    reserve2: u64,
+    reserve3: u64,
+}
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(std::mem::size_of::<ProcUniqueIdentifierInfo>() == 56);
+
+#[cfg(target_os = "macos")]
+pub(crate) fn peer_process_pidversion(pid: u32) -> Result<u32> {
+    const PROC_PIDUNIQIDENTIFIERINFO: libc::c_int = 17;
+    let pid = i32::try_from(pid)?;
+    anyhow::ensure!(pid > 0, "socket connector audit token has no process PID");
+    let mut info = ProcUniqueIdentifierInfo::default();
+    let size = std::mem::size_of::<ProcUniqueIdentifierInfo>() as libc::c_int;
+    // SAFETY: repr(C) matches the 56-byte Darwin API struct, and the writable
+    // buffer has exactly the size supplied. Short/unsupported queries refuse.
+    let count = unsafe {
+        libc::proc_pidinfo(pid, PROC_PIDUNIQIDENTIFIERINFO, 0,
+            (&mut info as *mut ProcUniqueIdentifierInfo).cast(), size)
+    };
+    anyhow::ensure!(count == size, "Darwin process identity version is unavailable");
+    // audit_token_t stores this signed kernel int in an unsigned 32-bit word.
+    Ok(info.idversion.cast_unsigned())
 }
 
 #[cfg(not(target_os = "linux"))]

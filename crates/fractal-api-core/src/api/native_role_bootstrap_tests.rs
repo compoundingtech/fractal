@@ -122,12 +122,6 @@ async fn declared_bootstrap(crate_name: &str, harness: &'static str, canonical_i
     let (connector, _) = connector_listener.accept().await.unwrap();
     let connector_kernel = super::super::local_peer_process(&connector).unwrap();
     assert_eq!(connector_kernel.pid(), connector_pid);
-    let connector_kernel = if canonical_identity {
-        connector_kernel
-    } else {
-        // Exercise fresh (not retained) custody with the older-kernel generation proof too.
-        fractal_runtime::PeerProcessIdentity::capture_generation(connector_pid).unwrap()
-    };
     let mut connector = BufReader::new(connector);
     line.clear();
     connector.read_line(&mut line).await.unwrap();
@@ -160,11 +154,6 @@ async fn declared_bootstrap(crate_name: &str, harness: &'static str, canonical_i
         let (http, _) = http_listener.accept().await.unwrap();
         let accepted = super::super::local_peer_process(&http).unwrap();
         assert_eq!(accepted.pid(), provider_kernel.pid());
-        let accepted = if canonical_identity {
-            accepted
-        } else {
-            fractal_runtime::PeerProcessIdentity::capture_generation(accepted.pid()).unwrap()
-        };
         let local_peer = super::super::LocalPeer { pid:accepted.pid(), peer_process:Some(accepted), ancestor:None };
         let app = axum::Router::new().route("/v1/native-connectors/bootstrap", post(bootstrap))
             .with_state(state.clone()).layer(axum::Extension(local_peer));
