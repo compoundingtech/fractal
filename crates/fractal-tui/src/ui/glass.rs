@@ -221,7 +221,7 @@ impl TabBadge {
                 let mut used = 0;
                 for (at, character) in label[prefix_bytes..].char_indices() {
                     let cells = character.width().unwrap_or(0);
-                    if used + cells + 1 > room {
+                    if used + cells >= room {
                         break;
                     }
                     used += cells;
