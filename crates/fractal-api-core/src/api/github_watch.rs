@@ -810,7 +810,7 @@ mod tests {
                 crate::graph::subscription_spec(&item.desired).map(|spec| (item.subject, spec))
             }).collect::<Vec<_>>();
             let revision = store.selected_desired_revision(&thread.observer()).unwrap().unwrap();
-            let mut facts = json!({"repository_id":7, "full_name":"acme/greenhouse", "pull_requests":[{
+            let mut facts = json!({"repository_id":7, "pull_requests":[{
                 "number":12, "title":"Seed catalog", "url":"https://github.com/acme/greenhouse/pull/12",
                 "head":"a".repeat(40), "state":"open", "draft":false,
                 "required_checks":{"state":"pending", "source":"rules", "checks":["build"], "failed":[]}
