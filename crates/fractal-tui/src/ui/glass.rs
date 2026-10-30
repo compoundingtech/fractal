@@ -654,29 +654,44 @@ impl Glasses {
                 continue;
             };
             let groups = glass.layout.groups();
-            let group = if place.group_id.is_empty() {
+            if place.group_id.is_empty() {
                 let Some(group) = groups.get(place.group) else {
                     continue;
                 };
                 place.group_id.clone_from(&group.id);
                 place.tab_id = group.tabs.get(place.tab).map(|tab| tab.id.clone());
-                *group
-            } else {
-                let Some(group) = groups.iter().find(|group| group.id == place.group_id) else {
-                    continue;
-                };
-                *group
-            };
-            let exists = match &place.tab_id {
-                Some(id) => group.tabs.iter().any(|tab| &tab.id == id),
-                None => place.pane == Pane::List(0).key(),
-            };
-            if exists {
-                if index <= stored.history_cursor {
-                    history_cursor = history.len();
-                }
-                history.push(place);
             }
+            match &place.tab_id {
+                Some(id) => {
+                    // A stable tab can move out of its recorded group, even removing that group.
+                    let Some((group_index, group, tab_index)) =
+                        groups.iter().enumerate().find_map(|(index, group)| {
+                            group.tabs.iter().position(|tab| &tab.id == id)
+                                .map(|tab| (index, *group, tab))
+                        })
+                    else {
+                        continue;
+                    };
+                    place.group = group_index;
+                    place.group_id.clone_from(&group.id);
+                    place.tab = tab_index;
+                }
+                None => {
+                    let Some(group_index) =
+                        groups.iter().position(|group| group.id == place.group_id)
+                    else {
+                        continue;
+                    };
+                    if place.pane != Pane::List(0).key() {
+                        continue;
+                    }
+                    place.group = group_index;
+                }
+            }
+            if index <= stored.history_cursor {
+                history_cursor = history.len();
+            }
+            history.push(place);
         }
         let excess = history.len().saturating_sub(50);
         history.drain(..excess);
