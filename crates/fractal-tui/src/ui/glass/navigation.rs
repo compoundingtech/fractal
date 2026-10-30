@@ -582,7 +582,12 @@ mod tests {
         ui.drop_tab((0, 0), Drop::Strip { group: 1, index: 1 });
         assert_eq!(ui.glasses.glass().layout.groups().len(), 1);
         ui.prune_place_history();
-        assert!(ui.glasses.history.contains(&first));
+        assert!(
+            ui.glasses
+                .history
+                .iter()
+                .any(|place| same_place(place, &first))
+        );
         ui.navigate_history(false);
         assert_eq!(ui.focused_pane(), Some(b.clone()));
         ui.navigate_history(false);
