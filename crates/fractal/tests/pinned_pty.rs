@@ -5,12 +5,12 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// `PTY_BINARY` when set (a control against another build), else the pinned pty the dev shell and
-/// the flake's st3 check name, else `pty` on PATH. Every failure names the binary it ran.
+/// The pinned pty the dev shell and the flake's st3 check name, else `pty` on PATH. No other
+/// variable can substitute a binary: the signed run's dev shell always sets this one, and
+/// scripts/ci-local keeps it only as a store path. A control against another build sets it
+/// inside the dev shell. Every failure names the binary it ran.
 fn pty(root: &Path) -> Command {
-    let binary = std::env::var_os("PTY_BINARY")
-        .or_else(|| std::env::var_os("FRACTAL_PINNED_PTY_BIN"))
-        .unwrap_or_else(|| "pty".into());
+    let binary = std::env::var_os("FRACTAL_PINNED_PTY_BIN").unwrap_or_else(|| "pty".into());
     let mut command = Command::new(binary);
     command
         .env_clear()
@@ -34,7 +34,7 @@ fn bounded(mut command: Command, limit: Duration) -> (Output, bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("install pty or set PTY_BINARY");
+        .expect("install pty or set FRACTAL_PINNED_PTY_BIN");
     let deadline = Instant::now() + limit;
     let mut finished = true;
     while child.try_wait().unwrap().is_none() {
@@ -64,7 +64,7 @@ fn a_wait_for_an_exit_that_already_happened_returns_the_recorded_exit() {
         ])
         .args(["--", "sh", "-c", "exit 37"])
         .output()
-        .expect("install pty or set PTY_BINARY");
+        .expect("install pty or set FRACTAL_PINNED_PTY_BIN");
     assert!(started.status.success(), "{started:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
     while pty_core::registry::read_metadata_in(root.path(), "done")
