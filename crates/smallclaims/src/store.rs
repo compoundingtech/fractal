@@ -40,6 +40,7 @@ mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
 mod operation_metadata;
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
 pub use operation_metadata::OperationMetadata;

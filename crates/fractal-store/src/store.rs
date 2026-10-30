@@ -33,6 +33,9 @@ pub mod declarations;
 pub mod schedule_declarations;
 pub mod retirements;
 pub mod identities;
+mod rename_proof;
+#[cfg(test)]
+mod rename_proof_tests;
 pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
