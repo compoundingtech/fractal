@@ -1312,13 +1312,25 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
 
+    let channel_stderr = root.join("omp-channel-stderr.log");
+    let assert_channel_alive = |channel: &mut Child| {
+        if let Some(status) = channel.try_wait().unwrap() {
+            let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
+            std::fs::write(
+                root.join("omp-channel-exit.txt"),
+                format!("{status:?}\n{status}\n{stderr}"),
+            )
+            .unwrap();
+            panic!("the omp channel exited during the daemon outage: {status}; stderr: {stderr}");
+        }
+    };
     let mut channel = seat_command(root, &daemon.socket)
         .arg("--catalog")
         .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "restart-omp"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&channel_stderr).unwrap()))
         .spawn()
         .unwrap();
     let mut input = channel.stdin.take().unwrap();
@@ -1341,7 +1353,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     input.flush().unwrap();
     daemon.send("message/restart-omp-mail", seat, "COPPER KITE");
     tokio::time::sleep(Duration::from_millis(2_500)).await;
-    assert_alive(&mut channel, "the omp channel");
+    assert_channel_alive(&mut channel);
     assert!(daemon.harness_states(seat, incarnation).is_empty());
 
     daemon.start().await;
@@ -1384,9 +1396,10 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
         },
     )
     .await;
-    assert_alive(&mut channel, "the omp channel");
+    assert_channel_alive(&mut channel);
 
-    let stderr = stop(channel);
+    let _ = stop(channel);
+    let stderr = std::fs::read_to_string(&channel_stderr).unwrap();
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
