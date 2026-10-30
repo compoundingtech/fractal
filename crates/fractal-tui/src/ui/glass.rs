@@ -2604,6 +2604,9 @@ impl Ui {
         } else {
             usize::from(available.saturating_sub(2 * marker + 1))
         };
+        // One cell belongs to the tab, even when chrome consumes the nominal budget.
+        // Fewer whole tabs are preferable to erasing their activity glyphs.
+        let label_width = label_width.max(usize::from(available > 0));
         let labels: Vec<_> = tabs
             .iter()
             .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
@@ -2654,8 +2657,10 @@ impl Ui {
             x += width;
         }
         // Where tabs must stop so the right marker and `+` (each after a gap) stay in the strip.
-        let tail = if last + 1 < labels.len() {
-            1 + marker + plus
+        let hidden_after = labels.len().saturating_sub(last + 1);
+        let tail = if hidden_after > 0 {
+            // Reserve the marker actually drawn, not the total tab count's upper bound.
+            hidden_after.ilog10() as u16 + 5 + plus
         } else if plus > 0 {
             1 + plus
         } else {
@@ -6064,6 +6069,46 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         });
+    }
+
+    #[test]
+    fn narrow_strip_reservations_keep_activity_with_and_without_overflow() {
+        for count in [1, 5, 12, 50] {
+            for width in [12, 14, 18] {
+                for current in [0, count / 2, count - 1] {
+                    let mut ui = tab_badge_world();
+                    let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+                    let agent = group.tabs[0].clone();
+                    group.tabs = vec![agent; count];
+                    group.current = current;
+                    let row = tab_strip_row(&ui, width);
+                    let info = ui.frame.borrow();
+                    let mut active_shown = false;
+                    for (rect, hit) in &info.hits {
+                        if let Hit::GlassTab(0, index) = hit {
+                            let start = usize::from(rect.x);
+                            let painted = row
+                                .chars()
+                                .skip(start)
+                                .take(usize::from(rect.width))
+                                .collect::<String>();
+                            assert!(rect.width > 0 && rect.right() <= width);
+                            assert!(
+                                painted.contains('●'),
+                                "{count} tabs, {width} cells, current={current}, tab {index}: |{row}|"
+                            );
+                            active_shown |= *index == current;
+                        }
+                    }
+                    assert!(active_shown, "{count} tabs, {width} cells: |{row}|");
+                    drop(info);
+                    assert_marker_counts(&ui, &row, count);
+                    if count == 1 {
+                        assert_eq!(strip_markers(&ui), (None, None));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
