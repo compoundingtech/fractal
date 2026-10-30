@@ -60,10 +60,10 @@ impl Ui {
         glasses
             .history
             .truncate(glasses.history_cursor.saturating_add(1));
-        if let Some(before) = before {
-            if glasses.history.last() != Some(&before) {
-                glasses.history.push(before);
-            }
+        if let Some(before) = before
+            && glasses.history.last() != Some(&before)
+        {
+            glasses.history.push(before);
         }
         glasses.history.push(after);
         if glasses.history.len() > 50 {
