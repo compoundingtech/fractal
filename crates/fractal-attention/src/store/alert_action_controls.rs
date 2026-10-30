@@ -914,6 +914,64 @@ fn concurrent_delegated_dismissals_have_one_source_answer_and_one_notice() {
 }
 
 #[test]
+fn delegated_dismissals_that_both_pass_the_fence_record_one_answer() {
+    // Hold the writer until both dismissals have read the fence and queued their writes, so the
+    // second one's fence read cannot see the first one's answer.
+    let (store, denial, proof) = denial_fixture(&["close-item"]);
+    let (held, is_held) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let waiting = || {
+        smallclaims::windows::holds::report()["waiting"]["writer"]
+            .as_u64()
+            .unwrap()
+    };
+    let results = std::thread::scope(|scope| {
+        let store = &store;
+        let writer = scope.spawn(move || {
+            store.hold_writer_for_test(|| {
+                held.send(()).unwrap();
+                released.recv().unwrap();
+            })
+        });
+        is_held.recv().unwrap();
+        let before = waiting();
+        let callers = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    store.respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(&proof))
+                })
+            })
+            .collect::<Vec<_>>();
+        let asked = std::time::Instant::now();
+        while waiting() < before + 2 {
+            assert!(
+                asked.elapsed() < std::time::Duration::from_secs(10),
+                "the dismissals never both asked for the writer"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        callers
+            .into_iter()
+            .map(|caller| caller.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let answers = store
+        .claims_for(SEAT, Some("harness.diagnostic"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.body["fields"]["code"] == "native-prompt-answered")
+        .collect::<Vec<_>>();
+    assert_eq!(answers.len(), 1);
+    // The same dismissal retried is answered with the recorded answer, not refused.
+    for result in results {
+        assert_eq!(result.unwrap().id, answers[0].id);
+    }
+    assert_eq!(store.messages(Some(SEAT), true).unwrap().len(), 1);
+}
+
+#[test]
 fn a_person_read_racing_sender_withdrawal_has_one_terminal_source_outcome() {
     let (store, origin, mut input) = person_work::tests::fixture();
     input.step = None;
