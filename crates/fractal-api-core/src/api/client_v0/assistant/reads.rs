@@ -182,8 +182,13 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
             for agent in agents.iter() {
                 if ident(agent["id"].as_str()).is_some_and(|id| id.starts_with("agent/")) {
                     let reported = agent["harness_state"].as_str();
-                    let age = agent["_status_source"]["observed_at_unix_ms"].as_u64()
-                        .map(|at| u64::try_from(now.saturating_sub(u128::from(at))).unwrap_or(u64::MAX));
+                    let source: Option<crate::model::CurrentHarnessView> =
+                        serde_json::from_value(agent["_status_source"].clone()).ok();
+                    let heard = match &source {
+                        Some(harness) => Some(crate::api::heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness).map_err(ApiError::internal)?),
+                        None => None,
+                    };
+                    let age = heard.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
                     // The scalar state rules of overlay_agent_resources/overlay_down, followed
                     // by the same local delivery assessment; no card is built just to count it.
                     let mut runtime = agent["state"].as_str();
