@@ -840,20 +840,27 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     })
 }
 
+/// Inputs for promoting an existing config-peer store into a fleet anchor.
+pub struct MigrateAnchorOptions<'a> {
+    pub state_dir: &'a Path,
+    pub store_path: &'a Path,
+    pub admitted_store: Option<Arc<AdmittedStore>>,
+    pub node: &'a str,
+    pub fleet_id: &'a str,
+    pub secret_file: &'a Path,
+    pub settings: &'a MemberSettings,
+    pub fabric_protocol: Option<String>,
+    pub runtime: Arc<dyn Runtime>,
+}
+
 /// Make this config-peer node the anchor of its existing fleet: it keeps its fleet ID, secret,
 /// store, and history, gets a member key, and admits itself when the daemon next starts.
 /// Legacy exchanges stay accepted until `st fleet migrate --finish`.
-pub fn migrate_anchor(
-    state_dir: &Path,
-    store_path: &Path,
-    admitted_store: Option<Arc<AdmittedStore>>,
-    node: &str,
-    fleet_id: &str,
-    secret_file: &Path,
-    settings: &MemberSettings,
-    fabric_protocol: Option<String>,
-    runtime: Arc<dyn Runtime>,
-) -> Result<Founded> {
+pub fn migrate_anchor(options: MigrateAnchorOptions<'_>) -> Result<Founded> {
+    let MigrateAnchorOptions {
+        state_dir, store_path, admitted_store, node, fleet_id, secret_file,
+        settings, fabric_protocol, runtime,
+    } = options;
     anyhow::ensure!(
         FleetFile::load(state_dir)?.is_none(),
         "this machine already has fleet membership settings"
@@ -909,6 +916,47 @@ mod tests {
     use super::*;
     use crate::fleet::code::PairingData;
     use crate::sync::Backend as _;
+
+    #[test]
+    fn migrate_anchor_options_preserve_default_and_admitted_stores() {
+        let fleet_id = uuid::Uuid::parse_str("6f1c2a7e-0b4d-4c55-9a1e-2d3f4b5c6d7e").unwrap().to_string();
+        for explicit in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = root.path().join("state");
+            fs::create_dir(&state).unwrap();
+            let directory = if explicit { root.path().join("store") } else { state.clone() };
+            fs::create_dir_all(&directory).unwrap();
+            let database = directory.join("claims.sqlite3");
+            let runtime: Arc<dyn Runtime> = Arc::new(crate::store::runtime::Plain);
+            {
+                let store = Store::open(&database, "anchor", runtime.clone()).unwrap();
+                store.bind_fleet(&fleet_id).unwrap();
+            }
+            let admitted = explicit.then(|| AdmittedStore::from_locked_directory(
+                &directory, fs::File::open(&directory).unwrap(),
+            ).unwrap());
+            let settings = MemberSettings {
+                transports: Some(vec!["fabric".into()]),
+                ..MemberSettings::default()
+            };
+            let secret = state.join("legacy-secret");
+            let founded = migrate_anchor(MigrateAnchorOptions {
+                state_dir: &state, store_path: &database, admitted_store: admitted.clone(),
+                node: "anchor", fleet_id: &fleet_id, secret_file: &secret,
+                settings: &settings, fabric_protocol: Some("fixture-protocol".into()), runtime,
+            }).unwrap();
+            assert_eq!(founded.fleet_id, fleet_id);
+            let membership = FleetFile::load(&state).unwrap().unwrap();
+            assert_eq!(membership.node.as_deref(), Some("anchor"));
+            assert_eq!(membership.fabric_protocol.as_deref(), Some("fixture-protocol"));
+            assert!(membership.legacy_peers);
+            assert!(database.exists());
+            if explicit {
+                assert!(!state.join("claims.sqlite3").exists());
+                admitted.unwrap().verify_directory().unwrap();
+            }
+        }
+    }
 
     #[tokio::test]
     async fn admitted_join_refuses_directory_changes_during_sponsor_wait_without_database_writes() {
