@@ -12,6 +12,11 @@
 //! still moving, and the same key is left out by every member that holds that claim. The cut
 //! never selects an older claim of a key, since a trimmed member may no longer hold it.
 //!
+//! A key that gains a claim after the cut leaves the summary on each member when that claim
+//! arrives, so two members that compute at different times can differ only in such keys. The
+//! keys a narrowing lists therefore carry them too, marked `moving`, and a key moving on either
+//! member is no difference.
+//!
 //! `keys` counts the keys a kind's digest covers and `claims` the kind's claims older than the
 //! cut. A member that trims holds fewer claims than one that does not, so callers compare
 //! `claims` only between members that trim the same way.
@@ -66,6 +71,10 @@ pub struct AnswerKey {
     pub subject: String,
     pub origin: String,
     pub claim: String,
+    /// The key's newest claim is at or after the cut: no digest counts it, and a member that has
+    /// not yet received that claim still counts the older one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub moving: bool,
 }
 
 /// One kind's bucket digests at a cut, with the keys of the buckets asked for.
@@ -75,7 +84,7 @@ pub struct KindBuckets {
     pub cut_unix_ms: u128,
     /// One digest per bucket; an empty bucket's is empty.
     pub buckets: Vec<String>,
-    /// The keys of the buckets asked for, in key order.
+    /// The keys of the buckets asked for, in key order, with the moving ones.
     pub keys: Vec<AnswerKey>,
 }
 
@@ -116,8 +125,9 @@ pub fn bucket(subject: &str, origin: &str) -> usize {
     usize::from(hash.finalize()[0])
 }
 
-/// Call `visit` with each key of `kind` whose newest claim is older than `cut_unix_ms`, in key
-/// order, and return how many claims of the kind are older than the cut.
+/// Call `visit` with each key of `kind` and its newest claim, in key order, marked `moving` when
+/// that claim is not older than `cut_unix_ms`, and return how many claims of the kind are older
+/// than the cut.
 fn each_answer(
     connection: &Connection,
     kind: &str,
@@ -134,9 +144,6 @@ fn each_answer(
     let mut current: Option<(String, String, u128, Vec<String>)> = None;
     let mut finish = |key: Option<(String, String, u128, Vec<String>)>| -> Result<()> {
         let Some((subject, origin, accepted, mut newest)) = key else { return Ok(()) };
-        if accepted >= cut_unix_ms {
-            return Ok(());
-        }
         let claim = if newest.len() == 1 {
             newest.pop().expect("one claim")
         } else {
@@ -148,7 +155,7 @@ fn each_answer(
             keyed.sort();
             keyed.pop().expect("claims share the time").5
         };
-        visit(AnswerKey { subject, origin, claim })
+        visit(AnswerKey { subject, origin, claim, moving: accepted >= cut_unix_ms })
     };
     while let Some(row) = rows.next()? {
         let subject: String = row.get(0)?;
@@ -204,6 +211,9 @@ pub fn kind_answers(connection: &Connection, kind: &str, cut_unix_ms: u128) -> R
     domain(&mut hash, kind);
     let mut keys = 0;
     let claims = each_answer(connection, kind, cut_unix_ms, |key| {
+        if key.moving {
+            return Ok(());
+        }
         keys += 1;
         field(&mut hash, &key.subject);
         field(&mut hash, &key.origin);
@@ -232,7 +242,7 @@ pub const READER_PREFIX: &str = "reader/";
 /// still change their answers by dropping an older claim they fold, so the summary covers them
 /// too. Given a reader connection and the cut, they return each reader's answers by name: one
 /// key per subject they answer for, `origin` empty and `claim` a digest of the answer, in key
-/// order. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
+/// order, and a `moving` key for each subject with a claim at or after the cut. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
 pub type FoldReaders = Arc<dyn Fn(&Connection, u128) -> Result<BTreeMap<String, Vec<AnswerKey>>> + Send + Sync>;
 
 /// A fold reader's answers as a kind: its summary entry, and every key with its bucket digests.
@@ -241,7 +251,7 @@ pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (S
     let mut hash = Sha256::new();
     domain(&mut hash, &kind);
     let mut hashes: Vec<Option<Sha256>> = (0..BUCKETS).map(|_| None).collect();
-    for key in &keys {
+    for key in keys.iter().filter(|key| !key.moving) {
         let bucket_hash = hashes[bucket(&key.subject, &key.origin)].get_or_insert_with(|| {
             let mut hash = Sha256::new();
             domain(&mut hash, &kind);
@@ -253,7 +263,8 @@ pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (S
             field(hash, &key.claim);
         }
     }
-    let answers = KindAnswers { keys: keys.len() as u64, claims: 0, digest: hex::encode(hash.finalize()) };
+    let counted = keys.iter().filter(|key| !key.moving).count();
+    let answers = KindAnswers { keys: counted as u64, claims: 0, digest: hex::encode(hash.finalize()) };
     let buckets = KindBuckets {
         kind: kind.clone(),
         cut_unix_ms,
@@ -277,14 +288,16 @@ pub fn kind_buckets(
     let mut keys = Vec::new();
     each_answer(connection, kind, cut_unix_ms, |key| {
         let index = bucket(&key.subject, &key.origin);
-        let hash = hashes[index].get_or_insert_with(|| {
-            let mut hash = Sha256::new();
-            domain(&mut hash, kind);
-            hash
-        });
-        field(hash, &key.subject);
-        field(hash, &key.origin);
-        field(hash, &key.claim);
+        if !key.moving {
+            let hash = hashes[index].get_or_insert_with(|| {
+                let mut hash = Sha256::new();
+                domain(&mut hash, kind);
+                hash
+            });
+            field(hash, &key.subject);
+            field(hash, &key.origin);
+            field(hash, &key.claim);
+        }
         if wanted.contains(&index) {
             keys.push(key);
         }
@@ -340,10 +353,18 @@ pub fn differing_buckets(ours: &[String], theirs: &[String]) -> BTreeSet<usize> 
         .collect()
 }
 
-/// The keys whose answers differ, from both members' keys of the same buckets.
+/// The keys whose answers differ, from both members' keys of the same buckets. A key moving on
+/// either member is left out: the members differ only in when they computed.
 pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDifference> {
+    let moving = ours
+        .iter()
+        .chain(theirs)
+        .filter(|key| key.moving)
+        .map(|key| (key.subject.clone(), key.origin.clone()))
+        .collect::<BTreeSet<_>>();
     let side = |keys: &[AnswerKey]| {
         keys.iter()
+            .filter(|key| !key.moving)
             .map(|key| ((key.subject.clone(), key.origin.clone()), key.claim.clone()))
             .collect::<BTreeMap<_, _>>()
     };
@@ -352,7 +373,7 @@ pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDiffer
         .chain(theirs.keys())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter(|key| ours.get(*key) != theirs.get(*key))
+        .filter(|key| !moving.contains(*key) && ours.get(*key) != theirs.get(*key))
         .map(|key| KeyDifference {
             subject: key.0.clone(),
             origin: key.1.clone(),

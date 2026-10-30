@@ -5,7 +5,9 @@
 //!
 //! A kind that differs is compared again every half hour, when both members have computed their
 //! answers again and counted any claim that arrived late. A difference that lasts two hours is
-//! narrowed to buckets and keys and handed to the store to record, which raises a fault. An
+//! narrowed to buckets and keys and handed to the store to record, which raises a fault. A kind
+//! whose differing keys all moved past the cut on one member is no difference: that member only
+//! computed after the newer claim arrived. An
 //! agreeing check is handed over too, so the store can end an earlier fault. A peer on a build
 //! without the check answers 404 and is not compared.
 use super::*;
@@ -162,7 +164,8 @@ async fn compare_answers<B: Backend>(
     let (Some(ours), Some(theirs)) = (ours.summary, theirs.summary) else {
         return Ok(Step::Pending);
     };
-    let kinds = differing_kinds(&ours, &theirs, ours.trims_locally == theirs.trims_locally);
+    let compare_claims = ours.trims_locally == theirs.trims_locally;
+    let kinds = differing_kinds(&ours, &theirs, compare_claims);
     if !kinds.is_empty() && !settled {
         return Ok(Step::Differ);
     }
@@ -193,6 +196,13 @@ async fn compare_answers<B: Backend>(
             report.keys = differing_keys(&ours.keys, &theirs.keys);
             report.complete = buckets.len() <= MAX_BUCKETS && report.keys.len() <= MAX_KEYS;
             report.keys.truncate(MAX_KEYS);
+            // Every key that differs is moving, and the members count the same claims: they
+            // differ only in when they computed.
+            let claims = |side: &Option<crate::answers::KindAnswers>| side.as_ref().map_or(0, |side| side.claims);
+            let claims_differ = compare_claims && claims(&report.ours) != claims(&report.theirs);
+            if report.complete && report.keys.is_empty() && !claims_differ {
+                continue;
+            }
         }
         differences.push(report);
     }
@@ -487,6 +497,33 @@ mod tests {
         )
         .await;
         assert!(stranger.is_err());
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_that_moves_past_the_cut_on_one_member_is_no_difference() {
+        let auth = FleetAuth::test(FLEET, &[6; 32]);
+        let alder = node("alder");
+        let birch = node("birch");
+        state(&alder, "item/a", "one");
+        state(&alder, "item/b", "one");
+        push(&alder, &birch);
+        std::thread::sleep(Duration::from_millis(5));
+        let cut = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        std::thread::sleep(Duration::from_millis(5));
+        // alder writes again after the cut, so it no longer counts item/b; birch has not seen the
+        // newer claim yet and still counts the one before the cut.
+        state(&alder, "item/b", "two");
+        let (peer, server) = serve(alder.clone(), &auth).await;
+        let http = replication_http_client();
+        let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
+        let backend = Answering(Local(birch.clone()));
+        let compare = async |settled| {
+            compare_answers(&http, &backend, "birch", &peer, &auth, &dialer, cut, settled).await.unwrap()
+        };
+        assert_eq!(compare(false).await, Step::Differ, "the summaries differ while item/b moves");
+        let agree = AnswersCheck { peer: "alder".into(), cut_unix_ms: cut, differences: Vec::new() };
+        assert_eq!(compare(true).await, Step::Found(agree), "a moving key is not reported");
         server.abort();
     }
 
