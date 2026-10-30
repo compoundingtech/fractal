@@ -324,3 +324,35 @@ fn outer_context_preserves_inner_phase_elapsed_and_request_measurements() {
     assert_eq!(contextual.elapsed_ms, 123);
     assert_eq!(contextual.attempt_elapsed_ms, None);
 }
+
+/// A peer that keeps exchanging with us while our own dial to it is refused stays up: each
+/// refusal used to publish unknown and each exchange up again, a claim per exchange.
+#[test]
+fn a_refused_dial_does_not_flap_a_peer_that_keeps_exchanging() {
+    let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    let source = Store::open_memory("birch", Arc::new(Plain)).unwrap();
+    let exchange = source.export_replication_summary("sample-fleet").unwrap();
+    let observations = || {
+        store
+            .claims_for("host/birch", Some("transport.observed"))
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.origin == "alder")
+            .count()
+    };
+    for _ in 0..10 {
+        // What a receive does: the exchange, then this member's up observation of the peer.
+        store
+            .receive_replication_exchange_via("birch", "sample-fleet", &exchange, false, smallclaims::replication::ReplicationCarrier::Loopback)
+            .unwrap();
+        store.record_transport_observation("birch", "up", None, None).unwrap();
+        // What a failed outbound dial does: the failure, then an observation only when stale.
+        let stale = store
+            .record_peer_failure_via("birch", "refused", "service grant refused", Some(smallclaims::replication::ReplicationCarrier::Fabric), None)
+            .unwrap();
+        if stale {
+            store.record_transport_observation("birch", "refused", Some("service grant refused"), None).unwrap();
+        }
+    }
+    assert_eq!(observations(), 1, "one up observation, not one per refusal and exchange");
+}

@@ -110,19 +110,24 @@ for index in 0..32 {
 let fresh = start(&store, "fresh", "new-first-readiness", root.path());
 creation_order.push(fresh.id.clone());
 let notify = Arc::new(Notify::new());
-let state = AppState { owning_person: None,
-store: store.clone(),
-notify: notify.clone(),
-event_notify: tokio::sync::watch::channel(0).0,
-node: "node".into(),
-state_dir: root.path().into(),
-pty_root: root.path().join("pty"),
-pty_binary: "unused-pty".into(),
-fleet_id: None,
-configured_peers: Vec::new(),
-client_relay: None,
-native_session_home: None,
-planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+let state = AppState {
+    owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "node".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "unused-pty".into(),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
+};
 let socket = root.path().join("st3.sock");
 let server_socket = socket.clone();
 let (listening, ready) = tokio::sync::oneshot::channel();
@@ -271,19 +276,24 @@ assert!(
 );
 
 let notify = Arc::new(Notify::new());
-let state = AppState { owning_person: None,
-store: store.clone(),
-notify: notify.clone(),
-event_notify: tokio::sync::watch::channel(0).0,
-node: "node".into(),
-state_dir: root.path().into(),
-pty_root: root.path().join("pty"),
-pty_binary: "unused-pty".into(),
-fleet_id: None,
-configured_peers: Vec::new(),
-client_relay: None,
-native_session_home: None,
-planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+let state = AppState {
+    owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "node".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "unused-pty".into(),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
+};
 let socket = root.path().join("st3.sock");
 let server_socket = socket.clone();
 let (listening, ready) = tokio::sync::oneshot::channel();
