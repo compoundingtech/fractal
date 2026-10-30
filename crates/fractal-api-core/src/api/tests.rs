@@ -12779,6 +12779,11 @@ async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_rep
         "reason":"Clarify responsibility", "idempotency_key":"subject-rename"
     })).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (status, after) = get_request(app.clone(), &format!("/v1/status?subject={original}")).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    for field in ["host", "incarnation_id", "runtime_id", "status"] {
+        assert_eq!(after["subjects"][0]["actual"][field], before["subjects"][0]["actual"][field]);
+    }
     let replica_root = tempfile::tempdir().unwrap();
     let mut replica = state(replica_root.path());
     replica.store = Arc::new(Store::open_memory("subject-replica").unwrap());
@@ -12788,7 +12793,7 @@ async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_rep
         for requested in [renamed, original] {
             let (status, shown) = get_request(app.clone(), &format!("/v1/status?subject={requested}")).await;
             assert_eq!(status, StatusCode::OK, "{shown}");
-            assert_eq!(shown["subjects"][0]["actual"], before["subjects"][0]["actual"]);
+            assert_eq!(shown["subjects"][0]["actual"], after["subjects"][0]["actual"]);
             let (status, claims) = get_request(app.clone(), &format!("/v1/claims?subject={requested}&order=desc&limit=20")).await;
             assert_eq!(status, StatusCode::OK, "{claims}");
             assert!(!claims["claims"].as_array().unwrap().is_empty(), "{claims}");
