@@ -447,7 +447,7 @@ impl ConversationReadsStore for Store {
         ) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
         let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
-        let mut statement = connection.prepare_cached(&format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbb6fa80389ef owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
             "{LOCAL_OBSERVATION_COLUMNS} INDEXED BY local_observations_subject_kind_index
              WHERE subject=?1 AND kind='harness.diagnostic' AND after_store_index<?2
              ORDER BY id DESC LIMIT 1000"
