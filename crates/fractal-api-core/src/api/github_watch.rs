@@ -859,16 +859,26 @@ mod tests {
                 crate::graph::subscription_spec(&item.desired).map(|spec| (item.subject, spec))
             }).collect::<Vec<_>>();
             let revision = store.selected_desired_revision(&thread.observer()).unwrap().unwrap();
-            let observation = json!({"repository_id":7, "pull_requests":[{
+            let mut observation = json!({"repository_id":7, "pull_requests":[{
                 "number":12, "title":"Seed catalog", "url":"https://github.com/acme/garden/pull/12",
-                "head":"a".repeat(40), "state":"open", "draft":false
+                "head":"a".repeat(40), "state":"open", "draft":false,
+                "required_checks":{"state":"pending", "source":"rules", "checks":["build"], "failed":[]}
             }]});
+            let baseline = store.record_resource_observation(
+                &thread.observer(), &revision, None, &thread.resource(), None,
+                &observation, smallclaims::store::now_ms(), &subscriptions, None,
+            ).unwrap();
+            assert!(baseline.message_subjects.is_empty());
+            observation["pull_requests"][0]["required_checks"]["state"] = json!("pass");
+            let mut delivered_events = 0;
             for _ in 0..2 {
-                store.record_resource_observation(
+                let outcome = store.record_resource_observation(
                     &thread.observer(), &revision, None, &thread.resource(), None,
                     &observation, smallclaims::store::now_ms(), &subscriptions, None,
                 ).unwrap();
+                delivered_events += outcome.message_subjects.len();
             }
+            assert_eq!(delivered_events, 1);
             let mut listed_before = None;
             for name in [renamed, original] {
                 let (status, listed) = request(app.clone(), "GET",
