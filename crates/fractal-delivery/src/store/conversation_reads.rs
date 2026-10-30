@@ -166,6 +166,13 @@ pub trait ConversationReadsStore {
             owner: &str,
             before: Option<u64>,
         ) -> Result<Vec<ClaimRecord>>;
+    /// The owner's diagnostics in this node's local observation log that follow a claim before
+    /// `before`: the observability codes, which never replicate. Newest 1,000, newest first.
+    fn conversation_timeline_owner_local_diagnostics_at(
+            &self,
+            owner: &str,
+            before: Option<u64>,
+        ) -> Result<Vec<ClaimRecord>>;
     fn conversation_claims_by_ids(&self, ids: &[String]) -> Result<Vec<ClaimRecord>>;
     /// Session membership reads indexed acceptance times without copying runtime bodies into Rust.
     fn conversation_runtime_span(
@@ -431,6 +438,25 @@ impl ConversationReadsStore for Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         self.conversation_claims_by_ids(&ids)
+    }
+
+    fn conversation_timeline_owner_local_diagnostics_at(
+            &self,
+            owner: &str,
+            before: Option<u64>,
+        ) -> Result<Vec<ClaimRecord>> {
+        let connection = self.readers.get();
+        let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
+        let mut statement = connection.prepare_cached(&format!(
+            "{LOCAL_OBSERVATION_COLUMNS} INDEXED BY local_observations_subject_kind_index
+             WHERE subject=?1 AND kind='harness.diagnostic' AND after_store_index<?2
+             ORDER BY id DESC LIMIT 1000"
+        ))?;
+        let rows = statement.query_map(
+            params![owner, before.unwrap_or(i64::MAX as u64)],
+            |row| local_observation_from_row(self.origin(), row),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn conversation_claims_by_ids(&self, ids: &[String]) -> Result<Vec<ClaimRecord>> {

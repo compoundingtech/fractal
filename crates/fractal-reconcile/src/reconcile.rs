@@ -3140,6 +3140,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             &subject,
                             "harness.diagnostic",
                             BTreeMap::from([
+                                // An observability code: the warning stays in this node's
+                                // local observation log (retention.toml `local_codes`).
+                                ("code".into(), Value::String("render-warning".into())),
                                 ("status".into(), Value::String("warning".into())),
                                 ("reason".into(), Value::String(warning)),
                             ]),
@@ -8937,9 +8940,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             RestartDecision::Fail { reason } => {
                 if member.driver.as_deref() == Some("codex") {
                     let token = self.launch_token(&subject.subject)?;
+                    // The driver's failure is an observability code: it stays in this node's
+                    // local observation log, and an older driver's arrives as a claim.
                     let diagnostic = self
                         .store
-                        .harness_diagnostics(&subject.subject)?
+                        .observations_for(&subject.subject, "harness.diagnostic")?
                         .iter()
                         .rev()
                         .find(|claim| {
