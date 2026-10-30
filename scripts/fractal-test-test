@@ -391,7 +391,7 @@ class GovernedTest(unittest.TestCase):
             real = st_test.own_cap
             with mock.patch.dict(os.environ, dict(environment or {}, XDG_RUNTIME_DIR=tmp), clear=True), \
                     mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
-                    mock.patch.object(st_test.shutil, 'which', return_value='/usr/bin/systemd-run'), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'), \
                     contextlib.redirect_stderr(io.StringIO()):
                 return st_test.governed(['check'], 'linux-gate')
 
@@ -399,9 +399,14 @@ class GovernedTest(unittest.TestCase):
         self.assertIn('--slice=builds.slice', governed, why)
         self.assertEqual(governed[-1], 'check')
 
+    def assert_in_place(self, governed, why):
+        # In place, and marked as in a build cap for a cargo front door that would otherwise move cargo into builds.slice.
+        self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
+        self.assertEqual(Path(governed[0]).name, 'env', why)
+
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
-        self.assertEqual(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), ['check'])
-        self.assertEqual(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), ['check'])
+        self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
+        self.assert_in_place(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), 'builds.slice')
 
     def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
         self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
@@ -424,10 +429,10 @@ class GovernedTest(unittest.TestCase):
 
     def test_limits_on_different_levels_inside_the_cap_together_are_a_cap(self):
         limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
-        self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
+        self.assert_in_place(self.governed_in(self.LANE, limits), 'memory and CPU on two levels')
         # A level without a memory controller still caps CPU: each file is read on its own.
         limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
-        self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
+        self.assert_in_place(self.governed_in(self.LANE, limits), 'no memory controller on the CPU level')
 
     def test_an_unreadable_cgroup_is_no_cap(self):
         self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
@@ -1098,12 +1103,15 @@ class StTest(unittest.TestCase):
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
             target = self.pool() / 'target-0'
+            self.assertTrue((target / 'CACHEDIR.TAG').is_file())  # st-test made it before cargo ran, so it tags it as cargo would
             (target / 'junk').write_bytes(b'x' * 4096)
             with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
-                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
-                self.assertTrue((target / 'junk').exists())  # not a directory cargo made: never emptied
-                (target / 'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
-                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # cargo's, past the cap: emptied
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # past the cap: emptied
+                self.assertFalse((target / 'junk').exists())
+                self.assertTrue((target / 'CACHEDIR.TAG').is_file())  # and tagged again, so the next run can empty it too
+                (target / 'CACHEDIR.TAG').unlink()  # a pool target from before st-test tagged its targets
+                (target / 'junk').write_bytes(b'x' * 4096)
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # the pool's own: emptied, tag or none
             self.assertFalse((target / 'junk').exists())
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
@@ -1111,6 +1119,37 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': str(shared)})[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
+
+    def test_a_tagless_target_the_caller_made_is_never_emptied(self):
+        """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
+        self.commit('b.txt', 'two')
+        mine = self.home / 'mine'
+        mine.mkdir()
+        (mine / 'junk').write_bytes(b'x' * 4096)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=['true'], extra_env={'ST_EVIDENCE_TARGET': str(mine)})[0], 0)
+        self.assertTrue((mine / 'junk').exists())
+        self.assertFalse((mine / 'CACHEDIR.TAG').exists())  # nor tagged: st-test tags only a directory it creates
+
+    def test_only_a_path_inside_the_pool_directory_is_the_pools_own(self):
+        """The pool's own targets are known by resolved path, not by a name prefix: the default shared target ~/.cache/st-test-target
+        starts like the pool directory ~/.cache/st-test, and a symlink or .. can point out of it. None of those is emptied untagged."""
+        pool = self.home / '.cache/st-test'
+        own = pool / 'pools/o-1/target-0'
+        own.mkdir(parents=True)
+        outside = self.home / '.cache/st-test-target'
+        outside.mkdir()
+        (outside / 'junk').write_bytes(b'x' * 4096)
+        link = pool / 'pools/o-1/target-9'
+        link.symlink_to(outside)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+            self.assertTrue(st_test.in_pool(own))
+            for path in (outside, pool / '..' / 'st-test-target', link, self.home):
+                self.assertFalse(st_test.in_pool(path), path)
+            with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+                for path in (outside, link):
+                    st_test.trim(path, owned=st_test.in_pool(path))
+        self.assertTrue((outside / 'junk').exists())
 
     def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
         self.commit('b.txt', 'two')

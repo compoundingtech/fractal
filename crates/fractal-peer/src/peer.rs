@@ -2508,7 +2508,7 @@ mod tests {
         for (store, count) in [(&alder, 6), (&birch, 4)] {
             for index in 0..count {
                 store
-                    .append_claim(&ClaimInput {
+                    .append_as_older_build_for_test(&ClaimInput {
                         subject: format!("daemon/{}", store.origin()),
                         kind: "daemon.diagnostic".into(),
                         actor: None,
