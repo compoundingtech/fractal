@@ -12300,4 +12300,29 @@ fn unchanged_harness_reports_stay_local_once_every_member_can_ask_the_seats_host
         66,
         "the local log keeps every report"
     );
+/// A roster's freshness read takes every seat's newest local report in one statement: 12 seats
+/// cost what 2 do, and a seat with no local report adds nothing.
+#[test]
+fn the_newest_local_harness_report_of_many_seats_is_one_read() {
+    let measure = |reported: usize, silent: usize| {
+        let store = Store::open_memory("node").unwrap();
+        let subjects = (0..reported + silent).map(|seat| format!("agent/node.worker-{seat}")).collect::<Vec<_>>();
+        let start = now_ms();
+        for subject in subjects.iter().take(reported) {
+            store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+        }
+        let names = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let newest = store.local_harness_newest_many(&names).unwrap();
+        let work = scope.finish();
+        assert_eq!(newest.len(), reported);
+        for subject in subjects.iter().take(reported) {
+            assert_eq!(newest[subject], ("inc-1".to_owned(), start), "{subject}");
+            assert_eq!(store.local_harness_newest(subject).unwrap(), Some(newest[subject].clone()));
+        }
+        work.statements
+    };
+    let two = measure(2, 0);
+    assert_eq!(measure(12, 0), two, "12 seats cost what 2 do");
+    assert_eq!(measure(2, 10), two, "and 10 seats with no local report add nothing");
 }

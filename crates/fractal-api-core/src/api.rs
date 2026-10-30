@@ -115,6 +115,10 @@ mod delivery_probes;
 mod end_reason;
 mod github_watch;
 pub mod harness_events;
+mod harness_questions;
+pub use harness_questions::{
+    HarnessQuestion, HarnessQuestionAdapterError, HarnessQuestionSettleSink, live_input_session,
+};
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod delivery_metrics;
@@ -245,6 +249,8 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Native answering is unavailable unless an adapter is explicitly installed.
+    pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
     /// Caller-bound assistant read receipts committed off the request path. Shut it down before
     /// the store closes; the last state reference to drop commits what remains.
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
@@ -1884,6 +1890,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "invalid-answer"
+        | "not-answerable"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"
@@ -2537,16 +2545,16 @@ pub async fn client_capabilities(
     // The request snapshot may predate a checkpoint or legacy conversion. Advertise the
     // frontier and floor from one current read so the SDK's first event request can resume.
     let store = state.store.clone();
-    let (oldest, newest) = blocking_store(move || {
+    let capability_state = state.clone();
+    let capability_session = session.clone();
+    let (oldest, newest, capabilities) = blocking_store(move || {
         // No further than the published index, as an event page (`read_event_page`).
         let through = store.index()?;
-        store.read_snapshot(|_| store.event_bounds())
-            .map(|(oldest, newest)| (oldest, newest.min(through)))
-    })
-    .await?;
+        let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
+        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session)))
+    }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&state, &session);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
@@ -3208,6 +3216,8 @@ fn overlay_agent_resources_at(
 ) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
+        let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subjects.iter().map(String::as_str).collect::<Vec<_>>())?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
@@ -3221,11 +3231,10 @@ fn overlay_agent_resources_at(
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            // The seat's host also hears the re-stamps that stay local, in one seek per card.
-            let heard_at = match &harness {
-                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness, now)?),
-                None => None,
-            };
+            // The seat's host also hears the re-stamps that stay local, read for every card at once.
+            let heard_at = harness
+                .as_ref()
+                .map(|harness| heard.heard_at(store, item["id"].as_str().unwrap_or_default(), harness, now));
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
@@ -3268,8 +3277,26 @@ fn overlay_agent_resources_at(
 /// it (`seat_freshness`), whichever is latest. Re-stamps that change nothing stay in the host's
 /// local log, so without them a resting seat reads stale.
 pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView, now: u128) -> anyhow::Result<u128> {
-    let heard = store.heard_harness_at(subject, &harness.incarnation_id, now)?;
-    Ok(heard.map_or(harness.observed_at_unix_ms, |heard| heard.max(harness.observed_at_unix_ms)))
+    Ok(HeardSeats::read(store, &[subject])?.heard_at(store, subject, harness, now))
+}
+
+/// The local log's newest harness report of many seats, read in one statement, so a roster's
+/// cards cost one query rather than one per card.
+pub struct HeardSeats(std::collections::HashMap<String, (String, u128)>);
+
+impl HeardSeats {
+    pub fn read(store: &Store, subjects: &[&str]) -> anyhow::Result<Self> {
+        Ok(Self(store.local_harness_newest_many(subjects)?))
+    }
+
+    /// [`heard_at`] from the seats read here.
+    pub fn heard_at(&self, store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView, now: u128) -> u128 {
+        let local = self.0.get(subject).filter(|(of, _)| *of == harness.incarnation_id).map(|(_, at)| *at);
+        let relayed = store
+            .extension::<crate::store::RelayedFreshness>()
+            .heard_at(subject, &harness.incarnation_id, now);
+        harness.observed_at_unix_ms.max(local.unwrap_or(0)).max(relayed.unwrap_or(0))
+    }
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.
@@ -10750,13 +10777,7 @@ pub async fn input_session_as(
     {
         return Ok(Json(session_control_response(&subject, &result)));
     }
-    let session = live_session(state, &subject, Some(&request.expected_incarnation))?;
-    if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
-            "unsupported-capability",
-            "session input requires a terminal session",
-        )));
-    }
+    let session = live_input_session(state, &subject, &request.expected_incarnation)?;
     let bytes = match request.mode {
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)

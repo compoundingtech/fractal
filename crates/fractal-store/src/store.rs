@@ -721,7 +721,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h82624af80f95 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h806ead738248 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -731,6 +731,10 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Shared action-key admission must seek one actor/key, never scan retained resolutions.
+CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
+ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
+WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -5714,6 +5718,33 @@ impl Store {
             .query_row(/* sqlite-large-value: allow-for-now lv-hdfe967515468 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
         Ok(newest.and_then(|(at, incarnation)| Some((incarnation?, at.max(0) as u128))))
+    }
+
+    /// [`Self::local_harness_newest`] for many seats in one statement: one seek per seat in
+    /// `local_observations_subject_kind_index`, so a roster read is one query, not one per card.
+    pub fn local_harness_newest_many(&self, subjects: &[&str]) -> Result<HashMap<String, (String, u128)>> {
+        if subjects.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT seats.value, local.observed_at_unix_ms, json_extract(local.body, '$.fields.incarnation_id')
+             FROM json_each(?1) AS seats
+             JOIN local_observations AS local ON local.id=(
+                 SELECT id FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=seats.value AND kind='harness.observed' ORDER BY id DESC LIMIT 1)",
+        )?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        let mut newest = HashMap::new();
+        for row in rows {
+            let (subject, at, incarnation) = row?;
+            if let Some(incarnation) = incarnation {
+                newest.insert(subject, (incarnation, at.max(0) as u128));
+            }
+        }
+        Ok(newest)
     }
 
     /// When this node last heard `subject`'s harness report for `incarnation`, from its local log.
