@@ -7863,26 +7863,30 @@ async fn dispatch_action(
                 parameter_string(p, "episode")?,
                 parameter_string(p, "answer")?,
             );
-            // A card may have offered allow from a read before its call's result: whatever lets
-            // the call through is refused once the seat's conversation records one.
-            // Only the seat's person is told: anyone else is refused by the store as before.
+            // A card may have offered allow from a read before its call's result. Whatever lets
+            // the named call through goes on only while Fractal sees it waiting in the seat's
+            // conversation on this node, as a card that offers allow does: not once it has its
+            // result, and not when the conversation cannot be read here. Only the seat's person
+            // is told: anyone else is refused by the store as before.
             let person = state.store.agent_person(&seat).map_err(ApiError::internal)?;
             if delegation.is_none() && answer != "deny" && person.as_deref() == Some(authority_actor.as_str()) {
                 let call = state.store.native_prompt_call(&seat, &episode).map_err(ApiError::internal)?;
                 if let Some(call) = call {
                     let (reader, target) = (state.clone(), seat.clone());
-                    let answered = crate::api::read_deadline::spawn_blocking(move || {
-                        crate::api::prompt_card::call_has_result(&reader, &target, &call)
+                    let waits = crate::api::read_deadline::spawn_blocking(move || {
+                        crate::api::prompt_card::call_waits(&reader, &target, &call)
                     })
                     .await
                     .map_err(ApiError::internal)?;
-                    if answered == Ok(true) {
+                    let refused = match waits {
+                        Ok(true) => None,
+                        Ok(false) => Some("is no longer waiting: the call it asks about already has a result, or Fractal does not see it waiting in the seat's conversation".to_owned()),
+                        Err(why) => Some(format!("can only be answered in the seat's terminal: {why}")),
+                    };
+                    if let Some(refused) = refused {
                         return Err(ApiError::bad(St3Error::new(
                             "stale-fence",
-                            format!(
-                                "{}is no longer waiting: the call it asks about already has a result",
-                                fractal_client::PROMPT_REFUSAL_PREFIX
-                            ),
+                            format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
                         )));
                     }
                 }

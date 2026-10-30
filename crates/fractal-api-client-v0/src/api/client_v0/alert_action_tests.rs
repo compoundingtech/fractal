@@ -107,8 +107,9 @@ async fn delegated_prompt_actions_share_one_source_contract_and_cannot_choose_th
 }
 
 /// A card may have offered allow from a read before its call's result. An answer that lets the
-/// call through reads the seat's conversation again, and is refused once it records a result for
-/// the call the prompt names; while the call waits, the answer goes on as before.
+/// call through reads the seat's conversation again, and goes on only while it sees the named
+/// call waiting: not once the call has its result, even beyond the entries a card reads, and not
+/// when the conversation cannot be read. Nothing is recorded for a refused answer.
 #[tokio::test]
 async fn an_allow_for_a_call_that_already_has_a_result_is_refused() {
     use sha2::Digest as _;
@@ -172,7 +173,7 @@ async fn an_allow_for_a_call_that_already_has_a_result_is_refused() {
     let asked = append(
         "harness.observed",
         json!({"state":"blocked","driver":"codex","incarnation_id":incarnation,"evidence_incarnation":provider,
-            "blocked_on":"human","ask":"permission","reason":"shell","ownership_sequence":1,"transition_sequence":3}),
+            "blocked_on":"human","ask":"permission","reason":"commandExecution","ownership_sequence":1,"transition_sequence":3}),
     );
     let named = |call: &str| {
         append(
@@ -195,17 +196,34 @@ async fn an_allow_for_a_call_that_already_has_a_result_is_refused() {
         action_inner(State(state.clone()), Extension(snapshot), Extension(session.clone()), Json(request), None)
     };
 
+    let refused = |key: &'static str, says: &'static str| {
+        let answer = &answer;
+        let state = &state;
+        async move {
+            let before = state.store.index().unwrap();
+            let refused = answer(key).await.unwrap_err();
+            assert_eq!(refused.code, "stale-fence", "{key}: {}", refused.message);
+            assert!(refused.message.contains(says), "{key}: {}", refused.message);
+            assert_eq!(state.store.index().unwrap(), before, "{key}: nothing was recorded");
+        }
+    };
+
     // The prompt names the call that already has its result: allowing it is refused.
     named("call-done");
     assert_eq!(state.store.native_prompt_call(seat, &asked.id).unwrap().as_deref(), Some("call-done"));
-    let before = state.store.index().unwrap();
-    let refused = answer("allow-answered").await.unwrap_err();
-    assert_eq!(refused.code, "stale-fence", "{}", refused.message);
-    assert!(refused.message.contains("already has a result"), "{}", refused.message);
-    assert_eq!(state.store.index().unwrap(), before, "nothing was recorded");
-    // The prompt names the call that waits: the answer goes on to the store.
+    refused("allow-answered", "already has a result").await;
+    // The prompt names the call that waits, but its conversation cannot be read here any more.
     named("call-waiting");
-    if let Err(error) = answer("allow-waiting").await {
-        assert!(!error.message.contains("already has a result"), "{}", error.message);
-    }
+    let kept = std::fs::read(&transcript).unwrap();
+    std::fs::remove_file(&transcript).unwrap();
+    refused("allow-unreadable", "can only be answered in the seat's terminal").await;
+    // Read again, it waits: the answer is recorded.
+    std::fs::write(&transcript, &kept).unwrap();
+    answer("allow-waiting").await.unwrap();
+    // A result more entries back than a card reads still counts: the call no longer waits.
+    let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    let mut later = vec![json!({"type":"response_item","timestamp":"2026-10-30T12:00:04Z","payload":{"type":"function_call_output","call_id":"call-waiting","output":"released"}})];
+    later.extend((0..300).map(|n| json!({"type":"response_item","timestamp":"2026-10-30T12:00:05Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("step {n}")}]}})));
+    std::io::Write::write_all(&mut file, later.iter().map(|line| format!("{line}\n")).collect::<String>().as_bytes()).unwrap();
+    refused("allow-long-after", "does not see it waiting").await;
 }

@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "prompt.respond refuses an answer other than deny with stale-fence (\"that prompt is no longer waiting: the call it asks about already has a result\") when the seat's conversation records a result for the call the prompt names. Clients already show stale-fence prompt refusals."
+    "detail": "prompt.respond refuses an answer other than deny to a prompt that names its call with stale-fence unless the call waits in the seat's conversation on this node: once it has a result (\"that prompt is no longer waiting: ...\"), or when the conversation cannot be read here (\"that prompt can only be answered in the seat's terminal: ...\"). A client on another node allows such a prompt from the seat's own node or its terminal. Clients already show stale-fence prompt refusals."
   },
   "downtime": {
     "status": "none",

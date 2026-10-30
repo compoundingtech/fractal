@@ -136,13 +136,14 @@ fn tail(source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>
     Ok(slice.items)
 }
 
-/// Whether `seat`'s conversation on this node already records a result for `call`: a card may
-/// have shown it as waiting from a read before the result, so an answer that lets it through
-/// checks again. `Err` says why st cannot read the conversation.
-pub fn call_has_result(state: &AppState, seat: &str, call: &str) -> Result<bool, String> {
-    Ok(tail(&seat_source(state, seat)?)?
+/// Whether `call` waits in `seat`'s conversation on this node: among the newest entries a card
+/// reads, with no result. A card may have shown it as waiting from a read before its result, so
+/// an answer that lets it through checks again; a call that has its result, or that a card
+/// could not have shown, does not wait. `Err` says why st cannot read the conversation.
+pub fn call_waits(state: &AppState, seat: &str, call: &str) -> Result<bool, String> {
+    Ok(pending_calls(&tail(&seat_source(state, seat)?)?)
         .iter()
-        .any(|item| item["type"] == "tool_result" && item["body"]["call_id"] == call))
+        .any(|pending| pending["call_id"] == call))
 }
 
 /// The tool calls without a result in a conversation `source`, following it from before the
