@@ -24,6 +24,11 @@ fn member(trims_locally: bool) -> Store {
     store
 }
 
+/// What `[trim] notify` sets at startup.
+fn set_notify(store: &Store, agent: &str) {
+    *store.extension::<crate::store::answers_check::TrimSettings>().notify.lock().unwrap() = Some(agent.into());
+}
+
 fn local_member(_name: &str) -> Store {
     member(true)
 }
@@ -212,11 +217,7 @@ fn a_plan_that_would_drop_the_newest_claim_of_a_key_stops_before_deleting_anythi
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let claims = claims_of(&store, "observer.observed");
-    *store
-        .extension::<crate::store::answers_check::TrimSettings>()
-        .notify
-        .lock()
-        .unwrap() = Some("agent/example/operations".into());
+    set_notify(&store, "agent/example/operations");
     store.set_trim_fault(Some(smallclaims::store::TrimFault::DropNewest));
     let actions = step(&store, &context);
     assert_eq!(kinds(&actions), ["graph-changed"]);
@@ -241,13 +242,33 @@ fn a_plan_that_would_drop_the_newest_claim_of_a_key_stops_before_deleting_anythi
             .unwrap()
     };
     assert_eq!(faults(), [("operational.failure".to_string(), "agent/example/operations".to_string())]);
-    // Halted until resumed; an agent may resume a member that trims locally, which ends the fault.
+    // Halted until resumed. Only the `[trim] notify` agent or a person may resume, and the
+    // resume ends the fault.
     assert!(step(&store, &context).is_empty());
-    store.resume_checkpoints("agent/example/operations", "looked at the plan").unwrap();
-    store.recover_local_trim_stops("agent/example/operations", "looked at the plan").unwrap();
+    assert!(store.resume_stopped_trims("agent/example/other", "looked at the plan").is_err());
+    assert!(store.resume_stopped_trims("agent/example/operations", " ").is_err());
+    assert_eq!(faults().len(), 1, "a refused resume leaves the fault open");
+    assert!(step(&store, &context).is_empty(), "a refused resume leaves the member halted");
+    store.resume_stopped_trims("agent/example/operations", "looked at the plan").unwrap();
     assert_eq!(faults().last().unwrap().0, "operational.recovered");
     assert!(step(&store, &context).is_empty(), "the stopped cut is set aside, not retried");
-    assert!(store.resume_checkpoints("agent/example/operations", " ").is_err());
+}
+
+#[test]
+fn only_a_person_or_the_notify_agent_resumes_a_member_that_trims_locally() {
+    let store = local_member("alder");
+    // With no `[trim] notify` agent, only a person may.
+    assert!(store.resume_stopped_trims("agent/example/operations", "looked").is_err());
+    store.resume_stopped_trims("person/operator", "looked").unwrap();
+    set_notify(&store, "agent/example/operations");
+    assert!(store.resume_stopped_trims("agent/example/other", "looked").is_err());
+    store.resume_stopped_trims("agent/example/operations", "looked").unwrap();
+    store.resume_stopped_trims("person/operator", "looked").unwrap();
+    // An ordinary member: a person only, whatever `[trim] notify` names.
+    let ordinary = member(false);
+    set_notify(&ordinary, "agent/example/operations");
+    assert!(ordinary.resume_stopped_trims("agent/example/operations", "looked").is_err());
+    ordinary.resume_stopped_trims("person/operator", "looked").unwrap();
 }
 
 proptest! {

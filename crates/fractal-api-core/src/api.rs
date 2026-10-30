@@ -116,6 +116,7 @@ mod github_watch;
 pub mod harness_events;
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod delivery_metrics;
 pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
@@ -145,7 +146,7 @@ pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
 mod launch_card;
-mod prompt_card;
+pub mod prompt_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
@@ -1830,6 +1831,11 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-arrangement-subject" | "invalid-arrangement-action"
         | "invalid-arrangement-operations" | "invalid-arrangement-folder"
         | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference"
+        | "invalid-arrangement-version" | "invalid-arrangement-body"
+        | "unsupported-membership-container" | "membership-owner-forbidden"
+        | "invalid-membership-member" | "invalid-membership-bucket"
+        | "invalid-membership-key" | "invalid-membership-operations"
+        | "membership-edit-too-large"
     )) { return false; }
     matches!(
         code,
@@ -1893,6 +1899,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-arrangement-name"
         | "invalid-arrangement-key"
         | "invalid-subject-reference"
+        | "invalid-arrangement-version"
+        | "invalid-arrangement-body"
+        | "unsupported-membership-container"
+        | "membership-owner-forbidden"
+        | "invalid-membership-member"
+        | "invalid-membership-bucket"
+        | "invalid-membership-key"
+        | "invalid-membership-operations"
+        | "membership-edit-too-large"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
@@ -3435,6 +3450,7 @@ fn agent_delivery_presence(
         item["id"].as_str()?, driver, item["incarnation_id"].as_str(),
     ))
 }
+
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn client_agent_resources_uncached(
@@ -8357,7 +8373,7 @@ fn doctor_report_with_operation_drift(
             let mut blocked = agents
                 .iter()
                 .filter(|agent| {
-                    agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
                         || agent.pointer("/delivery/reason").and_then(Value::as_str)
                             .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
                                 || reason.starts_with("ownership proof unavailable"))

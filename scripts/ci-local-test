@@ -53,7 +53,7 @@ class CiLocal(unittest.TestCase):
         self.tmp_root = root / 'short-tmp'
         self.tmp_root.mkdir()
 
-    def run_local(self, *stages, ci_linux=None, **extra):
+    def run_local(self, *stages, ci_linux=None, entry='ci-local', **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
         counter = Path(self.tmp.name) / 'calls'
         counter.write_text('0')
@@ -71,7 +71,7 @@ class CiLocal(unittest.TestCase):
                'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', 'FRACTAL_PINNED_PTY_BIN': '/nix/store/x-pty/bin/pty',
                'CI_LOCAL_TMP_ROOT': str(self.tmp_root), **extra}
         self.last_env = env
-        done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True,
+        done = subprocess.run(['bash', f'scripts/{entry}', *stages], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(self.umask))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
@@ -495,6 +495,53 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
+
+    def test_keyed_defaults_and_explicit_values_pass_through_ci_local(self):
+        for entry, stage, variable in (('ci-clippy-keyed', 'clippy', 'CI_KEYED_CLIPPY_POLICY'),
+                                       ('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY')):
+            shutil.copy(ROOT / 'scripts' / entry, self.work / 'scripts' / entry)
+            for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
+                with self.subTest(entry=entry, explicit=explicit):
+                    extra = {} if explicit is None else {variable: explicit}
+                    done, calls = self.run_local(entry=entry, CLIPPY_BASE_SHA='f' * 40, **extra)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertEqual(calls[-1]['env'][variable], 'auto:.st/evidence-skip-policy.json' if explicit is None else explicit)
+                    self.assertEqual(calls[-1]['argv'], [stage])
+                    self.log.unlink()
+            done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
+            self.log.unlink()
+
+    def test_keyed_consumer_selects_missing_only_without_running_compiles(self):
+        source = (ROOT / 'scripts/ci-linux').read_text()
+        function = 'keyed_policy() {' + source.split('keyed_policy() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        def resolve(value='auto:.st/evidence-skip-policy.json'):
+            return subprocess.run(['bash', '-euc', function + '\nkeyed_policy "$CI_KEYED_CLIPPY_POLICY"'], cwd=self.work,
+                                  env=dict(os.environ, CI_KEYED_CLIPPY_POLICY=value), capture_output=True, text=True)
+        old = self.work / '.st/evidence-skip-policy.json'
+        new = self.work / '.fractal/evidence-skip-policy.json'
+        old.parent.mkdir()
+        new.parent.mkdir()
+        old.write_text('{}')
+        self.assertEqual(resolve().stdout.strip(), '.st/evidence-skip-policy.json')
+        new.write_text('{}')
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json')
+        old.unlink()
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json')
+        old.write_text('{}')
+        new.write_text('{')
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json', 'malformed selected file is not bypassed')
+        new.unlink()
+        new.symlink_to('missing')
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json', 'dangling selected file is not bypassed')
+        new.unlink()
+        new.parent.rmdir()
+        new.parent.symlink_to('.fractal')
+        self.assertNotEqual(resolve().returncode, 0, 'lookup errors must not select legacy')
+        for explicit in ('', '.st/evidence-skip-policy.json', '/custom/policy.json'):
+            done = resolve(explicit)
+            self.assertEqual((done.returncode, done.stdout.rstrip('\n')), (0, explicit))
 
     def test_the_linux_gate_stages_run_in_order_and_clippy_s_base_is_given_or_fetched_never_a_local_ref(self):
         def git(*args, cwd=None):
