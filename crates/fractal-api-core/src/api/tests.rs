@@ -13139,3 +13139,59 @@ mission "agent-jobs" state="ready" {
     append("harness.observed", json!({"state":"ended","driver":"omp","incarnation_id":"two","background_jobs":1}));
     assert!(card()["background_jobs"].is_null());
 }
+
+async fn signature_resume_request(app: Router, bound: Option<&str>, body: Value) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/signatures/resume")
+        .header("content-type", "application/json");
+    if let Some(agent) = bound {
+        request = request.extension(BoundAgent(agent.into()));
+    }
+    let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    (status, envelope.get("value").cloned().unwrap_or(envelope))
+}
+
+#[tokio::test]
+async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_other_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"node.ops\" { command \"true\"; handles-faults }\n";
+    let intent = crate::graph::parse_intent(source, &state.node).unwrap();
+    let preview = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    state.store.apply(&intent, &preview.subject_tokens, "signature-resume-owner").unwrap();
+    let fault_agent = state.store.fleet_fault_agent().unwrap().unwrap();
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let fault = || state.store.signature_migration().unwrap().fault;
+
+    state.store.fail_signature_migration("fixture stopped page").unwrap();
+    for (bound, actor, code) in [
+        // A harness never names a person, and an ordinary agent acting as itself is refused.
+        (Some("agent/helper"), "person/avery", "foreign-agent-actor"),
+        (Some("agent/helper"), "agent/helper", "invalid-signature-resume"),
+        (None, "agent/helper", "invalid-signature-resume"),
+    ] {
+        let (status, refusal) = signature_resume_request(app.clone(), bound, json!({"reason":"looked","actor":actor})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], code, "{actor}: {refusal}");
+        assert_eq!(fault().as_deref(), Some("fixture stopped page"));
+    }
+    let (status, refusal) = signature_resume_request(app.clone(), None, json!({"reason":" ","actor":"person/avery"})).await;
+    assert_eq!((status, refusal["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("invalid-signature-resume")));
+
+    let (status, resumed) = signature_resume_request(app.clone(), None, json!({"reason":"busy writer, not corruption","actor":"person/avery"})).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["cleared"], "fixture stopped page");
+    assert_eq!(resumed["actor"], "person/avery");
+    assert!(resumed["migration"]["fault"].is_null(), "{resumed}");
+    assert_eq!(fault(), None);
+
+    state.store.fail_signature_migration("fixture stopped again").unwrap();
+    let (status, resumed) = signature_resume_request(app.clone(), Some(&fault_agent), json!({"reason":"repaired","actor":fault_agent})).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    assert_eq!(resumed["cleared"], "fixture stopped again");
+    assert_eq!(fault(), None);
+}

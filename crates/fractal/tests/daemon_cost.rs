@@ -284,6 +284,7 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     ("POST /v1/checkpoint/excuse", "checkpoint agreement"),
     ("POST /v1/checkpoint/resume", "checkpoint agreement"),
+    ("POST /v1/signatures/resume", "clears one control row; the verdict backlog drains in later writer loans"),
     (
         "POST /v1/internal/replication/checkpoint",
         "pages a trimmed checkpoint's manifest",
