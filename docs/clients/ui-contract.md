@@ -1,5 +1,11 @@
 # Fractal client UI contract
 
+The terminal UI records up to 50 device-local content destinations across spaces.
+Stops track stable local group and tab identities, Inbox selection, and pane content;
+focus-only movement does not add a stop. Workspace format 3 persists this history
+and still reads formats 1 and 2. Local identities are not sent in graph layouts.
+
+
 For package choices and a runnable client, see [Build your own client](build-your-own.md).
 
 What every Fractal client shows and does. Three clients implement it: the terminal UI
