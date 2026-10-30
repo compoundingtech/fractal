@@ -221,9 +221,10 @@ impl Daemon {
             .collect()
     }
 
+    /// Diagnostics of every code: observability codes are in the local observation log.
     fn has_diagnostic(&self, subject: &str, incarnation: &str, code: &str) -> bool {
         self.store
-            .claims_for(subject, Some("harness.diagnostic"))
+            .observations_for(subject, "harness.diagnostic")
             .unwrap_or_default()
             .into_iter()
             .any(|claim| {
@@ -755,7 +756,7 @@ time.sleep(300)
     let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
     wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
         daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
-            && daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap()
+            && daemon.store.observations_for(seat, "harness.diagnostic").unwrap()
                 .iter().any(|claim| {
                     claim.body["fields"]["code"] == "claude-channel-initialized"
                         && claim.body["fields"]["incarnation_id"] == incarnation
@@ -806,7 +807,7 @@ time.sleep(300)
     assert!(before["delivery"]["reason"].as_str().is_some_and(|reason| {
         reason.contains(warning)
     }), "{before}");
-    let initialized = daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    let initialized = daemon.store.observations_for(seat, "harness.diagnostic").unwrap();
     assert!(initialized.iter().any(|claim| {
         claim.body["fields"]["code"] == "claude-channel-initialized"
             && claim.body["fields"]["incarnation_id"] == incarnation
@@ -1093,10 +1094,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     )
     .await;
     assert_alive(&mut driver, "a running Claude driver");
-    // The graph records the delivery outage and its recovery for this incarnation.
+    // The seat's node records the delivery outage and its recovery for this incarnation, in
+    // its local observation log: they are observability codes.
     let diagnostics = daemon
         .store
-        .claims_for(seat, Some("harness.diagnostic"))
+        .observations_for(seat, "harness.diagnostic")
         .unwrap()
         .into_iter()
         .map(|claim| {
@@ -2407,12 +2409,11 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
         selected.claim, before.claim,
         "component initialization changed the selected activity claim"
     );
-    let diagnostics: Vec<_> = claims
+    // Initialization is an observability code, in this node's local observation log.
+    let observed = daemon.store.observations_for("agent/quartz", "harness.diagnostic").unwrap();
+    let diagnostics: Vec<_> = observed
         .iter()
-        .filter(|claim| {
-            claim.kind == "harness.diagnostic"
-                && claim.body["fields"]["code"] == "claude-channel-initialized"
-        })
+        .filter(|claim| claim.body["fields"]["code"] == "claude-channel-initialized")
         .collect();
     assert_eq!(
         diagnostics.len(),
@@ -3100,7 +3101,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
                 || {
                     !daemon
                         .store
-                        .claims_for("agent/quartz", Some("harness.diagnostic"))
+                        .observations_for("agent/quartz", "harness.diagnostic")
                         .unwrap()
                         .is_empty()
                 },
@@ -3110,7 +3111,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
             tokio::time::sleep(Duration::from_millis(2200)).await;
             let claims = daemon
                 .store
-                .claims_for("agent/quartz", Some("harness.diagnostic"))
+                .observations_for("agent/quartz", "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims.len(), 1);
             assert_eq!(claims[0].body["fields"]["code"], "claude-channel-initialized");
