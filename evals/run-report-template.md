@@ -1,7 +1,6 @@
 # Eval run report — YYYY-MM-DD
 
 - Eval: `<name>`
-- Runtime: `st2|st3`
 - Run ID: `<id>`
 - Candidate commit: `<sha>`
 - Eval KDL SHA-256: `<sha256>`
@@ -30,7 +29,7 @@
 | --- | --- | --- | --- |
 | `<time>` | `<subject>` | `<old> -> <new>` | `<store index, event, or log>` |
 
-## Small Talk
+## Fractal
 
 - Runtime work messages: `<count>`
 - Direct agent messages: `<count>`

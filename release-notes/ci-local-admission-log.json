@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local names the build admission log (BUILD_ADMISSION_LOG) from the account's home, beside BUILD_ADMISSION_STATE, so the cargo shim's slot-wait records inside the stages are written instead of failing under the stages' own HOME",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No rule change."},
+  "compatibility": {"status": "changed", "detail": "Only on a host with the account's build-admission program: the stages see BUILD_ADMISSION_LOG, and a value the caller set is kept. ci-local is a lane file, so this changes linux-gate's lane definition digest."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

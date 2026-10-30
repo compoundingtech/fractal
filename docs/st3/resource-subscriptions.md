@@ -1,7 +1,5 @@
 # Resource subscriptions
 
-Status: current design.
-
 ## Outcome
 
 An agent or a person can request a message or mission when selected external facts change.
@@ -121,29 +119,29 @@ observed state; their first GitHub observation still participates in new-issue a
 
 The local file provider supports `status`, `path`, `content_hash`, `size`, `mode`, and `reason`. It never returns file content.
 
-## Authored watch operation
-
-A planner or authorized producing agent authors the watch as a mission graph. The delivery target
-is explicit in the mission; it is never inferred from a caller's terminal environment. The one
-standalone watch is a seat's watch on a GitHub issue or pull request (`st gh watch`, below).
-
-The subscription key includes the provider kind, provider locator, selected fields, target, and delivery type. An exact retry returns the same subjects.
-
 ## Graph shape
 
-The command publishes this graph shape:
+A planner or authorized producing agent authors the watch as a mission that owns one observer
+and one subscription. Its delivery target is explicit, never inferred from the caller's terminal
+environment. The standalone watch is a seat's GitHub issue or pull request watch (`st gh watch`, below).
 
 ```kdl
-resource "github/compoundingtech/st2/pull/403" {
+version 2
+agent "example/worker" {
+  workspace "/srv/example/worker"
+  harness "claude" {}
+}
+
+resource "github/acme/garden/pull/403" {
   kind "vcs.pull-request"
 }
 
-mission "resource-watch/github/compoundingtech/st2/pull/403/KEY" state="ready" {
+mission "resource-watch/github/acme/garden/pull/403/KEY" state="ready" {
   goal "Observe one resource and send its selected changes."
   observer "watch" {
-    resource "resource/github/compoundingtech/st2/pull/403"
+    resource "resource/github/acme/garden/pull/403"
     provider "github.pull-request"
-    locator "compoundingtech/st2#403"
+    locator "acme/garden#403"
     field "head"
     field "state"
     field "review"
@@ -152,39 +150,61 @@ mission "resource-watch/github/compoundingtech/st2/pull/403/KEY" state="ready" {
 
   subscription "watch" {
     observer "observer/watch"
-    to "agent/example.worker"
+    to "agent/example/worker"
     on "head"
     on "state"
     on "review"
     on "checks"
     delivery "message"
   }
+
+  step "retire" {
+    agentless
+    gate "stop the watch" type="human" {
+      reviewer "person/operator"
+      question "Stop observing this pull request?"
+    }
+  }
 }
 ```
 
 The resource begins unbound. The resource stores normalized external facts after its first observation.
 
-The mission run owns the observer and subscription.
+The mission run owns the observer and subscription. The `retire` gate keeps the run open;
+approving it ends the run and its watch. Without a step, the run completes immediately.
+The durable `example/worker` seat is declared outside the run. Replace its workspace and harness
+with the seat you want to receive changes; an undeclared delivery target blocks publication.
 
-The returned subjects use `observer/RUN/watch` and `subscription/RUN/watch`.
+The run’s subjects are `observer/RUN/watch` and `subscription/RUN/watch`.
 
-The subscription stores the selected changes and delivery intent. The agent declaration does not change.
+The subscription stores the selected changes and delivery intent.
 
-A provider locator is an opaque provider value. st does not assign meaning to it outside the registered provider.
+A provider locator is an opaque provider value. Fractal does not assign meaning to it outside the registered provider.
 
 The `github.ref` locator is `OWNER/REPOSITORY@BRANCH`. Branch names can contain `/`. For example:
 
 ```kdl
-resource "github/shareup/app-web/ref/one-space-at-a-time" {
+version 2
+resource "github/acme/garden/ref/topic/feature" {
   kind "vcs.ref"
 }
 
-observer "one-space" {
-  resource "resource/github/shareup/app-web/ref/one-space-at-a-time"
-  provider "github.ref"
-  locator "shareup/app-web@one-space-at-a-time"
-  field "head"
-  field "ancestors"
+mission "follow-branch" state="ready" {
+  goal "Observe the branch head and merged refs."
+  observer "branch" {
+    resource "resource/github/acme/garden/ref/topic/feature"
+    provider "github.ref"
+    locator "acme/garden@topic/feature"
+    field "head"
+    field "ancestors"
+  }
+  step "retire" {
+    agentless
+    gate "stop following the branch" type="human" {
+      reviewer "person/operator"
+      question "Stop observing this branch?"
+    }
+  }
 }
 ```
 
@@ -199,6 +219,7 @@ It uses public API access when no authenticated token is available.
 An observer does not need a subscription. This form records one resource without sending a message:
 
 ```kdl
+version 2
 resource "workspace/config" {
   kind "filesystem.file"
 }
@@ -214,10 +235,18 @@ mission "observe-config" state="ready" {
     field "size"
     field "mode"
   }
+  step "retire" {
+    agentless
+    gate "stop observing" type="human" {
+      reviewer "person/operator"
+      question "Stop observing this file?"
+    }
+  }
 }
 ```
 
-The mission run owns the observer. Mission cancellation stops the observer.
+The mission run owns the observer. Its `retire` gate keeps the run open. Approval or mission
+cancellation stops the observer.
 
 An internal declarative refresh operation requests an immediate observation and waits for that exact
 attempt. It returns `changed=false` when the provider confirms the same facts. That success adds no
@@ -239,7 +268,7 @@ The GitHub repository provider reads what changed since its cursor. Its first po
 item, up to 10 pages; a larger open listing fails the observation instead of recording part of it.
 After that, it reads the issues listing for items updated since its watermark, which also names
 each closed pull request's merge, and the repository's comments updated since a second watermark.
-A comment watermark starts at the first poll, so st does not read old comments. Each read is
+A comment watermark starts at the first poll, so Fractal does not read old comments. Each read is
 conditional and its URL changes only when something changed, so an idle repository answers 304
 and costs nothing. A read longer than 10 pages records what it read and continues at once.
 
@@ -269,11 +298,6 @@ The provider also records the repository's numeric ID. A renamed repository answ
 through a redirect with the same ID, so every item keeps its identity. A different ID fails the
 observation. An item is identified by its number within the observed resource.
 
-Builds before item resources kept every item in the repository facts. The first observation
-without them records each listed item that had no resource, closes each pull request that was open
-there and left the open listing, and records the repository facts without the items. A delivery
-compares an item against that older listing, so the upgrade starts no review and no triage.
-
 The provider can use a webhook, a stream, or a conditional request. A conditional provider returns one next-check deadline.
 An observer's `every` replaces that deadline, except when the provider asks to continue within a
 second, as a listing longer than one read does.
@@ -282,7 +306,34 @@ The daemon records that deadline as a one-shot wake. It does not run a periodic 
 
 Conditional requests use provider cursors such as an ETag. Cursors are local progress state, not resource facts.
 
-The daemon keeps each next-check deadline and cursor in local scheduler memory. A daemon restart performs one immediate observation.
+The daemon keeps each next-check deadline in local scheduler memory. A daemon restart performs one immediate observation.
+
+Each observer's cursor stays on the member that polls it, in the GitHub plugin's own database,
+`<state>/plugins/github/github.sqlite3`. That database never syncs and is not in a backup. For a
+`github.repository` observer, `observer.observed` carries only how far the observer has read:
+its `cursor` holds `items_since` and `comments_since`. The version maps, which are most of a
+cursor's bytes, stay in the plugin database. Builds before it wrote the whole cursor there.
+
+A member with no row for an observer polls from the cursor in that observer's newest
+`observer.observed` claim: the whole cursor an older build wrote, or how far another member had
+read. Once a poll there had a cursor, before or after, it keeps a row, even if a later poll ends
+without one, so it adopts a claim's cursor once per database. A member drops its row when the
+observer stops or another member declares it.
+
+A member that takes over polling, or lost its database, reads on from the claim's position. Each
+item it reads is compared with the facts the graph already recorded for it, so it delivers what
+changed in between once, such as an issue closed or a comment written in the gap, and nothing
+twice. A claim is written only when a poll changes facts, so its position can be behind the
+polling member's; reading from an earlier point only reads more again. A repository with no
+recorded facts is a baseline, which delivers nothing.
+
+A database file the daemon cannot use, damaged or from a newer build, is set aside beside it as
+`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. It does not
+start only when the directory cannot be made, the file cannot be moved aside, or no database
+opens in its place: each names the path and the cause. A read that
+fails is the observer's fault, and a later pass polls it again. An observer whose poll cannot keep
+its cursor there is `degraded` with error code `github-plugin-database`: it retries the write each
+minute and does not ask GitHub again until the database takes the cursor.
 
 The provider applies bounded retries and backoff. It records authentication, rate-limit, and transport failures on the observer subject.
 
@@ -304,7 +355,7 @@ An unchanged failure creates no new claim. A later success replaces the complete
 
 An observer checks its declared fields. Its effective field set also includes the union of its subscription fields.
 
-st does not fetch once for each target. A subscription update can expand or reduce the observer field set.
+Fractal does not fetch once for each target. A subscription update can expand or reduce the observer field set.
 
 ## The intake pipeline
 
@@ -358,7 +409,8 @@ delivers nothing more. A review or triage request keeps the key as before.
 
 `st gh watch OWNER/REPO#N` gives the seat that runs it one watch on that issue or pull request. The
 seat wakes once for each new comment or review on it, each time the required checks on its current
-head move into pass or fail, and a last time when it closes or merges, which ends the watch.
+head move into pass or fail, when an open pull request changes head, enters or leaves draft, or joins
+or leaves the merge queue, and a last time when it closes or merges, which ends the watch.
 
 ```kdl
 subscription "watch/acme/garden/12/example/planner" {
@@ -378,8 +430,10 @@ last day, and `--all` every seat's.
 
 Every watch of a repository, from any host, uses one standing observer,
 `observer/github/OWNER/REPO`, which no mission run owns. The first watch of the repository declares
-it on its host, which polls it every 30 seconds; the host stops it once no running subscription
-uses it. No issue or pull request has a poller of its own.
+it on its host, which polls immediately, then every three minutes while active. Unchanged
+observations back off to six then ten minutes; any changed observed fact resets three minutes.
+After a daemon restart the first poll is immediate again. The host stops the observer once no
+running subscription uses it. No issue or pull request has a poller of its own.
 
 The standing observer records into `resource/github/OWNER/REPO`, unless another observer of the
 repository runs: then it records into that observer's resource and keeps that resource from then
@@ -413,6 +467,7 @@ The write that records an observation decides each watch's wakes from its item's
   its entry and wakes nobody;
 - a move of `required_checks.state` into `pass` or `fail`, or a new head first seen there, is one
   wake; a new head starts over, and a rerun that fails again on the same head wakes again;
+- an open pull request's change of head, draft state or merge-queue membership is one wake;
 - the item closing or merging is the last wake, and `subscription.watch-ended` records it in the
   same write, so nothing follows it. Only that watch ends.
 
@@ -504,11 +559,7 @@ It shows open requests as `pending`, oldest first. A person can cancel a request
 `st missions cancel-request REQUEST --as person/operator --reason "the work is no longer needed"`.
 A cancelled request never starts.
 
-On upgrade, the reconciler automatically moves existing held requests into this queue. It cancels
-requests for superseded heads, closed or merged pull requests, or pull requests back in draft,
-with a reason. Current requests start as capacity allows. Stored attention items from the old
-five-request cap close automatically, including while the queue is waiting for capacity.
-`st missions release` remains available for legacy held requests; automatic intake does not need it.
+`st missions release` releases a legacy held request; automatic intake does not need it.
 
 An optional `requester` names one exact agent or person as the run's requester.
 
@@ -593,14 +644,13 @@ A run revision that no longer declares an owned observer or subscription stops i
 A stopped subscription records `subscription.mission-request-cancelled` for each request it has not
 started. Runs it already started continue. Only the host that declared a subscription starts its runs.
 
-The GitHub pull request provider observes the final merge or closure change. The subscription remains active until an explicit unwatch in the MVP.
+The GitHub pull request provider observes the final merge or closure change. `st gh watch` ends after 14 days when `--until` is omitted and prints `active until <deadline>` with the stored deadline. `--until 4h` or an RFC 3339 time selects another deadline; `--until none` explicitly keeps the watch without a deadline. An explicit unwatch or the thread's close/merge also ends it. Existing indefinite declarations keep their stored lifetime across upgrade and restart. Running `st gh watch` again on a thread without `--until` now replaces an indefinite or earlier deadline with a fresh fourteen days; previously, an omitted deadline meant indefinite. A watch that reaches its deadline ends and its owner is told with a message, so automation that registers once and expects the watch to persist must re-register or pass `--until none`. This GitHub alias default does not change the lifetime of other subscriptions.
 
 A `when` condition gates delivery; it does not stop the subscription. Use an explicit unwatch or
 mission cancellation to stop it.
 
 ## Acceptance proof
 
-- An exact command retry creates no duplicate graph subject.
 - The first observation creates a baseline and no message.
 - An unchanged provider result creates no claim and no message.
 - A selected scalar field change creates one observation claim and one message.
@@ -614,8 +664,6 @@ mission cancellation to stop it.
 - A renamed locator and a first complete listing create no mission request.
 - A burst of twenty new items queues every request and starts all twenty in order as mission capacity allows.
 - New requests cannot pass an older request waiting on a capacity retry.
-- Legacy held requests migrate automatically; current requests start and stale requests cancel with a reason.
-- Stored held-request attention closes even while the queue waits for capacity.
 - A draft-to-ready transition creates one mission request.
 - One repository observer records each item as its own resource; an unchanged poll records no
   claim, and a poll that read only a comment keeps the item's other facts.
@@ -641,11 +689,3 @@ mission cancellation to stop it.
 - A manual refresh waits for its exact attempt and reports an unchanged success without a new resource claim.
 - A GitHub ref observation records the selected branch head and its sorted merged branch refs.
 - A conditional subscription sends once on each false-to-true transition and stays quiet while the condition remains true.
-
-## Observer process isolation to evaluate
-
-The daemon can schedule observations and accept their results.
-
-An external worker process can run each provider operation. This boundary can keep a provider failure outside the daemon.
-
-The design must test crashes, hangs, time limits, bounded results, and failed observation records before it selects this boundary.

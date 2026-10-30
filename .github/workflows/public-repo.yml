@@ -8,22 +8,84 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 on:
-  pull_request: null
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+  merge_group: null
+  workflow_dispatch: null
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
+  fractal-changelog:
+    name: fractal-changelog
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'pull_request') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Fetch the whole history without evidence tags
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
+            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
+            export GIT_CONFIG_VALUE_0
+          fi
+          head=$(git rev-parse HEAD)
+          rm -f "$(git rev-parse --git-path shallow)"
+          git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
+          git fsck --connectivity-only --no-dangling --no-progress
+      - name: Test changelog requirement policy
+        run: node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs
+      - name: Require a new changelog entry for UI changes
+        env:
+          PR_MERGE_SHA: ${{ github.sha }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: node apps/fractal-web/scripts/ci/changelog-requirement.mjs --base "$PR_MERGE_SHA^1" --head "$PR_MERGE_SHA" --labels "$PR_LABELS"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Checks the full Git diff and pure changelog policy without dependencies or compilation.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   public-repo:
-    runs-on: ["namespace-profile-linux-x86-64;job.priority=1;github.run-id=${{ github.run_id }}"]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Test repository guard
         run: python3 scripts/check-public-repo-test
       - name: Check repository content
         run: python3 scripts/check-public-repo
+      - name: Test rolling compatibility baseline policy
+        run: |
+          python3 scripts/compat-baseline-release-test
+          python3 scripts/compat-baseline-test
+
+      - name: Check published stable release baseline freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 scripts/compat-baseline-release check
       - name: Report job cache coverage
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Runs standard-library source checks without downloads or compilation.
+          CACHE_REASON: Runs standard-library guards and queries published release metadata; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}

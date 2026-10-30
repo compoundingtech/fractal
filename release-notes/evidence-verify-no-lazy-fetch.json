@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-verify never fetches lazily: checking a record's subject commit and projecting an input key no longer trigger partial-clone fetches, which made the gate's verifier time out (unavailable) on pull requests with input-keyed records (55 s to 1.5 s in a reproduction).",
+  "replay": {
+    "status": "none",
+    "detail": "Verifier behavior only: the same records give the same verdict and the same key."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No format change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "A subject commit the checkout lacks was already treated as for a shallow fetch (the signer's claim stands); now it is never fetched to find out. A tree id never depended on blobs being present."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The gate runs the base's verifier, so the fix applies to runs whose base includes it."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "CI script only."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert restores the lazy fetches."
+  }
+}

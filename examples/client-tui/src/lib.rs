@@ -5,11 +5,11 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, List, ListItem, ListState, Paragraph},
 };
-use st3_client::{
+use fractal_client::{
     ActionStatus, Agent, Client, ClientError, Fence, MessageSendParameters, Resource,
 };
-use st3_conversation_ui::{Cache, Theme, Timeline, adapt};
-use st3_feed::{Command, Update, Window};
+use fractal_conversation_ui::{Cache, Theme, Timeline, adapt};
+use fractal_feed::{Command, Update, Window};
 use std::collections::{BTreeMap, HashSet};
 
 /// Kept unchanged until st acknowledges it. Retrying a lost response cannot duplicate the send.
@@ -38,6 +38,7 @@ pub async fn send(client: &Client, request: &Send) -> Result<String, ClientError
                 in_reply_to: None,
                 session_id: None,
                 tags: vec![],
+                kind: fractal_client::MessageKind::Wake,
                 attachments: vec![],
                 signature: None,
             },
@@ -149,12 +150,14 @@ impl App {
                 replace,
                 has_more,
                 items,
+                header,
             } if self.selected.as_ref() == Some(&target) => {
-                self.timeline.apply(st3_conversation_ui::Frame {
+                self.timeline.apply(fractal_conversation_ui::Frame {
                     replace,
                     has_more,
                     items,
                     session_id: Some(session_id),
+                    header,
                 });
                 self.conversation_status = if self.timeline.more_before() {
                     "Recent conversation · earlier history omitted"
@@ -201,7 +204,7 @@ impl App {
         }
         if self.pending.is_none() {
             let to = self.selected.clone()?;
-            let (id, key) = st3_feed::action_pair();
+            let (id, key) = fractal_feed::action_pair();
             self.pending = Some(Send {
                 id,
                 key,

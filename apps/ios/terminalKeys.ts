@@ -1,4 +1,4 @@
-import type { TerminalModes } from '../../clients/typescript/st3-client/Models.generated';
+import type { TerminalModes } from '../../clients/typescript/fractal-client/Models.generated';
 
 // What the phone's keyboard and key bar send to a terminal, as the bytes a terminal emulator
 // would send for the same keys, so full-screen programs such as vim work.
@@ -50,7 +50,7 @@ export function wheelBytes(up: boolean, column: number, row: number, modes: Pick
 
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-/** The UTF-8 bytes of text as base64, which st's raw terminal input takes. */
+/** The UTF-8 bytes of text as base64, which Fractal's raw terminal input takes. */
 export function rawInput(text: string): string {
   const bytes = new TextEncoder().encode(text);
   let out = '';

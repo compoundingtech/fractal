@@ -6,20 +6,20 @@ manifest, facts and answers. The daemon interprets a descriptor; it runs no exte
 
 ## Register and answer a question
 
-The complete example manifest is [custom-review.json](../../examples/st3/custom-review.json).
+The complete example manifest is [custom-review.json](../../examples/fractal/custom-review.json).
 All identities below are invented. Run the commands against your own daemon:
 
 ```sh
-st schema register examples/st3/custom-review.json --as agent/garden/seed
+st schema register examples/fractal/custom-review.json --as agent/garden/seed
 st claim custom/garden/review/v1/review-001 custom.garden.review.v1.requested \
   --actor agent/garden/seed \
   --field 'title=Retain the seed history?' \
   --field 'detail=Choose Keep or Discard.' --field recipient=person/lichen
 st subject show custom/garden/review/v1/review-001
-st attention ls --as person/lichen
+st alerts ls --as person/lichen
 ```
 
-The claim pins its registration hash automatically. One card appears for Lichen. stui displays
+The claim pins its registration hash automatically. One card appears for Lichen. The terminal UI displays
 its declared fields and source ID. Open the reply box and enter `keep`, or enter a JSON object
 such as `{"selection":"keep","text":"Retain the provenance."}`. The generic client action
 is `custom.reply`; its parameters come from the card's `action_parameters` and `custom_form`.
@@ -71,7 +71,7 @@ reference flags require string fields. String fields also support `pattern`: a r
 against the entire string. Patterns are limited to 512 bytes, nesting depth 16 and 256 KiB
 compiled size/cache; invalid or over-complex patterns fail registration. `max_bytes` bounds
 the JSON-encoded value, including string quotes and escapes. `_registration` and `_basis` are
-reserved metadata. Omitting `pattern` preserves existing manifest serialization and hashes.
+reserved metadata.
 
 Slots select `first` or `last` in canonical order for an exact declared claim kind. Expressions
 copy a field (`op: field`, `slot`, `field`), an actor or claim ID (`actor`/`claim-id`, `slot`), or a
@@ -88,13 +88,13 @@ retention rules, native actions, or contributed UI are accepted.
 
 ## Shared reference carriers
 
-Register [image-file-reference.json](../../examples/st3/image-file-reference.json) and
-[onepassword-field-reference.json](../../examples/st3/onepassword-field-reference.json)
+Register [image-file-reference.json](../../examples/fractal/image-file-reference.json) and
+[onepassword-field-reference.json](../../examples/fractal/onepassword-field-reference.json)
 to use the same `reference.image-file` and `reference.onepassword-field` v1 kinds across fleets:
 
 ```sh
-st schema register examples/st3/image-file-reference.json --as agent/garden/seed
-st schema register examples/st3/onepassword-field-reference.json --as agent/garden/seed
+st schema register examples/fractal/image-file-reference.json --as agent/garden/seed
+st schema register examples/fractal/onepassword-field-reference.json --as agent/garden/seed
 st claim custom/reference/image-file/v1/seed-picture custom.reference.image-file.v1.created \
   --actor agent/garden/seed --field 'file=file/alder:/srv/garden/seed.png' \
   --field content_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -113,7 +113,7 @@ read, embed, replicate or verify the image bytes; a consumer must check the file
 The 1Password carrier accepts only an exact `op://vault/item/field` locator (≤1024 JSON
 bytes). Each of its three components starts with an ASCII letter or digit and contains only
 ASCII letters, digits, `_` or `-`. Use IDs or simple names; v1 deliberately excludes spaces,
-section-qualified fields, query strings, fragments and encoded components. st never resolves
+section-qualified fields, query strings, fragments and encoded components. Fractal never resolves
 the locator. The schema has no secret-value, document, content or free-text field, and rejects
 extra fields. A locator's identifiers are graph data visible to graph readers; use invented
 names in public examples and keep credentials in the [sekrets](sekrets.md) workflow.
@@ -123,8 +123,7 @@ Only that actor can append more creation facts; later ones do not replace the se
 reference. There is no update or reply kind. Use a new subject for a changed reference.
 Subject suffixes are caller-chosen labels, not an identity binding: consumers must check
 the projected owner against their expected writer. Custom facts do not satisfy native
-approval gates. Members need pattern-capable st builds to interpret these manifests; older builds reject the unknown
-descriptor and cannot provide a typed view.
+approval gates.
 
 ## Reads, replication and derived state
 
@@ -134,10 +133,8 @@ descriptor and cannot provide a typed view.
 client unknown-resource decoding. It includes the pinned registration, source revision,
 selected fields, provenance and `state`: `ready`, `stale`, `pending-dependencies`, `conflict`,
 or `invalid`. Custom attention adds optional metadata to the existing attention resource.
-Updated clients send `x-st3-features: custom-subjects.v1` to receive namespaced attention and
-`custom.reply`. Without that opt-in, attention/Now pages and collection streams use the existing
-`agent-request` kind, no new action enum value, and an exact CLI reply hint. Older closed-enum
-clients keep reading their entire queue. Optional custom metadata remains available to renderers.
+Clients send `x-st3-features: custom-subjects.v1` to receive namespaced attention and
+`custom.reply`.
 
 Manifest documents, registry claims and typed facts use the existing signed envelope and blob
 replication. The three shared custom tables are rebuildable caches and participate in projection
@@ -153,11 +150,11 @@ the output kind, dependency cycles are invalid, and bounds are enforced.
 
 ## Decision trees
 
-[decision-tree.json](../../examples/st3/decision-tree.json) registers `decision.tree` version 1
+[decision-tree.json](../../examples/fractal/decision-tree.json) registers `decision.tree` version 1
 for the external decision-tree tool. Register it once per fleet:
 
 ```sh
-st schema register examples/st3/decision-tree.json --as agent/example/decisions
+st schema register examples/fractal/decision-tree.json --as agent/example/decisions
 ```
 
 Each logical tree is one subject, `custom/decision/tree/v1/<seat>`, named after the durable seat
@@ -206,5 +203,4 @@ supersession forks and option grounding stay in the tool. A `damaged` receipt sh
 source's `damage*` fields even when a tree has no readable requests, so a failed import does
 not read as an empty tree. Writes need a running daemon; nothing is spooled offline. Custom
 claims do not block native work or confer native approval; a tool that needs native blocking
-separately uses authorized work asks. This manifest does not replace the existing decision-tree
-bridge.
+separately uses authorized work asks.

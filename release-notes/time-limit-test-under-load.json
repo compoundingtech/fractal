@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Test only: the fractal-test test that a ci-local check's time limit counts from ci-local's start no longer times its passing case out on a loaded host (it waits 12 s before the start line under a 10 s limit, instead of 3 s under 2 s, which left the wrapper's own signing too little room)",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Test only."},
+  "compatibility": {"status": "none", "detail": "Test only."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

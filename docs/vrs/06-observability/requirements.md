@@ -1,7 +1,7 @@
 # Observability requirements
 
-st2 emits OpenTelemetry signals about its own supervision work. This tree defines what st2's
-telemetry must do and how it is proven. It follows the root [vision](../vision.md) and refines the
+st2 and st3 emit OpenTelemetry signals about their own supervision work. This tree defines what
+their telemetry must do and how it is proven. It follows the root [vision](../vision.md) and refines the
 supervision subjects of the root [requirements](../requirements.md). It does not define fleet-wide
 naming, provenance, or pipeline semantics — those are owned centrally by the dotfiles context
 `observability` tree (`01-conventions` for naming/provenance/span-label rules, `09-integration`
@@ -22,6 +22,8 @@ forwarder at `127.0.0.1:4318`, which forwards to dev3 LGTMP and Grafana/gcx. st2
 pipeline as one more producer; it does not invent its own.
 
 ## Requirements
+
+### st2
 
 - **O11Y-R01 Three signals:** st2 produces traces, metrics, and logs through OpenTelemetry.
   Traces cover the supervision control flow (roots listed in the
@@ -48,8 +50,8 @@ pipeline as one more producer; it does not invent its own.
   variables present in the launching environment into `Environment=` lines alongside the
   existing `PATH`/`PTY_ROOT` serialization, so `st2 up --install-unit` preserves ambient
   telemetry configuration (R02) under systemd.
-- **O11Y-R07 Sync process model:** Telemetry must not require an async runtime. st2's process
-  model is synchronous (no tokio reactor); the exporter path must work under blocking clients.
+- **O11Y-R07 Sync process model (st2 only):** Telemetry must not require an async runtime. st2's
+  process model is synchronous (no tokio reactor); the exporter path must work under blocking clients.
 - **O11Y-R08 Conformance posture:** Fleet-integration obligations are met as far as the st2 side
   allows: resource attributes (R04), naming (R05), OTLP endpoint via ambient env (R02). The
   remaining central obligations — the `telemetry.contract.ts` registry entry, the Grafana
@@ -63,5 +65,7 @@ pipeline as one more producer; it does not invent its own.
   `span.label`; raw prompt, message, and path content is forbidden from every
   diagnostic signal.
 
-The [specification](spec.md) owns the crate stack, exporter configuration, trace roots, and PR
-stack. Open items are tracked in [open-questions](open-questions.md).
+### st
+
+The current O11Y-R10–R18 constraints and mechanism are in
+[st observability](../../st3/observability.md).

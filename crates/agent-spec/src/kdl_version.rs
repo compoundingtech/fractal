@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use kdl::{KdlDocument, KdlValue};
 
 pub const ST2_KDL_VERSIONS: [u32; 2] = [0, 1];
-pub const ST3_KDL_VERSION: u32 = 2;
+pub const KDL_SCHEMA_VERSION: u32 = 2;
 
 /// Return the declared document version. A missing declaration is version zero.
 pub fn document_version(document: &KdlDocument) -> Result<u32> {
@@ -41,10 +41,10 @@ pub fn ensure_st2_version(document: &KdlDocument) -> Result<u32> {
     Ok(version)
 }
 
-pub fn ensure_st3_version(document: &KdlDocument) -> Result<u32> {
+pub fn ensure_kdl_schema_version(document: &KdlDocument) -> Result<u32> {
     let version = document_version(document)?;
     ensure!(
-        version == ST3_KDL_VERSION,
+        version == KDL_SCHEMA_VERSION,
         "st3 requires KDL version 2, but this document uses version {version}"
     );
     Ok(version)
@@ -59,7 +59,7 @@ mod tests {
         let document: KdlDocument = "agent \"worker\"".parse().unwrap();
         assert_eq!(document_version(&document).unwrap(), 0);
         assert_eq!(ensure_st2_version(&document).unwrap(), 0);
-        assert!(ensure_st3_version(&document).is_err());
+        assert!(ensure_kdl_schema_version(&document).is_err());
     }
 
     #[test]
@@ -69,13 +69,13 @@ mod tests {
                 .parse()
                 .unwrap();
             assert_eq!(ensure_st2_version(&document).unwrap(), version);
-            assert!(ensure_st3_version(&document).is_err());
+            assert!(ensure_kdl_schema_version(&document).is_err());
         }
         let document: KdlDocument =
             "version 2\nmission \"work\" state=\"ready\" { goal \"Do the work.\" }"
                 .parse()
                 .unwrap();
-        assert_eq!(ensure_st3_version(&document).unwrap(), 2);
+        assert_eq!(ensure_kdl_schema_version(&document).unwrap(), 2);
         assert!(ensure_st2_version(&document).is_err());
     }
 

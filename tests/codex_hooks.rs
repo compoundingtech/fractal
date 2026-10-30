@@ -13,7 +13,7 @@ fn bash() -> PathBuf {
         .expect("bash is available on PATH")
 }
 
-use st2::{context, message};
+use fractal_legacy_runner::{context, message};
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -47,7 +47,7 @@ impl Fixture {
 
         let bin = tmp.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
-        symlink(env!("CARGO_BIN_EXE_st2"), bin.join("st2")).unwrap();
+        symlink(test_env!("CARGO_BIN_EXE_st2"), bin.join("st2")).unwrap();
         let state = tmp.path().join("state");
 
         Self {
@@ -62,8 +62,8 @@ impl Fixture {
 
     fn run(&self, script: &str) -> Output {
         self.run_path(
-            &Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("crates/st-drivers/hooks")
+            &Path::new(test_env!("CARGO_MANIFEST_DIR"))
+                .join("crates/fractal-drivers/hooks")
                 .join(script),
         )
     }
@@ -83,7 +83,7 @@ impl Fixture {
     }
 
     fn install_hooks(&self) -> PathBuf {
-        let output = Command::new(env!("CARGO_BIN_EXE_st2"))
+        let output = Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args(["hooks", "install"])
             .env("ST_HOOKS", self.state.join("st2/hooks"))
             .env("XDG_STATE_HOME", &self.state)
@@ -94,7 +94,7 @@ impl Fixture {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        st2::hooks::versioned_hooks_dir_at(&self.state.join("st2/hooks"))
+        fractal_legacy_runner::hooks::versioned_hooks_dir_at(&self.state.join("st2/hooks"))
     }
 }
 
@@ -249,8 +249,8 @@ fn stop_fails_open_without_required_commands() {
     let fixture = Fixture::new();
     let output = Command::new(bash())
         .arg(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("crates/st-drivers/hooks")
+            Path::new(test_env!("CARGO_MANIFEST_DIR"))
+                .join("crates/fractal-drivers/hooks")
                 .join("codex-stop.sh"),
         )
         .env("PATH", fixture._tmp.path().join("missing-bin"))

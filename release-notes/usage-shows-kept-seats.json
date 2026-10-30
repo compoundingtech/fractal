@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st usage lists the seats this node's [limits] keep never stops at the weekly limit, beside the exempt accounts and harnesses",
+  "replay": { "status": "none", "detail": "No claim kind or replay change." },
+  "schema": { "status": "none", "detail": "No database schema change. `st --json usage` limits_policy gains an additive `keep` list." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "Display only. The limits policy is unchanged." },
+  "downtime": { "status": "none", "detail": "No additional service interruption." },
+  "manual": { "status": "none", "detail": "No manual migration." },
+  "recovery": { "status": "none", "detail": "No recovery change." }
+}

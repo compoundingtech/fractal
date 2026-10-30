@@ -5,7 +5,7 @@ Talk merge train is a lane: each entry is a pull request, and the train updates,
 the front one at a time.
 
 This document explains the model, the declaration, the commands, how the order is stored and
-replicated, and what st leaves to the run that owns the lane.
+replicated, and what Fractal leaves to the run that owns the lane.
 
 ## Model
 
@@ -25,19 +25,28 @@ replicated, and what st leaves to the run that owns the lane.
 - A lane can name one `approver`. Only that person can approve an entry. The run decides which
   entries need an approval and holds them until one is recorded.
 
-st stores and replays the lane and shows it. It does not decide when an entry is ready or what
+Fractal stores and replays the lane and shows it. It does not decide when an entry is ready or what
 working on it means. The run's own work does that, for example an `exec` runtime declared next to
 the lane. A lane never starts, cancels, or reorders mission runs by itself.
 
 ## Declaration
 
 ```kdl
+version 2
 mission "example/app/merge-train" state="ready" {
   goal "Merge ready pull requests into main one at a time."
 
   lane "app" {
     entries "resource/github/acme/app/ci/pull-request/"
     approver "person/ada"
+  }
+
+  step "retire" {
+    agentless
+    gate "Close the merge lane" type="human" {
+      reviewer "person/ada"
+      question "Has the merge driver finished using this lane?"
+    }
   }
 
   exec "driver" {
@@ -49,6 +58,10 @@ mission "example/app/merge-train" state="ready" {
   }
 }
 ```
+
+The example assumes a merge driver is installed at the shown path. The retirement gate keeps
+the run and lane open while that driver works. Approving the gate finishes the run and closes
+the lane. An exec runtime alone does not keep a mission run active.
 
 `entries` is an optional subject prefix. When it is set, every entry must start with it, and the
 commands accept the rest of the subject alone, so `42` means
@@ -76,15 +89,15 @@ lane, or a lane name that only one active lane uses. An entry argument is a full
 part after the lane's `entries` prefix; a leading `#` is dropped.
 
 Every mutation records its actor. An agent inside a harness acts as its own seat. A person passes
-`--as person/NAME`, or the command uses the `person` from the st configuration. `approve` refuses
+`--as person/NAME`, or the command uses the `person` from the Fractal configuration. `approve` refuses
 any actor except the lane's approver.
 
 `st lanes show` prints the entries in order with their status, and the recent joins, leaves,
 moves, and approvals, newest first:
 
 ```text
-LANE      lane/example/app/merge-train/1/app
-RUN       mission-run/example/app/merge-train/1
+LANE      lane/example/app/merge-train/RUN_ID/app
+RUN       mission-run/example/app/merge-train/RUN_ID
 ENTRIES   resource/github/acme/app/ci/pull-request/
 APPROVER  person/ada
 QUEUE     3
@@ -97,7 +110,7 @@ RECENT
 
 `st missions show RUN` lists the lanes the run owns with the same entries, and `st missions tree`
 lists every active lane under `LANES`. The client API serves the same view: the `lanes`
-collection, `lane.get`, and the actions `lane.join`, `lane.leave`, `lane.move`, `lane.mark`,
+collection, `lanes.get`, and the actions `lane.join`, `lane.leave`, `lane.move`, `lane.mark`,
 and `lane.approve`.
 
 ## Storage and replication
@@ -121,11 +134,11 @@ observers and schedules.
 
 ## Tests
 
-- `crates/st3/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
+- `crates/fractal-kernel/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
   placement, and marks and approvals that belong to one membership.
-- `crates/st3/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
+- `crates/fractal/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
   drives it through the CLI: join by prefix, a harness joining as its own seat, show, move, mark,
   approve by the approver only, leave, rejoin, the lane in `missions show` and `missions tree`,
   and a lane that closes with its run.
-- `crates/st3/tests/client_v0_contract.rs` checks the `lanes` collection, `lanes.get`, and the
+- `crates/fractal/tests/client_v0_contract.rs` checks the `lanes` collection, `lanes.get`, and the
   lane actions, including the approver check.

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { glassChoices, glassGroups, groupBoxes, groups, paneTarget } from './glassesView.ts';
 
-const agent = (id, name) => ({ id, kind: 'agent', name, state: 'running' });
+const served = (state) => ({ state, group: state, because: null, now: null, next: [], queued: 0 });
+const agent = (id, name) => ({ id, kind: 'agent', name, state: 'running', presentation: served('idle') });
 const mission = (id, title) => ({ id, kind: 'mission', title, state: 'running' });
 const lists = {
   agents: [agent('agent/example/harbor/keeper', 'example/harbor/keeper')],
@@ -16,7 +17,7 @@ const glass = (id, name, layout, extra = {}) => ({ id: `glass/person/avery/${id}
 const split = (split, a, b) => ({ split, children: [a, b] });
 const group = (...tabs) => ({ tabs: tabs.map(tab => typeof tab === 'string' ? { pane: tab } : tab) });
 
-// Splits read left to right, top to bottom, as stui numbers them.
+// Splits read left to right, top to bottom, as the Fractal terminal UI numbers them.
 assert.deepEqual(groups(split('right', group('a'), split('below', group('b', 'c'), group()))).map(tabs => tabs.map(tab => tab.pane)), [['a'], ['b', 'c'], []]);
 
 // Choices are the live glasses by name.
@@ -30,7 +31,7 @@ assert.deepEqual([audit.kind, audit.title, audit.needsYou], ['mission', 'Audit',
 assert.equal(paneTarget('agent:agent/example/retired', lists).gone, true);
 // Agents and missions carry their state as their own lists mark it (Nathan, 2026-10-02).
 assert.equal(keeper.status?.word, 'idle');
-const busy = paneTarget('agent:agent/example/harbor/keeper', { ...lists, agents: [{ ...lists.agents[0], harness_state: 'working' }] });
+const busy = paneTarget('agent:agent/example/harbor/keeper', { ...lists, agents: [{ ...lists.agents[0], presentation: served('working') }] });
 assert.equal(busy.status?.word, 'working');
 assert.ok(audit.status?.glyph);
 assert.equal(paneTarget('agent:agent/example/retired', lists).status, undefined);
@@ -60,10 +61,12 @@ assert.deepEqual(glassGroups(glass('1', 'main', group()), lists), [{ index: 0, t
   assert.equal(spaceSummary({ ...glass, body: { name: 'one', layout: { tabs: [{ pane: 'agent:agent/a' }] } } }), '1 tab');
 }
 
-// A split's ratio sizes its groups, as stui drew them; without one they share evenly.
+// A split's ratio sizes its groups, as the Fractal terminal UI drew them; without one they share evenly.
 {
   const sized = { split: 'right', ratio: 0.3, children: [group('a'), { split: 'below', children: [group('b'), group('c')] }] };
   const boxes = groupBoxes(sized).map(box => Object.values(box).map(value => Math.round(value * 100) / 100));
   assert.deepEqual(boxes, [[0, 0, 0.3, 1], [0.3, 0, 0.7, 0.5], [0.3, 0.5, 0.7, 0.5]]);
   assert.deepEqual(groupBoxes(group('a')), [{ x: 0, y: 0, width: 1, height: 1 }]);
 }
+
+assert.equal(paneTarget('resource:resource/github/acme/garden/issue/9', { agents: [], missions: [], attention: [], machines: [] }).kind, 'resource');

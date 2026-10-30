@@ -2,7 +2,7 @@ import { useLayoutEffect, useMemo } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Banners, Empty, StatusLine, useListsOnFocus } from '../chrome';
+import { Banners, Empty, StatusLine, useListsOnFocus, useMissionsOnFocus } from '../chrome';
 import { glassChoices, glassGroups, groupBoxes, spaceSummary, type GlassLists, type PaneTarget } from '../glassesView';
 import { navigationRef, type RootParams, type RootScreen } from '../navigation';
 import { useStore } from '../store';
@@ -11,7 +11,7 @@ import { ListRow, Note, Screen, T } from '../ui';
 
 // Spaces on the phone: the list of the person's spaces by name, and each one's tabs across all its
 // panes, grouped as the panes group them on the computer and in the same order. A tab opens what it
-// shows. Both follow st live, so a change made in stui shows here.
+// shows. Both follow Fractal live, so a change made in the Fractal terminal UI shows here.
 
 type Navigation = NativeStackNavigationProp<RootParams>;
 
@@ -21,6 +21,7 @@ function openPane(navigation: Navigation, pane: PaneTarget) {
   if (pane.kind === 'agent') navigation.navigate('Conversation', { target: pane.id, title: pane.title });
   else if (pane.kind === 'mission') navigation.navigate('Mission', { id: pane.id, title: pane.title });
   else if (pane.kind === 'terminal') navigation.navigate('Terminal', { terminalId: pane.id, title: pane.title });
+  else if (pane.kind === 'resource') navigation.navigate('Resource', { id: pane.id, title: pane.title });
   else if (pane.kind === 'usage') navigation.navigate('Usage');
   else if (pane.kind === 'machine') navigationRef.navigate('Fleet', { screen: 'FleetRoot' });
 }
@@ -30,13 +31,13 @@ function paneGlyph(pane: PaneTarget): { glyph: string; color: string } {
   if (pane.needsYou) return { glyph: '◆', color: theme.person };
   // Agents and missions are marked as in their own lists: working, idle, broken…
   if (pane.status) return pane.status;
-  const glyphs: Record<PaneTarget['kind'], string> = { agent: '●', mission: '◇', machine: '▣', terminal: '⌨', usage: '$', other: '·' };
+  const glyphs: Record<PaneTarget['kind'], string> = { agent: '●', mission: '◇', machine: '▣', terminal: '⌨', usage: '$', resource: '◇', other: '·' };
   return { glyph: glyphs[pane.kind], color: theme.subtext0 };
 }
 
 function paneDetail(pane: PaneTarget): string {
   if (pane.gone) return 'gone';
-  if (pane.needsYou) return `${pane.kind} · needs you`;
+  if (pane.needsYou) return `${pane.kind} · alert`;
   if (pane.status) return `${pane.kind} · ${pane.status.word}`;
   return pane.kind === 'other' ? 'this app cannot show it yet' : pane.kind;
 }
@@ -47,9 +48,9 @@ function useLists(): GlassLists {
 }
 
 function Notes() {
-  const { glassesGranted, glassesIssue } = useStore();
+  const { glassesGranted, glassesIssue, status } = useStore();
   return <>
-    {!glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in stui appear here once it does.</Note> : null}
+    {status === 'online' && !glassesGranted ? <Note tone="warning">This gateway does not keep spaces yet, or this device was paired before it could. Spaces made in the Fractal terminal UI appear here once it does.</Note> : null}
     {glassesIssue ? <Note tone="fault">{glassesIssue}</Note> : null}
   </>;
 }
@@ -69,7 +70,7 @@ export function GlassesScreen() {
         return <ListRow key={choice.id} glyph="▢" glyphColor={theme.lavender} title={choice.name} second={spaceSummary(glass)}
           onPress={() => navigation.navigate('Space', { id: choice.id, title: choice.name })} />;
       })}
-      {!choices.length && glassesGranted ? <Empty text="No spaces yet. Make one in stui on a computer." /> : null}
+      {!choices.length && glassesGranted ? <Empty text="No spaces yet. Make one in the Fractal terminal UI on a computer." /> : null}
     </ScrollView>
   </Screen>;
 }
@@ -78,6 +79,7 @@ export function GlassesScreen() {
 export function SpaceScreen({ route, navigation }: RootScreen<'Space'>) {
   const { glasses } = useStore();
   useListsOnFocus(['machines']);
+  useMissionsOnFocus();
   const lists = useLists();
   const glass = glasses.find(candidate => candidate.id === route.params.id);
   useLayoutEffect(() => { navigation.setOptions({ title: glass?.body?.name ?? route.params.title ?? 'Space' }); }, [navigation, glass?.body?.name, route.params.title]);
@@ -85,6 +87,7 @@ export function SpaceScreen({ route, navigation }: RootScreen<'Space'>) {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingVertical: 8, paddingBottom: 32 }}>
+      <StatusLine />
       <Notes />
       {!glass ? <Empty text="This space is gone." /> : null}
       {glass?.body && panes.length > 1 ? <SpaceMap layout={glass.body.layout} titles={panes.map(pane => pane.tabs[0]?.title ?? '')} /> : null}
@@ -100,7 +103,7 @@ export function SpaceScreen({ route, navigation }: RootScreen<'Space'>) {
   </Screen>;
 }
 
-/** The space's splits at the sizes stui gives them (st keeps them from glasses version 2), each
+/** The space's splits at the sizes the Fractal terminal UI gives them (Fractal keeps them from glasses version 2), each
  * labelled with its first tab, so the cards below map to where they sit on the computer. */
 function SpaceMap({ layout, titles }: { layout: Parameters<typeof groupBoxes>[0]; titles: string[] }) {
   return <View style={styles.map}>

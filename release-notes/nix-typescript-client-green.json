@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "checks.typescript-client builds green in the Nix sandbox: the frozen pnpm installation is a fixed-output derivation and the check runs scripts/ci-typescript-client over it unchanged",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change; a Nix check and a refresh script only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. Nothing reads the check's result to skip a CI job."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. The CI job and its script are unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "After a pnpm-lock.yaml change run scripts/nix-typescript-client-deps-hash, which needs network, to refresh nix/typescript-client-deps.hash; a stale hash fails only this Nix check."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

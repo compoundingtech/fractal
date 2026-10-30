@@ -63,7 +63,7 @@ redefine terminal delivery.
   unreadable, or version-mismatched head, node, active-intent, pending, and row state instead of
   weakening the coverage claim.
 - **MESSAGE-R04 Stable shared wire:** The sent envelope and row are serialized
-  through `st2-wire`. Optional metadata and body omission preserve absent versus
+  through `fractal-wire`. Optional metadata and body omission preserve absent versus
   empty values. A durable record version changes whenever an existing field's
   meaning changes or a strict record gains fields. A reader may reinterpret a
   version-1 endpoint as an agent ID only for legacy bus identities that
@@ -114,4 +114,4 @@ redefine terminal delivery.
 The crash and retry state model, alternative analysis, and benchmark method are recorded in
 [`2026-08-12-sender-history-crash-model.md`](./.experiments/2026-08-12-sender-history-crash-model.md).
 Executable controls live in `tests/message_cli.rs` and the shared schema controls live in
-`crates/st-wire/src/message.rs`.
+`crates/fractal-wire/src/message.rs`.
