@@ -3849,8 +3849,8 @@ impl Ui {
                     "the leader, in a terminal too: a list of what to press next; Ctrl+\\ again closes the tab, c shows the conversation",
                 ),
                 (
-                    "ctrl+]  ctrl+t ctrl+t",
-                    "attach the agent's terminal; Ctrl+T twice leaves it for the conversation",
+                    "Attach · enter",
+                    "Attach opens the agent's terminal; Enter attaches a detached terminal pane; Ctrl+T twice leaves it",
                 ),
                 (
                     "opening an agent",
@@ -4354,6 +4354,9 @@ impl Ui {
             && matches!(self.focused_pane(), Some(Pane::Terminal(_)))
             && !self.palette_open()
             && !self.help
+            && !self.home_open()
+            && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
+            && self.popover.is_none()
         {
             self.open_terminal();
             return;
