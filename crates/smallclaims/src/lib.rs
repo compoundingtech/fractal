@@ -19,6 +19,7 @@ pub mod performance;
 pub mod prepared_cut;
 pub mod fifo;
 pub mod principal;
+pub mod proof;
 /// Opt-in accounting of where the daemon's time goes, turned on by `ST3_PROFILE_DIR`.
 pub mod profile;
 pub mod task_cpu;
