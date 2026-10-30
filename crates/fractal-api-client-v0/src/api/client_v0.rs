@@ -22027,6 +22027,18 @@ mission "example/zero-run" state="ready" {
             ]),
             "timeline-initialization",
         );
+        // An observability code stays in this node's local observation log; the seat's own
+        // timeline still shows it, after the claim it follows.
+        append(
+            "harness.diagnostic",
+            BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("code".into(), json!("native-delivery-degraded")),
+                ("reason".into(), json!("delivery paused")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            "timeline-delivery-degraded",
+        );
         append(
             "harness.usage",
             BTreeMap::from([
@@ -22126,6 +22138,24 @@ mission "example/zero-run" state="ready" {
         );
         assert!(!entries.iter().any(|entry| entry["body"]["code"] == "claude-channel-initialized"));
         assert!(entries.iter().any(|entry| entry["body"]["code"] == "provider-warning"));
+        let position = |code: &str| {
+            entries
+                .iter()
+                .position(|entry| entry["body"]["code"] == code)
+                .unwrap_or_else(|| panic!("{code} is missing from {entries:?}"))
+        };
+        assert!(
+            position("provider-warning") < position("native-delivery-degraded"),
+            "the local diagnostic follows the claim before it"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry["body"]["code"] == "native-delivery-degraded")
+                .count(),
+            1,
+            "the local diagnostic appears once across pages"
+        );
         let types = entries
             .iter()
             .filter_map(|entry| entry["type"].as_str())

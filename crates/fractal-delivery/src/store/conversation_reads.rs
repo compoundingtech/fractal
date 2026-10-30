@@ -167,7 +167,8 @@ pub trait ConversationReadsStore {
             before: Option<u64>,
         ) -> Result<Vec<ClaimRecord>>;
     /// The owner's diagnostics in this node's local observation log that follow a claim before
-    /// `before`: the observability codes, which never replicate. Newest 1,000, newest first.
+    /// `before`: the observability codes, which never replicate. Newest first, at most 256 rows
+    /// and about 1 MiB of bodies, the budget the claim read beside it keeps.
     fn conversation_timeline_owner_local_diagnostics_at(
             &self,
             owner: &str,
@@ -447,16 +448,24 @@ impl ConversationReadsStore for Store {
         ) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
         let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
-        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbb6fa80389ef owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbd706c4f7611 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
             "{LOCAL_OBSERVATION_COLUMNS} INDEXED BY local_observations_subject_kind_index
              WHERE subject=?1 AND kind='harness.diagnostic' AND after_store_index<?2
-             ORDER BY id DESC LIMIT 1000"
+             ORDER BY id DESC LIMIT 256"
         ))?;
-        let rows = statement.query_map(
+        let mut rows = statement.query_map(
             params![owner, before.unwrap_or(i64::MAX as u64)],
             |row| local_observation_from_row(self.origin(), row),
         )?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut diagnostics = Vec::new();
+        let mut bytes = 0;
+        while bytes <= 1024 * 1024 {
+            let Some(row) = rows.next() else { break };
+            let row = row?;
+            bytes += row.body.to_string().len();
+            diagnostics.push(row);
+        }
+        Ok(diagnostics)
     }
 
     fn conversation_claims_by_ids(&self, ids: &[String]) -> Result<Vec<ClaimRecord>> {
