@@ -452,7 +452,7 @@ pub fn admit_prepared_envelope_tx(
                 if !retired_here {
                     transaction
                         .prepare_cached(
-                            /* sqlite-large-value: allow-for-now lv-h0f58f2e5f02b owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
+                            /* sqlite-large-value: allow-for-now lv-h1693db03cced owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
                                  record_ref, writer, sequence, envelope_hash, position, raw, state,
                                  claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
                              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)

@@ -237,7 +237,7 @@ fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
         .into_iter()
         .map(|table| {
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE claim_id NOT IN (SELECT id FROM claims)");
-            (table, store.readers.get().query_row(&sql, [], |row| row.get(0)).unwrap())
+            (table, store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-he41d7d662db4 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ &sql, [], |row| row.get(0)).unwrap())
         })
         .collect()
 }
@@ -272,7 +272,7 @@ fn a_member_that_trims_locally_drops_superseded_claims_from_envelopes_it_keeps()
         .unwrap();
     assert_eq!(retired, 19);
     // Admitting the kept envelopes again brings back neither a claim nor its record.
-    store.connection.write().execute("UPDATE replica_envelopes SET receipt_state='pending'", []).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2bc6841e508b owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'", []).unwrap();
     store.validate_replication_backlog().unwrap();
     assert_eq!(claims_of(&store, "observer.observed"), 1);
     let orphaned = orphans(&store);

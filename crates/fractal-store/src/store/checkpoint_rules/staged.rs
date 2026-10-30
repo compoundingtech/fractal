@@ -221,7 +221,7 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
         )?;
         let kept = kept
             + staging.execute(
-                /* sqlite-large-value: allow-for-now lv-hc255b654722e owner=fractal_store::store::checkpoint_rules::staged TODO=chunk-or-reference-exact-wire-values */ "UPDATE claims SET dropped=0 WHERE dropped=1
+                /* sqlite-large-value: allow-for-now lv-hc4cf5762c02a owner=fractal_store::store::checkpoint_rules::staged TODO=chunk-or-reference-exact-wire-values */ "UPDATE claims SET dropped=0 WHERE dropped=1
                    AND NOT EXISTS(SELECT 1 FROM split_envelopes)
                    AND EXISTS(SELECT 1 FROM claims other
                               WHERE other.writer=claims.writer AND other.sequence=claims.sequence
