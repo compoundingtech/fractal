@@ -51,7 +51,9 @@
 "client.js-error" = { class = "transition", window = "7d", log = "local" }
 "client.launch" = { class = "transition", window = "7d", log = "local" }
 "client.native-crash" = { class = "transition", window = "7d", log = "local" }
-"daemon.diagnostic" = { class = "current" }
+# Observability only: no control logic reads it, so its history goes to OpenTelemetry through
+# [observations.otlp]. Claims written by older members stay, under the checkpoint rule below.
+"daemon.diagnostic" = { class = "current", log = "local" }
 "daemon.started" = { class = "transition", window = "7d", pending = "restart windows read every start" }
 "delivery.hold" = { class = "durable" }
 "doc.bound" = { class = "durable" }

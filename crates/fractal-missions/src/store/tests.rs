@@ -2824,7 +2824,7 @@ fn work_extensions_upgrade_and_adopt_a_v5_certificate_without_changing_its_terms
     worker_work(&worker, &step, "claim", None, "historic-extension-claim");
     for index in 0..5 {
         controller
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/controller".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -4599,7 +4599,7 @@ fn repaired_original_sources_and_operations_ignore_local_retention_and_roll_back
     let target = Store::open_memory("birch").unwrap();
     let observation = |reason: &str, key: &str| {
         source
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/alder".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,

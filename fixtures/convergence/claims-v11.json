@@ -1429,7 +1429,8 @@
     "write_policy": "system-only",
     "cardinality": "append",
     "projection": "daemons",
-    "wakes_reconciler": true
+    "wakes_reconciler": true,
+    "retention": "local"
   },
   "daemon.started": {
     "kind": "daemon.started",
