@@ -63,6 +63,10 @@ pub(super) struct PromptModel<'w> {
     calls: Vec<&'w PendingCall>,
     /// st names the call it asks about.
     named: bool,
+    /// st lets the call it serves be allowed or answered from here.
+    allowed: bool,
+    /// Why st serves no calls beside it, when it cannot.
+    unread: Option<&'w str>,
     form: Form,
     questions: Option<Vec<Question>>,
     pub rows: Vec<FormRow>,
@@ -78,6 +82,15 @@ impl PromptModel<'_> {
         }
     }
 
+    /// Why an answer that lets the call through is withheld when st does not allow it.
+    fn withheld(&self) -> &'static str {
+        if self.calls.iter().any(|call| !call.complete) {
+            "too long for Fractal to show in full"
+        } else {
+            "Fractal does not let this through from here"
+        }
+    }
+
     /// Every question has a choice, so the answers can be sent.
     fn complete(&self, chosen: Option<&BTreeMap<usize, BTreeSet<usize>>>) -> bool {
         self.questions.as_ref().is_some_and(|asked| {
@@ -90,27 +103,29 @@ impl PromptModel<'_> {
     }
 }
 
-/// The call to show beside a prompt's answers: the exact call it asks about, when st names it
-/// and the conversation has it. A prompt that names none has no call beside it, so it is never
-/// allowed, approved or answered from here: no unanswered call is guessed at.
-fn prompt_calls<'w>(world: &'w World, seat: &str, call: &Option<String>) -> Vec<&'w PendingCall> {
-    world
-        .pending_calls
-        .get(seat)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
+/// The call to show beside a prompt's answers, from those st serves beside it
+/// (`presentation.prompt.calls`): the exact call it asks about, when st names it. A prompt that
+/// names none has no call beside it, so it is never allowed, approved or answered from here: no
+/// unanswered call is guessed at. `Err` says why st serves none.
+fn prompt_calls(item: &Attention) -> Result<Vec<&PendingCall>, &str> {
+    let AttentionKind::Prompt { calls, call, .. } = &item.kind else {
+        return Ok(Vec::new());
+    };
+    let calls = calls.as_ref().map_err(String::as_str)?;
+    Ok(calls
         .iter()
         .filter(|pending| call.as_deref() == Some(pending.id.as_str()))
-        .collect()
+        .collect())
 }
 
 /// A native prompt as a form, when st lists answers for it.
-pub(super) fn prompt_model<'w>(world: &'w World, item: &Attention) -> Option<PromptModel<'w>> {
+pub(super) fn prompt_model<'w>(world: &'w World, item: &'w Attention) -> Option<PromptModel<'w>> {
     let AttentionKind::Prompt {
         seat_id,
         answers,
         text,
         call,
+        allow,
         ..
     } = &item.kind
     else {
@@ -125,7 +140,10 @@ pub(super) fn prompt_model<'w>(world: &'w World, item: &Attention) -> Option<Pro
         .iter()
         .find(|agent| &agent.id == seat_id)
         .map_or(Harness::Unknown, |agent| agent.harness);
-    let calls = prompt_calls(world, seat_id, call);
+    let (calls, unread) = match prompt_calls(item) {
+        Ok(calls) => (calls, None),
+        Err(why) => (Vec::new(), Some(why)),
+    };
     let shared: Vec<Call<'_>> = calls
         .iter()
         .map(|call| Call {
@@ -159,6 +177,8 @@ pub(super) fn prompt_model<'w>(world: &'w World, item: &Attention) -> Option<Pro
     Some(PromptModel {
         calls,
         named: call.is_some(),
+        allowed: *allow,
+        unread,
         form,
         questions,
         rows,
@@ -263,10 +283,10 @@ pub(super) fn prompt_form(
         [] if matches!(model.form.kind, Kind::Permission | Kind::Plan | Kind::Question) => {
             note(
                 doc,
-                if model.named {
-                    "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+])."
-                } else {
-                    "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in the terminal (Ctrl+])."
+                &match model.unread {
+                    Some(why) => format!("{why}, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+])."),
+                    None if model.named => "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+]).".into(),
+                    None => "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in the terminal (Ctrl+]).".into(),
                 },
             );
             doc.blank();
@@ -327,6 +347,8 @@ pub(super) fn prompt_form(
         // and a question's answers go once every question has a choice.
         let withheld = match option.answer.as_str() {
             "allow" | "approve" if !full => Some("too long to show here in full"),
+            // st serves the call cut short, or does not let it through from here.
+            "allow" | "approve" | "answer" if !model.allowed => Some(model.withheld()),
             "answer" if !complete => Some("choose an answer to each question first"),
             _ => None,
         };
@@ -391,6 +413,7 @@ pub(super) fn prompt_form(
         Some(FormRow::Answer(answer))
             if prompts::enter_answers(answer)
                 && !(matches!(answer.as_str(), "allow" | "approve") && !full)
+                && !(matches!(answer.as_str(), "allow" | "approve" | "answer") && !model.allowed)
                 && !(answer == "answer" && !complete) =>
         {
             Some("Enter to select")
@@ -571,13 +594,13 @@ impl Ui {
     /// frame, so it finds the call as the prompt's model does without building the form.
     fn question_call_key(&self, id: &str) -> Option<String> {
         let item = self.world.attention.items().iter().find(|item| item.id == id)?;
-        let AttentionKind::Prompt { seat_id, answers, call, .. } = &item.kind else {
+        let AttentionKind::Prompt { answers, .. } = &item.kind else {
             return None;
         };
         if answers.is_empty() {
             return None;
         }
-        match prompt_calls(&self.world, seat_id, call).as_slice() {
+        match prompt_calls(item).unwrap_or_default().as_slice() {
             [only] => Some(question_key(id, &only.id)),
             _ => None,
         }
@@ -731,7 +754,15 @@ impl Ui {
             AttentionKind::Prompt { seat_id, .. } => Some(seat_id.as_str()),
             _ => None,
         };
-        let calls = seat.and_then(|seat| self.world.pending_calls.get(seat));
+        let (calls, allow) = match &item.kind {
+            AttentionKind::Prompt { calls, allow, .. } => (Some(calls), *allow),
+            _ => (None, false),
+        };
+        allow.hash(&mut hasher);
+        if let Some(Err(why)) = calls {
+            why.hash(&mut hasher);
+        }
+        let calls = calls.and_then(|calls| calls.as_ref().ok());
         let harness = seat.and_then(|seat| {
             self.world
                 .agents
@@ -1280,6 +1311,15 @@ impl Ui {
                 self.flash("Fractal does not say which call this asks about: answer it in the terminal (Ctrl+])");
                 return;
             }
+            // st allows only the one call it serves beside the prompt, whole. The card may have
+            // changed since its buttons were drawn, so a tap is checked against it again.
+            AttentionKind::Prompt { allow, .. }
+                if matches!(answer, "allow" | "approve" | "answer")
+                    && !(*allow && prompt_calls(item).is_ok_and(|calls| calls.len() == 1)) =>
+            {
+                self.flash("Fractal does not let this call through from here: answer it in the terminal (Ctrl+])");
+                return;
+            }
             AttentionKind::Prompt { answers, .. }
                 if item.actions.iter().any(|a| a == "prompt.respond")
                     && answers.iter().any(|offered| offered == answer) =>
@@ -1412,6 +1452,8 @@ mod tests {
                 answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
                 episode: "episode-1".into(),
                 call: None,
+                calls: Ok(vec![]),
+                allow: false,
             },
             actions: if answers.is_empty() {
                 vec![]
@@ -1438,7 +1480,38 @@ mod tests {
             id: format!("call-{tool}"),
             tool: tool.into(),
             input,
+            complete: true,
         }
+    }
+
+    /// st serves `calls` beside each prompt, and allows the call the prompt names when it is
+    /// among them and whole. A prompt that names none is allowed nothing.
+    fn serve(world: &mut World, calls: Vec<PendingCall>) {
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("no attention");
+        };
+        for item in items {
+            if let AttentionKind::Prompt { calls: served, call, allow, answers, .. } = &mut item.kind {
+                *allow = !answers.is_empty()
+                    && call
+                        .as_deref()
+                        .is_some_and(|named| calls.iter().any(|pending| pending.id == named && pending.complete));
+                *served = Ok(calls.clone());
+            }
+        }
+    }
+
+    /// The calls st serves beside the first prompt.
+    fn served(world: &World) -> Vec<PendingCall> {
+        world
+            .attention
+            .items()
+            .iter()
+            .find_map(|item| match &item.kind {
+                AttentionKind::Prompt { calls: Ok(calls), .. } => Some(calls.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     /// One prompt kind with invented content: the answers st lists, the call it is about, and
@@ -1557,7 +1630,7 @@ mod tests {
             _ => item,
         };
         world.attention = Load::Ready(vec![item]);
-        world.pending_calls.insert(SEAT.into(), case.calls.clone());
+        serve(&mut world, case.calls.clone());
         world
     }
 
@@ -1711,6 +1784,54 @@ mod tests {
         world_with(case)
     }
 
+    /// st's allow is checked again when a tap is dispatched: a card drawn while st allowed its call
+    /// may have changed since, because st no longer allows it or can no longer read the seat's
+    /// conversation. Then the form withholds the answer, a tap on it sends nothing, and deny still
+    /// goes.
+    #[test]
+    fn an_allow_tap_is_refused_once_st_no_longer_allows_the_call() {
+        let cases = cases();
+        let tap = |answer: &str| Hit::Alert("attention/one".into(), AlertTap::Answer(answer.into()));
+        for case in [&cases[1], &cases[2]] {
+            let gated = case.answers[0];
+            // While st allows it, the tap answers.
+            let mut ui = in_inbox(world_with(case));
+            ui.live = true;
+            ui.click(tap(gated));
+            assert!(matches!(ui.effects.as_slice(), [Effect::Attention { .. }]), "{gated}: {:?}", ui.effects);
+            for unread in [false, true] {
+                let mut world = world_with(case);
+                let Load::Ready(items) = &mut world.attention else {
+                    panic!("no attention");
+                };
+                if let AttentionKind::Prompt { allow, calls, .. } = &mut items[0].kind {
+                    if unread {
+                        *calls = Err("st cannot read this seat's conversation on host/example: it is out of reach".into());
+                    } else {
+                        *allow = false;
+                    }
+                }
+                let mut ui = in_inbox(world);
+                ui.live = true;
+                let shown = render(&ui, 120, 60);
+                let why = if unread { "st cannot read this seat's conversation" } else { "Fractal does not let this through" };
+                assert!(shown.contains(why), "{gated} {unread}: {shown}");
+                assert!(!ui.frame.borrow().hits.iter().any(|(_, hit)| *hit == tap(gated)), "{gated} {unread}: {shown}");
+                ui.click(tap(gated));
+                assert!(ui.effects.is_empty(), "{gated} {unread}: {:?}", ui.effects);
+                ui.click(tap("deny"));
+                assert!(
+                    matches!(
+                        ui.effects.as_slice(),
+                        [Effect::Attention { action, answer: Some(answer), .. }] if action == "prompt.respond" && answer == "deny"
+                    ),
+                    "{gated} {unread}: {:?}",
+                    ui.effects
+                );
+            }
+        }
+    }
+
     /// Focus only focuses: arrows and Tab move the mark and send nothing. Enter takes the marked
     /// allow, shown in full; a refusal takes its own number, never Enter.
     #[test]
@@ -1771,8 +1892,8 @@ mod tests {
     #[test]
     fn a_call_too_long_for_the_band_is_allowed_only_where_it_is_shown_whole() {
         let mut world = bash_world();
-        world.pending_calls.insert(
-            SEAT.into(),
+        serve(
+            &mut world,
             vec![call("Bash", serde_json::json!({"command": (1..=12).map(|n| format!("echo step {n}")).collect::<Vec<_>>().join("\n")}))],
         );
         let allow = Hit::Alert("attention/one".into(), AlertTap::Answer("allow".into()));
@@ -1815,13 +1936,13 @@ mod tests {
         let shown = render(&ui, 100, 60);
         assert!(shown.contains("[✓] Tulips") && shown.contains("[✓] Asters"), "{shown}");
         // Another question call replaces it: the picks made for the first never answer it.
-        let asked = ui.world.pending_calls[SEAT][0].clone();
+        let asked = served(&ui.world)[0].clone();
         let first = ui.world.attention.items()[0].clone();
-        ui.world.pending_calls.insert(SEAT.into(), vec![PendingCall { id: "call-replaced".into(), ..asked.clone() }]);
         ui.world.attention = Load::Ready(vec![naming(first.clone(), "call-replaced")]);
+        serve(&mut ui.world, vec![PendingCall { id: "call-replaced".into(), ..asked.clone() }]);
         let shown = render(&ui, 100, 60);
         assert!(shown.contains("[ ] Tulips") && !shown.contains("[✓]"), "{shown}");
-        ui.world.pending_calls.insert(SEAT.into(), vec![asked]);
+        // The first call again, as st serves it.
         ui.world.attention = Load::Ready(vec![first]);
         let shown = render(&ui, 100, 60);
         assert!(shown.contains("[✓] Tulips") && shown.contains("[✓] Asters"), "its own picks are kept: {shown}");
@@ -1923,9 +2044,7 @@ mod tests {
             })
             .collect();
         let mut world = world_with(case);
-        world
-            .pending_calls
-            .insert(SEAT.into(), vec![call("AskUserQuestion", serde_json::json!({"questions": asked}))]);
+        serve(&mut world, vec![call("AskUserQuestion", serde_json::json!({"questions": asked}))]);
         world
     }
 
@@ -2028,7 +2147,7 @@ mod tests {
         let mut ui = in_conversation(bash_world());
         ui.click(Hit::Alert(SEAT.into(), AlertTap::Toggle));
         assert!(render(&ui, 80, 40).contains("make clean"));
-        ui.world.pending_calls.insert(SEAT.into(), vec![call("Bash", serde_json::json!({"command": "make tulips"}))]);
+        serve(&mut ui.world, vec![call("Bash", serde_json::json!({"command": "make tulips"}))]);
         let shown = render(&ui, 80, 40);
         assert!(shown.contains("make tulips") && !shown.contains("make clean"), "{shown}");
         ui.prompt_marks.insert("attention/one".into(), 1);
