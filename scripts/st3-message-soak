@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# arn:lmig:smalltalk:2026-10-27-script-paths
-exec bash "$(dirname -- "${BASH_SOURCE[0]}")/fractal-message-soak" "$@"
