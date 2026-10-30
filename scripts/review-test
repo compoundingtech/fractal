@@ -576,7 +576,7 @@ class Review(unittest.TestCase):
         self.assertIn("reads must be one of", done.stderr)
 
     def test_the_default_harnesses_say_how_their_reviewer_reads_files(self):
-        harnesses = json.loads((ROOT / ".st" / "review-harness.json").read_text())["harnesses"]
+        harnesses = json.loads(_module.config_path(ROOT, _module.CONFIG).read_text())["harnesses"]
         self.assertEqual(harnesses["codex"]["reads"], "shell")
         self.assertNotIn("reads", harnesses["claude"])
 
