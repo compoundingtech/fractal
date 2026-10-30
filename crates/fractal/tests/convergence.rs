@@ -1731,9 +1731,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10,
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v11,
 /// all 17 fixed seeds converge and trim a checkpoint, including seed 3.
-/// This measured characterization includes the three durable person-repair kinds.
+/// This measured characterization includes the GitHub plugin's two compact kinds.
 /// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
 const NEVER_TRIMS: &[u64] = &[];
 
