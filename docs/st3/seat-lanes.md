@@ -45,7 +45,12 @@ declaration change) ends the old scope with what the harness started in it, as t
 new one in the same slice. A job the seat wants to outlive a restart, such as a queued `st-test` run,
 starts as a unit of its own in the slice: the harness's environment names it in
 `FRACTAL_LANE_SLICE`, so `systemd-run --user --unit=st-test-<seat>-… --slice="$FRACTAL_LANE_SLICE" …`
-runs it inside the seat's cap and beside, not inside, the harness's scope. The slice ends, and every
+runs it inside the seat's cap and beside, not inside, the harness's scope. Such a unit starts with
+the user manager's environment, not the seat's, so it passes the lane's variables on itself
+(`--setenv=BUILDS_SLICE_ACTIVE=1 --setenv=FRACTAL_LANE_SLICE --setenv=SCCACHE_SERVER_UDS`, each
+`--setenv=NAME` copying the seat's value). Without `BUILDS_SLICE_ACTIVE`, a build host's cargo front
+door moves each cargo command into `builds.slice`, out of the lane; `st-test` sets it for its own
+checks when it finds itself in a lane, whatever started it. The slice ends, and every
 job in it with it, when the seat stops for good: the reconciler ends it when a stop completes and the
 seat's declaration is an explicit stop or gone. A stop for a restart of a live declaration keeps it.
 Ending a lane also removes the slice's runtime limits (`systemctl --user revert`). A seat whose lane
@@ -70,8 +75,9 @@ The first two already run in place when `BUILDS_SLICE_ACTIVE` is set, so a lane'
 it. `governed()` signs checks, so it takes neither a variable's nor a name's word alone: it runs a check
 in place only when it runs inside one of the two caps made for builds, `builds.slice` or a seat's
 lane (an `app-lanes-<seat>.slice` directly in `app-lanes.slice`), and that slice or a cgroup below it
-holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. Otherwise
-it starts the check in `builds.slice` as before. The host's sccache server runs in `builds.slice`, so
+holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. In place,
+the check runs with `BUILDS_SLICE_ACTIVE=1`, so a cargo front door that reads only that variable keeps
+its cargo in the cap. Otherwise it starts the check in `builds.slice` as before. The host's sccache server runs in `builds.slice`, so
 compiles sent to it would leave the lane: a lane sets `SCCACHE_SERVER_UDS` to a socket of its own,
 and the client starts that server inside the lane, on the same on-disk cache (the socket is named for
 the seat, so a restarted harness reuses it). A seat that names its own server keeps it. The build admission queue (slots, load and memory checks) still applies to a
