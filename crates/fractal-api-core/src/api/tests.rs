@@ -325,7 +325,7 @@ async fn history_pages_and_detail_do_not_cache_the_whole_claim_log() {
     for number in 0..8 {
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/node".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -968,7 +968,7 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     client_agent_resources(&state.store, false, "first", index).unwrap();
     let index = state
         .store
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/node".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,

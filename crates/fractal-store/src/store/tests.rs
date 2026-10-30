@@ -1278,7 +1278,7 @@ fn a_panic_while_the_writer_is_held_does_not_disable_the_store() {
     .join();
     assert!(panicked.is_err());
     store
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/node".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -12249,4 +12249,74 @@ fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
     // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
     assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
     assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
+}
+
+/// `daemon.diagnostic` is observability only, so it stays in the node's local observation log,
+/// from which `[observations.otlp]` exports it. Claims an older member replicates still arrive and
+/// are kept, and an upgraded node's own older claims stay readable beside its new local rows.
+#[test]
+fn daemon_diagnostics_stay_local_while_older_members_claims_still_arrive() {
+    let store = Store::open_memory("node").unwrap();
+    let diagnostic = |code: &str, reason: &str, key: Option<&str>| ClaimInput {
+        subject: "daemon/node".into(),
+        kind: "daemon.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("error")),
+            ("code".into(), json!(code)),
+            ("reason".into(), json!(reason)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: key.map(str::to_owned),
+    };
+    let legacy = |origin: &str, subject: &str, reason: &str| {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            origin,
+            subject,
+            "daemon.diagnostic",
+            None,
+            &json!({ "fields": { "severity": "error", "code": "reconcile-failed", "reason": reason }, "evidence": [] }),
+            &[],
+            None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    };
+    // Before the upgrade, this node replicated its own diagnostics.
+    legacy("node", "daemon/node", "before the upgrade");
+    let index_before = store.index().unwrap();
+    let inventory_before = store.replication_inventory().unwrap();
+
+    let first = diagnostic("reconcile-failed", "after the upgrade", Some("daemon-diagnostic:one"));
+    assert!(store.append_claim_outcome(&first).unwrap().1);
+    assert!(!store.append_claim_outcome(&first).unwrap().1, "a repeated key is the same diagnostic");
+    assert!(store.append_claim_outcome(&diagnostic("kill-survivor", "pid 7", None)).unwrap().1);
+    assert_eq!(store.index().unwrap(), index_before, "no claim was written");
+    assert_eq!(
+        store.replication_inventory().unwrap().envelopes,
+        inventory_before.envelopes,
+        "a diagnostic adds no envelope"
+    );
+    let local = store.local_observations_after(0, 10).unwrap();
+    assert_eq!(
+        local.iter().filter(|row| row.kind == "daemon.diagnostic").count(),
+        2,
+        "both diagnostics are in the local log the exporter reads"
+    );
+    // A writer comparing with the newest diagnostic sees the local one, not the older claim.
+    let newest = store.latest_observation("daemon/node", "daemon.diagnostic").unwrap().unwrap();
+    assert_eq!(newest.body["fields"]["code"], "kill-survivor");
+    let claims = store.claims_for("daemon/node", Some("daemon.diagnostic")).unwrap();
+    assert_eq!(claims.len(), 1, "the pre-upgrade claim stays");
+    assert_eq!(claims[0].body["fields"]["reason"], "before the upgrade");
+
+    // An older member still replicates its diagnostics; this node stores them as before.
+    legacy("older-node", "daemon/older-node", "written by an older build");
+    let received = store.claims_for("daemon/older-node", Some("daemon.diagnostic")).unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body["fields"]["reason"], "written by an older build");
 }

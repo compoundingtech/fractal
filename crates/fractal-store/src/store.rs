@@ -21280,6 +21280,10 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Write the claim as a build from before its kind became a local observation did: a
+    /// replicated claim. Tests use it for the claims older members still replicate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub as_older_build: bool,
 }
 
 pub fn append_claim_with_commit_context(
@@ -21330,8 +21334,12 @@ pub fn append_claim_with_commit_context(
     if !context.retirement_writer {
         validate_claim_input(input)?;
     }
-    if local_retention(&input.kind)
-        || (input.actor.is_none() && system_local_retention(&input.kind))
+    #[cfg(any(test, feature = "test-support"))]
+    let older_build = context.as_older_build;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let older_build = false;
+    if !older_build
+        && (local_retention(&input.kind) || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
         let connection = graph.readers.get();
         admission(&connection)?;

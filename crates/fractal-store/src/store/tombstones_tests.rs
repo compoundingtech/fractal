@@ -24,7 +24,7 @@ fn diagnostic(subject: &str, n: usize, reason: &str) -> ClaimInput {
 fn write_diagnostics(store: &Store, subject: &str, count: usize) {
     for n in 0..count {
         store
-            .append_claim(&diagnostic(subject, n, &format!("slow {n}")))
+            .append_as_older_build_for_test(&diagnostic(subject, n, &format!("slow {n}")))
             .unwrap();
     }
 }
@@ -375,12 +375,12 @@ fn a_retry_of_a_dropped_claim_is_answered_without_a_duplicate() {
     let before = store.claims_for("daemon/alder", None).unwrap().len();
 
     let retry = store
-        .append_claim(&diagnostic("daemon/alder", 0, "slow 0"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "slow 0"))
         .unwrap_err();
     assert_eq!(retry.code, "claim-checkpointed");
     assert_eq!(retry.details["claim_id"], json!(dropped.id));
     let different = store
-        .append_claim(&diagnostic("daemon/alder", 0, "another reason"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "another reason"))
         .unwrap_err();
     assert_eq!(different.code, "idempotency-mismatch");
     assert_eq!(
@@ -417,7 +417,7 @@ fn a_reused_operation_of_a_dropped_claim_still_conflicts() {
     let cedar = Store::open_memory("cedar").unwrap();
     cedar.bind_fleet(FLEET).unwrap();
     cedar
-        .append_claim(&diagnostic("daemon/alder", 0, "a different request"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "a different request"))
         .unwrap();
     while sync(&cedar, "cedar", &alder, false).received != 0 {}
     while sync(&cedar, "cedar", &birch, false).received != 0 {}
@@ -445,7 +445,7 @@ fn a_repeat_of_a_dropped_request_is_no_conflict() {
     let cedar = Store::open_memory("cedar").unwrap();
     cedar.bind_fleet(FLEET).unwrap();
     cedar
-        .append_claim(&diagnostic("daemon/alder", 0, "slow 0"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder", 0, "slow 0"))
         .unwrap();
     while sync(&cedar, "cedar", &alder, false).received != 0 {}
     let answer = has_unknown_claim_at(&alder.readers.get(), "daemon/alder", None).unwrap();
@@ -492,7 +492,7 @@ fn the_committed_index_never_moves_back() {
     assert_eq!(store.index().unwrap(), index);
     assert_eq!(current_index(&store.readers.get()).unwrap(), index);
     let next = store
-        .append_claim(&diagnostic("daemon/alder-after", 0, "after"))
+        .append_as_older_build_for_test(&diagnostic("daemon/alder-after", 0, "after"))
         .unwrap();
     assert!(next.store_index > index);
 }
@@ -858,7 +858,7 @@ fn a_trim_never_makes_a_write_wait_long() {
     while !trimming.is_finished() {
         let started = std::time::Instant::now();
         store
-            .append_claim(&diagnostic("daemon/birch", writes, "written during a trim"))
+            .append_as_older_build_for_test(&diagnostic("daemon/birch", writes, "written during a trim"))
             .unwrap();
         longest = longest.max(started.elapsed());
         writes += 1;

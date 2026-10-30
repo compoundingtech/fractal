@@ -107,6 +107,16 @@ impl Store {
         transaction.commit().unwrap();
     }
 
+    /// Append `input` as a replicated claim, as a build from before its kind became a local
+    /// observation wrote it.
+    pub fn append_as_older_build_for_test(&self, input: &ClaimInput) -> Result<ClaimRecord, St3Error> {
+        append_claim_with_commit_context(self, input, None, None, None, None, ClaimCommitContext {
+            as_older_build: true,
+            ..Default::default()
+        })
+        .map(|(claim, _)| claim)
+    }
+
     pub fn hold_write_transaction_for_test(&self, hold: impl FnOnce()) {
         let mut writer = self.connection.write();
         let transaction = writer.transaction().unwrap();

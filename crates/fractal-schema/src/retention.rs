@@ -245,6 +245,8 @@ mod tests {
                 "harness.timeline" | "harness.telemetry" | "render.applied"
                 | "runtime.readiness-deadline-reached" | "sekret.called" | "sekret.exited"
                 | "sekret.refused" | "sekret.changed" => Retention::Local,
+                // Observability only since step 2b of the claims-store breakup.
+                "daemon.diagnostic" => Retention::Local,
                 "runtime.action.requested" | "runtime.action.succeeded" | "runtime.action.failed"
                 | "runtime.action.deadline-reached" => Retention::SystemLocal,
                 "harness.observed" | "harness.usage" | "harness.todo.observed"
