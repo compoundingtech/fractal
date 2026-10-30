@@ -1028,7 +1028,7 @@ async fn drive_st2_native(
                                 &mut last_activity_fingerprint,
                             )
                             .await?;
-                            if observed.reason.as_deref() == Some("providerCapacity") {
+                            if let Some(cause) = provider_retry_cause(observed.state, observed.reason.as_deref()) {
                                 let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&(
                                     driver,
                                     observed.since_ms,
@@ -1039,6 +1039,7 @@ async fn drive_st2_native(
                                         client,
                                         subject,
                                         &incarnation,
+                                        cause,
                                         observed.since_ms,
                                         &fingerprint,
                                     )
@@ -2580,12 +2581,13 @@ async fn drive_codex_native(
                             observed.transition_sequence,
                             observed.reason.as_deref(),
                         ))?));
-                        if observed.reason.as_deref() == Some("providerCapacity") {
+                        if let Some(cause) = provider_retry_cause(observed.state, observed.reason.as_deref()) {
                             if last_capacity_fingerprint.as_deref() != Some(fingerprint.as_str()) {
                                 publish_provider_capacity_diagnostic(
                                     client,
                                     subject,
                                     &incarnation,
+                                    cause,
                                     observed.since_ms,
                                     &fingerprint,
                                 )

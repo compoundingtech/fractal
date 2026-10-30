@@ -11,7 +11,10 @@
 //! the ledger is its authority: admission refuses a retired identity, the inventory lists it as
 //! held without payload so no peer sends it, and it is served to no peer. Becoming the authority
 //! judges the ledger once (`judge_tx`): what adoption withdrew, or only an uncommitted checkpoint
-//! recorded, was never a deletion and leaves it. Otherwise the ledger only grows. An ordinary
+//! recorded, was never a deletion and leaves it. From then on the checkpoint tables no longer
+//! write it: each identity enters as it is deleted, in the deleting transaction, so a cut that is
+//! recorded but never trims teaches no peer to refuse what this member still holds. Otherwise the
+//! ledger only grows. An ordinary
 //! member's admission and every member's evidence still read the checkpoint tables.
 //!
 //! A SHA-256 identity, as 64 lowercase hex digits, is stored as its 32 bytes. Any other value is
@@ -38,8 +41,9 @@ pub fn schema() -> String {
     let old_id = identity_sql("OLD.id");
     let new_hash = identity_sql("NEW.envelope_hash");
     let old_hash = identity_sql("OLD.envelope_hash");
+    let ordinary = format!("NOT EXISTS(SELECT 1 FROM meta WHERE key='{AUTHORITY}' AND value='1')");
     format!(
-        /* sqlite-large-value: allow-for-now lv-h80c8cc996711 owner=smallclaims::store::retired TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS retired_claim_ids (id BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID;
+        /* sqlite-large-value: allow-for-now lv-ha8e0f7b45414 owner=smallclaims::store::retired TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS retired_claim_ids (id BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS retired_envelopes (
     writer TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -58,30 +62,44 @@ CREATE TABLE IF NOT EXISTS retired_envelope_withdrawals (
     checkpoint TEXT NOT NULL,
     PRIMARY KEY(writer, sequence, envelope_hash, checkpoint)
 ) WITHOUT ROWID;
-CREATE TRIGGER IF NOT EXISTS retired_claim_recorded_v1 AFTER INSERT ON checkpoint_claims BEGIN
+-- An authoritative member writes its ledger as it deletes (`delete_dropped_rows_tx`), so a
+-- recorded cut that never commits teaches no peer anything.
+DROP TRIGGER IF EXISTS retired_claim_recorded_v1;
+DROP TRIGGER IF EXISTS retired_claim_rewritten_v1;
+DROP TRIGGER IF EXISTS retired_claim_withdrawn_v1;
+DROP TRIGGER IF EXISTS retired_envelope_recorded_v1;
+DROP TRIGGER IF EXISTS retired_envelope_rewritten_v1;
+DROP TRIGGER IF EXISTS retired_envelope_withdrawn_v1;
+CREATE TRIGGER IF NOT EXISTS retired_claim_recorded_v2 AFTER INSERT ON checkpoint_claims
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({new_id});
 END;
-CREATE TRIGGER IF NOT EXISTS retired_claim_rewritten_v1
-AFTER UPDATE OF id, checkpoint ON checkpoint_claims BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_claim_rewritten_v2
+AFTER UPDATE OF id, checkpoint ON checkpoint_claims
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({new_id}), ({old_id});
     INSERT OR IGNORE INTO retired_claim_withdrawals(id, checkpoint) VALUES ({old_id}, OLD.checkpoint);
 END;
-CREATE TRIGGER IF NOT EXISTS retired_claim_withdrawn_v1 BEFORE DELETE ON checkpoint_claims BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_claim_withdrawn_v2 BEFORE DELETE ON checkpoint_claims
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({old_id});
     INSERT OR IGNORE INTO retired_claim_withdrawals(id, checkpoint) VALUES ({old_id}, OLD.checkpoint);
 END;
-CREATE TRIGGER IF NOT EXISTS retired_envelope_recorded_v1 AFTER INSERT ON checkpoint_envelopes BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_envelope_recorded_v2 AFTER INSERT ON checkpoint_envelopes
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
     VALUES (NEW.writer, NEW.sequence, {new_hash});
 END;
-CREATE TRIGGER IF NOT EXISTS retired_envelope_rewritten_v1
-AFTER UPDATE OF writer, sequence, envelope_hash, checkpoint ON checkpoint_envelopes BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_envelope_rewritten_v2
+AFTER UPDATE OF writer, sequence, envelope_hash, checkpoint ON checkpoint_envelopes
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
     VALUES (NEW.writer, NEW.sequence, {new_hash}), (OLD.writer, OLD.sequence, {old_hash});
     INSERT OR IGNORE INTO retired_envelope_withdrawals(writer, sequence, envelope_hash, checkpoint)
     VALUES (OLD.writer, OLD.sequence, {old_hash}, OLD.checkpoint);
 END;
-CREATE TRIGGER IF NOT EXISTS retired_envelope_withdrawn_v1 BEFORE DELETE ON checkpoint_envelopes BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_envelope_withdrawn_v2 BEFORE DELETE ON checkpoint_envelopes
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
     VALUES (OLD.writer, OLD.sequence, {old_hash});
     INSERT OR IGNORE INTO retired_envelope_withdrawals(writer, sequence, envelope_hash, checkpoint)
@@ -147,6 +165,33 @@ pub fn envelope_refused(
     Ok(checkpoint::envelope_tombstoned(connection, writer, sequence, envelope_hash)?
         || (authoritative(connection)?
             && envelope_retired(connection, writer, sequence, envelope_hash)?))
+}
+
+/// Record a claim ID as retired.
+pub fn retire_claim_tx(connection: &Connection, id: &str) -> Result<()> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(/* sqlite-large-value: allow-for-now lv-h6dce256b8fab owner=smallclaims::store::retired TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})", identity_sql("?1"))
+    });
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd45d8b1edb9e owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ &QUERY)?.execute(/* sqlite-large-value: allow-for-now lv-h366036687056 owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ [id])?;
+    Ok(())
+}
+
+/// Record an envelope identity as retired.
+pub fn retire_envelope_tx(
+    connection: &Connection,
+    writer: &str,
+    sequence: u64,
+    envelope_hash: &str,
+) -> Result<()> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            /* sqlite-large-value: allow-for-now lv-hca2b050ed4fb owner=smallclaims::store::retired TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
+             VALUES (?1, ?2, {})",
+            identity_sql("?3")
+        )
+    });
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6734845d3e2d owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ &QUERY)?.execute(/* sqlite-large-value: allow-for-now lv-h254df5a61bd9 owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ params![writer, sequence, envelope_hash])?;
+    Ok(())
 }
 
 /// The checkpoint states whose tombstones are committed deletions. A checkpoint still
