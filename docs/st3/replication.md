@@ -1361,17 +1361,20 @@ Each day such a member trims its own due cut (the day before yesterday, as for a
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
 checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed` and `resource.observed`, which observers write in
-the same batches. Everything else is kept, as a protected claim is, and envelopes still go whole.
-`harness.observed` stays out: its audited rule drops a credential transition that moves the `since`
-of a seat's needs-login state, which no projection digest covers. Two checks stand in for the
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
+and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+rules stay out because a reader reads the history they drop, which no projection digest covers.
+`harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
+needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
+and a watch walks those observations back to find when the pull request left the merge queue. Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything
 is recorded. While deleting, every chunk compares the projection digests before and after and
 stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
 an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
 trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
-such a member, by an agent (`--as agent/...`); the stopped cut is set aside and the next day's cut
-goes on, and the resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
 The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
 disk cannot hold.
 
