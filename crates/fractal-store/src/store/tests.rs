@@ -8660,6 +8660,56 @@ fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
     assert_eq!(host_total(), tokens);
 }
 
+/// A current batch read folds every subject's held usage from one statement. A statement per
+/// subject made a cold roster rebuild cost one more statement per card: 3,916 statements for
+/// 3,011 cards, against 893 before. A subject that holds no reading costs nothing extra either.
+#[test]
+fn a_current_usage_batch_reads_the_held_usage_of_every_subject_at_once() {
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    // `held` subjects hold a second rollup on this node; `quiet` ones only replicated their first.
+    let measure = |held: usize, quiet: usize| {
+        let store = Store::open_memory("node").unwrap();
+        let subjects = (0..held + quiet).map(|seat| format!("agent/node.worker-{seat}")).collect::<Vec<_>>();
+        for (seat, subject) in subjects.iter().enumerate() {
+            store.append_latest_observation(&harness_state(subject, "working", start as u64), start).unwrap();
+            // The first reading replicates; the second waits for its hour, held on this node.
+            let readings: &[(u64, u128)] = if seat < held { &[(1, start), (2, start + 4_000)] } else { &[(1, start)] };
+            for &(tokens, at) in readings {
+                let rollup = ClaimInput {
+                    subject: subject.clone(),
+                    kind: "harness.usage".into(),
+                    actor: Some(subject.clone()),
+                    fields: BTreeMap::from([
+                        ("driver".into(), json!("codex")),
+                        ("incarnation_id".into(), json!("inc-1")),
+                        ("semantics".into(), json!("response_rollup")),
+                        ("model".into(), json!("example-model")),
+                        ("total_tokens".into(), json!(tokens)),
+                        ("observed_at_unix_ms".into(), json!(at as u64)),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("rollup:{subject}:{tokens}")),
+                };
+                store.append_latest_observation(&rollup, at).unwrap();
+            }
+        }
+        let at = Some(store.index().unwrap());
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let batch = store.usage_summaries_at(&subjects, at).unwrap();
+        let work = scope.finish();
+        for (seat, subject) in subjects.iter().enumerate() {
+            let expected = if seat < held { 2 } else { 1 };
+            assert_eq!(batch[subject].total_tokens, expected, "{subject} folds what it holds");
+        }
+        work.statements
+    };
+    let two = measure(2, 0);
+    assert_eq!(measure(12, 0), two, "a current batch read costs the same for 12 subjects holding readings as for 2");
+    assert_eq!(measure(2, 10), two, "and 10 subjects holding none add nothing");
+}
+
 /// A native binding that arrives while a newer rollup waits for its hour binds that reading when
 /// it replicates. The stop flush that binds an older, already replicated rollup must not drop it.
 #[test]
