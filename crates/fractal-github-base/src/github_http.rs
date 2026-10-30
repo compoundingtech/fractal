@@ -507,8 +507,8 @@ async fn send_selected_read(request: reqwest::RequestBuilder, auth: &mut GithubA
     }
 }
 
-/// Send reads with separately admitted same-origin redirect hops. App reads retain
-/// their bounded credential replay; mutations are sent exactly once using the PAT.
+/// Send requests with separately admitted same-origin redirect hops. App reads retain
+/// their bounded credential replay; mutations retain their method and body using the PAT.
 pub async fn send(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
@@ -525,15 +525,17 @@ async fn send_redirected(
 ) -> Result<reqwest::Response> {
     let (client, request) = request.build_split();
     let request = request?;
-    if request.method() != reqwest::Method::GET && request.method() != reqwest::Method::HEAD {
-        return send_once(reqwest::RequestBuilder::from_parts(client, request), auth.pat()).await;
-    }
+    let read = request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD;
     let mut template = request;
     let mut redirects = 0;
     let mut effective = auth.clone();
     let mut cache_ineligible = auth.used_fallback();
     loop {
-        let mut selected = read_auth_for_url(template.url().as_str(), &effective);
+        let mut selected = if read {
+            read_auth_for_url(template.url().as_str(), &effective)
+        } else {
+            auth.pat().clone()
+        };
         if selected.cache_principal() != effective.cache_principal() {
             template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
             cache_ineligible = true;
@@ -542,8 +544,13 @@ async fn send_redirected(
             GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
             _ => None,
         };
-        let request = template.try_clone().context("GitHub read body cannot be replayed for a redirect")?;
-        let response = send_selected_read(reqwest::RequestBuilder::from_parts(client.clone(), request), &mut selected).await?;
+        let request = template.try_clone().context("GitHub request body cannot be replayed for a redirect")?;
+        let request = reqwest::RequestBuilder::from_parts(client.clone(), request);
+        let response = if read {
+            send_selected_read(request, &mut selected).await?
+        } else {
+            send_once(request, &selected).await?
+        };
         cache_ineligible |= fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
             || selected.cache_principal() != effective.cache_principal();
         effective = selected;
@@ -553,7 +560,8 @@ async fn send_redirected(
                 source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
-        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+        if !matches!(response.status().as_u16(), 301 | 307 | 308)
+            && !(read && matches!(response.status().as_u16(), 302 | 303)) {
             return Ok(response);
         }
         let location = response.headers().get(reqwest::header::LOCATION)
