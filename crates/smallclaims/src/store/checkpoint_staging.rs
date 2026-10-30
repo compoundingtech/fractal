@@ -293,8 +293,8 @@ impl Store {
                 cut_unix_ms,
                 seal_rowid,
                 epoch,
-                scope.clone(),
-            )?;
+            )?
+            .scoped(scope.clone());
             let captured = staged.capture(self);
             let space_failed = space.as_ref().is_some_and(|space| space.failed());
             let captured = match &space {
@@ -462,7 +462,6 @@ impl StagedSet {
         cut_unix_ms: u128,
         seal_rowid: i64,
         epoch: i64,
-        scope: Option<Vec<String>>,
     ) -> Result<Self> {
         let connect = || -> Result<Connection> {
             let staging = Connection::open(path)?;
@@ -499,8 +498,13 @@ impl StagedSet {
             cut_unix_ms,
             seal_rowid,
             epoch,
-            scope,
+            scope: None,
         })
+    }
+
+    /// The same set, capturing only `scope`'s kinds (`checkpoint_staging/scoped`).
+    fn scoped(self, scope: Option<Vec<String>>) -> Self {
+        Self { scope, ..self }
     }
 
     /// Delete the staging file and give back the lock, for a capture that starts again.
@@ -1366,7 +1370,7 @@ mod headroom_resume_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("capture-checkpoint-2026-10-16-1.sqlite3");
         let first = StagedSet::open(
-            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1, None,
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
         ).unwrap();
         first.staging.execute(
             "UPDATE meta SET phase=?1, cursor=?2 WHERE id=1",
@@ -1374,7 +1378,7 @@ mod headroom_resume_tests {
         ).unwrap();
         drop(first); // A headroom refusal closes the file without discarding committed pages.
         let resumed = StagedSet::open(
-            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1, None,
+            &path, lock_staging(dir.path()).unwrap(), None, "same-identity".into(), 0, 1, 1,
         ).unwrap();
         let (phase, cursor, _) = resumed.position().unwrap();
         assert_eq!((phase, cursor), (CLAIMS, 42));

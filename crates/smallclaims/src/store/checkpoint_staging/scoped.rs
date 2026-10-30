@@ -16,6 +16,9 @@
 use super::*;
 use crate::store::checkpoint::sealed_envelope_records_sql;
 
+/// An envelope holding a record of a staged claim: its key, accepted time and record count.
+type ClaimEnvelope = (EnvelopeKey, u128, i64);
+
 impl StagedSet {
     fn scope_kinds(&self) -> &[String] {
         self.scope.as_deref().unwrap_or_default()
@@ -31,7 +34,7 @@ impl StagedSet {
             Self::advance(&transaction, RECORDS, 0, None)?;
             return Ok(transaction.commit()?);
         };
-        let page: Vec<(i64, Vec<(EnvelopeKey, u128, i64)>)> = store.checkpoint_capture_page(self.epoch, || {
+        let page: Vec<(i64, Vec<ClaimEnvelope>)> = store.checkpoint_capture_page(self.epoch, || {
             let connection = store.readers.get();
             let claims = connection
                 .prepare_cached(
