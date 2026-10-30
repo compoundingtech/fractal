@@ -16951,7 +16951,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     );
                                     // A mirror that is new, moved, restored, set aside or behind
                                     // the cursor refills from GitHub once the listing has caught up.
-                                    if !continuing && !github_plugin.filled(&spec.resource).unwrap_or(true) {
+                                    if !continuing
+                                        && !github_plugin.filled(&spec.resource).unwrap_or(true)
+                                        && github_plugin.refill_due(&spec.resource, now_ms())
+                                    {
                                         refill_mirror(
                                             provider.as_ref(), &github_plugin, &observer_subject, &spec,
                                             observation.cursor.as_deref(),
@@ -18588,9 +18591,12 @@ async fn refill_mirror(
         plugin.fill(&spec.resource, observer, &spec.locator, cursor, &items).map(|filled| (filled, count))
     }
     .await;
+    // A fill that failed waits before the next, so a lasting failure does not spend the
+    // observer's budget on every look.
+    plugin.refill_ended(&spec.resource, now_ms(), matches!(filled, Ok((true, _))));
     match filled {
         Ok((true, items)) => tracing::info!(observer, resource = %spec.resource, items, "the GitHub plugin mirror refilled from GitHub"),
-        Ok((false, _)) => {}
+        Ok((false, _)) => tracing::info!(observer, resource = %spec.resource, "the GitHub plugin mirror moved on during its refill; the next look tries again"),
         Err(error) => tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror could not refill from GitHub; reads answer from the graph until it does: {error:#}"),
     }
 }

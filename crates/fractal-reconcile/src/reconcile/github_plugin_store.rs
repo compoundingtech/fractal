@@ -67,7 +67,13 @@ pub struct GithubPluginStore {
     connection: Mutex<Connection>,
     /// Observers this process knows have no row, so forgetting them again reads nothing.
     absent: Mutex<HashSet<String>>,
+    /// Each repository whose fill failed: when the next may start, and the wait after that.
+    refills: Mutex<HashMap<String, (u128, u128)>>,
 }
+
+/// The first wait after a failed fill, doubled after each further failure up to an hour.
+const REFILL_RETRY_MS: u128 = 60_000;
+const REFILL_RETRY_MAX_MS: u128 = 60 * 60_000;
 
 impl GithubPluginStore {
     /// The database beneath `state_dir`, created on first use. A file this build cannot use,
@@ -77,7 +83,7 @@ impl GithubPluginStore {
     /// place.
     pub fn open(state_dir: &Path) -> Result<Self> {
         let connection = super::plugin_store::open(state_dir, MANIFEST.name, Self::migrate)?;
-        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default() })
+        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default() })
     }
 
     /// The one handle this process keeps on the database beneath `state_dir`, opened on first
@@ -101,7 +107,7 @@ impl GithubPluginStore {
     pub fn memory() -> Self {
         let connection = Connection::open_in_memory().expect("an in-memory database opens");
         Self::migrate(&connection).expect("an in-memory database migrates");
-        Self { connection: Mutex::new(connection), absent: Mutex::default() }
+        Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default() }
     }
 
     fn migrate(connection: &Connection) -> Result<()> {
@@ -274,6 +280,26 @@ impl GithubPluginStore {
             )
             .optional()?
             .unwrap_or(false))
+    }
+
+    /// Whether a fill of `repository` may start now: always, unless the last one failed and its
+    /// wait has not passed.
+    pub fn refill_due(&self, repository: &str, now: u128) -> bool {
+        self.refills.lock().unwrap_or_else(PoisonError::into_inner)
+            .get(repository)
+            .is_none_or(|(next, _)| now >= *next)
+    }
+
+    /// Record how a fill of `repository` ended: a failure waits a minute before the next, doubling
+    /// up to an hour; a success clears the wait.
+    pub fn refill_ended(&self, repository: &str, now: u128, succeeded: bool) {
+        let mut refills = self.refills.lock().unwrap_or_else(PoisonError::into_inner);
+        if succeeded {
+            refills.remove(repository);
+            return;
+        }
+        let wait = refills.get(repository).map_or(REFILL_RETRY_MS, |(_, wait)| (wait * 2).min(REFILL_RETRY_MAX_MS));
+        refills.insert(repository.to_owned(), (now.saturating_add(wait), wait));
     }
 
     /// Fill `repository`'s mirror from one look at GitHub that recorded nothing else: each item
@@ -574,10 +600,10 @@ fn upsert_repository(connection: &Connection, repository: &str, observer: &str, 
 fn write_item(connection: &Connection, repository: &str, number: u64, item: &MirrorItem, at: u128) -> Result<()> {
     let state = if item.facts.get("state").and_then(Value::as_str) == Some("open") { "open" } else { "closed" };
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hb68788c308e8 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_items(repository, number, item_kind, subject, state, facts, claim, observed_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-h371a84dadb26 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO mirror_items(repository, number, item_kind, subject, state, facts, claim, observed_at_unix_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(repository, number) DO UPDATE SET item_kind=excluded.item_kind, subject=excluded.subject,
-             state=excluded.state, facts=excluded.facts, claim=excluded.claim,
+             state=excluded.state, facts=excluded.facts, claim=COALESCE(excluded.claim, mirror_items.claim),
              observed_at_unix_ms=excluded.observed_at_unix_ms",
         params![
             repository, number as i64, item.item_kind, item.subject, state,
@@ -749,7 +775,10 @@ mod tests {
             "a fill from another cursor than the mirror followed fills nothing");
         let mut full = item(9, json!({"state": "open", "title": "Orchard", "head_sha": "q"}), "unused");
         full.claim = None;
-        assert!(store.fill(REPOSITORY, OBSERVER, "acme/garden", Some(&poller.cursor()), &[full]).unwrap());
+        let mut refilled_seven = item(7, json!({"state": "open", "head_sha": "a"}), "unused");
+        refilled_seven.claim = None;
+        assert!(store.fill(REPOSITORY, OBSERVER, "acme/garden", Some(&poller.cursor()), &[full, refilled_seven]).unwrap());
+        assert_eq!(store.item(REPOSITORY, 7).unwrap().unwrap()["claim"], "c1", "a fill keeps the recording claim");
         assert!(store.filled(REPOSITORY).unwrap());
         assert_eq!(store.item(REPOSITORY, 9).unwrap().unwrap()["facts"]["title"], "Orchard");
         assert!(store.events(REPOSITORY, None, 10).unwrap().is_empty(), "a fill derives no event");
@@ -813,6 +842,23 @@ mod tests {
             ("kind".to_owned(), json!("vcs.pull-request")), ("facts".to_owned(), facts),
         ]);
         assert!(MANIFEST.admit("resource/github/acme/garden/pull-request/7", "resource.observed", &snapshot).is_err());
+    }
+
+    #[test]
+    fn a_failed_fill_waits_longer_each_time_and_a_success_clears_the_wait() {
+        let store = GithubPluginStore::memory();
+        assert!(store.refill_due(REPOSITORY, 0));
+        store.refill_ended(REPOSITORY, 0, false);
+        assert!(!store.refill_due(REPOSITORY, REFILL_RETRY_MS - 1));
+        assert!(store.refill_due(REPOSITORY, REFILL_RETRY_MS));
+        store.refill_ended(REPOSITORY, REFILL_RETRY_MS, false);
+        assert!(!store.refill_due(REPOSITORY, 3 * REFILL_RETRY_MS - 1));
+        for _ in 0..10 {
+            store.refill_ended(REPOSITORY, 0, false);
+        }
+        assert!(store.refill_due(REPOSITORY, REFILL_RETRY_MAX_MS), "the wait stops at an hour");
+        store.refill_ended(REPOSITORY, 0, true);
+        assert!(store.refill_due(REPOSITORY, 0));
     }
 
     #[test]

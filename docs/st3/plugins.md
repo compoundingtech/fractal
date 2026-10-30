@@ -62,8 +62,9 @@ poller fills it with one fresh look by the repository provider:
 - It runs under the observer's own request budget.
 - It records nothing in the graph and moves no cursor, so the observer's own looks keep
   delivering from where they read to.
-- Its items replace the mirror's rows without events. A fill that fails is tried again after
-  the next look.
+- Its items replace the mirror's facts without events; a row keeps the claim that last recorded it.
+  A fill that fails waits a minute before the next, doubling up to an hour, so a lasting failure
+  does not spend the budget on every look.
 
 On a repository of 731 open items (148 open pull requests), a fill costs about:
 
@@ -151,9 +152,18 @@ Every answer names the `repository`, its `resource`, `observer` and `poller` (`h
 
 - `{"kind": "mirror", "host": ...}`: the poller's mirror answered, directly or through the relay.
 - `{"kind": "graph", "host": ..., "reason": ...}`: this member answered from its own graph and
-  says why. The reasons are: the poller runs a build without the plugin, the poller did not answer
-  (with `relay_error`), the read names no person or agent to relay as, or the poller has not taken
-  a look since it started. A graph answer has no head history: `heads` is null, which means unknown.
+  says why. The reasons are:
+  - the poller runs a build without the plugin;
+  - the poller did not answer (with `relay_error`);
+  - the read names no person or agent to relay as;
+  - this member has no route to the poller;
+  - no member's declaration of the repository's observer is selected;
+  - the poller is refilling its mirror from GitHub;
+  - the poller has not taken a look since it started;
+  - this member has no mirror of the repository (a relayed read reached a member that no longer polls it);
+  - the item is not among those the filled mirror holds.
+
+  A graph answer has no head history: `heads` is null, which means unknown.
 
 A repository no member polls is `404 not-found`. `st gh watch OWNER/REPO#N` declares its observer.
 
