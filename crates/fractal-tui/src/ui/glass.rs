@@ -167,6 +167,13 @@ impl TabBadge {
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
+        if width == 0 {
+            return String::new();
+        }
+        let activity_width = text::width(self.activity);
+        if !self.activity.is_empty() && width <= activity_width {
+            return text::truncate(self.activity, width);
+        }
         let (title, truncated) = Self::title(title);
         let attention = self.attention();
         let digits = if counts && !attention.is_empty() {
@@ -200,11 +207,33 @@ impl TabBadge {
             }
         }
         label.push(' ');
-        if text::width(&label) <= width {
-            label
-        } else {
-            text::truncate(&label, width)
+        if text::width(&label) > width {
+            use unicode_width::UnicodeWidthChar as _;
+            // Padding may disappear, but truncation never consumes the activity glyph.
+            let (prefix_bytes, prefix_width) = if self.activity.is_empty() {
+                (0, 0)
+            } else {
+                (1 + self.activity.len(), 1 + activity_width)
+            };
+            let room = width - prefix_width;
+            let mut end = prefix_bytes;
+            if room > 0 {
+                let mut used = 0;
+                for (at, character) in label[prefix_bytes..].char_indices() {
+                    let cells = character.width().unwrap_or(0);
+                    if used + cells + 1 > room {
+                        break;
+                    }
+                    used += cells;
+                    end = prefix_bytes + at + character.len_utf8();
+                }
+            }
+            label.truncate(end);
+            if room > 0 {
+                label.push('…');
+            }
         }
+        label
     }
 }
 
@@ -5053,6 +5082,69 @@ mod tests {
                         assert_eq!(badge.width(title, counts), text::width(&label), "{label}");
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_truncation_protects_activity_before_padding_and_ellipsis() {
+        for activity in ["●", "○", "×", "!", "~"] {
+            let badge = TabBadge {
+                activity,
+                ..TabBadge::default()
+            };
+            for (width, expected) in [
+                (0, String::new()),
+                (1, activity.to_owned()),
+                (2, format!(" {activity}")),
+                (3, format!(" {activity}…")),
+                (4, format!(" {activity}A…")),
+            ] {
+                let label = badge.label("Atlas", width, false);
+                assert_eq!(label, expected);
+                assert_eq!(text::width(&label), width);
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_narrow_strips_keep_each_painted_agent_activity() {
+        for overflow in [false, true] {
+            for width in [12, 14, 18] {
+                let mut ui = tab_badge_world();
+                let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+                let agent = group.tabs[0].clone();
+                if overflow {
+                    // Cover a two-digit tab count and the smallest label budgets.
+                    group.tabs.resize(12, agent);
+                } else {
+                    group.tabs = vec![agent];
+                }
+                let area = Rect::new(0, 0, width, 1);
+                let mut buffer = Buffer::empty(area);
+                ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+                for (rect, hit) in &ui.frame.borrow().hits {
+                    if let Hit::GlassTab(0, index) = hit {
+                        let tab = &ui.glasses.glass().layout.groups()[0].tabs[*index];
+                        let badge = ui.tab_badge(tab, Pane::parse(&tab.pane).as_ref());
+                        if !badge.activity.is_empty() {
+                            let painted = (rect.x..rect.right())
+                                .map(|x| buffer[(x, 0)].symbol())
+                                .collect::<String>();
+                            assert!(
+                                painted.contains(badge.activity),
+                                "{width} cells, overflow={overflow}, tab {index}: |{painted}|"
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    ui.frame
+                        .borrow()
+                        .hits
+                        .iter()
+                        .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+                );
             }
         }
     }

@@ -79,7 +79,8 @@ expired. Question identity comes from the native question kind or exact named qu
 tool call; cached calls without an open live prompt cannot set it. Mission tabs
 aggregate their agents' current question prompts; Inbox aggregates all of them.
 Titles retain 26 cells. A narrow strip drops counts first, then the attention suffix,
-while keeping activity at the left. Overflow markers reach hidden tabs.
+while keeping activity at the left, even if padding and the title no longer fit.
+Overflow markers reach hidden tabs.
 Wheel right/down over a strip browses one whole tab right; wheel left/up browses left.
 This does not select a tab. Each split keeps its own temporary view; selecting another
 tab reveals it again if necessary. `‹N` / `N›` count the tabs outside that view.
