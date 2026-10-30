@@ -15090,14 +15090,16 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// Whether catch-up now selects an occurrence after `occurrence`. A timer that runs an interval
     /// or more late finds a later occurrence current, and passes made in the meantime armed it
     /// too: `latest` and `skip` start only that one, and `all` keeps the missed occurrences.
-    fn superseded_by_catch_up(spec: &crate::model::ScheduleSpec, occurrence: u64,
-        last: Option<u64>, now: i64) -> Result<bool> {
+    fn superseded_by_catch_up(spec: &crate::model::ScheduleSpec, occurrence: u64, now: i64) -> Result<bool> {
         if !matches!(spec.catch_up.as_str(), "latest" | "skip") || spec.at_unix_ms.is_some() {
             return Ok(false);
         }
         if let Some(calendar) = &spec.calendar {
-            // As for a standby, compare with the current tick, not the next one `skip` would choose.
-            return Ok(calendar_occurrence(calendar, last, now, "latest", spec.max_catch_up)?.0 > occurrence);
+            // Counted from this occurrence, `latest` picks the latest later tick already due, or the
+            // next tick when none is; only a due one supersedes it. (Counted from the reached history,
+            // a first occurrence that fires late, before the next day's time, would get that future day.)
+            let (_, at) = calendar_occurrence(calendar, Some(occurrence), now, "latest", spec.max_catch_up)?;
+            return Ok(at <= now);
         }
         let (Some(interval), Some(anchor)) = (spec.every_ms, spec.anchor_unix_ms) else { return Ok(false) };
         if now < anchor { return Ok(false); }
@@ -15395,7 +15397,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // A late timer can find that later passes already armed a newer occurrence. The
                 // standby's candidate check above covers a takeover; the owner checks here.
                 if takeover.is_none() && let Some(spec) = current_spec.as_ref()
-                    && Self::superseded_by_catch_up(spec, occurrence, last_reached, now_ms() as i64).unwrap_or(false) {
+                    && Self::superseded_by_catch_up(spec, occurrence, now_ms() as i64).unwrap_or(false) {
                     let _ = store.append_claim(&ClaimInput {
                         subject: schedule_subject.clone(),
                         kind: "schedule.occurrence-cancelled".into(),
@@ -31437,6 +31439,63 @@ schedule "{name}" {{
         assert_eq!(
             store.claims_for("schedule/late", Some("schedule.work-started")).unwrap().len(),
             1
+        );
+    }
+
+    /// A daily 09:00 `latest` schedule arms Monday's occurrence at Monday 09:00; its timer then runs
+    /// at `fire_at`, after one more pass there when `pass_first`. Returns the reached and cancelled
+    /// occurrence keys.
+    async fn late_calendar_timer(fire_at: u128, pass_first: bool) -> (Vec<u64>, Vec<u64>) {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        let monday = chrono::TimeZone::with_ymd_and_hms(&Utc, 2027, 1, 4, 9, 0, 0).unwrap().timestamp_millis() as u128;
+        smallclaims::store::set_thread_clock(Some(monday + 1));
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let revision = scheduled_mission_revision(&store);
+        apply_source(&store, &format!(r#"version 2
+schedule "daily" {{
+  calendar {{ at "09:00"; timezone "Etc/UTC" }}
+  catch-up "latest"
+  work {{ mission "scheduled-cycle@{revision}"; workspace "/tmp/st3-calendar-test" }}
+}}"#
+            ),
+            "calendar-schedule",
+        );
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        smallclaims::store::set_thread_clock(Some(fire_at));
+        if pass_first {
+            reconciler.reconcile_once().unwrap();
+        }
+        finish_armed_schedules(&reconciler).await;
+        let occurrences = |kind: &str| {
+            store
+                .claims_for("schedule/daily", Some(kind))
+                .unwrap()
+                .iter()
+                .filter_map(|claim| claim.body.pointer("/fields/occurrence").and_then(Value::as_u64))
+                .collect::<Vec<_>>()
+        };
+        (occurrences("schedule.occurrence-reached"), occurrences("schedule.occurrence-cancelled"))
+    }
+
+    #[tokio::test]
+    async fn a_late_calendar_timer_gives_way_only_to_a_tick_that_is_due() {
+        const HOUR: u128 = 3_600_000;
+        let monday = chrono::TimeZone::with_ymd_and_hms(&Utc, 2027, 1, 4, 9, 0, 0).unwrap().timestamp_millis() as u128;
+        // Tuesday 08:00: Tuesday's occurrence is not due yet, so Monday's is still the latest.
+        assert_eq!(late_calendar_timer(monday + 23 * HOUR, false).await, (vec![20270104], vec![]));
+        // Tuesday 09:00: a pass armed Tuesday's occurrence, which supersedes Monday's.
+        assert_eq!(
+            late_calendar_timer(monday + 24 * HOUR + 1_000, true).await,
+            (vec![20270105], vec![20270104])
         );
     }
 
