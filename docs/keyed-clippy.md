@@ -1,7 +1,8 @@
 # Keyed clippy and fleet-compat (design)
 
-Status: 2026-10-26. Mission `fleet/factory/no-whole-tree`, step `clippy-keyed`. PR 1 (shadow) implements sections 1 and 4, except
-st-test, which comes with the linux-gate shrink (below). Factory approved the design on 2026-10-26.
+Status: 2026-10-29. Mission `fleet/factory/no-whole-tree`, steps `clippy-keyed` and `fleet-compat-keyed`. PR 1 (shadow, #4178)
+implements sections 1 and 4, except st-test, which comes with the linux-gate shrink (below); the fleet-compat PR implements section 3
+the same way. Factory approved the design on 2026-10-26.
 
 ## The problem
 
@@ -78,18 +79,32 @@ crates, a per-crate key (the rust-tests closure plus the baseline rows for that 
 
 ### 3. Fleet-compat, the same way
 
-The fleet-compat stage runs the released binaries pinned by `.github/fleet-compat-baseline.json` and
-`.github/messaging-compat-baseline.json` (v0.3.20, archive URLs and sha256 values, read by `scripts/compat-baseline`) against the
-tree's own build. Its key is:
+The fleet-compat stage (`fleet_compat` in `scripts/ci-linux`) runs one ignored test of crate `fractal`,
+`fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade`, with `FRACTAL_COMPAT_BIN` set to the published
+binary that `.github/fleet-compat-baseline.json` pins (`scripts/compat-baseline fleet` fetches and checks it). It reads no file at the
+base, so it has no `base_inputs` and is not base-bound in st-test. Its check is `linux-fleet-compat` (shadow, `enforce` false), and its
+`inputs`, which are also the lane's `tree_inputs`, are:
 
-- the Rust sources and manifests of the binaries it builds (the same group as above, narrowed to the binaries' dependency closure
-  when `scripts/rust-test-keys`' closure walker is reused);
-- the toolchain;
-- both baselines, which are verdict data;
-- `scripts/compat-baseline` and the stage's own scripts.
+- crate `fractal`'s dependency closure as `scripts/rust-test-keys` walks it: the directory of every crate it depends on and the
+  manifest of every workspace member, but not `fractal`'s `extra` paths in `.st/rust-test-inputs.json` (what the rest of its tests
+  read at run time) and not the root package `fractal-legacy-runner`, which it does not depend on;
+- every file a `#[path = ...]` in those crates compiles in from outside them (`crates/pty-launch-environment.rs`,
+  `scripts/ci-test-paths.rs`);
+- the files the workspace's compiles read from outside the crates (`include_str!` of docs, fixtures, `wit/`, `slo/`, `plugins/`,
+  `examples/`), as linux-clippy's dep-info found them, without clippy's codegen and lint data;
+- the toolchain (`.cargo`, `Cargo.toml`, `Cargo.lock`, `flake.nix`, `flake.lock`);
+- `.github/fleet-compat-baseline.json`, its verdict data (`VERDICT_DATA` in `scripts/lane-definition-closure`). The messaging baseline
+  is not an input: no messaging test runs in this stage;
+- what the stage executes (`scripts/lane-definition-closure --lane linux-fleet-compat --write`).
 
-It gets its own check name, `linux-fleet-compat`, with the same policy, gate and st-test steps as clippy. Its exact script list is
-taken from `scripts/lane-definition-closure`'s executed set for the stage, as for clippy. The step for it follows clippy's.
+Its lane is `scripts/ci-fleet-compat-keyed`, which sets `CI_KEYED_FLEET_COMPAT_POLICY` (CI's linux-fleet-compat job sets it too). With
+it, the stage first builds the test with `--no-run --message-format=json` and runs `scripts/dep-info-check --check linux-fleet-compat
+--jsonl 'fleet-compat-*.jsonl' --warn`, as clippy's does; linux-gate runs the stage without it and never depends on the policy file. The
+first measurement (2026-10-26, a warm target) read 474 units and 1035 files, and found one uncovered, `crates/pty-launch-environment.rs`,
+which is why `#[path]` targets are in the key. The job skips on linux-gate's gate or its own, as clippy's does. st-test signs it on
+request (`--check linux-fleet-compat`), not with `--all`, until linux-gate shrinks. `scripts/evidence-verify-test` (`FleetCompatKey`)
+changes each declared input alone and sees the key change, and changes files the stage does not read (a doc, `scripts/st-test`, the
+root package, a crate outside the closure, the messaging baseline) and sees it stay.
 
 ## The risk, and how each key is kept honest
 

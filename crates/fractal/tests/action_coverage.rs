@@ -849,6 +849,7 @@ async fn dispatch(
         "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
+        "arrangement.membership.edit" => arrangement_membership_edit,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
         "lane.mark" => lane_mark, "lane.move" => lane_move,
@@ -871,6 +872,49 @@ async fn dispatch(
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arrangement_membership_edits_survive_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let subject = "arrangement/person/avery/019a0000-0000-7000-8000-000000000001";
+    let fence = daemon.fence(PERSON).await;
+    dispatch(
+        &daemon.client(PERSON),
+        "arrangement.edit",
+        "coverage:membership-container",
+        fence,
+        json!({"subject": subject, "owner": PERSON, "version": 2,
+            "operations": [{"op": "create", "name": "Restart memberships"}]}),
+    )
+    .await
+    .unwrap();
+    let operations = json!([{"op": "place", "member": WORKER, "bucket": null, "key": "a0"}]);
+    let fence = daemon.fence(PERSON).await;
+    daemon
+        .exercise(
+            PERSON,
+            "arrangement.membership.edit",
+            json!({"subject": subject, "owner": PERSON, "operations": operations}),
+            fence,
+        )
+        .await;
+    // `exercise` reopened the disk-backed daemon after acceptance and replayed the edit.
+    let claims = daemon.store().claims_for(subject, Some("ordered-membership.edited")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(PERSON));
+    assert_eq!(claims[0].body["fields"]["owner"], PERSON);
+    assert_eq!(claims[0].body["fields"]["operations"], operations);
+    let memberships = daemon.store().ordered_memberships(subject, u64::MAX, None, 10).unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0]["container"], subject);
+    assert_eq!(memberships[0]["member"], WORKER);
+    assert_eq!(memberships[0]["position"], json!({"bucket": null, "key": "a0"}));
+    assert_eq!(memberships[0]["revision"], claims[0].id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2763,10 +2807,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
     }
 }
 
-/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
-/// after a restart, the same run reads the same way.
+/// What a run waits on and the blocked runs read the daemon's published lists, as a daemon
+/// serves them; before and after a restart, the same run reads the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_waiting_on_reads_published_lists_after_restart() {
+async fn cli_waiting_on_and_blocked_runs_read_published_lists_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -2792,6 +2836,16 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
         assert_eq!(waiting["open"][0]["path"], "work");
         assert_eq!(waiting["open"][0]["kind"], "ready");
         assert_eq!(waiting["open"][0]["who"], WORKER);
+        // Quiet for longer than a millisecond: nobody claims the ready step.
+        let output = daemon.cli(PERSON, &["missions", "blocked", "--quiet", "1ms"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"][0]["cause"], "unclaimed", "{blocked:#}");
+        assert_eq!(blocked["groups"][0]["runs"][0]["run"], run.subject.as_str());
+        let output = daemon.cli(PERSON, &["missions", "blocked"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"], json!([]), "within the default quiet limit nothing is blocked");
         daemon.restart().await;
     }
 }

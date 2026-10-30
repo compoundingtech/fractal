@@ -93,7 +93,6 @@ pub fn world() -> World {
             },
         ]),
         conversations,
-        pending_calls: BTreeMap::new(),
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
@@ -101,6 +100,7 @@ pub fn world() -> World {
         agent_messages: None,
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
+        slo_stale: None,
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),
@@ -411,6 +411,7 @@ fn attention() -> Vec<Attention> {
             related: vec![],
             raised_by: None,
             blocked: None,
+            deadline: None,
             kind: AttentionKind::Review {
                 question: s(
                     "The row counts agree and the contract check passed. Cut over to the new store?",
@@ -446,6 +447,7 @@ fn attention() -> Vec<Attention> {
             related: vec![],
             raised_by: None,
             blocked: None,
+            deadline: None,
             kind: AttentionKind::Feedback {
                 question: s(
                     "Here is the draft of the pricing page. What should change before it goes live?",
@@ -476,6 +478,7 @@ fn attention() -> Vec<Attention> {
             related: vec![],
             raised_by: None,
             blocked: None,
+            deadline: None,
             kind: AttentionKind::Launch {
                 planner: s("Planner"),
                 name: s("harbor/nightly-audit"),
@@ -540,6 +543,7 @@ fn attention() -> Vec<Attention> {
             related: vec![],
             raised_by: None,
             blocked: None,
+            deadline: None,
             kind: AttentionKind::Fault {
                 what: s(
                     "Release Captain exited 4 times in 10 minutes and Fractal stopped restarting it.",
@@ -564,6 +568,7 @@ fn attention() -> Vec<Attention> {
             related: vec![],
             raised_by: None,
             blocked: None,
+            deadline: None,
             kind: AttentionKind::Revision {
                 reason: s(
                     "A key rotated mid-run last week and nobody noticed. An audit step would catch it.",
@@ -593,6 +598,7 @@ fn attention() -> Vec<Attention> {
             related: vec![],
             raised_by: None,
             blocked: None,
+            deadline: None,
             kind: AttentionKind::Message {
                 from: s("Chief of Staff"),
                 body: s(

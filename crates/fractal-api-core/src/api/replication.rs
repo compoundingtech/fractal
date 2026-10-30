@@ -142,13 +142,25 @@ pub async fn checkpoint_resume(
     Json(request): Json<crate::store::CheckpointResumeRequest>,
 ) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
     let store = state.store.clone();
-    blocking_action(move || store.resume_checkpoints(&request.actor, &request.reason)).await?;
+    blocking_action(move || store.resume_stopped_trims(&request.actor, &request.reason)).await?;
     signal_changed(&state);
     let store = state.store.clone();
     let peers = state.configured_peers.clone();
     blocking_store(move || store.checkpoint_status(client_now_ms(), &peers))
         .await
         .map(Json)
+}
+
+/// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
+/// or the fleet's fault agent.
+pub async fn signature_resume(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::store::principals::SignatureResumeRequest>,
+) -> Result<Json<smallclaims::store::principals::SignatureResume>, ApiError> {
+    let store = state.store.clone();
+    let resumed = blocking_action(move || store.resume_signature_migration_as(&request.actor, &request.reason)).await?;
+    signal_changed(&state);
+    Ok(Json(resumed))
 }
 
 pub async fn repair_replication_record(
@@ -214,6 +226,28 @@ pub async fn replication_checkpoint_manifest(
     blocking_store(move || store.checkpoint_manifest_page(&request))
         .await
         .map(Json)
+}
+
+/// This node's answers per claim kind, for its replication worker and the peers it serves. They
+/// are computed off the request path and kept, so a request answers at once, `pending` until
+/// they exist.
+pub async fn replication_answers(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::answers::AnswersRequest>,
+) -> Json<Option<smallclaims::answers::AnswersReply>> {
+    let cache = state.store.extension::<smallclaims::answers::AnswersCache>();
+    Json(Some(cache.answer(&state.store, &request)))
+}
+
+/// Record what the replication worker's daily answers check found.
+pub async fn replication_answers_check(
+    State(state): State<AppState>,
+    Json(check): Json<smallclaims::answers::AnswersCheck>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || Ok(store.record_answers_check(&check)?))
+        .await
+        .map(|()| Json(serde_json::json!({})))
 }
 
 /// The newest stable checkpoint this node needs a peer's manifest for, if any.

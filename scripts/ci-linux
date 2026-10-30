@@ -10,15 +10,56 @@ logs="$RUNNER_TEMP/ci-logs"
 mkdir -p "$logs"
 
 fleet_compat() {
+  # Fleet runtime compatibility is separate from Fractal-to-Fractal replication.
+  # Exercise the deployed pty 0.13.0 record through the production mailbox bind handler,
+  # even when the devShell's newer pty writer would hide missing daemonBootId.
+  cargo test -p fractal-api-mailbox --locked --lib \
+    api::mailbox::tests::replay_native_tests::deployed_pty_0_13_0_record_without_boot_id_binds_mailbox \
+    -- --exact 2>&1 | tee "$logs/pty-mailbox-compat-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/pty-mailbox-compat-result.log" || return
   local baseline
   baseline=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/baseline") || return
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   export FRACTAL_COMPAT_BIN="$baseline" ST3_COMPAT_BIN="$baseline"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   test -x "${FRACTAL_COMPAT_BIN-${ST3_COMPAT_BIN-}}" || return
+  # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
+  # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
+  # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
+  # checked. --warn while linux-fleet-compat is in shadow, as for clippy.
+  if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
+    cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
+    local policy
+    policy=$(keyed_policy "$CI_KEYED_FLEET_COMPAT_POLICY") || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-fleet-compat --policy "$policy" --jsonl 'fleet-compat-*.jsonl' --warn || return
+  fi
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-result.log"
+}
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
+# Only an auto:PATH argument selects a layout; explicit paths are never rewritten.
+# The keyed caller supplies PATH: ordinary linux-gate/rust-tests must not declare a policy read.
+keyed_policy() {
+  local selected=$1
+  if [[ "$selected" != auto:* ]]; then
+    printf '%s\n' "$selected"
+    return
+  fi
+  python3 -I - "${selected#auto:}" <<'PY'
+import os
+import sys
+path = sys.argv[1]
+preferred = os.path.join('.fractal', os.path.basename(path))
+try:
+    os.lstat(preferred)
+except FileNotFoundError:
+    pass
+else:
+    path = preferred
+print(path)
+PY
 }
 
 clippy_and_codegen() {
@@ -44,7 +85,9 @@ clippy_and_codegen() {
   # must not depend on the policy file (lane-definition-closure --check), so without CI_KEYED_CLIPPY_POLICY the check is not run.
   # --warn while linux-clippy is in shadow: no default local run checks it yet, so a failure would first show in the merge queue.
   if [ -n "${CI_KEYED_CLIPPY_POLICY:-}" ]; then
-    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$CI_KEYED_CLIPPY_POLICY" --jsonl 'clippy-*.jsonl' --warn || return
+    local policy
+    policy=$(keyed_policy "$CI_KEYED_CLIPPY_POLICY") || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' --warn || return
   fi
   cargo run --locked -p fractal-client-codegen -- --check
 }

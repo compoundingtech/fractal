@@ -2197,6 +2197,59 @@ fn agent_card_shows_the_member_reconcile_fault() {
     ));
 }
 
+fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
+    serde_json::from_value(serde_json::json!({
+        "kind": "agent", "id": "agent/garden/worker", "revision": "one",
+        "updated_at": "2026-10-21T04:37:42Z", "name": "garden/worker",
+        "state": "stopped", "reachability": "unreachable", "runtime_ids": [],
+        "end_reason": end_reason
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
+    let parked = stopped_agent(serde_json::json!({
+        "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
+        "reason": "the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)"
+    }));
+    let card = render_client_agent(&parked, &[], 0);
+    assert!(card.contains(
+        "STATE        stopped\nWHY          parked by st after it failed to start at 2026-10-21T04:37:42.469Z: the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)\n"
+    ), "{card}");
+    let by_person = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-person", "actor": "person/ada", "ended_at": "2026-10-22T09:00:00.000Z",
+        "reason": "Done for the week.\n\u{1b}[31mspoof"
+    }));
+    assert!(render_client_agent(&by_person, &[], 0).contains(
+        "WHY          stopped by person/ada at 2026-10-22T09:00:00.000Z: Done for the week. spoof\n"
+    ));
+    let by_run = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-mission", "actor": "mission-run/garden/one", "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    let unknown = stopped_agent(serde_json::Value::Null);
+    let page: ClientPage = serde_json::from_value(serde_json::json!({
+        "kind": "page", "collection": "agents",
+        "items": [by_run, unknown],
+        "page": {"limit": 50, "has_more": false}
+    }))
+    .unwrap();
+    assert_eq!(
+        render_client_agents(&page, false, false, "st agents ls"),
+        "AGENTS  2\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped, with no recorded reason\n"
+    );
+    // A running agent prints no stop line, even with an end reason from an earlier incarnation.
+    let mut running = stopped_agent(serde_json::json!({
+        "kind": "crashed", "exit_code": 1, "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    running.state = "running".into();
+    assert!(!render_client_agent(&running, &[], 0).contains("WHY"));
+}
+
 #[test]
 fn agent_card_names_a_pending_codex_approval() {
     let agent: fractal_client::Agent = serde_json::from_value(serde_json::json!({
@@ -3049,6 +3102,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     #[cfg(test)]
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
+    #[cfg(test)]
+    const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -3066,6 +3121,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("validate", VALIDATE_SOURCE),
         ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
@@ -3783,6 +3839,27 @@ fn provider_capacity_backoff_is_bounded_deterministic_and_increases() {
             <= PROVIDER_CAPACITY_MAX_BACKOFF_MS
                 + PROVIDER_CAPACITY_MAX_BACKOFF_MS.saturating_div(4)
     );
+}
+
+/// The model at capacity is retried whatever the turn shows; a 429 or a failing connection only
+/// once the seat is idle, since an active turn is still its harness's own to retry.
+#[test]
+fn a_provider_retry_is_owed_for_capacity_and_for_an_idle_rate_limit_or_connection() {
+    use fractal_drivers::harness_state::Activity;
+    assert_eq!(
+        provider_retry_cause(Activity::Idle, Some("providerCapacity")),
+        Some("providerCapacity")
+    );
+    for cause in ["rateLimited", "connection"] {
+        assert_eq!(provider_retry_cause(Activity::Idle, Some(cause)), Some(cause));
+        assert_eq!(provider_retry_cause(Activity::Active, Some(cause)), None, "{cause}");
+        assert_eq!(provider_retry_cause(Activity::Ended, Some(cause)), None, "{cause}");
+    }
+    assert_eq!(provider_retry_cause(Activity::Idle, Some("usageLimit")), None);
+    assert_eq!(provider_retry_cause(Activity::Idle, None), None);
+    let (waiting, exhausted) = provider_retry_reasons("rateLimited");
+    assert!(waiting.contains("429") && waiting.contains("resume this session"));
+    assert!(exhausted.contains("retry limit"));
 }
 
 #[test]
@@ -8629,4 +8706,55 @@ async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
     assert!(rendered.contains("Lease renewal ownership is unavailable."));
     assert!(!rendered.contains("Renew it with:"));
     assert!(!rendered.contains("The lease expires at"));
+}
+
+#[tokio::test]
+async fn the_signature_job_keeps_a_persisted_fault_whole_and_goes_on_after_a_resume() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-job").unwrap());
+    let fault = "inventory page: fixture defect";
+    store.fail_signature_migration(fault).unwrap();
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Each start used to wrap the stored fault in `bootstrap job stopped: …` again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(store.signature_migration().unwrap().fault.as_deref(), Some(fault));
+    assert!(!job.is_finished(), "a stopped job waits for a resume");
+    assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault));
+    for _ in 0..200 {
+        if store.signature_migration().unwrap().done() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(store.signature_migration().unwrap().done());
+    assert!(!job.is_finished(), "the job stays to drain later verdict backlogs");
+    job.abort();
+}
+
+#[tokio::test]
+async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-drain").unwrap());
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..3_000 {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h9837292e813d owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [format!("claim/{i:05}")]).unwrap();
+        }
+        // The trust roots these verdicts relied on have since changed.
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h03aebe910c9e owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES ('claim_candidate_verdict_roots','earlier-roots')", []).unwrap();
+        tx.commit().unwrap();
+    }
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Nothing is pending yet: the job finishes its startup pass and goes idle.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!store.verdicts_pending().unwrap());
+    store.judge_claims_slice(true).unwrap();
+    assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // An in-memory store shares one cache, so this read can meet the job's writer.
+    while store.verdicts_pending().unwrap_or(true) {
+        assert!(Instant::now() < deadline, "the idle job drains what the pass left");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!job.is_finished());
+    job.abort();
 }

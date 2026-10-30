@@ -372,6 +372,33 @@ disagree. Fractal serves each of these once, as a presentation projection, so ev
 same answer and one place is measured and optimized
 ([#2646](https://github.com/compoundingtech/fractal/issues/2646)).
 
+### Complete revisioned agents streams
+
+A daemon granting `collections.agents.revisioned.v1` accepts an agents collection
+subscription with `agents_publication_version: 1`, no limit and no selectors.
+This opt-in is separate from legacy bounded windows and the exact-agent selector.
+Those existing contracts, including HTTP list reads, do not change.
+
+An initial or replacement subscription receives a complete immutable publication
+as consecutive `snapshot` chunks. Each carries the same `publication` metadata
+(`node_epoch`, `revision`, `status_watermark`, `materialized_at_ms`) and snapshot,
+with zero-based `chunk_index` and a fixed `chunk_count`. Concatenate each chunk's
+`items` and `order`, then replace the visible roster only after the final chunk.
+Do not expose a partial roster as a complete result. `has_more` is always false.
+
+Subsequent `changes` carry complete-row `upserts`, `removes`, the complete target
+`order`, and `base_revision`. Apply them only when the held epoch and revision
+match their publication epoch and base revision. Metadata-only revisions can have
+empty upserts/removes. An epoch change or an oversized delta starts a new complete
+snapshot sequence instead. There is no replay history: reconnect starts over.
+
+Every frame is at most 1 MiB. A row that cannot fit intact permanently refuses the
+subscription with `agents-publication-row-too-large`, before any snapshot chunk.
+Publication notices coalesce for a non-sliding 50 ms; slower readers skip obsolete
+pending targets rather than queueing every revision. A contiguous sequence has an
+eight-second total deadline and revalidates authority before every data frame.
+Other collection data cannot interleave with that sequence.
+
 ### Rules for every projection
 
 - **On a published view, never derived on read.** A projection is a `presentation` object on the
@@ -515,7 +542,7 @@ roster refresher already folds.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
-| Phone | `apps/ios/agentsView.ts` `agentState` (file 294 lines) | Ignores `blocked_on`, so every blocked seat reads as needs you; calls needs you "alert"; shows no next. |
+| Phone | Moved: `apps/ios/agentsView.ts` `agentState` reads `presentation.state`; a row without one reads `unknown` and shows its reported `state` as from an older Fractal (`agentReported`) | Calls needs you "alert"; shows no `because` and no next. |
 | Fractal | `apps/fractal-web/src/data/projections.ts` `activityOf`, `statusOf`; `web/sidebarRow.ts` | Its own status line and activity words; no shared states. |
 
 ### Attention row
@@ -531,9 +558,9 @@ never infer it.
 | `kind` | The card: `review`, `feedback`, `request`, `update`, `launch`, `revision`, `prompt`, `login` or `fault`, or `null` for a row that is no card at all (an unread message). |
 | `agent` | Who **Chat about this** reaches, `{id, label}`: the conversation, else the step's claimant, else an agent working in the mission (the first in the agents roster's order, when several are), else the requester. `null` means the chief of staff. |
 | `raised_by`, `waiting` | Who raised it, `{id, label}`: the requester, else the agent behind it, with Fractal's own actors (`daemon/…`, `agent/st3/reconciler`) labeled "Fractal", else "the … mission" it came from; and the step it holds, `{step, path}`. A person's label is their id. |
-| `launch` | On a launch card: the newest variant's mission as `{variant, goals[], steps[], agents[], asks_you}`. Each step is `{path, title, assignee, after[], asks_you}`, in display order without `finally` steps. `assignee` is `{kind, agent, label}`, with `kind` one of `agent`, `any`, `st` or `none`. Each agent is `{id, label, harness, host}`. `asks_you` counts the steps that stop for a person. With no previewable variant it is `{unavailable: {reason, diagnostics[]}}`, with up to three diagnostics. |
+| `launch` | On a launch card: the newest variant's mission as `{variant, goals[], steps[], agents[], asks_you}`. Each step is `{path, title, assignee, after[], asks_you}`, in display order without `finally` steps. `assignee` is `{kind, agent, label}`, with `kind` one of `agent`, `any`, `st` or `none`; an `st` step's label is "Fractal". Each agent is `{id, label, harness, host}`. `asks_you` counts the steps that stop for a person. With no previewable variant it is `{unavailable: {reason, diagnostics[]}}`, with up to three diagnostics, and so is a preview past 12 KiB, so the row stays within its 16 KiB bound. An agent's `harness` and `host` are its seat as the candidate declares it, else as Fractal runs it, else `null`. |
 | `revision` | On a revision card: the changes (see [Revision changes](#revision-changes)). |
-| `prompt` | On a harness-prompt card: `{calls[], answers[], allow}`. Each call is a tool call without a result in the seat's conversation: `{call_id, tool, input, input_complete}`, at most five, each input within 4 KiB. `answers` come from `action_parameters["prompt.respond"]`. `allow` is true only when exactly one call is pending and its input is complete. When Fractal cannot read the timeline, `calls` is `null` with `unknown_reason` and `allow` is false: the card says to answer in the terminal. |
+| `prompt` | On a harness-prompt card: `{calls[], answers[], allow}`. `calls` holds the call the harness asks about, the one `action_parameters["prompt.respond"].call_id` names, while it has no result in the seat's conversation: `{call_id, tool, input, input_complete}`. `input` is the call's arguments as JSON text, cut at 4 KiB, and `input_complete` is false when it was cut, or when the timeline holds only a bounded preview of the call. Fractal never guesses the call from the others without a result, such as a parent's open `Task` call: a prompt that names no call has no calls and is answered in its terminal. `answers` come from `action_parameters["prompt.respond"]`. `allow` is true only when the named call is listed, its input is complete and there are answers. When Fractal cannot read the timeline, or cannot follow it for changes, `calls` is `null` with `unknown_reason` and `allow` is false: the card says to answer in the terminal. An answer other than deny to a prompt that names its call goes on, when the seat runs on this member, only while that call waits in its conversation here, as a card that offers allow does; when the seat runs on another member it is recorded where it lands, and the seat's hook releases it only for the very prompt it published; otherwise it is refused (`stale-fence`), so a card shown from an earlier read lets nothing through. Fractal reads the seat's conversation among its newest 200 entries (a page): on this member, or through the client-read relay from the member that runs the seat, as the seat's person. It reads as the attention list folds, and again whenever the conversation changes: the named call shows once the seat makes it, and goes once it has its result. For a remote seat a follower of its own reads through the relay, waits on the host's changes and reads again when any arrive; the list takes its latest read, so it never waits on another member. Until that first read, and while the host can't be read, the card has `unknown_reason` and no allow. |
 
 Kinds come from `attention_kind`: a human gate is `stopped` · `review` (`feedback` in feedback
 mode); a person step or agent request is `stopped` · `request`, or `later` · `update` when it
@@ -556,9 +583,9 @@ agents.
 
 | | Derivation | Differs from this contract |
 |---|---|---|
-| Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows Fractal's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. Still its own: `preview()`, `alerts.rs` `unanswered_calls`, the variants fetch in `live.rs` | Fills launch agents' harness and host as unknown. Withholds allow when a call runs past four lines, instead of when its input is incomplete. |
-| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Home. Still its own: `pendingCalls`, `offeredAnswers` | Shows launch variants and diagnostics, with no step preview. |
-| Fractal | None live; `projections.ts` `attentionRefs` only | Nothing to delete. |
+| Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows Fractal's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. A launch card shows `launch` (`launch_preview()`), and a prompt's band shows `prompt`'s calls and offers allow only where `allow` says so (`prompt_calls()`, `alerts.rs`); an older Fractal that serves neither gets a card that says so, answered in the terminal. | Also withholds allow when the band cannot show the whole call in its four lines, as a client that cannot show the whole input offers deny only. |
+| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Home. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
+| Fractal | `projections.ts` `attentionRefs`; its alerts read a prompt's calls from the conversation (`src/conversation/alerts/AgentAlerts.tsx`, with `homeView.ts` `pendingCalls`, `offeredAnswers`) | Moves to `prompt` with `servedPrompt` and `servedAnswers`; then `pendingCalls` and `offeredAnswers` are deleted. |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on
 `input_complete`; a client that cannot show the whole input offers deny only.

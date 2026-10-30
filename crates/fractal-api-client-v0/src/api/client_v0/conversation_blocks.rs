@@ -87,7 +87,7 @@ pub async fn chunk_local(
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) =
@@ -2129,9 +2129,18 @@ mod tests {
 
     #[test]
     fn concurrent_read_limit_has_no_waiting_backlog() {
-        let slots = tokio::sync::Semaphore::new(4);
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let slots = read_slots(&root.path().join("one.jsonl"));
         let held: Vec<_> = (0..4).map(|_| slots.try_acquire().unwrap()).collect();
         assert_eq!(read_slot(&slots).unwrap_err().code, "rate-limited");
+        let same_scope = read_slots(&root.path().join("two.jsonl"));
+        assert_eq!(read_slot(&same_scope).unwrap_err().code, "rate-limited");
+        let other_scope = read_slots(&other.path().join("one.jsonl"));
+        assert!(
+            read_slot(&other_scope).is_ok(),
+            "parallel test scopes must not consume each other's read budget"
+        );
         drop(held);
         assert!(read_slot(&slots).is_ok());
     }
@@ -2195,55 +2204,82 @@ mod tests {
         }
     }
 
-    #[test]
-    fn same_fold_viewers_wait_without_holding_global_read_slots() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().to_owned();
-        let shared = fold_fixture(&home, "shared").transcript;
-        crate::external_sessions::timeline_test_support::arm_refresh(&shared);
-        let identities = |items: &[Value]| {
-            items
-                .iter()
-                .map(|item| (item["id"].clone(), item["sequence"].clone()))
-                .collect::<Vec<_>>()
-        };
-        let viewer = |name: &'static str| {
-            let source = fold_fixture(&home, name);
-            let session = ClientSession::local(Some("person/example")).unwrap();
-            std::thread::spawn(move || {
-                read_slice(
-                    &source,
-                    &session,
-                    &source.id,
-                    crate::external_sessions::TimelineOrder::Sequence,
-                    None,
-                    10,
-                    true,
-                )
-            })
-        };
-        let first = viewer("shared");
-        crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
-        let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
-        // Every viewer of the shared transcript is queued on its fold, none on a read slot.
-        crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
-        let unrelated = viewer("other");
-        let unrelated = unrelated.join().unwrap().unwrap();
-        assert!(
-            serde_json::to_string(&unrelated.items)
-                .unwrap()
-                .contains("content of other"),
-            "another conversation is admitted while the shared fold is contended"
-        );
-        crate::external_sessions::timeline_test_support::release_refresh(&shared);
-        let first = first.join().unwrap().unwrap();
-        assert!(!first.items.is_empty());
-        for viewer in parked {
-            assert_eq!(
-                identities(&viewer.join().unwrap().unwrap().items),
-                identities(&first.items)
-            );
+    /// Run blocking coordination away from the runtime thread so its deadline can fire even
+    /// if a refresh gate, fold wait, or thread join never completes.
+    async fn coordination_deadline(name: &'static str, test: impl FnOnce() + Send + 'static) {
+        let (done, result) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(test)));
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .unwrap_or_else(|_| panic!("{name}: coordination did not finish within 30 seconds"))
+            .expect("coordination worker must report its outcome");
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
+    }
+
+    #[tokio::test]
+    async fn same_fold_viewers_wait_without_holding_global_read_slots() {
+        coordination_deadline(
+            "same_fold_viewers_wait_without_holding_global_read_slots",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().to_owned();
+                let shared = fold_fixture(&home, "shared").transcript;
+                // A parallel test can fill its own budget before this first viewer starts.
+                let other_test = tempfile::tempdir().unwrap();
+                let other_slots = read_slots(&other_test.path().join("busy.jsonl"));
+                let _other_reads: Vec<_> =
+                    (0..4).map(|_| other_slots.try_acquire().unwrap()).collect();
+                crate::external_sessions::timeline_test_support::arm_refresh(&shared);
+                let identities = |items: &[Value]| {
+                    items
+                        .iter()
+                        .map(|item| (item["id"].clone(), item["sequence"].clone()))
+                        .collect::<Vec<_>>()
+                };
+                let viewer = |name: &'static str| {
+                    let source = fold_fixture(&home, name);
+                    let session = ClientSession::local(Some("person/example")).unwrap();
+                    std::thread::spawn(move || {
+                        read_slice(
+                            &source,
+                            &session,
+                            &source.id,
+                            crate::external_sessions::TimelineOrder::Sequence,
+                            None,
+                            10,
+                            true,
+                        )
+                    })
+                };
+                let first = viewer("shared");
+                crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
+                let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
+                // Every shared viewer queues on its fold, not on a read slot.
+                crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
+                let unrelated = viewer("other");
+                let unrelated = unrelated.join().unwrap().unwrap();
+                assert!(
+                    serde_json::to_string(&unrelated.items)
+                        .unwrap()
+                        .contains("content of other"),
+                    "another conversation is admitted while the shared fold is contended"
+                );
+                crate::external_sessions::timeline_test_support::release_refresh(&shared);
+                let first = first.join().unwrap().unwrap();
+                assert!(!first.items.is_empty());
+                for viewer in parked {
+                    assert_eq!(
+                        identities(&viewer.join().unwrap().unwrap().items),
+                        identities(&first.items)
+                    );
+                }
+            },
+        )
+        .await;
     }
 
     #[test]
