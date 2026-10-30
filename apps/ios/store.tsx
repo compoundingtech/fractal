@@ -16,6 +16,7 @@ import { rememberBounded } from './boundedCache';
 import { IMAGES, imageKey } from './imageView';
 import { wantsScreenSequence, withFreshTerminalFence, type TerminalFence } from './terminalControls';
 import { sendFences } from './sendFence';
+import { sendRefusal } from './composer';
 import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts } from './qualityNative';
@@ -110,7 +111,7 @@ function items<K extends Resource['kind']>(page: { items: Resource[] }, kind: K)
   return page.items.filter((item): item is Extract<Resource, { kind: K }> => item.kind === kind);
 }
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
-function sentAs(outcome: SendOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: errorText(outcome.error) } : outcome; }
+function sentAs(outcome: SendOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
 
 /** Where a measurement was served from: the route it ran over and, for fabric, the path once measured. */
 function observedContext(route: Route, fabricPath: 'direct' | 'relay' | 'unknown'): Context {

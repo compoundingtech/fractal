@@ -380,6 +380,7 @@
   },
   "fractal-ui-model": {
    "extra": [
+    "clients/typescript/fractal-views/tests/fixtures/prompt-forms.json",
     "fixtures/clients/documents-v1.json",
     "fixtures/clients/sidebar-v2.json",
     "fixtures/clients/words.json",

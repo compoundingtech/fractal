@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.dont_write_bytecode = True
@@ -142,15 +143,32 @@ def git(cwd, *args):
     return subprocess.run(['git', '-C', str(cwd), *args], capture_output=True, check=True).stdout.decode()
 
 
+def remove_tree(tmp, attempts=5):
+    """TemporaryDirectory cleanup that outlasts a writer still finishing inside it: a few short retries, then the error as before."""
+    for attempt in range(attempts):
+        try:
+            return tmp.cleanup()
+        except OSError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+
+
 class FlipReady(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(remove_tree, self.tmp)
         tmp = Path(self.tmp.name)
         # A copy of the files the flip edits, committed and pushed to a local origin: --propose pushes there.
         self.origin, self.repo = tmp / 'origin.git', tmp / 'repo'
         subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(self.origin)], check=True)
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(self.repo)], check=True)
+        # These disposable repositories have no maintenance lifecycle. A detached Git writer (auto gc or maintenance after a commit,
+        # or receive-pack's auto gc on the origin) can outlive its command and race the cleanup: 'Directory not empty' on repo/.git.
+        for repo in (self.origin, self.repo):
+            git(repo, 'config', 'maintenance.auto', 'false')
+            git(repo, 'config', 'gc.auto', '0')
+        git(self.origin, 'config', 'receive.autogc', 'false')
         for path in (flip.POLICY, flip.DOC, flip.WORKFLOW, *(path for path, _ in flip.TEST_LISTS)):
             (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / path).write_text(SHADOW[path]) if path in SHADOW else shutil.copyfile(ROOT / path, self.repo / path)
