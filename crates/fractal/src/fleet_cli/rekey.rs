@@ -269,11 +269,11 @@ esac
             let app = Router::new()
                 .route("/v1/internal/fleet/membership", get(move || {
                     let reads = reads.clone();
-                    async move { Json(membership(reads.lock().unwrap().last())) }
+                    async move { Json(json!({"api_version":"st3.v1","value":membership(reads.lock().unwrap().last())})) }
                 }))
                 .route("/v1/internal/fleet/fabric-rekey", post(move |Json(request):Json<Value>| {
                     let writes = writes.clone();
-                    async move { writes.lock().unwrap().push(request); Json(json!({"published":true})) }
+                    async move { writes.lock().unwrap().push(request); Json(json!({"api_version":"st3.v1","value":{"published":true}})) }
                 }));
             let socket = root.path().join("api.sock");
             let listener = tokio::net::UnixListener::bind(&socket).unwrap();
