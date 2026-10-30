@@ -537,6 +537,10 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
+    /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
+    /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
+    /// without one has nothing to end.
+    fn end_lane(&self, _runtime_id: &str) {}
 }
 
 pub struct NativeRuntime {
@@ -592,6 +596,18 @@ pub fn member_environment(
     let mut environment = crate::environment::overlay(inherited, declared, executable)?;
     record_member_commands(&mut environment, recorder)?;
     Ok(environment)
+}
+
+/// Hands a seat's lane to its spawn. Only a `capacity` declaration selects one; a value in the
+/// seat's own `env` does not.
+fn set_lane(environment: &mut BTreeMap<String, String>, capacity: Option<fractal_runtime::Capacity>) {
+    environment.remove(fractal_runtime::CAPACITY_ENV);
+    for alias in fractal_runtime::CAPACITY_ENV_ALIASES {
+        environment.remove(alias);
+    }
+    if let Some(capacity) = capacity {
+        environment.insert(fractal_runtime::CAPACITY_ENV.into(), capacity.to_string());
+    }
 }
 
 /// Puts the recorder directory first on a member's PATH, after the declaration and the st3
@@ -892,6 +908,10 @@ impl RuntimeControl for NativeRuntime {
             self.exec.end_leftovers_later(runtime_id);
         }
     }
+
+    fn end_lane(&self, runtime_id: &str) {
+        fractal_runtime::end_lane(runtime_id);
+    }
 }
 
 impl NativeRuntime {
@@ -922,8 +942,9 @@ impl NativeRuntime {
         backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
-        let environment =
+        let mut environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
+        set_lane(&mut environment, member.capacity);
         let mut launch = fractal_runtime::Launch::from(&member.launch);
         match &mut launch {
             fractal_runtime::Launch::Shell(source) => {
@@ -1538,6 +1559,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         fractal_runtime::set_configured_seat_priority(priority);
         self.runtime_environment
             .insert(fractal_runtime::PRIORITY_ENV.into(), priority.as_str().into());
+        self
+    }
+
+    /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
+    /// install config). Applies to launches after this call.
+    pub fn with_lanes(self, enforced: bool) -> Self {
+        fractal_runtime::set_lanes_enforced(enforced);
         self
     }
 
@@ -6987,6 +7015,18 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
+            let desired = self.store.selected_desired_token(subject)?;
+            let stop = match &desired {
+                Some(token) if self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop") => {
+                    Some(token.clone())
+                }
+                _ => None,
+            };
+            // A seat stopped for good (an explicit stop, or no declaration left) ends its lane, if
+            // it has one, and the jobs in it. A stop for a restart of a live declaration keeps them.
+            if stop.is_some() || desired.is_none() {
+                self.runtime.end_lane(runtime_id);
+            }
             let mut fields = BTreeMap::from([
                 ("status".into(), Value::String("stopped".into())),
                 ("runtime_id".into(), Value::String(runtime_id.into())),
@@ -6999,15 +7039,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             // A confirmed explicit stop can fence a later move even while this host is offline.
             // Stops for a restart of a still-live declaration cannot release a placement fence.
-            let mut evidence = Vec::new();
-            if let Some(token) = self.store.selected_desired_token(subject)?
-                && self
-                    .store
-                    .claim_by_id(&token)?
-                    .is_some_and(|c| c.body["kind"] == "stop")
-            {
-                evidence.push(token);
-            }
+            let evidence = Vec::from_iter(stop);
             fields.insert("host".into(), Value::String(self.host.clone()));
             if self.store.latest_actual_value(subject)?.is_some_and(|actual| {
                 actual_field(&actual, "restarting_from").is_some_and(Value::is_string)
@@ -12022,6 +12054,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("loop-metric".into()),
             terminal_size: None,
+            capacity: None,
         };
         self.perform_start(
             &DesiredSubject {
@@ -17553,6 +17586,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("mechanical-gate".into()),
             terminal_size: None,
+            capacity: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -18104,6 +18138,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("llm-gate".into()),
             terminal_size: None,
+            capacity: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -19890,6 +19925,21 @@ pub mod tests {
     }
 
     #[test]
+    fn only_a_capacity_declaration_selects_a_lane() {
+        use fractal_runtime::{CAPACITY_ENV, Capacity};
+        let authored = |key: &str| BTreeMap::from([(key.to_string(), "cores=64,memory=68719476736".to_string())]);
+        for key in [CAPACITY_ENV, "ST_SEAT_CAPACITY", "ST3_SEAT_CAPACITY"] {
+            let mut environment = authored(key);
+            super::set_lane(&mut environment, None);
+            assert!(environment.is_empty(), "{key} selected a lane without a declaration");
+        }
+        let declared = Capacity { cores: 2, memory: 4 << 30 };
+        let mut environment = authored("ST_SEAT_CAPACITY");
+        super::set_lane(&mut environment, Some(declared));
+        assert_eq!(environment, BTreeMap::from([(CAPACITY_ENV.to_string(), declared.to_string())]));
+    }
+
+    #[test]
     fn a_terminal_a_person_opened_stays_at_normal_priority() {
         use super::overlay_runtime_environment;
         use fractal_runtime::PRIORITY_ENV;
@@ -20359,6 +20409,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         /// How many keys `send_key_if` takes before it fails, when set.
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
+        lanes_ended: Mutex<Vec<String>>,
     }
 
     #[test]
@@ -20678,6 +20729,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 .lock()
                 .unwrap()
                 .push((runtime_id.into(), terminal));
+        }
+        fn end_lane(&self, runtime_id: &str) {
+            self.lanes_ended.lock().unwrap().push(runtime_id.into());
         }
     }
 
@@ -28428,6 +28482,8 @@ mission "proof" state="ready" {{
                 expected_starts,
                 "{name}"
             );
+            // An exit of a live declaration, relaunched or not, keeps the seat's lane and its jobs.
+            assert!(runtime.lanes_ended.lock().unwrap().is_empty(), "{name}");
         }
     }
 
@@ -29798,6 +29854,8 @@ agent "worker" {
             &*runtime.leftovers.lock().unwrap(),
             &[("node.worker".to_owned(), true)]
         );
+        // Stopped for good: its lane ends too.
+        assert_eq!(&*runtime.lanes_ended.lock().unwrap(), &["node.worker".to_owned()]);
         assert_eq!(
             actual_field(
                 &store
