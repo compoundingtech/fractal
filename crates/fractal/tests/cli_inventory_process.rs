@@ -163,6 +163,13 @@ fn standalone_inventory_exits_with_live_json_without_a_daemon() {
             .iter()
             .any(|row| row.as_str() == Some("st claude-channel install-policy"))
     );
+    for command in [
+        "st harness-questions list",
+        "st harness-questions show",
+        "st harness-questions answer",
+    ] {
+        assert!(commands.iter().any(|row| row.as_str() == Some(command)), "{command}");
+    }
     assert!(value.get("source_head").is_none());
     assert!(value.get("source_tree").is_none());
     assert!(!root.path().join("absent-daemon.sock").exists());
