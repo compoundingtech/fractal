@@ -1730,11 +1730,13 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10,
-/// all 17 fixed seeds converge and trim a checkpoint, including seed 3.
-/// This measured characterization includes the three durable person-repair kinds.
-/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10, which
+/// includes the three durable person-repair kinds and `ordered-membership.edited`, all 17
+/// fixed seeds converge and 15 trim a checkpoint. Seeds 21 and 233 add an old build that no
+/// one excuses, so it holds every checkpoint.
+/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG, so any
+/// change to the corpus moves every schedule and must measure this set again.
+const NEVER_TRIMS: &[u64] = &[21, 233];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {

@@ -154,8 +154,12 @@ Versions 1 through 9 stay frozen. Generate it with
 `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v10.json`;
 do not hand-edit the snapshot. Slot 10 was selected after fetching current main
 immediately before generation. The simulation and audit summaries select v10.
-With this corpus, all 17 fixed seeds converge and trim a checkpoint, including seed 3;
-the exact `NEVER_TRIMS` set is empty. The remote characterization used
+With this corpus, all 17 fixed seeds converged and trimmed a checkpoint, including seed 3,
+and the exact `NEVER_TRIMS` set was empty. Regenerating v10 with `ordered-membership.edited`
+moved every schedule: all 17 still converge, but seeds 21 and 233 now add an old build that
+no one excuses, which holds every checkpoint, so `NEVER_TRIMS` is `[21, 233]`. Any change to
+the corpus moves every schedule, so measure `NEVER_TRIMS` again with it. The remote
+characterization used
 `cargo test -p fractal --test integration convergence::seed_ -- --nocapture --test-threads=1`.
 That run observed every seed trim; its sole failed assertion was v9's obsolete
 expectation that seed 3 never trims. The per-seed equality remains enforced.
