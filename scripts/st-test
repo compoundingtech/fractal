@@ -173,6 +173,7 @@ TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 1  # how often a waiter looks at the tree queue again
+TREE_FREE_FALLBACK_SECONDS = 60  # a tree this waiter has seen free this long, untaken by the ticket ahead of it, may be tried by it: the flock decides (liveness: waiters run different copies of this order, so the best ticket of one may defer to another that defers back)
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
@@ -1003,6 +1004,7 @@ def evict_to_cap(base, limit_gb, keep=None):
 
 
 PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
+PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (hetz2, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
 
 
 def priority_rank(environment=None):
@@ -1036,7 +1038,8 @@ def process_started_ns(pid):
 
 
 def tree_queue(queue, now_ns):
-    """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival. A ticket
+    """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival, except that a
+    ticket past PRIORITY_MAX_WAIT_SECONDS goes before all the others, oldest first (a limit on starvation, which ranks under the floor would otherwise cause). A ticket
     whose process is gone is removed, and so is one whose pid now names a process that started after the ticket was taken (a waiter killed
     with SIGKILL leaves its ticket; a reused pid must not keep its place)."""
     found = []
@@ -1059,6 +1062,8 @@ def tree_queue(queue, now_ns):
                 os.unlink(queue / name)
             continue
         effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
+        if now_ns - nanos >= PRIORITY_MAX_WAIT_SECONDS * 10**9:
+            effective = -1  # past the maximum wait: ahead of every ticket that has not, and the overdue ones among themselves by arrival
         found.append((effective, nanos, name))
     return sorted(found)
 
@@ -1070,7 +1075,8 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
     pool size or a function giving it, read again on every pass: when the host's heavy slots grow while runs wait, the best ticket takes a new
     tree at once instead of polling only the old ones (with every ticket behind it waiting too).
     With `slot_ready` (a function giving (ready, why): build_slot_ready, for a run that builds) a free tree is taken only when it says a build
-    could start now, or once TREE_SLOT_WAIT_LIMIT seconds of a free tree left for want of a slot have passed (slot first, above). `waits`, a
+    could start now, or once TREE_SLOT_WAIT_LIMIT seconds of a free tree left for want of a slot have passed (slot first, above). A waiter that is not first
+    still tries a tree it has seen free for TREE_FREE_FALLBACK_SECONDS (liveness against waiters running different copies of the order). `waits`, a
     dict, is given the seconds spent: 'tree_wait_s' in all, and 'slot_wait_s' of them while a free tree waited for a build slot."""
     root.mkdir(parents=True, exist_ok=True)
     queue = root / 'queue'
@@ -1079,6 +1085,7 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
     ticket.touch()
     waited, told = False, set()
     began, slot_waited, slot_seen, slot_told = time.monotonic(), 0.0, None, False
+    free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
 
     def taken(n, lock):
         if waits is not None:
@@ -1128,6 +1135,30 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
                         told.add(n)
                         print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
                               'a run that lost the tree); it is skipped until they end', file=sys.stderr)
+            elif trees:
+                # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
+                # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
+                # would try a free tree. Liveness: a tree seen free for TREE_FREE_FALLBACK_SECONDS that the head has not taken may be tried here; the flock
+                # still decides any contention, and a build waiting for a slot keeps the head's rule (a free tree is taken only when a build could start).
+                for n in range(trees):
+                    lock = open(root / f'tree-{n}.lock', 'w')
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        lock.close()
+                        free_since.pop(n, None)
+                        continue
+                    if tree_users(root / f'tree-{n}'):
+                        lock.close()
+                        free_since.pop(n, None)
+                        continue
+                    now = time.monotonic()
+                    seen = free_since.setdefault(n, now)
+                    if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
+                        print(f'fractal-test: tree-{n} has been free for {round(now - seen)}s and the {ahead} ticket(s) ahead did not take it '
+                              f'(TREE_FREE_FALLBACK_SECONDS): trying it', file=sys.stderr, flush=True)
+                        return taken(n, lock)
+                    lock.close()
             if not free_tree:
                 slot_seen = None  # only the time a free tree waited for a slot counts toward TREE_SLOT_WAIT_LIMIT
                 if not waited:

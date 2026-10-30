@@ -146,7 +146,7 @@ pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
 mod launch_card;
-mod prompt_card;
+pub mod prompt_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
@@ -771,6 +771,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
+        .route("/v1/signatures/resume", post(replication::signature_resume))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -4389,6 +4390,13 @@ fn client_attention_resources_from_items(
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
         }
+        // An ask resolves by itself at its deadline, with its default answer if it has one.
+        if let Some(deadline) = item.deadline_unix_ms {
+            resource["deadline_at"] = json!(client_timestamp(deadline));
+        }
+        if let Some(default) = item.default_answer {
+            resource["default_answer"] = default;
+        }
         for (name, value) in [
             ("conversation_id", item.conversation),
             ("requester_id", item.requester_id),
@@ -7044,6 +7052,7 @@ pub async fn guard_bound_request(
         "/v1/diagnostic",
         "/v1/rules/",
         "/v1/repair",
+        "/v1/signatures/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
@@ -7310,6 +7319,8 @@ fn doctor_attention_items(
     let mut items = store.attention_snapshot(None, now)?;
     items.extend(store.fault_snapshot(now)?.into_iter().map(|fault| {
         crate::model::AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             person: fault.owner.unwrap_or_else(|| "no owning agent".into()),
             ..fault.item
         }
