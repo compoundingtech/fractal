@@ -879,16 +879,23 @@ mod tests {
                 delivered_events += outcome.message_subjects.len();
             }
             assert_eq!(delivered_events, 1);
-            let mut listed_before = None;
-            for name in [renamed, original] {
-                let (status, listed) = request(app.clone(), "GET",
-                    &format!("/v1/github/watches?agent={name}"), Value::Null).await;
-                assert_eq!(status, StatusCode::OK, "{listed}");
-                assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
-                assert_eq!(listed[0]["subject"], initial["subject"]);
-                assert_eq!(listed[0]["until"], initial["until"]);
-                if let Some(previous) = listed_before.replace(listed.clone()) {
-                    assert_eq!(listed, previous);
+            let replica_root = tempfile::tempdir().unwrap();
+            let mut replica = super::super::tests::state(replica_root.path());
+            replica.store = Arc::new(Store::open_memory("watch-replica").unwrap());
+            replica.store.import_replication(store.origin(), &store.export_replication(0).unwrap()).unwrap();
+            assert_eq!(replica.store.messages(Some(original), false).unwrap().len(), 1);
+            for reader in [app.clone(), router(replica)] {
+                let mut listed_before = None;
+                for name in [renamed, original] {
+                    let (status, listed) = request(reader.clone(), "GET",
+                        &format!("/v1/github/watches?agent={name}"), Value::Null).await;
+                    assert_eq!(status, StatusCode::OK, "{listed}");
+                    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+                    assert_eq!(listed[0]["subject"], initial["subject"]);
+                    assert_eq!(listed[0]["until"], initial["until"]);
+                    if let Some(previous) = listed_before.replace(listed.clone()) {
+                        assert_eq!(listed, previous);
+                    }
                 }
             }
             let wakes = store.messages(Some(original), false).unwrap();
