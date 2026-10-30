@@ -1464,7 +1464,7 @@ class CommittedPolicy(unittest.TestCase):
                 else:
                     self.assertTrue((ROOT / path).exists(), f'{check} declares {path}, which does not exist')
         for check in ('linux-gate', 'typescript-client', 'fractal-web'):
-            self.assertEqual(self.rules(check)['sample_one_in'], 1, check)  # no sampling on pull requests (Nathan, 2026-10-26)
+            self.assertEqual(self.rules(check)['sample_one_in'], 1, check)  # no sampling on pull requests (Ada, 2026-10-26)
 
     def test_the_fractal_web_inputs_cover_every_tracked_path_the_web_lane_detector_matches(self):
         # The detector decides whether the lane runs at all; a path it matches that the key left out would let a change to it reuse a
@@ -1521,7 +1521,7 @@ class CommittedPolicy(unittest.TestCase):
                          {check: check in ENFORCED for check in policy['checks']})
         for check in ENFORCED:
             self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
-            # Our pull requests skip CI entirely (Nathan, 2026-10-26): no comparison sample; the merge queue's full run is the comparison.
+            # Our pull requests skip CI entirely (Ada, 2026-10-26): no comparison sample; the merge queue's full run is the comparison.
             self.assertEqual(policy['checks'][check].get('sample_one_in', 1), 1, check)
         with_host = {}
         for check, entry in policy['checks'].items():
@@ -1540,7 +1540,7 @@ class CommittedPolicy(unittest.TestCase):
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
             # to the lane as well (Factory, 2026-10-22); since 2026-10-26 to the lane as the signed tree defines it, so a tree that edits
-            # its own lane skips on a host note made with that edited definition (Nathan: our pull requests skip CI entirely).
+            # its own lane skips on a host note made with that edited definition (Ada: our pull requests skip CI entirely).
             self.assertEqual(override.pop('lane', False), 'tree' if check in HOST_LANE_BOUND else False, check)
             # The agent level: the host's rule exactly, with the lane binding.
             agent = dict(rule['by_level']['agent'])
