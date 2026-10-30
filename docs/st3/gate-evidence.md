@@ -1804,10 +1804,25 @@ first (`git merge --no-ff`, with your git identity: a new head commit), then sig
 commit (`fractal-test: the branch is 37 commits behind main, more than 24: merged origin/main (...) into my-branch as <sha>; the head tree is what is signed`).
 A signed merge tree is void at main's next commit, but the merged head's tree stays the one CI judges for `HEAD_TREE_MAX_BEHIND` more commits of main
 (as long as no protected file moves), so a run that waited hours for a pool tree is not lost to what landed meanwhile. A conflict stops the run at once,
-with the branch as it was (`git merge --abort`); so does a checkout that gained uncommitted changes to tracked files during the wait. With `--push`, a run
-that merged and exits 0 also pushes the branch at that merge to the branch of the same name on REMOTE (never forced, through the pre-push hook as any
-push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a branch named as the base's, is not
-pushed: the command is printed. `--status` changes nothing: it asks about the tree CI would judge now, the merge tree (`git merge-tree`, nothing
+with the branch as it was (`git merge --abort`); so does a checkout that gained uncommitted changes to tracked files during the wait.
+**A signing run that main overtakes is topped up, not lost.** With `--push`, a green run (exit 0) of the whole suite, or one that merged, asks again
+before it pushes: it fetches the base, merges it in when the gate would now judge the merge (as above, with your git identity, never a rebase), and
+asks the base's verifier about EVERY check of the suite for the head, as `--status` does. What is covered is not run again; what is not (a check whose
+tree the merge changed, a crate whose key main's `.st/rust-test-inputs.json` moved, the whole-tree checks a narrowed `--check rust-tests --crate X`
+run did not select once it merged) is signed in the same pool tree, and the branch is pushed at once when nothing is missing, so main has no time
+to move a protected file between a green run and its push (2026-10-29: a run's three checks were green and its push was refused, main having moved a
+protected file during the run). It does this at most `TOP_UP_ROUNDS` (3) times after the run itself, each against the base as it is then (`fractal-test:
+top-up round 1 of 3: origin/main is at <sha>, merged into the branch as <sha>; signing what <sha> lacks: linux-gate, rust-tests (2 crates: ...)`), and
+then fails, exit 2, with `main is moving too fast; run again`: the notes it signed are pushed, the branch is not. A conflict in a top-up merge stops the
+run the same way (`git merge --abort`, the branch as it was, not pushed). When the base did not move and a check the round signed is still not covered
+(a note the verifier finds too old, say), signing again would change nothing: the run ends as before, pushing a merge it made and not a head that is not
+covered. A narrowed run that merged nothing pushes only its notes, as before. The branch goes to the branch of the same name on REMOTE (never forced,
+through the pre-push hook as any push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a
+branch named as the base's, is not pushed: the command is printed. Before it waits for a pool tree a `--push` run checks that git has an identity for
+such a merge (`git var GIT_AUTHOR_IDENT`/`GIT_COMMITTER_IDENT`, from git config: `fractal-test` drops the `GIT_AUTHOR_*`/`GIT_COMMITTER_*` variables),
+and every run that starts nix checks it can find it (on PATH, else `/run/current-system/sw/bin/nix`, `~/.nix-profile/bin/nix`,
+`/nix/var/nix/profiles/default/bin/nix`): a `systemd-run --user` unit starts with the user manager's PATH, so pass it `--setenv=PATH="$PATH"`. Either
+missing fails the run at once, not after hours in the queue. A `--base` given as a commit ID (no `remote/` prefix) reads its repository through `origin`. `--status` changes nothing: it asks about the tree CI would judge now, the merge tree (`git merge-tree`, nothing
 checked out), so the pre-push hook refuses a push when that tree is not covered even if the head tree is. A run that waits for a pool tree fetches
 the base again once it has one and decides at the base's tip then (a branch that does not merge with the base is still refused before the wait).
 A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
