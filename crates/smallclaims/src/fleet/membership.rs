@@ -265,6 +265,27 @@ impl Membership {
     }
 
     /// The keys whose incarnation windows hold this writer sequence.
+    /// The window for an envelope of a named shard. Membership windows count a writer's
+    /// default-store sequences, which say nothing about its sequences in a shard, so a shard
+    /// envelope needs a signature by a key of any incarnation of its writer that was not
+    /// removed. A shard has no legacy window: a writer that was never a member, or whose every
+    /// incarnation was removed, is fenced.
+    pub fn shard_window(&self, writer: &str) -> Window {
+        let keys = self
+            .incarnations
+            .get(writer)
+            .into_iter()
+            .flatten()
+            .filter(|incarnation| incarnation.ended.as_deref() != Some("removed"))
+            .map(|incarnation| incarnation.member_key.clone())
+            .collect::<BTreeSet<_>>();
+        if keys.is_empty() {
+            Window::Fenced
+        } else {
+            Window::Keyed(keys)
+        }
+    }
+
     pub fn keys_for(&self, writer: &str, sequence: u64) -> BTreeSet<String> {
         self.incarnations
             .get(writer)

@@ -870,6 +870,9 @@ pub struct Store {
     projection_contention_generation: AtomicU64,
     /// When this process last attempted projection of replicated claims, in Unix milliseconds.
     pub last_replication_projection_unix_ms: AtomicU64,
+    /// For a shard, the default store whose fleet identity and membership it uses: a shard
+    /// holds no fleet claims of its own. See `bind_fleet_authority`.
+    fleet_authority: std::sync::OnceLock<Arc<Store>>,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
     pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
@@ -1255,6 +1258,7 @@ impl Store {
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
+            fleet_authority: std::sync::OnceLock::new(),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
@@ -2317,9 +2321,10 @@ impl Store {
         else {
             return Ok(0);
         };
-        let Some(fleet_id) = fleet_meta(&self.readers.get(), "fleet_id")? else {
+        let Some(fleet_id) = self.signing_fleet_id(&self.readers.get())? else {
             return Ok(0);
         };
+        let shard = self.bound_shard()?;
         let target: u64 = self.readers.get().query_row(
             "SELECT COALESCE(MAX(sequence),0) FROM replica_envelopes WHERE writer=?1",
             [&self.origin],
@@ -2350,7 +2355,8 @@ impl Store {
                     (
                         *sequence,
                         hash,
-                        key.sign(&crate::fleet::envelope_signature_message(
+                        key.sign(&crate::fleet::envelope_signature_message_in(
+                            shard.as_deref(),
                             &fleet_id,
                             &self.origin,
                             *sequence,
@@ -2431,6 +2437,9 @@ impl Store {
 
     /// The current fleet membership, folded from admitted `fleet.*` claims.
     pub fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.fleet_membership();
+        }
         // Membership is a function of the fleet claims, their envelopes' signatures and the
         // anchor, and triggers advance `fleet_generation` whenever any of them changes. Fold it
         // when the generation moved, not on every call: folding is hundreds of statements, and
@@ -2596,7 +2605,7 @@ impl Store {
         else {
             return Ok(0);
         };
-        let Some(fleet_id) = fleet_meta(transaction, "fleet_id")? else {
+        let Some(fleet_id) = self.signing_fleet_id(transaction)? else {
             return Ok(0);
         };
         let unsigned = prepared_seal::own_unsigned_envelopes(
@@ -2606,9 +2615,11 @@ impl Store {
             after_batch_rowid,
             through_batch_rowid,
         )?;
+        let shard = fleet_meta(transaction, "shard_id")?;
         let now = now_ms().to_string();
         for (sequence, envelope_hash) in &unsigned {
-            let signature = key.sign(&crate::fleet::envelope_signature_message(
+            let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+                shard.as_deref(),
                 &fleet_id,
                 &self.origin,
                 *sequence,
@@ -2701,9 +2712,10 @@ impl Store {
         let Some(key) = fleet_meta(&connection, principals::OWN_NODE_KEY)? else {
             return Ok(false);
         };
-        let Some(fleet_id) = fleet_meta(&connection, "fleet_id")? else {
+        let Some(fleet_id) = self.signing_fleet_id(&connection)? else {
             return Ok(false);
         };
+        let shard = fleet_meta(&connection, "shard_id")?;
         let mut statement = connection.prepare_cached(
             "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
              FROM replica_records AS records
@@ -2721,7 +2733,7 @@ impl Store {
         for row in rows {
             let (sequence, hash, signature) = row?;
             if VerifiedEnvelopeSignature::verify(
-                &fleet_id, &self.origin, sequence, &hash, &key, &signature,
+                shard.as_deref(), &fleet_id, &self.origin, sequence, &hash, &key, &signature,
             ).is_some() {
                 return Ok(true);
             }
@@ -3117,7 +3129,28 @@ pub fn fleet_admission_hold(
     membership: &crate::fleet::Membership,
     envelope: &ReplicaEnvelope,
 ) -> Result<Option<&'static str>> {
-    match membership.window(&envelope.writer, envelope.sequence) {
+    window_admission_hold(
+        connection,
+        membership.window(&envelope.writer, envelope.sequence),
+        envelope,
+    )
+}
+
+/// `fleet_admission_hold` for an envelope of a named shard; see `Membership::shard_window`.
+pub fn shard_admission_hold(
+    connection: &Connection,
+    membership: &crate::fleet::Membership,
+    envelope: &ReplicaEnvelope,
+) -> Result<Option<&'static str>> {
+    window_admission_hold(connection, membership.shard_window(&envelope.writer), envelope)
+}
+
+fn window_admission_hold(
+    connection: &Connection,
+    window: crate::fleet::Window,
+    envelope: &ReplicaEnvelope,
+) -> Result<Option<&'static str>> {
+    match window {
         crate::fleet::Window::Legacy => Ok(None),
         crate::fleet::Window::Fenced => Ok(Some("fenced")),
         crate::fleet::Window::Keyed(keys) => {
@@ -3190,6 +3223,7 @@ pub fn envelope_carries_fleet_claims(
 #[allow(clippy::too_many_arguments)]
 pub fn store_envelope_signature_tx(
     transaction: &Transaction<'_>,
+    shard: Option<&str>,
     fleet_id: &str,
     writer: &str,
     sequence: u64,
@@ -3199,7 +3233,7 @@ pub fn store_envelope_signature_tx(
     now: &str,
 ) -> Result<usize> {
     let Some(verified) = VerifiedEnvelopeSignature::verify(
-        fleet_id, writer, sequence, envelope_hash, member_key, signature,
+        shard, fleet_id, writer, sequence, envelope_hash, member_key, signature,
     ) else {
         return Ok(0);
     };
@@ -3219,6 +3253,7 @@ struct VerifiedEnvelopeSignature<'a> {
 
 impl<'a> VerifiedEnvelopeSignature<'a> {
     fn verify(
+        shard: Option<&str>,
         fleet_id: &str,
         writer: &'a str,
         sequence: u64,
@@ -3226,8 +3261,13 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
         member_key: &'a str,
         signature: &'a str,
     ) -> Option<Self> {
-        let message =
-            crate::fleet::envelope_signature_message(fleet_id, writer, sequence, envelope_hash);
+        let message = crate::fleet::envelope_signature_message_in(
+            shard,
+            fleet_id,
+            writer,
+            sequence,
+            envelope_hash,
+        );
         crate::fleet::verify_signature(member_key, &message, signature).then_some(Self {
             writer,
             sequence,
@@ -6592,6 +6632,41 @@ impl Store {
         fleet_meta(&self.readers.get(), "shard_id")
     }
 
+    /// Give a shard the default store whose fleet it belongs to. A shard holds no fleet claims:
+    /// its envelopes sign for the authority's fleet, and admission checks them against the
+    /// authority's membership, so a member removed there is refused here too. Set once per open.
+    pub fn bind_fleet_authority(&self, authority: Arc<Store>) -> Result<()> {
+        anyhow::ensure!(
+            self.bound_shard()?.is_some(),
+            "only a shard takes its fleet from another store"
+        );
+        anyhow::ensure!(
+            authority.bound_shard()?.is_none() && authority.fleet_authority.get().is_none(),
+            "a shard's fleet authority must be the default store"
+        );
+        self.fleet_authority
+            .set(authority)
+            .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))
+    }
+
+    /// The fleet this store's envelopes sign for: its authority's, for a shard.
+    fn signing_fleet_id(&self, connection: &Connection) -> Result<Option<String>> {
+        match self.fleet_authority.get() {
+            Some(authority) => authority.bound_fleet(),
+            None => fleet_meta(connection, "fleet_id"),
+        }
+    }
+
+    /// The fleet generation admission folded membership at. For a shard it is the authority's,
+    /// read outside this store's writer: a change landing after the check is used by the next
+    /// loan, as one landing after a default store's admission commits is.
+    fn admission_generation(&self, own: &Connection) -> Result<i64> {
+        match self.fleet_authority.get() {
+            Some(authority) => fleet_generation(&authority.readers.get()),
+            None => fleet_generation(own),
+        }
+    }
+
     pub fn replication_inventory(&self) -> Result<ReplicationInventory> {
         Ok(self.replication_snapshot()?.inventory.public())
     }
@@ -7260,6 +7335,7 @@ impl Store {
                     return None;
                 };
                 VerifiedEnvelopeSignature::verify(
+                    input.shard_id.as_deref(),
                     fleet_id,
                     &envelope.writer,
                     envelope.sequence,
@@ -7274,6 +7350,7 @@ impl Store {
             .iter()
             .filter_map(|signature| {
                 VerifiedEnvelopeSignature::verify(
+                    input.shard_id.as_deref(),
                     fleet_id,
                     &signature.writer,
                     signature.sequence,
@@ -7619,6 +7696,12 @@ impl Store {
     fn prepare_admission_membership(&self) -> Result<(i64, crate::fleet::Membership)> {
         #[cfg(test)]
         ADMISSION_MEMBERSHIP_FOLDS.with(|count| count.set(count.get() + 1));
+        if let Some(authority) = self.fleet_authority.get() {
+            // Read the generation first: a membership folded at a later one only makes the
+            // next loan see the generation moved and fold again.
+            let generation = fleet_generation(&authority.readers.get())?;
+            return Ok((generation, authority.fleet_membership()?));
+        }
         let reader = self.readers.get();
         let snapshot = reader.unchecked_transaction()?;
         let generation = fleet_generation(&snapshot)?;
@@ -7770,7 +7853,7 @@ impl Store {
                 let mut pass = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let (prepared_generation, prepared_membership) = membership.as_ref().unwrap();
-                if fleet_generation(&pass)? != *prepared_generation {
+                if self.admission_generation(&pass)? != *prepared_generation {
                     // Foreground authority changes can overtake this loan. Release it and
                     // prepare again without folding history on the writer or using stale roots.
                     drop(pass);
@@ -7805,6 +7888,9 @@ impl Store {
                     }
                     let started = std::time::Instant::now();
                     let hold = match authority {
+                        AdmissionAuthority::Membership if self.fleet_authority.get().is_some() => {
+                            shard_admission_hold(&pass, prepared_membership, envelope)?
+                        }
                         AdmissionAuthority::Membership => {
                             fleet_admission_hold(&pass, prepared_membership, envelope)?
                         }
