@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "An unchanged harness.observed report (a re-stamp) stays in the node's local observation log once every other member can ask it how recently it heard its seats; until then one replicates every five minutes instead of every minute",
+  "summary": "An unchanged harness.observed report (a re-stamp) stays in the node's local observation log once every other member hears its seats from its seat_freshness pushes; until then one replicates every five minutes instead of every minute",
   "replay": {
     "status": "changed",
-    "detail": "Fewer harness.observed claims are written. A report whose fields other than observed_at_ms, observed_since_ms and status_transition match the latest replicated one stays local while this node's meta key fleet_hears_seats is 1, unless readers would otherwise fold the seat to something newer than it (work activity after a resting report). The seat freshness poll sets the key every 30 seconds: 1 when every other current member, or configured peer, advertises seat_freshness in its own daemon.started and this node is not a dial-out member; a node outside a fleet sets it to 1. While it is 0 or unset, an unchanged report replicates when the replicated one is at least five minutes old, for working and legacy posters alike. Transitions and field changes replicate as before. Old claims are untouched."
+    "detail": "Fewer harness.observed claims are written. A report whose fields other than observed_at_ms, observed_since_ms and status_transition match the latest replicated one stays local while this node's meta key fleet_hears_seats is 1, unless readers would otherwise fold the seat to something newer than it (work activity after a resting report). The seat freshness pusher sets the key at each round, which a commit wakes: 1 when every other current member, or configured peer, advertises seat_freshness in its own daemon.started and this node is not a dial-out member; a node outside a fleet sets it to 1. While it is 0 or unset, an unchanged report replicates when the replicated one is at least five minutes old, for working and legacy posters alike. Transitions and field changes replicate as before. Old claims are untouched."
   },
   "schema": {
     "status": "none",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Contract C3 of the claims-store breakup (approved). Remote seat freshness comes from the seat's host: its own cards read its local log, and other members read its seat_freshness answers. An older member, which reads report ages, keeps every host it can see on the five-minute fallback, inside its 661-second down rule; its cards read a resting remote seat as stale after 90 seconds, as they already do for resting native seats. The host's wake acknowledgement reads its local log, so a working re-stamp after a wake still counts. No claim kind, field, wire or CLI shape changes."
+    "detail": "Contract C3 of the claims-store breakup (approved). Remote seat freshness comes from the seat's host: its own cards read its local log, and other members read its seat_freshness pushes. An older member, which reads report ages, keeps every host it can see on the five-minute fallback, inside its 661-second down rule; its cards read a resting remote seat as stale after 90 seconds, as they already do for resting native seats. The host's wake acknowledgement reads its local log, so a working re-stamp after a wake still counts. No claim kind, field, wire or CLI shape changes."
   },
   "downtime": {
     "status": "none",
