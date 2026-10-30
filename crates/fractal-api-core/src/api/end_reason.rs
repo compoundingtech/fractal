@@ -8,6 +8,15 @@ use crate::suspension::Suspension;
 /// The identity st acts as when it parks a seat on its own.
 pub const ST_RUNTIME_ACTOR: &str = "daemon/runtime";
 
+/// The park that still explains a seat: one on a current, unretired seat declaration that has not
+/// been seen running since. The card's fault and its end reason read the same answer.
+pub fn holding_park<'a>(subject: &SubjectStatus, parked: Option<&'a ParkedSeat>, retired: bool) -> Option<&'a ParkedSeat> {
+    let fields = subject.actual.as_ref().map(|v| v.get("fields").unwrap_or(v));
+    let actual = fields.and_then(|v| v.get("status")).and_then(Value::as_str);
+    parked.filter(|_| subject.projection.layer == "current" && subject.kind.as_deref() != Some("stop") && !retired
+        && !matches!(actual, Some("running" | "ready" | "working" | "idle")))
+}
+
 /// Read-only terminal evidence. An unknown actor/exit never implies success.
 pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarnessView>, suspension: Option<&Suspension>, desired: Option<&ClaimRecord>, parked: Option<&ParkedSeat>, retired: bool, updated_at: &str) -> Option<Value> {
     let fields = subject.actual.as_ref().map(|v| v.get("fields").unwrap_or(v));
@@ -18,7 +27,7 @@ pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarness
     if subject.projection.layer != "current" && !(stop && terminal_runtime) { return None; }
     // st stopped restarting a seat that failed to start, and it has not run since: that, not its
     // last exit, is why it is not running.
-    if let Some(parked) = parked.filter(|_| !stop && !retired && !matches!(actual, Some("running" | "ready" | "working" | "idle"))) {
+    if let Some(parked) = holding_park(subject, parked, retired) {
         return Some(json!({
             "kind": "parked",
             "actor": ST_RUNTIME_ACTOR,
@@ -225,10 +234,19 @@ mod tests {
         }));
         raise(&token);
         let parked = row(&store, &id, store.index().unwrap());
-        assert_eq!(parked["state"], "stopped");
+        assert_eq!(parked["state"], "failed");
+        assert_eq!(parked["fault"], reason);
+        assert_eq!(parked["presentation"]["group"], "fault");
         assert_eq!(parked["end_reason"]["kind"], "parked");
         assert_eq!(parked["end_reason"]["actor"], ST_RUNTIME_ACTOR);
         assert_eq!(parked["end_reason"]["reason"], reason);
+        // A seat seen ready has no running observation to end the park's lookup, yet neither its
+        // fault nor its end reason may still say it is parked.
+        observe(&store, &id, "runtime.observed", json!({"status":"ready","incarnation_id":"two"}));
+        let ready = row(&store, &id, store.index().unwrap());
+        assert_ne!(ready["fault"], reason, "{ready}");
+        assert_ne!(ready["state"], "failed", "{ready}");
+        assert_ne!(ready["end_reason"]["kind"], "parked", "{}", ready["end_reason"]);
         observe(&store, &id, "runtime.observed", json!({"status":"running","incarnation_id":"two"}));
         // Running again ends the park. (No reconciler here replaces the raise's `unreachable`,
         // so this log reads as a lost host instead.)
