@@ -56,6 +56,7 @@ pub mod screens;
 pub mod text;
 pub mod theme;
 mod objectives;
+mod triage;
 mod usage;
 mod voice;
 // The live client fills the variants and fields the demo does not use.
@@ -391,6 +392,7 @@ pub struct Ui {
     world: World,
     /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
     pub(super) keyboard_enhanced: bool,
+    triage: triage::Cursor,
     /// Each list's selection, by the section it lists (Now, Agents, Missions, Fleet, Usage,
     /// Worktrees). Which list has the keys is never stored: `tab()` reads it off the screen.
     selected: [usize; 6],
@@ -775,6 +777,7 @@ impl Ui {
             world,
             selected: [0; 6],
             keyboard_enhanced: false,
+            triage: triage::Cursor::default(),
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
             conversation_state: fractal_conversation_ui::State::default(),
@@ -3772,6 +3775,8 @@ impl Ui {
                     "ctrl+[ ]",
                     "back, forward (enhanced keyboard; not in terminals)",
                 ),
+                ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
+                ("ctrl+\\ l", "previous triage item, including in terminals"),
                 ("q", "quit"),
             ],
         );
@@ -4286,6 +4291,18 @@ impl Ui {
         }
         self.sync_terminal_slot();
         if !self.terminal_focused() && self.navigation_key(key) {
+            return;
+        }
+        if !self.terminal_focused()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            && matches!(key.code, KeyCode::Char('l' | 'L'))
+        {
+            self.triage_next(
+                !(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)),
+            );
             return;
         }
         // Retrying a failed initial attach uses the same path as opening its terminal.
@@ -7256,6 +7273,7 @@ mod tests {
         let mut world = demo::test_world();
         world.attention = Load::Ready(vec![Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7543,6 +7561,7 @@ mod tests {
         let mut world = demo::test_world();
         let asks = |id: &str| Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7593,6 +7612,7 @@ mod tests {
     fn a_reconnect_keeps_the_answer_box_open_after_earlier_asks_left() {
         let asks = |id: &str| Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7904,6 +7924,7 @@ mod tests {
         };
         let item = Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -7984,6 +8005,7 @@ mod tests {
             };
             let item = Attention {
                 deadline: None,
+                requested_at: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -8119,6 +8141,7 @@ mod tests {
         };
         let item = Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8204,6 +8227,7 @@ mod tests {
         };
         let item = Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8297,6 +8321,7 @@ mod tests {
         };
         let item = Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8377,6 +8402,7 @@ mod tests {
         let mission = "mission/release-proof";
         let item = Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8429,6 +8455,7 @@ mod tests {
         let mut world = demo::test_world();
         let item = Attention {
             deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -8683,6 +8710,7 @@ mod tests {
                 0,
                 Attention {
                     deadline: None,
+                    requested_at: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
