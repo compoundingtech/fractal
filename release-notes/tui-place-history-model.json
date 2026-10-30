@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Existing keyboard shortcuts are unchanged. Workspace formats 1 and 2 load with fresh device-local identities; format 3 history receives identity migration when needed."
+    "detail": "Existing keyboard shortcuts are unchanged. Workspace formats 1 and 2 load with fresh device-local identities; format 3 history receives identity migration when needed. History follows stable tabs moved between groups, including when their original group is removed, without replacing earlier content destinations."
   },
   "downtime": {
     "status": "none",
