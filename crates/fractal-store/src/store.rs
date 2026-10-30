@@ -5675,6 +5675,25 @@ impl Store {
     }
 
     /// The newest claim or local observation of `kind` for `subject`.
+    /// When this node last heard `subject`'s harness report for `incarnation`: its newest local
+    /// `harness.observed`, if that is of the incarnation. Local observations never replicate, so
+    /// only the node that runs the seat has one; it hears every re-stamp, replicated or not. One
+    /// seek in `local_observations_subject_kind_index`, whatever the log holds.
+    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        let connection = self.readers.get();
+        let newest: Option<(i64, Option<String>)> = connection
+            .prepare_cached(
+                "SELECT observed_at_unix_ms, json_extract(body, '$.fields.incarnation_id')
+                 FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=?1 AND kind='harness.observed' ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdfe967515468 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        Ok(newest
+            .filter(|(_, of)| of.as_deref() == Some(incarnation))
+            .map(|(at, _)| at.max(0) as u128))
+    }
+
     pub fn latest_observation(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let claim = self.latest_claim(subject, Some(kind))?;
@@ -5731,10 +5750,37 @@ impl Store {
             .collect()
     }
 
+    /// Clear a persisted signature fault and wake the stopped migration. A person may, and so
+    /// may the fleet's fault agent, which owns signature faults; no other agent.
+    pub fn resume_signature_migration_as(
+        &self,
+        actor: &str,
+        reason: &str,
+    ) -> Result<smallclaims::store::principals::SignatureResume, St3Error> {
+        let actor = smallclaims::store::normalize_actor(actor, "person");
+        let fault_agent = self.fleet_fault_agent().map_err(internal)?;
+        let allowed = actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str());
+        if !allowed || reason.trim().is_empty() {
+            return Err(St3Error::new(
+                "invalid-signature-resume",
+                "a person, or the fleet's fault agent, resumes the signature migration, with a reason",
+            ));
+        }
+        let cleared = self.resume_signature_migration().map_err(internal)?;
+        Ok(smallclaims::store::principals::SignatureResume {
+            actor,
+            reason: reason.to_owned(),
+            cleared,
+            migration: self.signature_migration().map_err(internal)?,
+        })
+    }
+
     pub fn signature_attention_items(&self) -> Result<Vec<AttentionItemView>> {
         let mut items = Vec::new();
         for fault in self.signature_state_faults()? {
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: format!("{}:{}", fault.code, fault.subject),
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -8533,11 +8579,25 @@ const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 /// hour once that hour is over, and its final totals when its seat ends. Periods and retention
 /// are exact to the hour ([`checkpoint_rules`]), and every response goes to OTLP, so a rollup per
 /// turn bought nothing a reader keeps. The seat's own host folds its pending rollups into its
-/// usage reads ([`pending_usage_rollups`]), so only other members lag, by up to an hour.
+/// usage reads ([`pending_usage`]), so only other members lag, by up to an hour.
 const USAGE_ROLLUP_HOUR_MS: u128 = 60 * 60 * 1000;
 
 fn usage_rollup_hour(fields: &BTreeMap<String, Value>, fallback: u128) -> u128 {
     fields.get("observed_at_unix_ms").and_then(Value::as_u64).map_or(fallback, u128::from) / USAGE_ROLLUP_HOUR_MS
+}
+
+/// A `context_occupancy` reading replicates when it moves at least this many points of the
+/// context window from the replicated one, on a compaction or model change, or when its seat
+/// ends: a card's number stays within these points, and writes follow change, not turns.
+const USAGE_OCCUPANCY_POINTS: f64 = 5.0;
+
+/// The share of the context window an occupancy reading uses, in percent, when it says.
+fn usage_occupancy_percent(fields: &BTreeMap<String, Value>) -> Option<f64> {
+    fields.get("context_used_percent").and_then(Value::as_f64).or_else(|| {
+        let used = fields.get("context_used_tokens").and_then(Value::as_u64)?;
+        let window = fields.get("context_window_tokens").and_then(Value::as_u64).filter(|window| *window > 0)?;
+        Some(used as f64 * 100.0 / window as f64)
+    })
 }
 
 /// Replicate every usage reading `subject` holds back, whatever its hour: its step ended, and
@@ -8589,16 +8649,30 @@ pub fn unreplicated_usage_rollups(connection: &Connection) -> rusqlite::Result<V
     Ok(rows)
 }
 
-/// The newest unreplicated `response_rollup` reading of each series of `subject` (of every
-/// subject when `None`) that this node holds, as (subject, body). Only the seat's host has them.
-pub fn pending_usage_rollups(connection: &Connection, subject: Option<&str>) -> rusqlite::Result<Vec<(String, String)>> {
+/// The newest unreplicated reading of each held usage series of `subject` (of every subject when
+/// `None`) that this node holds, as (subject, body, observed at): rollups, and occupancy too
+/// unless `rollups_only`. Only the seat's host has them.
+pub fn pending_usage(
+    connection: &Connection,
+    subject: Option<&str>,
+    rollups_only: bool,
+) -> rusqlite::Result<Vec<(String, String, u128)>> {
     let mut statement = connection.prepare_cached(
-        "SELECT o.subject, o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+        "SELECT o.subject, o.body, o.observed_at_unix_ms FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
          WHERE (?1 IS NULL OR s.subject=?1) AND s.kind='harness.usage' AND s.pending_local_id IS NOT NULL
-           AND json_extract(s.slot, '$[1]')='response_rollup'
+           AND (json_extract(s.slot, '$[1]')='response_rollup'
+             OR (NOT ?2 AND json_extract(s.slot, '$[1]')='context_occupancy'
+                 -- Only the live incarnation's: a restart leaves the replaced one's held reading,
+                 -- older than the new incarnation's context.
+                 AND json_extract(s.slot, '$[0]')=(
+                     SELECT json_extract(state.body, '$.fields.incarnation_id') FROM local_observations AS state
+                     WHERE state.subject=s.subject AND state.kind='harness.observed'
+                     ORDER BY state.id DESC LIMIT 1)))
          ORDER BY o.id",
     )?;
-    let rows = statement.query_map([subject], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let rows = statement.query_map(params![subject, rollups_only], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?.max(0) as u128))
+    })?;
     rows.collect()
 }
 
@@ -9356,25 +9430,43 @@ fn publish_due_usage_tx(
         ),
     };
     let rollup = input.fields.get("semantics").and_then(Value::as_str) == Some("response_rollup");
+    let published_fields = |text: &str| {
+        let mut published: BTreeMap<String, Value> = serde_json::from_str(text).unwrap_or_default();
+        // The publication may have added the native binding the reading lacks.
+        if !input.fields.contains_key("native_session_id") {
+            published.remove("native_session_id");
+        }
+        published
+    };
+    // Occupancy is held on its points only when both readings say how full the window is.
+    let occupancy = input.fields.get("semantics").and_then(Value::as_str) == Some("context_occupancy");
+    let held_occupancy = occupancy
+        && resting_since != Some(u128::MAX)
+        && live_incarnation
+        && usage_occupancy_percent(&input.fields).is_some()
+        && last.as_ref().is_some_and(|(_, text)| usage_occupancy_percent(&published_fields(text)).is_some());
     let (due, repeat) = match &last {
         None => (true, false),
         // A harness that never reported a state never ends or rests, so nothing would flush a
         // held rollup: its readings keep replicating as before.
-        Some((_, published_fields)) if rollup && resting_since != Some(u128::MAX) && !live_incarnation => {
-            let mut published: BTreeMap<String, Value> =
-                serde_json::from_str(published_fields).unwrap_or_default();
-            if !input.fields.contains_key("native_session_id") {
-                published.remove("native_session_id");
-            }
+        Some((_, text)) if held_occupancy => {
+            let published = published_fields(text);
+            let moved = usage_occupancy_percent(&input.fields)
+                .zip(usage_occupancy_percent(&published))
+                .is_some_and(|(now, then)| (now - then).abs() >= USAGE_OCCUPANCY_POINTS);
+            let changed = ["compactions", "model"]
+                .iter()
+                .any(|name| published.get(*name) != input.fields.get(*name));
             let repeat = published == input.fields;
+            ((moved || changed) && !repeat, repeat)
+        }
+        // Held semantics replicate at once once their incarnation ended or was replaced.
+        Some((_, text)) if (rollup || occupancy) && resting_since != Some(u128::MAX) && !live_incarnation => {
+            let repeat = published_fields(text) == input.fields;
             (!repeat, repeat)
         }
-        Some((_, published_fields)) if rollup && resting_since != Some(u128::MAX) => {
-            let mut published: BTreeMap<String, Value> =
-                serde_json::from_str(published_fields).unwrap_or_default();
-            if !input.fields.contains_key("native_session_id") {
-                published.remove("native_session_id");
-            }
+        Some((_, text)) if rollup && resting_since != Some(u128::MAX) => {
+            let published = published_fields(text);
             // The pending reading of an hour that is over was that hour's last: replicate it
             // now, and hold this one until its own hour ends.
             let hour = usage_rollup_hour(&input.fields, local.accepted_at_unix_ms);
@@ -9428,6 +9520,28 @@ fn publish_due_usage_tx(
             )
             .map_err(internal)?;
         return Ok(None);
+    }
+    // A context reading replaces the one before it in the fold, whatever its incarnation. Another
+    // incarnation's held occupancy replicates first, so a later end or flush can't put it over
+    // this one.
+    if occupancy {
+        let held = transaction
+            .prepare(
+                "SELECT o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                 WHERE s.subject=?1 AND s.kind='harness.usage' AND s.slot<>?2
+                   AND json_extract(s.slot, '$[1]')='context_occupancy'
+                 ORDER BY o.id",
+            )
+            .map_err(internal)?
+            .query_map(params![input.subject, slot], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(internal)?;
+        for body in held {
+            let body: Value = serde_json::from_str(&body).map_err(internal)?;
+            let fields = schema_fields_for_body("harness.usage", &body).map_err(internal)?;
+            publish_usage_slot_tx(transaction, origin, &input.subject, input.actor.as_deref(), &fields, now)?;
+        }
     }
     publish_usage_slot_tx(
         transaction,
@@ -9513,12 +9627,19 @@ fn publish_pending_usage_tx(
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(internal)?
     };
-    // For a rollup, whether it replicates now; `None` for the other semantics.
+    // For a held rollup or occupancy reading, whether it replicates now; `None` for the rest,
+    // which follow `published_by`.
     let usage_rollup_due = |observation: &ClaimRecord| {
-        (observation.body.pointer("/fields/semantics").and_then(Value::as_str) == Some("response_rollup")).then(|| {
-            let fields = observation.body["fields"].as_object().cloned().unwrap_or_default().into_iter().collect();
-            ended || usage_rollup_hour(&fields, observation.accepted_at_unix_ms) < now / USAGE_ROLLUP_HOUR_MS
-        })
+        let fields: BTreeMap<String, Value> =
+            observation.body["fields"].as_object().cloned().unwrap_or_default().into_iter().collect();
+        match fields.get("semantics").and_then(Value::as_str) {
+            Some("response_rollup") => Some(
+                ended || usage_rollup_hour(&fields, observation.accepted_at_unix_ms) < now / USAGE_ROLLUP_HOUR_MS,
+            ),
+            // A held occupancy reading moved fewer points than replicate it: it waits for the end.
+            Some("context_occupancy") if usage_occupancy_percent(&fields).is_some() => Some(ended),
+            _ => None,
+        }
     };
     if let Some(published_by) = published_by {
         // Publishing a slot clears its pending reading; the rest keep waiting.
@@ -9546,8 +9667,9 @@ fn publish_pending_usage_tx(
         // A rollup that waits keeps its pending reading; publishing clears the others.
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-ha084e6156225 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
-             WHERE subject=?1 AND kind='harness.usage' AND json_extract(slot, '$[1]') IS NOT 'response_rollup'",
+                /* sqlite-large-value: allow-for-now lv-hc52177269f65 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
+             WHERE subject=?1 AND kind='harness.usage'
+               AND json_extract(slot, '$[1]') NOT IN ('response_rollup', 'context_occupancy')",
                 [subject],
             )
             .map_err(internal)?;
@@ -12972,6 +13094,8 @@ fn attention_action(label: &str, argv: &[&str]) -> AttentionActionView {
 
 fn attention_item_from_failure(request: AttentionRequestView) -> AttentionItemView {
     AttentionItemView {
+        deadline_unix_ms: None,
+        default_answer: None,
         episode: request.request.clone(),
         priority: if request.severity == "warning" {
             "normal"

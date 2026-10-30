@@ -98,6 +98,7 @@ pub mod projection_digest;
 pub mod repair_ledger;
 pub mod retired;
 pub mod retired_facts;
+pub mod local_trim_citations;
 pub mod runtime;
 mod signature_backfill;
 pub mod transport_observation_index;
@@ -123,7 +124,7 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{CheckpointManifestNeed, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]
@@ -882,6 +883,12 @@ pub struct Store {
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
     pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
+    /// Wakes the idle signature job: an explicit resume, or a verdict backlog an ordinary
+    /// pass left over.
+    pub signature_job_wake: tokio::sync::Notify,
+    /// The first time and text of a transient storage error the signature work is retrying,
+    /// until the next success. Never persisted; doctor reports it once it lasts.
+    pub(crate) signature_retrying: Mutex<Option<(u128, String)>>,
     pub origin: String,
     /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
     /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
@@ -1136,6 +1143,9 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
         })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb1035261bc59 owner=smallclaims::store TODO=trace-statement-and-value-representation */ local_trim_citations::SCHEMA).map_err(Into::into)
+        })?;
         initialize_fleet_generation(connection)?;
         install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
@@ -1266,6 +1276,8 @@ impl Store {
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
             signature_migration_work: Mutex::new(None),
+            signature_job_wake: tokio::sync::Notify::new(),
+            signature_retrying: Mutex::new(None),
             origin,
             path,
             shared_memory,
@@ -6607,7 +6619,7 @@ impl Store {
         }
         // Judge the claims just sealed only after the snapshot is taken: a verdict pass takes the
         // writer, and writes queued behind it must not land between sealing and the snapshot.
-        self.judge_claims(false)?;
+        self.judge_claims_slice(false)?;
         Ok(snapshot)
     }
 
@@ -7643,7 +7655,7 @@ impl Store {
         // Admission needs no replication snapshot: building one in a fresh process reads every
         // envelope, and the daemon runs this before it serves. The first export builds it.
         self.seal_local_batches_after_frontier()?;
-        self.judge_claims(false)?;
+        self.judge_claims_slice(false)?;
         // Admission lends the writer back between chunks, so two must not run at once and
         // admit the same pending envelopes.
         let _admitting = self
@@ -8360,7 +8372,7 @@ impl Store {
                         continue;
                     }
                     if self.verdicts_due.swap(false, Ordering::AcqRel) {
-                        self.judge_claims(true).map_err(|error| {
+                        self.judge_claims_slice(true).map_err(|error| {
                             self.verdicts_due.store(true, Ordering::Release);
                             let error = crate::error::typed(error);
                             if error.is_sqlite_contention() {
