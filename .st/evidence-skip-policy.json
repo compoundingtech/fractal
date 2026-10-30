@@ -613,6 +613,7 @@
         "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",
+        "crates/fractal-client-codegen/templates/declarations.ts.in",
         "crates/fractal-tui/tests/fixtures/quality-hour.json",
         "docs/st3/client-v0/fixtures",
         "fixtures/clients",

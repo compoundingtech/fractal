@@ -119,6 +119,7 @@
         "apps/ios/package.json",
         "buck2/toolchains/BUCK",
         "clients/typescript/fractal-client/package.json",
+        "clients/typescript/fractal-declarations/package.json",
         "clients/typescript/fractal-scenarios/package.json",
         "clients/typescript/fractal-views/package.json",
         "flake.lock",
@@ -403,6 +404,7 @@
       "definition_paths": [
         "apps/ios/package.json",
         "clients/typescript/fractal-client/package.json",
+        "clients/typescript/fractal-declarations/package.json",
         "clients/typescript/fractal-views/package.json",
         "flake.lock",
         "flake.nix",
@@ -422,6 +424,7 @@
         "apps/fractal-web/src/folders/core.mts",
         "apps/ios",
         "clients/typescript",
+        "crates/fractal-client-codegen/templates/declarations.ts.in",
         "crates/fractal-tui/tests/fixtures/quality-hour.json",
         "docs/st3/client-v0/fixtures",
         "fixtures/clients",
