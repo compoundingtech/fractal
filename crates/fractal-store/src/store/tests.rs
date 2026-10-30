@@ -10614,10 +10614,14 @@ fn a_prompt_names_the_exact_call_its_hook_published() {
         )
     };
     append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-    asked(3);
+    let first = asked(3);
     assert_eq!(call_of_prompt(), None, "not named yet: allowed only in the terminal");
+    assert_eq!(store.native_prompt_call(seat, &first.id).unwrap(), None);
     published(3, "toolu_7");
     assert_eq!(call_of_prompt().as_deref(), Some("toolu_7"));
+    // An answer to this very prompt reads the same call; another episode names none.
+    assert_eq!(store.native_prompt_call(seat, &first.id).unwrap().as_deref(), Some("toolu_7"));
+    assert_eq!(store.native_prompt_call(seat, "claim/elsewhere").unwrap(), None);
     // The next prompt is its own observation: the earlier call is not its call.
     append(
         "harness.observed",
