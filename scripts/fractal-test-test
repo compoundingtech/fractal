@@ -491,7 +491,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         statement, = self.statements()
         digest = statement['predicate']['observed']['inputs']['lane_definition_sha256']
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
         base_tree = git(self.work, 'rev-parse', 'origin/main^{tree}')
         self.assertEqual(digest, verifier.lane_definition(str(self.work), base_tree, git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256'])
@@ -503,7 +506,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertNotIn('not signed', out)
         statement, = self.statements()
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', 'origin/main:.st/required-lanes.json'), 'demo')
         definition = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', 'origin/main^{tree}'),
                                               git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)
@@ -549,7 +555,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn('covered by wrapper', out)
         statement, = self.statements()
-        verifier = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify')).load_module()
+        loader = importlib.machinery.SourceFileLoader('ev', str(ROOT / 'scripts/evidence-verify'))
+        spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
         rules = verifier.lane_rules(git(self.work, 'show', f'{point}:.st/required-lanes.json'), 'demo')
         at_point = verifier.lane_definition(str(self.work), git(self.work, 'rev-parse', f'{point}^{{tree}}'),
                                             git(self.work, 'rev-parse', 'HEAD^{tree}'), rules)['sha256']

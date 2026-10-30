@@ -102,6 +102,7 @@ mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod validate_cli;
 mod work_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
@@ -113,6 +114,7 @@ use launch_cli::{run_launch, run_mission_view};
 use replication_cli::run_replication;
 use terminals_cli::run_pty;
 use uninstall_cli::run_uninstall;
+use validate_cli::{ValidateArgs, run_validate};
 use work_cli::{run_wait, run_work};
 
 use presentation::{
@@ -298,6 +300,9 @@ enum Command {
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
+    /// Validate KDL files offline using default host "local", without contacting a daemon.
+    /// This is not an authorization or deployment preview.
+    Validate(ValidateArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
         #[command(subcommand)]
@@ -1221,6 +1226,16 @@ enum MissionViewCommand {
     WaitingOn {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
         run: String,
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
+    /// Every blocked run in the fleet, one line each, grouped by cause: an ask on a person, an
+    /// agent stopped or down, a claim with no progress, a ready step nobody claims, a hold.
+    ///
+    /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
+    /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
+    Blocked {
         /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
         #[arg(long)]
         quiet: Option<String>,
@@ -3343,6 +3358,10 @@ struct AgentStopArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
+    /// Why the agent stops. `agents show` and `agents ls` print it beside who stopped it and
+    /// when.
+    #[arg(long)]
+    reason: Option<String>,
     /// Print the exact stop KDL without publishing it.
     #[arg(long)]
     print_kdl: bool,
@@ -4833,6 +4852,16 @@ fn cli_main() -> ExitCode {
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Validation must precede identity lookup, configuration loading and client construction.
+    if let Command::Validate(args) = &cli.command {
+        return match run_validate(args, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}: {}", ClientMessage::for_output(false).diagnostic_prefix("st"), plain_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if let Command::ActorContract { effective } = &cli.command {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
@@ -5470,6 +5499,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
+        Command::Validate(_) => unreachable!("validation runs before the CLI runtime"),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
@@ -13055,6 +13085,39 @@ fn push_todo_terminal_text(output: &mut String, text: &str) {
     }
 }
 
+/// Why a seat that is not running stopped, who or what stopped it and when, from the card's end
+/// reason. A stopped seat without one says so rather than printing nothing.
+fn agent_stop_line(agent: &fractal_client::Agent) -> Option<String> {
+    let Some(end) = &agent.end_reason else {
+        return (agent.state == "stopped").then(|| "stopped, with no recorded reason".to_owned());
+    };
+    let actor = end.actor.as_deref().unwrap_or("unknown");
+    let mut line = match end.kind.as_str() {
+        "parked" => "parked by st after it failed to start".to_owned(),
+        "stopped-by-person" | "stopped-by-agent" => format!("stopped by {actor}"),
+        "stopped-by-mission" => format!("stopped by {actor} as its run ended"),
+        "retired" => match &end.actor {
+            Some(actor) => format!("retired by {actor}"),
+            None => "retired".to_owned(),
+        },
+        "crashed" => match (&end.exit_signal, end.exit_code) {
+            (Some(signal), _) => format!("crashed on signal {signal}"),
+            (None, Some(code)) => format!("crashed with exit code {code}"),
+            (None, None) => "crashed".to_owned(),
+        },
+        "harness-exited" => "its harness exited".to_owned(),
+        "host-lost" => "its host is unreachable".to_owned(),
+        "completed" => "exited cleanly".to_owned(),
+        other => other.to_owned(),
+    };
+    line.push_str(&format!(" at {}", end.ended_at));
+    if let Some(reason) = end.reason.as_deref().or(end.diagnostic.as_deref()) {
+        line.push_str(": ");
+        push_todo_terminal_text(&mut line, reason);
+    }
+    Some(line)
+}
+
 fn render_client_agent(
     agent: &fractal_client::Agent,
     current_steps: &[StepRunView],
@@ -13072,6 +13135,11 @@ fn render_client_agent(
         None => {
             let _ = writeln!(output, "STATE        {}", agent.state);
         }
+    }
+    if agent.state != "running"
+        && let Some(line) = agent_stop_line(agent)
+    {
+        let _ = writeln!(output, "WHY          {line}");
     }
     let _ = writeln!(output, "REACHABILITY {}", agent.reachability);
     if let Some(custody) = &agent.mail_custody {
@@ -13370,6 +13438,11 @@ fn render_client_agents(
                     "{}\t{}\t{}",
                     agent.header.id, agent.name, agent.state
                 );
+            }
+            if agent.state != "running"
+                && let Some(line) = agent_stop_line(agent)
+            {
+                let _ = writeln!(output, "  {line}");
             }
             for relationship in &agent.under {
                 match relationship.reason.as_deref() {
