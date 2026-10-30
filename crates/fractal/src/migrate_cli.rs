@@ -150,6 +150,7 @@ impl Layout {
             .with_context(|| format!("configured store_dir {} is not reachable; mount or restore it before host migration", store.display()))?;
         ensure!(metadata.is_dir() && !metadata.file_type().is_symlink(),
             "configured store_dir {} must be an ordinary directory or an external mount, not a symlink", store.display());
+        check_store_files(&store)?;
         if target { return Ok(()); }
         let resolved = fs::canonicalize(&store)?;
         for (root, destination) in &self.directories {
@@ -167,7 +168,11 @@ impl Layout {
     }
 
     fn lock_store(&self) -> Result<Option<File>> {
-        self.store_dir.as_deref().map(fractal_daemon::node_identity::lock_directory).transpose()
+        self.store_dir.as_deref().map(|store| {
+            let guard = fractal_daemon::node_identity::lock_directory(store)?;
+            check_store_files(store)?;
+            Ok::<_, anyhow::Error>(guard)
+        }).transpose()
             .context("cannot lock configured store directory after legacy service stop; stop its owner or restore the directory before host migration")
     }
 
@@ -191,6 +196,19 @@ impl Layout {
         }
         pairs
     }
+}
+
+fn check_store_files(directory: &Path) -> Result<()> {
+    for name in fractal_daemon::config::STORE_DATABASE_FILES {
+        let path = directory.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => ensure!(!metadata.file_type().is_symlink(),
+                "configured store database file {} must not be a symlink", path.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect configured store database file before host migration"),
+        }
+    }
+    Ok(())
 }
 
 fn dropins(file: &Path) -> PathBuf {

@@ -489,6 +489,29 @@ fn nested_store_directory_fence_follows_root_exchange_without_extra_files() -> R
 }
 
 #[tokio::test]
+async fn store_database_symlinks_refuse_before_service_or_root_changes() -> Result<()> {
+    for name in fractal_daemon::config::STORE_DATABASE_FILES {
+        for dangling in [false, true] {
+            let mut fixture = Fixture::new()?;
+            let store = fixture.root.path().join("external-store");
+            fs::create_dir(&store)?;
+            let backing = fixture.root.path().join("database-backing");
+            if !dangling { fs::write(&backing, b"outside authority")?; }
+            symlink(&backing, store.join(name))?;
+            fixture.layout.store_dir = Some(store.clone());
+            let expected = format!("configured store database file {} must not be a symlink", store.join(name).display());
+            let error = fixture.run(false, false).await.unwrap_err();
+            assert_eq!(error.to_string(), expected);
+            assert!(!fixture.manager.changed_services());
+            assert!(!fixture.layout.journal.exists());
+            assert!(!fixture.layout.directories[1].1.exists());
+            assert!(format!("{:#}", fixture.layout.lock_store().unwrap_err()).contains(&expected));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn nonempty_fractal_dotfiles_are_rejected_before_stop_even_with_a_receipt() -> Result<()> {
     for with_receipt in [false, true] {
         let mut fixture = Fixture::new()?;
