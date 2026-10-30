@@ -447,7 +447,7 @@ fn subject_ref(object: &Map<String, Value>, families: &Value) -> Result<String> 
 }
 
 fn emit_string(object: &Map<String, Value>) -> Result<String> {
-    let mut excluded = None;
+    let mut excluded = vec![];
     let mut excluded_pattern = None;
     if let Some(not) = object.get("not") {
         let only = not.as_object().filter(|n| n.len() == 1);
@@ -458,10 +458,23 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
         if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
             excluded_pattern = Some(pattern.as_str().context("`not.pattern` must be a string")?);
         } else {
-            // `not: { const }` excludes one value from an otherwise plain string.
-            excluded = Some(only.and_then(|n| n.get("const")).context(
-                "only `not: { enum }`, `not: { const }` and `not: { pattern }` are translated",
-            )?);
+            // `not: { const }` excludes one value, and `not: { anyOf: [{ const }, ..] }` several,
+            // from an otherwise plain string.
+            excluded = match only.and_then(|n| n.get("anyOf")).and_then(Value::as_array) {
+                Some(branches) => branches
+                    .iter()
+                    .map(|branch| {
+                        branch
+                            .as_object()
+                            .filter(|b| b.len() == 1)
+                            .and_then(|b| b.get("const"))
+                            .context("`not: { anyOf }` must list only `{ const }` branches")
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                None => vec![only.and_then(|n| n.get("const")).context(
+                    "only `not: { enum }`, `not: { const }`, `not: { anyOf: [{ const }] }` and `not: { pattern }` are translated",
+                )?],
+            };
         }
     }
     let mut schema = match object.get("x-st-ref") {
@@ -490,11 +503,12 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             with_checks("Schema.String".into(), checks)
         }
     };
-    if let Some(value) = excluded {
+    if !excluded.is_empty() {
+        let values = js(&Value::Array(excluded.iter().map(|value| (*value).clone()).collect()));
+        let expected = excluded.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(", ");
         schema = format!(
-            "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
-            js(value),
-            js(&json!(format!("a string other than {value}")))
+            "{schema}.check(Schema.makeFilter((value: string) => !{values}.includes(value), {{ expected: {} }}))",
+            js(&json!(format!("a string other than {expected}")))
         );
     }
     if let Some(pattern) = excluded_pattern {
@@ -640,10 +654,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         }) {
             break;
         }
-        let members = branches
-            .iter()
-            .map(|branch| emit(branch, cx))
-            .collect::<Result<Vec<_>>>()?;
+        let members = union_members(branches, combinator == "oneOf", cx)?;
         let mode = if combinator == "oneOf" {
             ", { mode: \"oneOf\" }"
         } else {
@@ -1123,6 +1134,37 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
     })
 }
 
+/// Closed oneOf branches must also remain disjoint when Effect encoding ignores excess
+/// properties. Explicitly forbid known sibling fields, without changing tolerant handling
+/// of unrelated future fields or the canonical wire schema.
+fn union_members(branches: &[Value], exclusive: bool, cx: &mut Cx) -> Result<Vec<String>> {
+    let resolved = branches.iter().map(|branch| match branch.get("$ref").and_then(Value::as_str) {
+        Some(reference) => cx.normalized.get(reference.trim_start_matches("#/$defs/")).unwrap_or(branch),
+        None => branch,
+    }).collect::<Vec<_>>();
+    let fields = if exclusive {
+        resolved.iter().filter(|branch| branch["additionalProperties"] == false)
+            .filter_map(|branch| branch["properties"].as_object())
+            .flat_map(|properties| properties.keys().map(String::as_str)).collect::<BTreeSet<_>>()
+    } else { BTreeSet::new() };
+    branches.iter().zip(resolved.iter().copied()).map(|(branch, resolved)| {
+        if exclusive && resolved["additionalProperties"] == false
+            && let Some(object) = resolved.as_object()
+            && let Some(properties) = object.get("properties").and_then(Value::as_object)
+        {
+            let mut forbidden = fields.iter().filter(|field| !properties.contains_key(**field)).peekable();
+            if forbidden.peek().is_some() {
+                let mut built = emit_object(object, cx, "")?;
+                built.fields.extend(forbidden.map(|field| {
+                    format!("{}: Schema.optionalKey(Schema.Never)", js(&json!(field)))
+                }));
+                return Ok(built.expression());
+            }
+        }
+        emit(branch, cx)
+    }).collect()
+}
+
 /// The required single-const discriminator shared by every branch, if all values are unique
 /// strings or numbers; Effect tagged unions require PropertyKey tags.
 fn tagged_by(branches: &[Value], cx: &Cx) -> Option<String> {
@@ -1376,10 +1418,7 @@ fn def_decl(name: &str, value: &Value, cx: &mut Cx) -> Result<String> {
         .and_then(Value::as_array)
         .filter(|b| b.len() > 2 || b.iter().all(|x| x.get("type") != Some(&json!("null"))));
     if let Some(branches) = branches.filter(|_| open_enum(value).is_none()) {
-        let members = branches
-            .iter()
-            .map(|branch| emit(branch, cx))
-            .collect::<Result<Vec<_>>>()?;
+        let members = union_members(branches, true, cx)?;
         let tag = tagged_by(branches, cx);
         let mut union = format!(
             "Schema.Union([\n  {}\n], {{ mode: \"oneOf\" }})",

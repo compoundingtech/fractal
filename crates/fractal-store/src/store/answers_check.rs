@@ -26,16 +26,95 @@ pub fn episode(local: &str, peer: &str) -> String {
     format!("{EPISODE_PREFIX}{}", &digest[..32])
 }
 
+/// The subjects whose answers fold claims rather than read one: seats (harness state, status
+/// history, working since) and steps (timing).
+const FOLDED_SUBJECTS: [&str; 2] = ["agent/", "step-run/"];
+
+/// Every fold reader's answers at `cut`, for [`smallclaims::answers::FoldReaders`]. For each
+/// seat and step whose newest claim is older than the cut, it reads what the checkpoint proof
+/// reads (`checkpoint_rules::subject_answers`: current harness, status history, actual state and
+/// source, incarnations, reconcile decisions, usage, loop and timing) and reports each field as
+/// its own reader, keyed by subject. A subject still written at the cut is left out, as a claim
+/// kind's moving keys are, since its answers differ between members only by replication lag.
+pub fn fold_reader_answers(
+    connection: &Connection,
+    cut: u128,
+) -> Result<BTreeMap<String, Vec<smallclaims::answers::AnswerKey>>> {
+    let mut next = connection.prepare_cached(
+        "SELECT MIN(subject) FROM claims INDEXED BY claims_subject_index WHERE subject>?1 AND subject<?2",
+    )?;
+    let mut newest = connection.prepare_cached(
+        "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_accepted_index WHERE subject=?1
+         ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+    )?;
+    let mut readers: BTreeMap<String, Vec<smallclaims::answers::AnswerKey>> = BTreeMap::new();
+    let mut moving = Vec::new();
+    for prefix in FOLDED_SUBJECTS {
+        // Every subject that starts with `prefix` sorts after it and before the prefix with its
+        // last character raised.
+        let end = format!("{}{}", &prefix[..prefix.len() - 1], char::from(prefix.as_bytes()[prefix.len() - 1] + 1));
+        let mut after = prefix.to_owned();
+        loop {
+            let subject = next
+                .query(params![after, end])?
+                .next()?
+                .map(|row| row.get::<_, Option<String>>(0))
+                .transpose()?
+                .flatten();
+            let Some(subject) = subject else { break };
+            after = subject.clone();
+            let accepted = newest
+                .query([&subject])?
+                .next()?
+                .map(|row| row.get::<_, String>(0))
+                .transpose()?
+                .unwrap_or_default();
+            if accepted.parse::<u128>().map_or(true, |accepted| accepted >= cut) {
+                moving.push(subject);
+                continue;
+            }
+            let Value::Object(answers) = checkpoint_rules::subject_answers(connection, &subject, cut)? else {
+                continue;
+            };
+            for (reader, answer) in answers {
+                let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
+                readers.entry(reader).or_default().push(smallclaims::answers::AnswerKey {
+                    subject: subject.clone(),
+                    origin: String::new(),
+                    claim: hex::encode(Sha256::digest(canonical.as_bytes())),
+                    moving: false,
+                });
+            }
+        }
+    }
+    // A subject that moved past the cut moves in every reader, so a member that computed before
+    // its newer claim arrived is no difference.
+    for keys in readers.values_mut() {
+        keys.extend(moving.iter().map(|subject| smallclaims::answers::AnswerKey {
+            subject: subject.clone(),
+            origin: String::new(),
+            claim: String::new(),
+            moving: true,
+        }));
+        keys.sort();
+    }
+    Ok(readers)
+}
+
 impl Store {
     /// The `reviewer` of a fault local trimming raises: the agent `[trim] notify` names, which
     /// then owns the fault, or the operator, which leaves it to the fleet's fault agent.
     pub fn trim_fault_reviewer(&self) -> String {
+        self.trim_notify().unwrap_or_else(|| "person/operator".into())
+    }
+
+    /// The agent `[trim] notify` names, if any.
+    pub fn trim_notify(&self) -> Option<String> {
         self.extension::<TrimSettings>()
             .notify
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-            .unwrap_or_else(|| "person/operator".into())
     }
 
     /// Open a fault for a check that found differences, unless the pair's fault is still open,
@@ -169,6 +248,10 @@ impl Store {
         Ok(open)
     }
 }
+
+#[cfg(test)]
+#[path = "answers_check_tests.rs"]
+mod reader_tests;
 
 #[cfg(test)]
 mod tests {

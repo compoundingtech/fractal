@@ -383,6 +383,7 @@ pub fn admit_prepared_envelope_tx(
                 batch_rowid,
             ])
         .map_err(internal)?;
+    let mut refused_claims = 0;
     for (position, (claim, prepared)) in batch.claims.iter().zip(claims).enumerate() {
         let position = position as u64;
         let PreparedClaim {
@@ -409,6 +410,7 @@ pub fn admit_prepared_envelope_tx(
                 // already stored.
                 let tombstoned = super::retired::claim_refused(transaction, &claim.id)
                     .map_err(internal)?;
+                refused_claims += usize::from(tombstoned);
                 let inserted = if tombstoned {
                     0
                 } else {
@@ -519,6 +521,15 @@ pub fn admit_prepared_envelope_tx(
                 outcome.invalid += 1;
             }
         }
+    }
+    // Where the retired ledger is the authority, an envelope that carries only retired claims is
+    // retired too, so this member never serves it to a peer that has not yet learned them.
+    if refused_claims > 0
+        && refused_claims == batch.claims.len()
+        && super::retired::authoritative(transaction).map_err(internal)?
+    {
+        super::retired::retire_envelope_tx(transaction, &envelope.writer, envelope.sequence, &envelope.hash)
+            .map_err(internal)?;
     }
     transaction
         .prepare_cached(

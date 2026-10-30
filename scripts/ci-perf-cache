@@ -13,6 +13,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 
+class IncompatibleSnapshot(ValueError):
+    """A previous archive layout cannot supply this cache generation."""
+
+
 def api(path):
     return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
 
@@ -133,7 +137,7 @@ def remember_sources():
 
 def restore_sources(checkpoint=None):
     work = Path(os.environ['GITHUB_WORKSPACE'])
-    checkpoint = checkpoint or Path(os.environ['RUNNER_TEMP']) / 'st-ci-cache/perf-source-state.json'
+    checkpoint = checkpoint or Path(os.environ['RUNNER_TEMP']) / 'fractal-ci-cache/perf-source-state.json'
     if not checkpoint.exists():
         print('Performance source timestamps: no saved checkpoint', flush=True)
         return
@@ -157,9 +161,19 @@ def restore_sources(checkpoint=None):
 def unpack(archive, destination, names):
     # These are main's own archives, but refuse unexpected roots before extracting.
     listing = subprocess.check_output(['tar', '--zstd', '-tf', str(archive)], text=True)
-    for name in listing.splitlines():
-        path = Path(name)
-        if path.is_absolute() or '..' in path.parts or path.parts[0] not in names:
+    paths = [Path(name) for name in listing.splitlines()]
+    for path in paths:
+        if path.is_absolute() or '..' in path.parts or not path.parts:
+            raise ValueError('unexpected snapshot path')
+    legacy = '-'.join(('st', 'ci', 'cache'))
+    roots = {path.parts[0] for path in paths}
+    directories = {name.rstrip('/') for name in listing.splitlines() if name.endswith('/')}
+    if ('fractal-ci-cache' in names and legacy in roots and 'fractal-ci-cache' not in roots
+            and roots <= (set(names) - {'fractal-ci-cache'}) | {legacy}
+            and {'target', 'cargo-home/registry', 'cargo-home/git', 'perf-sccache', legacy} <= directories):
+        raise IncompatibleSnapshot('snapshot uses the previous cache directory')
+    for path in paths:
+        if path.parts[0] not in names:
             raise ValueError('unexpected snapshot path')
     subprocess.run(['tar', '--zstd', '-xf', str(archive), '-C', str(destination)], check=True)
 
@@ -182,7 +196,7 @@ def restore():
             directory = dest / kind
             download(repo, run, name, directory)
             downloaded = time.monotonic()
-            roots = ('target', 'cargo-home', 'perf-sccache', 'st-ci-cache') if kind == 'build' else ('st-bench',)
+            roots = ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache') if kind == 'build' else ('st-bench',)
             extracted = directory / 'extracted'
             extracted.mkdir()
             unpack(directory / f'{kind}.tar.zst', extracted, roots)
@@ -197,7 +211,11 @@ def restore():
             pending = [(kind, pool.submit(fetch, kind, name)) for kind, name in wanted.items()
                        if kind not in found and name in names]
             for kind, future in pending:
-                extracted, roots, downloaded, unpacked = future.result()
+                try:
+                    extracted, roots, downloaded, unpacked = future.result()
+                except IncompatibleSnapshot:
+                    print(f"Performance {kind} cache MISS: incompatible archive layout in run {run['id']}", flush=True)
+                    continue
                 for root in roots:
                     target = (work if root == 'target' else temp) / root
                     shutil.rmtree(target, ignore_errors=True)
@@ -293,7 +311,7 @@ def pack():
     output = temp / 'perf-snapshots'
     output.mkdir(exist_ok=True)
     checkpoint = temp / 'perf-source-state.json'
-    saved = temp / 'st-ci-cache/perf-source-state.json'
+    saved = temp / 'fractal-ci-cache/perf-source-state.json'
     saved.unlink(missing_ok=True)
     if checkpoint.exists():
         state = json.loads(checkpoint.read_text())
@@ -302,7 +320,7 @@ def pack():
     # Registry source/config files contain no runner credentials; never archive all of CARGO_HOME.
     subprocess.run(['tar', '--format=pax', '-I', 'zstd -1 -T2', '-cf', str(output / 'build.tar.zst'),
                     '-C', str(work), 'target', '-C', str(temp),
-                    'cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'st-ci-cache'], check=True)
+                    'cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'fractal-ci-cache'], check=True)
     subprocess.run(['tar', '--format=pax', '-I', 'zstd -1 -T2', '-cf', str(output / 'stores.tar.zst'),
                     '-C', str(temp), 'st-bench'], check=True)
 

@@ -128,6 +128,19 @@ fn a_run_names_what_each_step_waits_on_and_stalls_once_its_holder_and_its_queue_
         waiting.reason
     );
 
+    // The fleet list shows the run once, under its first cause, counting both steps.
+    let (work, missions) = published(&store);
+    let blocked = blocked_runs(&work, &missions.rows, late, QUIET);
+    assert_eq!(blocked.runs_read, 1);
+    assert_eq!(blocked.groups.len(), 1);
+    assert_eq!(blocked.groups[0].cause, WaitKind::NoProgress);
+    let line = &blocked.groups[0].runs[0];
+    assert_eq!(line.run, alpha.subject);
+    assert_eq!(line.mission.as_deref(), Some("mission/garden/alpha"));
+    assert_eq!((line.step.path.as_str(), line.blocked_steps), ("plant", 2));
+    // Within the quiet limit nothing is listed.
+    assert!(blocked_runs(&work, &missions.rows, t0 + MINUTE, QUIET).groups.is_empty());
+
     // A step that ends moves to the finished steps.
     store.set_step_state(&plant, "completed", None).unwrap();
     let waiting = waits(&store, &alpha.subject, late, QUIET);
@@ -177,6 +190,8 @@ mission "garden/review" state="ready" {
             new_run: None,
             incarnation: Some(format!("{ash}-1")),
             request: None,
+            deadline_ms: None,
+            default_answer: None,
             idempotency_key: "ask-beds".into(),
         })
         .unwrap();
@@ -197,6 +212,11 @@ mission "garden/review" state="ready" {
     assert_eq!(pruning.kind, WaitKind::Hold);
     assert!(pruning.until_unix_ms.is_some_and(|until| until > late));
     assert!(waiting.reason.starts_with("review waits on person/ada for 45m"), "{}", waiting.reason);
+
+    let (work, missions) = published(&store);
+    let blocked = blocked_runs(&work, &missions.rows, late, QUIET);
+    assert_eq!(blocked.groups.iter().map(|group| group.cause).collect::<Vec<_>>(), [WaitKind::Ask]);
+    assert_eq!(blocked.groups[0].runs[0].step.who.as_deref(), Some("person/ada"));
 }
 
 #[test]
@@ -229,6 +249,8 @@ fn a_stopped_seat_is_the_cause_of_the_step_it_would_take() {
     assert_eq!((watering.who.as_deref(), watering.seat_state.as_deref()), (Some(birch.as_str()), Some("stopped")));
     assert_eq!(watering.detail.as_deref(), Some("agent/garden/birch would take it and is stopped"));
     assert_eq!(open(&waiting, "plant").seat_state.as_deref(), Some("running"));
+    let blocked = blocked_runs(&work, &rows, t0 + MINUTE, QUIET);
+    assert_eq!(blocked.groups.iter().map(|group| group.cause).collect::<Vec<_>>(), [WaitKind::SeatDown]);
 }
 
 #[tokio::test]
@@ -239,7 +261,7 @@ async fn the_reads_serve_only_published_lists() {
     let alpha = start(&state.store, "garden/alpha", "alpha-1");
     let query = || Query(WaitingOnQuery::default());
     // Lists that were never published, as with ST3_PUBLISHED_LISTS=off: say so, never fold.
-    let refused = get_run_waiting_on(State(state.clone()), AxumPath(alpha.subject.clone()), query()).await.unwrap_err();
+    let refused = get_blocked_runs(State(state.clone()), query()).await.unwrap_err();
     assert_eq!(refused.code, WAITING_ON_UNAVAILABLE);
     // Started and not yet published: retry shortly.
     state.store.published_work_list().start();
@@ -250,9 +272,10 @@ async fn the_reads_serve_only_published_lists() {
     assert_eq!(waiting.run, alpha.subject);
     assert_eq!(waiting.mission, "mission/garden/alpha");
     assert_eq!(waiting.quiet_after_ms, QUIET);
-    assert_eq!(waiting.work_cut, state.store.index().unwrap());
     let missing = get_run_waiting_on(State(state.clone()), AxumPath("mission-run/nowhere".into()), query())
         .await
         .unwrap_err();
     assert_eq!(missing.code, "not-found");
+    let Json(blocked) = get_blocked_runs(State(state.clone()), query()).await.unwrap();
+    assert_eq!(blocked.work_cut, state.store.index().unwrap());
 }

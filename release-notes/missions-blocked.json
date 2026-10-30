@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st missions blocked and GET /v1/blocked-runs list every blocked run, one line each, grouped by cause, from the published work and missions lists",
+  "replay": {"status": "none", "detail": "A read of state st already publishes; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, index or migration change; it reads no store rows."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "Adds one HTTP read and one CLI command; no existing route, client or wire format changes."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "An older build lacks the route and command; nothing is stored."}
+}

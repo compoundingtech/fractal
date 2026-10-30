@@ -473,6 +473,16 @@ pub(super) async fn run_mission_view(
                 Ok(())
             }
         }
+        MissionViewCommand::Blocked { quiet } => {
+            let path = format!("/v1/blocked-runs{}", quiet_query(quiet.as_deref())?);
+            let view: fractal_daemon::waiting_on::BlockedRuns = client.get(&path).await?;
+            if json_output {
+                print_value(&serde_json::to_value(&view)?, true)
+            } else {
+                print!("{}", crate::waiting_on_cli::render_blocked_runs(&view));
+                Ok(())
+            }
+        }
         MissionViewCommand::Show(args) => {
             notice_ignored_read_actor(args.ignored_actor.as_deref());
             anyhow::ensure!((1..=50).contains(&args.limit), "mission tree limit must be 1 through 50");
