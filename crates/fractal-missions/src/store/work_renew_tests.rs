@@ -89,7 +89,7 @@ fn quiet_renewal_updates_only_lease_columns_with_bounded_wal_pages() {
     let before = renewal.store.step_run(&renewal.subject).unwrap().unwrap();
     let start = now_ms();
     renewal.store.connection.write().execute_batch(
-        "CREATE TEMP TRIGGER quiet_renewal_state_guard
+        /* sqlite-large-value: allow-for-now lv-hca69050f62ee owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER quiet_renewal_state_guard
          AFTER UPDATE OF status,worker_reported,lease_owner,lease_incarnation,
                          blocked_reason,readiness_epoch ON main.step_runs
          BEGIN SELECT RAISE(ABORT,'quiet renewal rewrote state columns'); END;",
@@ -123,18 +123,23 @@ fn lease_only_update_dirties_fewer_pages_than_rewriting_unchanged_indexed_state(
         let renewal = claimed_step(0);
         let page_size = reset_renewal_wal(&renewal);
         let connection = renewal.store.connection.write();
-        let sql = if broad {
-            "UPDATE step_runs SET status=status,worker_reported=worker_reported,
+        let expiry = (now_ms() + 601_000).to_string();
+        let updated = (now_ms() + 1_000).to_string();
+        if broad {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h574254113134 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=status,worker_reported=worker_reported,
                  lease_owner=lease_owner,lease_incarnation=lease_incarnation,
                  blocked_reason=blocked_reason,readiness_epoch=readiness_epoch,
-                 lease_expires_at_unix_ms=?2,updated_at_unix_ms=?3 WHERE subject=?1"
+                 lease_expires_at_unix_ms=?2,updated_at_unix_ms=?3 WHERE subject=?1",
+                params![renewal.subject, expiry, updated],
+            ).unwrap();
         } else {
-            "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
-                 updated_at_unix_ms=?3 WHERE subject=?1"
-        };
-        connection.execute(sql, params![
-            renewal.subject, (now_ms() + 601_000).to_string(), (now_ms() + 1_000).to_string(),
-        ]).unwrap();
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-haebfd1e4985b owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
+                 updated_at_unix_ms=?3 WHERE subject=?1",
+                params![renewal.subject, expiry, updated],
+            ).unwrap();
+        }
         drop(connection);
         pages.push(renewal_wal_frames(&renewal, page_size));
     }

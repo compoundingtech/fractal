@@ -6161,7 +6161,7 @@ impl MissionsStore for Store {
                     // when every value is unchanged.
                     transaction
                         .execute(
-                            "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
+                            /* sqlite-large-value: allow-for-now lv-h8d3cdf97e396 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
                                 updated_at_unix_ms=?3 WHERE subject=?1",
                             params![subject, claim_expiry.map(|value| value.to_string()), now.to_string()],
                         )
