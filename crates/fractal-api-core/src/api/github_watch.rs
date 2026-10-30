@@ -869,6 +869,11 @@ mod tests {
                 &observation, smallclaims::store::now_ms(), &subscriptions, None,
             ).unwrap();
             assert!(baseline.message_subjects.is_empty());
+            let desired_before = store.desired_subjects_named(&[thread.watch(original)]).unwrap()[0].desired.clone();
+            let addressed_as = if actor_is_new { renamed } else { original };
+            let repeated = declare_seat_watch(&store, &thread, addressed_as, Some(until)).unwrap();
+            assert_eq!(repeated["subject"], initial["subject"]);
+            assert_eq!(store.desired_subjects_named(&[thread.watch(original)]).unwrap()[0].desired, desired_before);
             observation["pull_requests"][0]["required_checks"]["state"] = json!("pass");
             let mut delivered_events = 0;
             for _ in 0..2 {
