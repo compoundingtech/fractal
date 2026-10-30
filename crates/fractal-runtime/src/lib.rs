@@ -19,6 +19,8 @@ mod peer_process;
 mod process;
 mod procfs;
 mod pty;
+mod seat_placement;
+pub use seat_placement::UnlanedSeatPlacement;
 mod pty_launcher;
 #[path = "../../pty-launch-environment.rs"]
 mod pty_launch_environment;
