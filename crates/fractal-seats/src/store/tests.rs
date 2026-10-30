@@ -2099,8 +2099,9 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
     );
 }
 
-/// Rollups replicate hourly, and a period that ends inside the hour reads, on the seat's host, the
-/// reading it ended on, not only the newest one waiting.
+/// Rollups replicate hourly. On the seat's host a period also counts the readings since each
+/// series' last replication, so a boundary inside the hour still waiting finds the reading it ended
+/// on. Once the hour replicates, the host reads what every member reads: periods exact to the hour.
 #[test]
 fn a_host_period_ending_inside_the_hour_reads_the_rollup_it_ended_on() {
     let local = Store::open_memory("host-one").unwrap();
@@ -2144,6 +2145,24 @@ fn a_host_period_ending_inside_the_hour_reads_the_rollup_it_ended_on() {
     let total = |until: u64| local.usage_period_rows(start - 1, until).unwrap()[0]["total_tokens"].as_u64();
     assert_eq!(total(start + 20 * minute), Some(10), "the reading the period ended on");
     assert_eq!(total(start + 40 * minute), Some(20));
+    local
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("state".into(), json!("ended")),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-one")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("hourly-ended".into()),
+        })
+        .unwrap();
+    assert_eq!(local.claims_for(subject, Some("harness.usage")).unwrap().len(), 2, "the end replicates the last");
+    assert_eq!(total(start + 40 * minute), Some(20));
+    assert_eq!(total(start + 20 * minute), Some(1), "replicated, the hour's snapshots are what every member reads");
 }
 
 #[test]

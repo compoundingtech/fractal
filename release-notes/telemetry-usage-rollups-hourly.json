@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Contract C2 of the db-breakup plan, approved: usage periods are exact to the hour. On the seat's host, st usage, /v1/usage, /v1/client/usage and the agent, mission and run cards fold the pending rollups too, so they stay exact. On other members they lag by up to about an hour, and a period boundary inside an hour reads that hour's previous snapshot. Per-response detail is in OTLP. No claim kind, field, wire or CLI shape changes; an older node keeps replicating rollups on its old schedule, and every node reads both."
+    "detail": "Contract C2 of the db-breakup plan, approved: usage periods are exact to the hour. On the seat's host, st usage, /v1/usage and /v1/client/usage also count every reading since each series' last replication, and the agent, mission and run cards fold the newest, so current totals and any period boundary since then stay exact. Older boundaries inside an hour read the hour's replicated snapshots, on the host as on every other member; other members' current totals lag by up to about an hour. Per-response detail is in OTLP. No claim kind, field, wire or CLI shape changes; an older node keeps replicating rollups on its old schedule, and every node reads both."
   },
   "downtime": {
     "status": "none",

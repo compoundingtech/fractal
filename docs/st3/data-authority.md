@@ -85,8 +85,9 @@ series' first reading, then the last reading of each UTC hour once that hour is 
 series' next reading or the resting seat's next re-stamp), and its final totals when the seat
 ends. The readings between stay pending in the host's local log. Fleet usage queries subtract the
 last rollup before a period from the last rollup inside it, so they are exact to the hour. On the
-seat's host, usage periods and the agent, mission and run cards also fold its pending rollups and
-stay exact; other members lag by up to about an hour. A configured OpenTelemetry collector
+seat's host, a period also counts every reading since each series' last replication, and the
+agent, mission and run cards fold the newest, so current totals and any boundary since then are
+exact there; other members lag by up to about an hour. A configured OpenTelemetry collector
 receives every response.
 
 Claude event hooks submit `harness.telemetry` observations to their local daemon. They retain
