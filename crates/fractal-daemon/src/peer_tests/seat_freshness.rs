@@ -294,7 +294,7 @@ fn the_fleet_hears_a_node_only_when_every_other_member_can_ask_it() {
     let advertise = |member: &str, feature: bool| {
         let source = &sources.iter().find(|(name, _)| *name == member).unwrap().1;
         let features = if feature { json!({"seat_freshness":1}) } else { json!({"schedule_standby":1}) };
-        append(&source, &format!("daemon/{member}"), "daemon.started", None, json!({"status":"running", "features":features}));
+        append(source, &format!("daemon/{member}"), "daemon.started", None, json!({"status":"running", "features":features}));
         node.import_replication(member, &source.export_replication(0).unwrap()).unwrap();
     };
     let members = ["conversation-gateway".to_owned(), "alder".to_owned(), "birch".to_owned()];
