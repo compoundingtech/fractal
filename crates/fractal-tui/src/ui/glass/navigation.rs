@@ -60,10 +60,10 @@ impl Ui {
         glasses
             .history
             .truncate(glasses.history_cursor.saturating_add(1));
-        if let Some(before) = before {
-            if glasses.history.last() != Some(&before) {
-                glasses.history.push(before);
-            }
+        if let Some(before) = before
+            && glasses.history.last() != Some(&before)
+        {
+            glasses.history.push(before);
         }
         glasses.history.push(after);
         if glasses.history.len() > 50 {
@@ -207,6 +207,9 @@ impl Ui {
     }
 
     pub(in crate::ui) fn navigation_key(&mut self, key: KeyEvent) -> bool {
+        if self.glasses.palette.is_some() {
+            return false;
+        }
         let Some(forward) = history_chord(key, self.keyboard_enhanced) else {
             return false;
         };
