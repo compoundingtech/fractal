@@ -12780,7 +12780,8 @@ async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_rep
     })).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
     let replica_root = tempfile::tempdir().unwrap();
-    let replica = state(replica_root.path());
+    let mut replica = state(replica_root.path());
+    replica.store = Arc::new(Store::open_memory("subject-replica").unwrap());
     replica.store.import_replication(owner.store.origin(), &owner.store.export_replication(0).unwrap()).unwrap();
     for app in [app, router(replica)] {
         let mut previous_claims = None;
