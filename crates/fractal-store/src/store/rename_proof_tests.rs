@@ -1,7 +1,7 @@
 //! Real in-memory SQLite stores, real member keys and sealed replication bytes; no mocks.
 use super::*;
 use super::identities::{IdentityKind, IdentityStore, RenameReceipt, RenameRequest};
-use crate::store::fleet_admission_tests_shared_seats::{FLEET, key, node};
+use crate::store::fleet_admission_tests_shared_seats::{FLEET, admit, key, node, sync};
 use smallclaims::proof::{RenameProofBundle, verify_rename_proof};
 
 const ORIGINAL: &str = "agent/example-original/worker";
@@ -114,7 +114,9 @@ fn portable_proof_rejects_tampered_metadata_envelope_and_signature() {
     let (proof, member) = exported();
     let mut changed = proof.clone();
     changed.canonical_id = "agent/example-forged".into();
-    assert!(verify_rename_proof(&changed, member.public(), None).is_err());
+    let error = verify_rename_proof(&changed, member.public(), None).unwrap_err();
+    assert_eq!(error.code, "malformed-bundle");
+    assert_eq!(error.exit_code(), 6);
 
     let mut changed = proof.clone();
     let envelope = changed.envelopes.last_mut().unwrap();
@@ -214,4 +216,71 @@ fn portable_proof_rejects_unknown_schema_and_forged_embedded_anchor() {
     let mut changed = proof;
     changed.fleet_anchor = key().public().to_owned();
     assert_eq!(verify_rename_proof(&changed, member.public(), None).unwrap_err().code, "untrusted-membership");
+}
+
+#[test]
+fn portable_proof_rejects_removed_anchor_admission_evidence() {
+    let (mut proof, member) = exported();
+    let admission_index = proof.envelopes.iter().position(|envelope| {
+        let payload: smallclaims::claim::ReplicaEnvelopePayload =
+            ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+        payload.batch.claims.iter().any(|claim| {
+            claim.kind == "fleet.member-admitted"
+                && claim.body["fields"]["via"] == "anchor"
+        })
+    }).unwrap();
+    proof.envelopes.remove(admission_index);
+    // Removing the founding admission also removes the writer's first sequence.
+    let error = verify_rename_proof(&proof, member.public(), None).unwrap_err();
+    assert_eq!(error.code, "broken-chain");
+    assert_eq!(error.exit_code(), 3);
+}
+
+#[test]
+fn retained_member_removal_fences_a_validly_signed_later_rename() {
+    let anchor_key = key();
+    let writer_key = key();
+    let anchor = node("example-anchor", Some(&anchor_key), Some(&anchor_key));
+    anchor.admit_fleet_anchor(FLEET, anchor_key.public(), "listening").unwrap();
+    admit(&anchor, "example-writer", &writer_key, "invite", None);
+    let writer = node("example-writer", Some(&writer_key), Some(&anchor_key));
+    sync(&anchor, &writer);
+    writer.ensure_principal_key(ACTOR).unwrap();
+    publish(&writer, "version 2\nagent \"example-original/worker\" { command \"true\"; }\n", "declare-removed-member-agent");
+    rename(&writer, IdentityKind::Agent, ORIGINAL, RENAMED, "before-removal");
+    sync(&writer, &anchor);
+    let before = writer.export_rename_proof(IdentityKind::Agent, RENAMED, None).unwrap();
+    let high_water = before.envelopes.iter()
+        .filter(|envelope| envelope.writer == "example-writer")
+        .map(|envelope| envelope.sequence).max().unwrap();
+
+    // The writer is partitioned: it can still create a real signed rename, while the
+    // anchor removes it at the last writer sequence the anchor actually observed.
+    anchor.remove_fleet_member("example-writer", "End this member window", ACTOR).unwrap();
+    rename(&writer, IdentityKind::Agent, RENAMED, FINAL, "partitioned-after-removal");
+    let mut proof = writer.export_rename_proof(IdentityKind::Agent, FINAL, None).unwrap();
+    let head_sequence = proof.envelopes.iter().filter_map(|envelope| {
+        let payload: smallclaims::claim::ReplicaEnvelopePayload =
+            ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+        payload.batch.claims.iter().any(|claim| claim.id == proof.naming_revision)
+            .then_some(envelope.sequence)
+    }).next().unwrap();
+    assert!(head_sequence > high_water);
+
+    // Combine only genuine sealed envelopes: retain the partitioned writer's signed
+    // suffix and replace the anchor prefix with its real removal-bearing history.
+    let anchor_history = anchor.rename_proof_envelopes().unwrap();
+    let removal = anchor_history.iter().flat_map(|envelope| {
+        let payload: smallclaims::claim::ReplicaEnvelopePayload =
+            ciborium::from_reader(envelope.payload.bytes().unwrap()).unwrap();
+        payload.batch.claims
+    }).find(|claim| claim.kind == "fleet.member-removed").unwrap();
+    assert_eq!(removal.subject, "host/example-writer");
+    assert_eq!(removal.body["fields"]["high_water"], high_water);
+    proof.envelopes.retain(|envelope| envelope.writer != "example-anchor");
+    proof.envelopes.extend(anchor_history.into_iter()
+        .filter(|envelope| envelope.writer == "example-anchor"));
+    let error = verify_rename_proof(&proof, anchor_key.public(), None).unwrap_err();
+    assert_eq!(error.code, "untrusted-membership");
+    assert_eq!(error.exit_code(), 4);
 }
