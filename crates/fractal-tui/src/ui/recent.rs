@@ -39,7 +39,7 @@ impl Popup {
         }
     }
 
-    fn filter(&mut self) {
+    fn refresh_matches(&mut self) {
         let query = self.query.to_lowercase();
         self.matches = self
             .entries
@@ -52,6 +52,10 @@ impl Popup {
             })
             .map(|(index, _)| index)
             .collect();
+    }
+
+    fn filter(&mut self) {
+        self.refresh_matches();
         self.selected = 0;
         // Typing deliberately switches to the explicit Enter/Esc interaction.
         self.commit_on_release = false;
@@ -63,6 +67,36 @@ impl Ui {
         self.recent.popup.is_some()
     }
 
+
+    /// Refresh the open snapshot only when the shared tab-status observations change.
+    /// This is not typing: keep both the selected destination and release-to-commit mode.
+    pub(in crate::ui) fn refresh_recent_labels(&mut self) {
+        let Some(mut popup) = self.recent.popup.take() else {
+            return;
+        };
+        let selected_entry = popup.matches.get(popup.selected).copied();
+        let mut old_index = 0;
+        let mut new_index = 0;
+        let mut surviving_selection = None;
+        popup.entries.retain_mut(|entry| {
+            let keep = self.place_exists(&entry.place);
+            if keep {
+                if selected_entry == Some(old_index) {
+                    surviving_selection = Some(new_index);
+                }
+                entry.label = self.place_label(&entry.place);
+                entry.search = entry.label.to_lowercase();
+                new_index += 1;
+            }
+            old_index += 1;
+            keep
+        });
+        popup.refresh_matches();
+        popup.selected = surviving_selection
+            .and_then(|entry| popup.matches.iter().position(|index| *index == entry))
+            .unwrap_or(0);
+        self.recent.popup = Some(popup);
+    }
     /// Explicit popup with the previous destination selected, also on legacy Ctrl+6/Ctrl+^.
     pub(super) fn open_recent(&mut self) {
         self.start_recent(false, false);
@@ -274,7 +308,10 @@ impl Ui {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::{demo, glass::Open, pane::Pane};
+    use crate::ui::{
+        demo, glass::Open, pane::Pane,
+        view::{AgentState, AttentionKind, Link, Load},
+    };
 
     fn places() -> Ui {
         let mut ui = Ui::new(demo::world());
@@ -282,6 +319,178 @@ mod tests {
         ui.open_in_glass(Pane::Documents(Some("recent-beta".into())), Open::Tab);
         ui.open_in_glass(Pane::Documents(Some("recent-gamma".into())), Open::Tab);
         ui
+    }
+
+    fn live_places() -> Ui {
+        let mut world = demo::world();
+        world.link = Link::Live;
+        let template = world.agents.items()[0].clone();
+        world.agents = Load::Ready(
+            ["agent/recent-a", "agent/recent-b"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    let mut agent = template.clone();
+                    agent.id = id.into();
+                    agent.name = format!("Live agent {index}");
+                    agent.state = AgentState::Idle;
+                    agent
+                })
+                .collect(),
+        );
+        world.attention = Load::Ready(Vec::new());
+        let mut ui = Ui::new(world);
+        ui.open_in_glass(Pane::Agent(Some("agent/recent-a".into())), Open::Tab);
+        ui.open_in_glass(Pane::Agent(Some("agent/recent-b".into())), Open::Tab);
+        ui.open_in_glass(Pane::Documents(Some("recent-notes".into())), Open::Tab);
+        ui
+    }
+
+    fn selected_place(ui: &Ui) -> &StoredPlace {
+        let popup = ui.recent.popup.as_ref().unwrap();
+        &popup.entries[popup.matches[popup.selected]].place
+    }
+
+    fn add_live_question(ui: &mut Ui) {
+        let mut world = ui.world.clone();
+        if let Load::Ready(agents) = &mut world.agents {
+            for agent in agents {
+                agent.state = AgentState::Working;
+                agent.name.push_str(" updated");
+            }
+        }
+        let mut alert = demo::world().attention.items()[0].clone();
+        alert.id = "attention/recent-question".into();
+        alert.agent = Some("agent/recent-b".into());
+        alert.conversations = vec!["agent/recent-b".into()];
+        alert.kind = AttentionKind::Prompt {
+            seat: "Live agent 1".into(),
+            seat_id: "agent/recent-b".into(),
+            text: "Choose".into(),
+            question: true,
+            answers: Vec::new(),
+            episode: "episode/recent-question".into(),
+            call: None,
+            calls: Ok(Vec::new()),
+            allow: true,
+        };
+        world.attention = Load::Ready(vec![alert]);
+        ui.set_world(world);
+    }
+
+    #[test]
+    fn world_refresh_updates_open_labels_activity_and_questions_without_ending_hold() {
+        let mut ui = live_places();
+        ui.keyboard_enhanced = true;
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        ui.recent_key(ctrl_tab(false));
+        let selected = selected_place(&ui).clone();
+        assert_eq!(selected.pane, "agent:agent/recent-b");
+        let before = ui.recent.popup.as_ref().unwrap().entries[1].label.clone();
+
+        add_live_question(&mut ui);
+
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(selected_place(&ui), &selected);
+        assert_eq!(popup.selected, 1, "refresh must not reset to the first match");
+        assert!(popup.commit_on_release);
+        let entry = &popup.entries[popup.matches[popup.selected]];
+        assert_eq!(entry.label, ui.place_label(&selected));
+        assert_ne!(entry.label, before);
+        assert!(entry.label.contains("updated"));
+        assert!(entry.label.contains('>'), "working activity is live");
+        assert!(entry.label.contains('?'), "live question is visible");
+        assert_eq!(entry.search, entry.label.to_lowercase());
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buffer = Buffer::empty(area);
+        ui.draw_recent(&mut buffer, area);
+        let rendered: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("updated"));
+        assert!(rendered.contains('?'));
+        assert!(ui.observe_recent_key(release(ModifierKeyCode::LeftControl)));
+        assert_eq!(ui.focused_pane().unwrap().key(), selected.pane);
+    }
+
+    #[test]
+    fn world_refresh_keeps_query_selected_match_and_explicit_commit_mode() {
+        let mut ui = live_places();
+        ui.keyboard_enhanced = true;
+        ui.observe_recent_key(release(ModifierKeyCode::LeftControl));
+        ui.recent_key(ctrl_tab(false));
+        for ch in "live agent".chars() {
+            ui.recent_key(key(KeyCode::Char(ch)));
+        }
+        ui.recent_key(key(KeyCode::Down));
+        let selected = selected_place(&ui).clone();
+        assert_eq!(ui.recent.popup.as_ref().unwrap().selected, 1);
+
+        add_live_question(&mut ui);
+
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(popup.query, "live agent");
+        assert_eq!(popup.matches.len(), 2);
+        assert_eq!(popup.selected, 1);
+        assert_eq!(selected_place(&ui), &selected);
+        assert!(!popup.commit_on_release);
+        assert!(!ui.observe_recent_key(release(ModifierKeyCode::LeftControl)));
+        assert!(ui.recent_open());
+    }
+
+    #[test]
+    fn world_refresh_refilters_current_query_and_prunes_disappeared_destinations() {
+        let mut ui = live_places();
+        ui.open_recent();
+        ui.recent_key(key(KeyCode::Char('?')));
+        assert!(ui.recent.popup.as_ref().unwrap().matches.is_empty());
+
+        add_live_question(&mut ui);
+
+        assert_eq!(ui.recent.popup.as_ref().unwrap().matches.len(), 1);
+        assert_eq!(selected_place(&ui).pane, "agent:agent/recent-b");
+        let mut world = ui.world.clone();
+        if let Load::Ready(items) = &mut world.attention {
+            for item in items {
+                if let AttentionKind::Prompt { question, .. } = &mut item.kind {
+                    *question = false;
+                }
+            }
+        }
+        ui.set_world(world);
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(popup.query, "?");
+        assert!(popup.matches.is_empty());
+        assert_eq!(popup.selected, 0);
+        assert!(!popup.commit_on_release);
+
+        let mut world = ui.world.clone();
+        if let Load::Ready(agents) = &mut world.agents {
+            agents.retain(|agent| agent.id != "agent/recent-b");
+        }
+        ui.set_world(world);
+        assert!(ui.recent.popup.as_ref().unwrap().entries.iter().all(|entry| {
+            entry.place.pane != "agent:agent/recent-b"
+        }));
+        ui.recent_key(key(KeyCode::Esc));
+        ui.set_world(ui.world.clone());
+        assert!(!ui.recent_open(), "refreshing a closed popup is a no-op");
+    }
+
+    #[test]
+    fn ui_dispatch_legacy_control_tab_does_not_switch_a_detached_quiet_pane() {
+        let mut ui = places();
+        assert!(!ui.keyboard_enhanced);
+        assert!(!ui.terminal_focused());
+        let before = ui.current_place().unwrap();
+        for event in [
+            ctrl_tab(false),
+            ctrl_tab(true),
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::CONTROL),
+        ] {
+            ui.key(event);
+            assert_eq!(ui.current_place().unwrap(), before);
+            assert!(!ui.recent_open());
+            assert!(!ui.terminal_focused());
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {

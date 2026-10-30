@@ -2656,6 +2656,7 @@ impl Ui {
 
     pub(super) fn refresh_tab_statuses(&mut self) {
         self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
+        self.refresh_recent_labels();
     }
 
 
@@ -3074,8 +3075,8 @@ impl Ui {
             }
             // Tab and Shift+Tab are tab keys here too. Left to the old layout, Tab switched its
             // section (Home, Agents…) under the focused conversation (Nathan, 2026-10-03).
-            KeyCode::Tab if quiet => self.show_tab((current + 1) % tabs),
-            KeyCode::BackTab if quiet => self.show_tab((current + tabs - 1) % tabs),
+            KeyCode::Tab if quiet && key.modifiers.is_empty() => self.show_tab((current + 1) % tabs),
+            KeyCode::BackTab if quiet && !control && !alt => self.show_tab((current + tabs - 1) % tabs),
             KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down if alt => {
                 self.move_focus(key.code)
             }

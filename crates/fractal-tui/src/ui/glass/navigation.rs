@@ -89,7 +89,7 @@ impl Ui {
         glasses.save();
     }
 
-    fn place_exists(&self, place: &StoredPlace) -> bool {
+    pub(in crate::ui) fn place_exists(&self, place: &StoredPlace) -> bool {
         if !self.glasses.all.iter().any(|glass| {
             glass.id == place.space
                 && glass.layout.groups().get(place.group).is_some_and(|group| {
