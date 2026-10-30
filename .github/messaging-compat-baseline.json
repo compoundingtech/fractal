@@ -1,16 +1,16 @@
 {
-  "commit": "5cc15de19fe50e0896cc7dff208f51e671506d1b",
-  "tag": "v0.3.22",
+  "commit": "943445316e3738a1fc1ee58f676334b7ec684bf4",
+  "tag": "v0.3.23",
   "why": "Rolling previous-published-release compatibility baseline; advance after each stable release.",
   "exception_reason": null,
   "bundles": {
     "x86_64-unknown-linux-gnu": {
-      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.22/smalltalk-x86_64-unknown-linux-gnu.tar.gz",
-      "sha256": "7a6b0392f4cffe2fbf87533bbd95c6791464ee0dbab6b2221eda65fdd46e67cf"
+      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.23/smalltalk-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "f09c386e0ed328d95a55366621eeb1e2de15883650261a7010b974148cde49f4"
     },
     "aarch64-apple-darwin": {
-      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.22/smalltalk-aarch64-apple-darwin.tar.gz",
-      "sha256": "59565996013d1d2639d5788171ac4702bff90342c4404ae329275e0ea5429c23"
+      "url": "https://github.com/compoundingtech/fractal/releases/download/v0.3.23/smalltalk-aarch64-apple-darwin.tar.gz",
+      "sha256": "8057d3f504edc373a21d838f66a17eb5847c49735ecb352f74f092aa14ca8f30"
     }
   }
 }
