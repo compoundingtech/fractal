@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The deterministic risk floor of a review (docs/review.md, .st/review-risk.json).
+"""The deterministic risk floor of a review (docs/review.md, evidence configuration).
 
   review-risk BASE HEAD     the risk of git diff BASE...HEAD by named rules, no model involved
 
@@ -7,10 +7,11 @@ Prints JSON: {"level": "low"|"medium"|"high", "reasons": [{"rule", "level", "pat
 "changed_lines": N}. The level is the highest of the reasons' levels. A review's final risk is the higher of this and the reviewing
 model's own score: the model may raise the risk above this floor and never lower it.
 
-The rules (.st/review-risk.json), the risky classes (.st/risky-classes.json) and the engine that applies them (scripts/classify-risk)
+The rules (review-risk.json), risky classes (risky-classes.json) and engine (scripts/classify-risk)
 are read from BASE, never from the head under review, so a change cannot lower its own floor by editing them. If BASE does not hold
 them yet (the change that introduces them), the review fails; --rules-from-checkout reads them from the checkout instead, for that
 one bootstrap case only.
+Configuration resolves .fractal first, then .st only when absent at that same base (or explicitly trusted checkout).
 """
 import argparse
 import importlib.machinery
@@ -37,11 +38,26 @@ def load_engine(path):
     return module
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — missing-only, same-authority bridge.
+def config_path(repo, path, base=None):
+    new = path.replace(".st/", ".fractal/", 1)
+    if base is not None:
+        probe = subprocess.run(["git", "ls-tree", "--full-tree", "-z", base, "--", new], cwd=repo, capture_output=True, check=True)
+        return new if probe.stdout else path
+    try:
+        (repo / new).lstat()
+    except FileNotFoundError:
+        return path
+    return new
+
+
 def rule_files(repo, base, from_checkout, folder):
     """(rules text, risky classes text, engine module): from BASE's tree, or the checkout's when asked to."""
     wanted = {"rules": RULES, "classes": ".st/risky-classes.json", "engine": "scripts/classify-risk"}
     texts = {}
     for key, path in wanted.items():
+        if path.startswith(".st/"):
+            path = config_path(repo, path, None if from_checkout else base)
         if from_checkout:
             if subprocess.run(["git", "cat-file", "-e", f"{base}:{path}"], cwd=repo, capture_output=True).returncode == 0:
                 raise SystemExit(f"review-risk: {base} holds {path}; it is read from there, --rules-from-checkout is only for a base that has none")
