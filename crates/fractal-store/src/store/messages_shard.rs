@@ -766,6 +766,12 @@ mod tests {
         assert_eq!(page.len(), 3);
         assert_eq!(next, None);
 
+        // The unpaged and delivery readers stay on the graph until they learn stream items.
+        let unpaged = graph.messages_through(Some("agent/cedar"), false, through).unwrap();
+        assert_eq!(unpaged.iter().map(|m| m.subject.as_str()).collect::<Vec<_>>(), ["message/00000000000000a1"]);
+        let delivered = graph.messages_through_inner(Some("agent/cedar"), false, through, true).unwrap();
+        assert_eq!(delivered.len(), 1);
+
         let subject = "message/00000000000000b1";
         let view = graph.message(subject).unwrap().unwrap();
         assert_eq!((view.status.as_str(), view.to.as_str()), ("sent", "agent/cedar"));
