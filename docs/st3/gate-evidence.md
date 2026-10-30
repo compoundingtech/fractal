@@ -1852,7 +1852,7 @@ The check that builds the Rust workspace (`linux-gate`) builds in one cargo targ
 trees instead, which one run at a time builds and tests in: its lock is exclusive for the whole run, because two runs on different
 trees sharing it once tested each other's binaries; `off` builds in the tree itself; a `CARGO_TARGET_DIR` you set is left alone), so a run does not start cold: a tree's path
 is the same every run, so the dependencies, build scripts and unchanged workspace crates are reused.
-Operations' terms: it is removed before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it), it is never
+Operations' terms: it is emptied before a run once it passes 80 GB (a limit below one run's size would empty it every time; the run holds the tree's lock, so nobody else uses it). st-test empties only a target it or cargo made, by its CACHEDIR.TAG, or a pool tree's own target inside the pool directory; st-test writes the tag when it creates a target, since cargo tags only a target directory it creates itself. It is never
 pinned, and the host's scratch sweep may reclaim it when idle (then the next run is cold). The old per-host `~/.cache/st-test-target` is
 no longer used by default and can be deleted.
 **The host's build cap governs the checks that build.** Each runs inside a `builds.slice` scope (`systemd-run --user --scope
