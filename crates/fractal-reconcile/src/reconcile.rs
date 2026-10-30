@@ -29108,7 +29108,13 @@ agent "worker" {
             .selected_desired_token("agent/node.worker")
             .unwrap()
             .unwrap();
-        let attention = store.fault_items(Some("person/alex")).unwrap();
+        // The parked seat's fault goes to its owner; find it by the seat.
+        let attention = store
+            .fault_items(None)
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "agent/node.worker")
+            .collect::<Vec<_>>();
         assert_eq!(attention.len(), 1);
         assert_eq!(attention[0].subject, "agent/node.worker");
         assert!(
@@ -31275,7 +31281,19 @@ schedule "{name}" {{
             tokio::task::yield_now().await;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
-        reconciler.reconcile_once().unwrap();
+        // On a loaded host several passes can arm due occurrences before any timer runs, and the
+        // last await reaches them all. One scheduled run is active at a time, so the later
+        // requests wait for the earlier runs to end. This runtime has one thread, so with no
+        // further await no timer reaches another occurrence; drive passes until they have started.
+        let mut passes = 0;
+        loop {
+            reconciler.reconcile_once().unwrap();
+            passes += 1;
+            if store.pending_schedule_work_requests("schedule/cycle").unwrap().is_empty() {
+                break;
+            }
+            assert!(passes < 20, "the schedule's requests did not start after {passes} passes");
+        }
 
         let reached = store
             .claims_for("schedule/cycle", Some("schedule.occurrence-reached"))
@@ -34381,6 +34399,71 @@ agent "node.parked" { workspace "/tmp"; command "true" }
             "{}",
             after.item.detail
         );
+    }
+
+    /// A seat an agent declared outside any run answers to that agent, not to the fleet's fault
+    /// agent: the agent that made the seat is the one that can fix its launch.
+    #[test]
+    fn a_parked_seat_an_agent_declared_raises_its_fault_to_that_agent() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+agent "node.ops" { workspace "/tmp"; command "true"; handles-faults }
+agent "node.lead" { workspace "/tmp"; command "true" }
+"#,
+            "fault-agent-and-lead",
+        );
+        let source = "version 2\nagent \"node.built\" { workspace \"/tmp\"; command \"true\" }";
+        let intent = parse_intent(source, "node").unwrap();
+        let mission = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply_as(
+                &intent,
+                &mission.subject_tokens,
+                "agent-declared",
+                Some("agent/node.lead"),
+            )
+            .unwrap();
+        let parked = "agent/node.built";
+        let token = store.selected_desired_token(parked).unwrap().unwrap();
+        store
+            .append_claim(&ClaimInput {
+                subject: parked.into(),
+                kind: "runtime.reconcile-decision".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("decision".into(), Value::String("raise".into())),
+                    (
+                        "key".into(),
+                        Value::String(format!("runtime-crash-loop:{token}")),
+                    ),
+                    (
+                        "reason".into(),
+                        Value::String("the runtime failed three times in a row".into()),
+                    ),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("parked-decision".into()),
+            })
+            .unwrap();
+        let fault = store
+            .fault_snapshot(now_ms())
+            .unwrap()
+            .into_iter()
+            .find(|fault| fault.item.subject == parked)
+            .expect("a parked seat is not a fault");
+        assert_eq!(fault.owner.as_deref(), Some("agent/node.lead"));
     }
     /// A person's now holds only requests and reviews. A message stays in conversations, and
     /// each fault, on a live run or a terminal one, goes once to the agent that owns it.
@@ -45094,6 +45177,15 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             .selected_desired_token("agent/node.worker")
             .unwrap()
             .unwrap();
+        // The parked seat's fault goes to its owner, whoever that is; find it by the seat.
+        let parked_faults = |store: &Store| {
+            store
+                .fault_items(None)
+                .unwrap()
+                .into_iter()
+                .filter(|item| item.subject == "agent/node.worker" && item.title.starts_with("A Codex agent stopped"))
+                .count()
+        };
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -45112,7 +45204,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .codex_crash_loop_raised("agent/node.worker", &token_a)
                 .unwrap()
         );
-        assert_eq!(store.fault_items(Some("person/alex")).unwrap().len(), 1);
+        assert_eq!(parked_faults(&store), 1);
 
         // A person revises the declaration, and the new revision's incarnation becomes ready.
         apply_source(&store, &source("gpt-5.6-sol"), "crash-loop-b");
@@ -45137,12 +45229,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             )
             .unwrap();
 
-        assert!(
-            store
-                .fault_items(Some("person/alex"))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(parked_faults(&store), 0);
     }
 
     #[test]

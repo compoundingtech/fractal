@@ -1982,6 +1982,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-09-29T10:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,
