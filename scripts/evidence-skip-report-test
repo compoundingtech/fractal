@@ -58,12 +58,45 @@ class FakeGitHub:
 
 
 def git_runner(command, **kwargs):
+    if command[:1] == ['git'] and 'ls-tree' in command:
+        return subprocess.CompletedProcess(command, 0, b'', b'')
     if command[:1] == ['git'] and 'show' in command:
         return subprocess.CompletedProcess(command, 0, json.dumps(LANES).encode(), b'')
     return subprocess.CompletedProcess(command, 1, b'', b'no')
 
 
 class SkipReport(unittest.TestCase):
+    def test_lane_reads_are_pinned_and_new_malformed_never_falls_back(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            def git(*args):
+                return subprocess.run(['git', '-C', folder, '-c', 'core.hooksPath=/dev/null',
+                                       '-c', 'commit.gpgsign=false', '-c', 'user.name=t', '-c', 'user.email=t@t', *args],
+                                      capture_output=True, check=True, text=True).stdout.strip()
+            git('init', '-q')
+            (root / '.st').mkdir()
+            (root / '.st/required-lanes.json').write_text(json.dumps(LANES))
+            git('add', '-A')
+            git('commit', '-qm', 'old')
+            old = git('rev-parse', 'HEAD')
+            (root / '.fractal').mkdir()
+            new_data = {'lanes': {'demo': {'definition_paths': ['new-only']}}}
+            new = root / '.fractal/required-lanes.json'
+            new.write_text(json.dumps(new_data))
+            git('add', '-A')
+            git('commit', '-qm', 'new')
+            new_revision = git('rev-parse', 'HEAD')
+            new.write_text('{')
+            self.assertEqual(report.lanes_at(root, old, report.flip.default_runner, {})['linux-gate'],
+                             LANES['lanes']['linux-gate']['definition_paths'])
+            self.assertEqual(report.lanes_at(root, new_revision, report.flip.default_runner, {}), {'demo': ['new-only']})
+            git('add', '-A')
+            git('commit', '-qm', 'malformed')
+            with self.assertRaises(ValueError):
+                report.lanes_at(root, git('rev-parse', 'HEAD'), report.flip.default_runner, {})
+            with self.assertRaises(RuntimeError):
+                report.lanes_at(root, 'f' * 40, report.flip.default_runner, {})
+
     def test_each_decision_is_counted_once_in_its_category(self):
         cases = [
             ({'decision': 'skip', 'outcome': 'satisfied', 'reason': 'satisfied'}, False, 'skipped'),
