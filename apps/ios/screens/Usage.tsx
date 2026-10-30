@@ -1,14 +1,15 @@
 import { useFocusEffect, useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { RefreshControl, ScrollView, View } from 'react-native';
-import type { UsagePeriod } from '../../../clients/typescript/fractal-client';
+import { Linking, RefreshControl, ScrollView, View } from 'react-native';
+import type { SloHistory, SloList, UsagePeriod } from '../../../clients/typescript/fractal-client';
 import { plainError } from '../../../clients/typescript/fractal-client';
 import { agentName } from '../agentsView';
 import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';
 import { useStore } from '../store';
 import { theme } from '../theme';
+import { bars, leftText, safeLink, secondLine, forecastOf, sloGroups, type SloTone } from '../slo';
 import { accounts, byOf, cost, creditsLine, groups, label, limitLine, nextBy, PERIODS, periodName, tokens, totalOf, type By, type Names, type Tone } from '../usage';
 import { Button, ListRow, Note, Screen, SectionHeader, T } from '../ui';
 
@@ -55,6 +56,69 @@ export function useUsage(hours: typeof PERIODS[number]) {
   return { period, issue, reading, read };
 }
 
+const sloTone: Record<SloTone, string> = { red: theme.fault, green: theme.idle, yellow: theme.waiting, quiet: theme.overlay0 };
+const CHART_HOURS = 24;
+
+/** Objectives and budgets from st's `slo.list`, read on focus and on pull, as the rest of this screen is on older members. */
+export function useSlo() {
+  const { client } = useStore();
+  const [list, setList] = useState<SloList | null>(null);
+  const [issue, setIssue] = useState('');
+  const read = useCallback(async () => {
+    if (!client) return;
+    try {
+      setList((await client.sloList()).value);
+      setIssue('');
+    } catch (error) {
+      const text = plainError(error);
+      setIssue(/404|not-found|it is gone/i.test(text) ? 'This Fractal version does not serve objectives and budgets yet; it needs an update.' : `Could not read objectives and budgets: ${text}`);
+    }
+  }, [client]);
+  useFocusEffect(useCallback(() => { void read(); }, [read]));
+  return { list, issue, read };
+}
+
+/** Budgets and objectives with each budget's projected use at its reset; tap a row for its words and a chart of the last day. */
+function SloSection({ list, issue }: { list: SloList | null; issue: string }) {
+  const { client } = useStore();
+  const [open, setOpen] = useState<string | null>(null);
+  const [history, setHistory] = useState<Record<string, SloHistory | string>>({});
+  const now = Date.now();
+  const link = safeLink(list?.otel_ui_url);
+  const toggle = (id: string) => {
+    setOpen(open === id ? null : id);
+    if (open === id || !client) return;
+    client.sloHistory(id, { since_ms: Date.now() - CHART_HOURS * 3_600_000, steps: 48 })
+      .then(result => setHistory(found => ({ ...found, [id]: result.value })))
+      .catch(error => setHistory(found => ({ ...found, [id]: plainError(error) })));
+  };
+  if (issue && !list) return <Note tone="warning">{issue}</Note>;
+  if (!list) return null;
+  return <View>
+    {issue ? <Note tone="warning">{issue}</Note> : null}
+    {sloGroups(list.rows).map(group => <View key={group.kind}>
+      <SectionHeader title={group.title} count={group.rows.length} />
+      {group.rows.map(row => {
+        const color = sloTone[row.tone ?? 'quiet'];
+        const line = secondLine(row, now);
+        const chart = history[row.id];
+        const forecast = forecastOf(row, now);
+        return <View key={row.id}>
+          <ListRow title={<T bold numberOfLines={1}><T color={color}>● </T>{row.account ? `${row.id} · ${row.account}` : row.id}</T>} right={<T bold color={color}>{leftText(row)}</T>} onPress={() => toggle(row.id)}
+            second={<T dim numberOfLines={1}>{line.text}{line.forecast ? <T color={line.forecast.runsOut ? theme.waiting : undefined} dim={!line.forecast.runsOut}>{line.forecast.short}</T> : null}</T>} />
+          {open === row.id ? <View style={{ paddingHorizontal: 12, paddingBottom: 8 }}>
+            <T dim>{row.explain}</T>
+            {forecast ? <T color={forecast.runsOut ? theme.waiting : undefined}>forecast {forecast.long}{row.forecast_basis_minutes != null ? ` (from the last ${row.forecast_basis_minutes >= 1440 ? `${Math.floor(row.forecast_basis_minutes / 1440)}d` : `${Math.floor(row.forecast_basis_minutes / 60)}h`})` : ''}</T> : null}
+            <T dim>left, last {CHART_HOURS} hours</T>
+            {typeof chart === 'string' ? <Note tone="warning">{chart}</Note> : chart ? <T color={color}>{chart.samples ? bars(chart, 48) : 'No readings in this period yet.'}</T> : <T dim>Loading the chart…</T>}
+          </View> : null}
+        </View>;
+      })}
+    </View>)}
+    {link ? <ListRow title={<T color={theme.accent}>History in OpenTelemetry ›</T>} onPress={() => void Linking.openURL(link)} /> : null}
+  </View>;
+}
+
 export function useNames(): Names {
   const { data } = useStore();
   useMissionsOnFocus();
@@ -69,6 +133,7 @@ export function UsageScreen() {
   const [hours, setHours] = useState<typeof PERIODS[number]>(PERIODS[0]);
   const [by, setBy] = useState<By>('agent');
   const { period, issue, reading, read } = useUsage(hours);
+  const slo = useSlo();
   const names = useNames();
   const scroll = useRef<ScrollView>(null);
   const now = Date.now();
@@ -80,13 +145,14 @@ export function UsageScreen() {
   const top = (grouping: By) => groups(rows, grouping).find(group => !group.id.startsWith('usage/'));
   return <Screen>
     <Banners />
-    <ScrollView ref={scroll} contentInsetAdjustmentBehavior="automatic" refreshControl={<RefreshControl refreshing={reading} onRefresh={() => void read()} tintColor={theme.overlay1} />} contentContainerStyle={{ paddingBottom: 32 }}>
+    <ScrollView ref={scroll} contentInsetAdjustmentBehavior="automatic" refreshControl={<RefreshControl refreshing={reading} onRefresh={() => { void read(); void slo.read(); }} tintColor={theme.overlay1} />} contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
       <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingTop: 8 }}>
         <Button label={periodName(hours)} onPress={() => setHours(PERIODS[(PERIODS.indexOf(hours as typeof PERIODS[number]) + 1) % PERIODS.length])} />
         <Button label={`by ${by}`} onPress={() => setBy(nextBy(by))} />
       </View>
       {issue ? <Note tone="warning">{issue}</Note> : null}
+      <SloSection list={slo.list} issue={slo.issue} />
       {!period && !issue ? <Note>Loading usage…</Note> : null}
       {period && !rows.length && !limits.length && !declared.length ? <Note>No spend recorded in this period.</Note> : null}
       {rows.length || limits.length || declared.length ? <>
