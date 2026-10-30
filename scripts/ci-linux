@@ -26,7 +26,7 @@ fleet_compat() {
   # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
   # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
   # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
-  # checked. --warn while linux-fleet-compat is in shadow, as for clippy.
+  # checked. --warn while linux-fleet-compat is in shadow (clippy's check fails).
   if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
     cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
     local policy
