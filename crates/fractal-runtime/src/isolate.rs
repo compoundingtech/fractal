@@ -179,8 +179,7 @@ pub(crate) fn wrap_in(
         program,
         arguments,
         environment,
-        lane,
-        unlaned_seat,
+        ScopePlacement { lane, unlaned_seat },
     )
 }
 
@@ -190,6 +189,12 @@ pub(crate) fn systemd_254() -> bool {
     mode() == Isolation::Scope && *SCOPE_EXPANSION_FLAG.get().unwrap_or(&false)
 }
 
+#[derive(Default)]
+struct ScopePlacement<'a> {
+    lane: Option<&'a crate::lane::Lane>,
+    unlaned_seat: Option<&'a crate::UnlanedSeatPlacement>,
+}
+
 fn wrap_for_mode(
     isolation: Isolation,
     expansion_flag: bool,
@@ -197,8 +202,7 @@ fn wrap_for_mode(
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
-    lane: Option<&crate::lane::Lane>,
-    unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
+    placement: ScopePlacement<'_>,
 ) -> Command {
     match isolation {
         Isolation::Scope => {
@@ -219,11 +223,11 @@ fn wrap_for_mode(
             if let Some(environment) = environment {
                 command.env_clear().envs(environment);
             }
-            if let Some(lane) = lane {
+            if let Some(lane) = placement.lane {
                 command.args(lane.scope_arguments());
                 let seat = |key: &str| environment?.get(key).cloned();
                 command.envs(crate::lane::environment(lane, seat, |key| std::env::var(key).ok()));
-            } else if let Some(policy) = unlaned_seat {
+            } else if let Some(policy) = placement.unlaned_seat {
                 policy.apply(&mut command);
             }
             instance_scope_environment(&mut command, environment);
@@ -529,8 +533,7 @@ mod tests {
             OsStr::new("provider"),
             &arguments,
             None,
-            None,
-            None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -554,8 +557,7 @@ mod tests {
             program,
             &arguments,
             None,
-            None,
-            None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -617,8 +619,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("%n:$HOME")],
             Some(&environment),
-            None,
-            None,
+            ScopePlacement::default(),
         );
         assert_eq!(
             command
@@ -713,7 +714,7 @@ mod tests {
         let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
         let arguments = |lane: Option<&crate::lane::Lane>, policy: Option<&crate::UnlanedSeatPlacement>| {
             wrap_for_mode(Isolation::Scope, true, "st3-work.scope",
-                OsStr::new("provider"), &[], None, lane, policy)
+                OsStr::new("provider"), &[], None, ScopePlacement { lane, unlaned_seat: policy })
                 .get_args().map(std::ffi::OsString::from).collect::<Vec<_>>()
         };
         assert_eq!(arguments(None, None), [
@@ -728,7 +729,7 @@ mod tests {
             "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--", "provider",
         ].map(std::ffi::OsString::from));
         let detached = wrap_for_mode(Isolation::Detached, false, "unused.scope",
-            OsStr::new("provider"), &[], None, None, Some(&policy));
+            OsStr::new("provider"), &[], None, ScopePlacement { lane: None, unlaned_seat: Some(&policy) });
         assert!(detached.get_args().next().is_none());
     }
 
@@ -746,8 +747,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("--flag")],
             Some(&environment),
-            Some(&lane),
-            None,
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
         );
         let arguments = command.get_args().collect::<Vec<_>>();
         let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
@@ -773,8 +773,7 @@ mod tests {
             OsStr::new("provider"),
             &[],
             Some(&environment),
-            Some(&lane),
-            None,
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
         );
         assert!(detached.get_args().next().is_none());
         assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));
