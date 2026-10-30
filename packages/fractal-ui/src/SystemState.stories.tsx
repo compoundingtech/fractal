@@ -1,8 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useScenarioSlice, type WireSlice } from '@smalltalk/st3-scenarios/react'
-import { scenarioArgTypes } from '@smalltalk/st3-scenarios/storybook'
+import { useScenarioSlice, type WireSlice } from '@fractal/scenarios/react'
+import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { Button } from 'react-aria-components'
 import { EmbraceScrollViewport } from './assistant-ui/EmbraceScrollViewport'
@@ -44,7 +44,10 @@ const lastObservedRoster = ({ loading, state }: WireSlice<'roster'>): { readonly
       status, statusLabel: statuses[status].label, freshness: 'stale',
       statusSince: agent.since == null ? undefined : Date.parse(agent.since), lastActivityAt,
       lastTurn: lastActivityAt === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', kind: 'activity', at: lastActivityAt },
-      childrenKnown: false, children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
+      // This current-daemon scenario factory reports explicit lists for observing drivers, including empty ones.
+      subagentCount: agent.subagents?.length,
+      subagentObservation: agent.subagents === undefined ? { _tag: 'NotReported', reason: { _tag: 'Harness' } } : { _tag: 'Reported' },
+      children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
     }
   })
   return { rows, observedAt: Math.max(...state.agents.map(agent => Date.parse(agent.updated_at))) }
@@ -145,7 +148,7 @@ type SystemStatesArgs = React.ComponentProps<typeof SystemStatesStory> & { roste
 const meta = {
   title: 'Fractal UI/System states',
   component: SystemStatesStory,
-  parameters: { layout: 'fullscreen', scenario: { slices: ['roster'] } },
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'slices', slices: ['roster'] } },
   args: { scheme: 'dark', connection: 'offline' },
   argTypes: { ...scenarioArgTypes(['roster']), scheme: { options: ['dark', 'light'], control: 'radio' }, connection: { options: ['live', 'offline', 'reconnecting', 'stale', 'failed'], control: 'radio' }, failure: { control: 'text' }, ticking: { control: 'boolean' } },
 } satisfies Meta<SystemStatesArgs>
@@ -243,7 +246,7 @@ const dropAndRestore = async (canvasElement: HTMLElement, between: () => Promise
 /** Geometry plays pin populated long history, bounded to 48 rows; they do not browse whole worlds. */
 const geometry = {
   args: { conversation: 'long' },
-  parameters: { scenario: { slices: ['conversation'], world: 'ci-failing-fix' } },
+  parameters: { scenario: { _tag: 'slices', slices: ['conversation'], world: 'ci-failing-fix' } },
   argTypes: { conversation: { control: false }, roster: { table: { disable: true } } },
   render: ({ scheme }) => <ConnectionGeometryStory scheme={scheme} />,
 } satisfies Story

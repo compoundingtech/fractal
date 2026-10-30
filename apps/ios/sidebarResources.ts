@@ -1,4 +1,4 @@
-import type { ResourceObservation, ResourcesFilter, ResourcesPage } from '../../clients/typescript/st3-client';
+import type { ResourceObservation, ResourcesFilter, ResourcesPage } from '../../clients/typescript/fractal-client';
 import type { SidebarResource } from './sidebarView';
 
 export const resourceFacts = (row: ResourceObservation): Record<string, unknown> => row.facts as Record<string, unknown>;

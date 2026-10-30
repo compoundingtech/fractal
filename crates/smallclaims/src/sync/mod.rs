@@ -4,7 +4,7 @@
 //!
 //! Every request and response carries the fleet's HMAC and, on a member, its member key's
 //! signature; [`FleetAuth`] makes and checks both. The worker reaches its store through a
-//! [`Backend`]: a program that holds the store itself uses [`Local`], and smalltalk hands the
+//! [`Backend`]: a program that holds the store itself uses [`Local`], and Fractal hands the
 //! calls to its daemon, the store's only writer.
 
 use std::fs;
@@ -27,12 +27,35 @@ mod worker;
 pub use backend::{Backend, Local, redemption_answer};
 pub use worker::*;
 
+/// `ST3_WORKER_INTERVAL_MS`, read once: a cap on every worker timer, and on the store's
+/// catch-up and divergence intervals that follow them, so tests of several nodes on one machine
+/// need not wait out the 30- and 60-second defaults. Unset, nothing is capped.
+pub(crate) fn worker_timer_cap() -> Option<std::time::Duration> {
+    static CAP: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("ST3_WORKER_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+/// `default`, or `cap` when that is shorter.
+pub(crate) fn capped(
+    default: std::time::Duration,
+    cap: Option<std::time::Duration>,
+) -> std::time::Duration {
+    cap.map_or(default, |cap| cap.min(default))
+}
+
 const PROTOCOL: &str = "st3-replication-v1";
 pub const EXCHANGE_PATH: &str = "/v1/peer/exchange";
 
 /// A page of a checkpoint's manifest, for a node that adopts a checkpoint it did not take part
 /// in. Older builds neither serve nor call it.
 pub const CHECKPOINT_PATH: &str = "/v1/peer/checkpoint";
+/// Where a member asks another for its answers per claim kind; see `crate::answers`.
+pub const ANSWERS_PATH: &str = "/v1/peer/answers";
 pub const JOIN_PATH: &str = "/v1/fleet/join";
 pub const MAX_JOIN_BYTES: usize = 4096;
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction.
@@ -407,7 +430,7 @@ fn headers(
     Ok(headers)
 }
 
-/// The envelope of every signed peer answer. Its layout and version are the ones smalltalk's
+/// The envelope of every signed peer answer. Its layout and version are the ones Fractal's
 /// client API answers with, so members on older builds read it unchanged.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeerResponse<T> {

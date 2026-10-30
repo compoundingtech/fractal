@@ -8,6 +8,8 @@ import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assi
 import { EmbraceScrollViewport, ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { TranscriptTurn } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
+import type { ConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
+import { workLogTurnFromItems } from '../../../../packages/fractal-ui/src/assistant-ui/taste/work-log.ts'
 import { observeUserMessageOverflow } from '../../../../packages/fractal-ui/src/assistant-ui/composition/user-message-overflow.ts'
 
 // Only CSS and browser layout are supplied by the harness; all runtime, mounting,
@@ -135,6 +137,21 @@ const scrollUp = async (top: number) => {
   })
   await flushFrames()
 }
+const sourceAt = new Date(now).toISOString()
+const answerRow = (id: string): ConversationItem => ({ _tag: 'Text', id, role: 'assistant', text: `Answer ${id}`, attachments: [], streaming: false, at: sourceAt })
+const thought = (id: string): ConversationItem => ({ _tag: 'Reasoning', id, text: `Thought ${id}`, streaming: false, at: sourceAt })
+const range = (prefix: string, from: number, to: number) => Array.from({ length: to - from }, (_, index) => `${prefix}/${from + index}`)
+const sourceTurn = (id: string, items: readonly ConversationItem[], prompt?: TranscriptTurn['prompt']): TranscriptTurn => ({
+  id, ...(prompt === undefined ? {} : { prompt }), items,
+  work: workLogTurnFromItems(items, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }),
+})
+// The turn's own marker of its mounted source ids, prompt first, in source order.
+const mountedSourceIds = () => [...container.querySelectorAll<HTMLElement>('[data-testid="transcript-turn"]')].flatMap(turn => {
+  const ids = turn.dataset.sourceIds
+  if (ids === undefined) throw new Error(`Mounted turn ${turn.dataset.itemId} lacks data-source-ids`)
+  return ids.split(' ').filter(id => id !== '')
+})
+const thinkingIds = () => [...container.querySelectorAll<HTMLElement>('[data-testid="thinking-body"] [data-conversation-entry-id]')].map(entry => entry.dataset.conversationEntryId)
 
 describe('tail-first transcript mounting', () => {
   it.each([3, 6].flatMap(count => [440, 1440].map(width => ({ count, width }))))('keeps all $count turns mounted at $width px even when the short history overflows', async ({ count, width }) => {
@@ -207,12 +224,34 @@ describe('tail-first transcript mounting', () => {
     expect(lane().scrollTop).toBe(top)
   })
 
+  it('restores a saved source window and leaf anchor outside the newest six rows', async () => {
+    await render(transcript())
+    expect(mountedSourceIds()).toEqual(turns.slice(-6).map(turn => turn.prompt!.id))
+    await act(async () => root.render(null))
+    const store = new ViewportStore()
+    store.save('tail-test', {
+      following: false, unread: false, top: 225, firstRenderedId: 'prompt-18',
+      anchor: { id: 'prompt-20', offset: -25 },
+    })
+    const restored = <ViewportStoreContext value={store}>{transcript()}</ViewportStoreContext>
+    await render(restored)
+    expect(mountedSourceIds()).toEqual(turns.slice(18).map(turn => turn.prompt!.id))
+    expect(container.querySelector('[data-item-id="prompt-17"]')).toBeNull()
+    const anchor = lane().querySelector<HTMLElement>('[data-testid="user-message"][data-item-id="prompt-20"]')!
+    expect(anchor).not.toBeNull()
+    expect(anchor.getBoundingClientRect().top).toBe(-25)
+    expect(lane().scrollTop).toBe(225)
+    await flushFrames()
+    expect(anchor.getBoundingClientRect().top).toBe(-25)
+    expect(lane().scrollTop).toBe(225)
+  })
+
   it('offers accessible full-history actions instead of incomplete hidden browser-find proxies', async () => {
     await render(transcript())
     expect(container.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(turns.length)
     expect(container.querySelector('[hidden="until-found"]')).toBeNull()
     const notice = [...container.querySelectorAll('[role="status"]')].find(node => node.textContent?.includes('Browser Find'))
-    expect(notice?.textContent).toMatch(/Browser Find misses \d+ earlier turns until you choose Show all messages/)
+    expect(notice?.textContent).toMatch(/^Latest \d+ of \d+ entries shown\. Browser Find misses \d+ earlier entries until you choose Show all messages\.$/)
     const controls = container.querySelector<HTMLElement>('[data-testid="transcript-history-controls"]')!
     expect(controls.getAttribute('role')).toBe('group')
     expect(controls.getAttribute('aria-label')).toBe('Conversation history range')
@@ -242,6 +281,64 @@ describe('tail-first transcript mounting', () => {
     await flushHistory(turns.length)
     expect(container.querySelectorAll('[data-testid="transcript-turn"]')).toHaveLength(turns.length)
     expect(container.querySelector('[data-testid="transcript-turn"][data-item-id="turn-0"]')?.textContent).toContain('Historical prompt 0')
+  })
+
+  it('bounds one oversized turn to its prompt and six newest source rows, then reveals every omitted row with stable keys', async () => {
+    const prompt = { _tag: 'Text', id: 'huge/prompt', role: 'user', text: 'Summarize the long run', attachments: [], streaming: false, at: sourceAt } as const
+    const all = range('huge', 0, 40)
+    await render(transcript([sourceTurn('huge-turn', all.map(answerRow), prompt)]))
+    expect(mountedSourceIds()).toEqual(['huge/prompt', ...all.slice(-6)])
+    expect([...container.querySelectorAll<HTMLElement>('[data-testid="user-message"], [data-testid="agent-message"]')].map(row => row.dataset.itemId)).toEqual(['huge/prompt', ...all.slice(-6)])
+    const turn = container.querySelector('[data-testid="transcript-turn"]')!
+    const summary = () => container.querySelector('[data-testid="transcript-history-summary"]')?.textContent
+    // The pinned prompt counts as a shown entry; totals count every prompt and item.
+    expect(summary()).toContain('7/41 entries')
+    expect(container.querySelector('[data-testid="transcript-history-range"]')?.textContent).toBe('Latest 7 of 41 entries shown. Browser Find misses 34 earlier entries until you choose Show all messages.')
+    const kept = new Map(mountedSourceIds().map(id => [id, container.querySelector(`[data-item-id="${id}"]`)!]))
+    const stable = () => {
+      expect(container.querySelector('[data-testid="transcript-turn"]')).toBe(turn)
+      for (const [id, row] of kept) expect(container.querySelector(`[data-item-id="${id}"]`)).toBe(row)
+    }
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show earlier messages"]')!.click() })
+    await flushFrames()
+    expect(mountedSourceIds()).toEqual(['huge/prompt', ...all.slice(-10)])
+    stable()
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(all.length)
+    expect(mountedSourceIds()).toEqual(['huge/prompt', ...all])
+    expect(container.querySelectorAll('[data-testid="user-message"]')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-testid="agent-message"]')).toHaveLength(all.length)
+    stable()
+    const controls = container.querySelector<HTMLElement>('[data-testid="transcript-history-controls"]')!
+    expect(controls.dataset.state).toBe('complete')
+    expect(controls.getAttribute('aria-busy')).toBe('false')
+    expect(container.querySelector('[data-testid="transcript-history-all"]')).toBeNull()
+    expect(summary()).toContain('All 41 entries shown')
+  })
+
+  it('mounts all reasoning in a crossing work-log disclosure and keeps it open while Show all reveals deferred tools and prose', async () => {
+    const tool: ConversationItem = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
+    const items = [...range('before', 0, 6).map(answerRow), thought('early/0'), thought('early/1'), tool, ...range('run', 0, 5).map(thought), ...range('after', 0, 3).map(answerRow)]
+    await render(transcript([sourceTurn('reasoning-turn', items)]))
+    // The suffix starts at run/2, but early/* and run/* belong to the same work-log disclosure.
+    // Complete its reasoning without mounting the interleaved tool or earlier prose.
+    const reasoningIds = ['early/0', 'early/1', ...range('run', 0, 5)]
+    expect(mountedSourceIds()).toEqual([...reasoningIds, ...range('after', 0, 3)])
+    expect(container.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('10/17 entries')
+    // Work-log call rows carry data-tool-status, not an item id; this turn has exactly one tool call.
+    expect(container.querySelectorAll('[data-testid="work-log"] [data-tool-status]')).toHaveLength(0)
+    const thinking = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="thinking-entry"] > button')]
+    expect(thinking).toHaveLength(1)
+    await act(async () => { thinking[0]!.click() })
+    expect(thinking[0]!.getAttribute('aria-expanded')).toBe('true')
+    expect(thinkingIds()).toEqual(reasoningIds)
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(items.length)
+    expect(mountedSourceIds()).toEqual(items.map(item => item.id))
+    expect(container.querySelectorAll('[data-testid="work-log"] [data-tool-status]')).toHaveLength(1)
+    expect(container.querySelector('[data-testid="thinking-entry"] > button')).toBe(thinking[0])
+    expect(thinking[0]!.getAttribute('aria-expanded')).toBe('true')
+    expect(thinkingIds()).toEqual(reasoningIds)
   })
 
   it('keeps the focused scroll lane and visible anchor while prepending through the keyboard', async () => {
@@ -295,7 +392,7 @@ describe('tail-first transcript mounting', () => {
     const controls = container.querySelector<HTMLElement>('[data-testid="transcript-history-controls"]')!
     expect(controls.closest('[data-testid="transcript-scroll"]')).toBeNull()
     expect(controls.getAttribute('aria-busy')).toBe('true')
-    expect(controls.textContent).toContain('Browser Find may miss earlier turns until this finishes.')
+    expect(controls.textContent).toContain('Browser Find may miss earlier entries until this finishes.')
     expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: preparing')
     previousCount = renderedRows(lane()).length
     let chunks = 0
@@ -311,7 +408,7 @@ describe('tail-first transcript mounting', () => {
       if (count < entries.length) {
         expect(controls.getAttribute('aria-busy')).toBe('true')
         expect(controls.querySelector('[data-testid="transcript-history-all"]')).toBe(button)
-        expect(controls.textContent).toContain('Browser Find may miss earlier turns until this finishes.')
+        expect(controls.textContent).toContain('Browser Find may miss earlier entries until this finishes.')
         expect(controls.querySelector('[data-testid="transcript-history-summary"]')?.textContent).toContain('Find: preparing')
       }
       previousCount = count

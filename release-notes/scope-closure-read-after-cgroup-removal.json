@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Checking whether a start's work scope has closed no longer fails with 'No such file or directory (os error 2)' when systemd removes the emptied scope's cgroup between reporting the scope loaded and the read of that cgroup. Such a read now proves nothing either way, so the scope is not yet counted as closed, and the next check sees the manager report it gone. Any other read error still fails.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, replay or projection change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, permission or trust change. A scope is still counted closed only on the manager's not-found answer or an unpopulated cgroup that was read."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, CLI or client change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Takes effect when the daemon restarts on the new build."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit; closure checks can then fail again when they lose the race."
+  }
+}

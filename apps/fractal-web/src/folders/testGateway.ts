@@ -1,7 +1,7 @@
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { St3Client } from '@smalltalk/st3-client'
-import type { Arrangement, Capabilities, Snapshot } from '@smalltalk/st3-client'
+import { FractalClient } from '@fractal/client'
+import type { Arrangement, Capabilities, Snapshot } from '@fractal/client'
 import { createFoldersClient } from './client.ts'
 import type { FoldersClient, Selection } from './client.ts'
 
@@ -11,15 +11,15 @@ export const testCapabilities: Capabilities = { kind: 'capabilities', capabiliti
 export const testArrangement = (): Arrangement => ({ ...testSelection, id: testSelection.subject, kind: 'arrangement', revision: 'claim/import', updated_at: '2026-01-01T00:00:00Z', deleted: false, body: { version: 1, name: { value: 'Sidebar', revision: 'claim/import' }, folders: {}, placements: {} } })
 export interface TestGateway {
   readonly client: FoldersClient
-  readonly sdk: St3Client
+  readonly sdk: FractalClient
   readonly calls: { url: string; body?: unknown }[]
-  readonly state: { current: Arrangement; accepted: boolean; loseNextReply: boolean; capability: boolean; afterAccept?: () => void }
+  readonly state: { current: Arrangement; accepted: boolean; loseNextReply: boolean; capability: boolean; capabilityVersion: number; afterAccept?: () => void }
   close(): Promise<void>
 }
 /** Local HTTP implementation of the exercised wire fixture, not a live daemon proof. */
 export const createTestGateway = async (): Promise<TestGateway> => {
   const calls: { url: string; body?: unknown }[] = []
-  const state: TestGateway['state'] = { current: testArrangement(), accepted: false, loseNextReply: false, capability: true }
+  const state: TestGateway['state'] = { current: testArrangement(), accepted: false, loseNextReply: false, capability: true, capabilityVersion: 1 }
   const server = createServer((request, response) => { void (async () => {
     const url = request.url ?? ''
     let body: unknown
@@ -30,7 +30,7 @@ export const createTestGateway = async (): Promise<TestGateway> => {
     }
     calls.push({ url, ...(body === undefined ? {} : { body }) })
     const send = (value: unknown): void => { response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ api_version: 'st3.client.v0', request_id: 'request/test', snapshot: testSnapshot, value })) }
-    if (url === '/v1/client/capabilities') { send({ ...testCapabilities, capabilities: state.capability ? testCapabilities.capabilities : [] }); return }
+    if (url === '/v1/client/capabilities') { send({ ...testCapabilities, capabilities: state.capability ? [{ id: 'arrangements', state: 'granted', version: state.capabilityVersion }] : [] }); return }
     if (url === '/v1/client/actions') {
       if (!state.accepted) { state.accepted = true; state.afterAccept?.() }
       if (state.loseNextReply) { state.loseNextReply = false; response.destroy(); return }
@@ -44,7 +44,7 @@ export const createTestGateway = async (): Promise<TestGateway> => {
   await once(server, 'listening')
   const address = server.address()
   if (address === null || typeof address === 'string') throw new TypeError('Missing fixture TCP listener')
-  const sdk = new St3Client({ baseUrl: `http://127.0.0.1:${address.port}` })
+  const sdk = new FractalClient({ baseUrl: `http://127.0.0.1:${address.port}` })
   return { sdk, client: createFoldersClient(sdk, testSelection), calls, state, close: async () => {
     server.closeAllConnections()
     await new Promise<void>((resolve) => server.close(() => resolve()))

@@ -238,7 +238,7 @@ Coverage variants are exact:
 | `since` | `since` | All successful indexed sends at or after the boundary are represented. |
 | `partial` | `since`, `pending` | The boundary exists, but one or more intents are incomplete. |
 
-`SentMessages`, `SentCoverage`, and `SentMessageRow` live in `st2-wire`. An
+`SentMessages`, `SentCoverage`, and `SentMessageRow` live in `fractal-wire`. An
 Agent sent row has canonical `to`, never `from`. Nullable `toAddress` is a
 display-only publication snapshot. Authoritative `toKind` determines whether
 `to` contains an agent ID or a canonical principal/external address; its
@@ -277,7 +277,7 @@ cleanup, and active cleanup. It covers payload/filename mismatch; missing, extra
 unreadable, and unsupported-version head/node/row state; digest, predecessor, ordinal, count, and
 genesis mismatch; valid-prefix rollback with an unexplained suffix; idempotency scope; unkeyed
 response loss; symmetric external-eval exclusion; and recipient-independent reads.
-`crates/st-wire/src/message.rs` verifies the coverage tags, `to` direction, and body omission.
+`crates/fractal-wire/src/message.rs` verifies the coverage tags, `to` direction, and body omission.
 
 The catalog performance procedure is defined in the experiment record. It compares Sent with
 same-sender message-ls on one captured catalog and must satisfy both the absolute and relative

@@ -4,7 +4,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 [env]
 # Bundled SQLite (libsqlite3-sys reads LIBSQLITE3_FLAGS in its build script): compile with
 # memory statistics off, so SQLite stops taking the global memstat mutex in sqlite3Malloc on
-# every allocation. smalltalk #946 measured 48.5% of daemon CPU under that mutex's futex.
+# every allocation. Fractal #946 measured 48.5% of daemon CPU under that mutex's futex.
 # Cargo [env] applies to cargo-driven builds, including the flake's crane build, which runs
 # cargo in this workspace where .cargo/config.toml is read.
 # SQLITE_MAX_MMAP_SIZE (1 TiB) lifts the 2 GiB default ceiling on how much of the store a reader

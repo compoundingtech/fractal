@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
 
@@ -246,7 +246,7 @@ describe('kit transcript turn mapping', () => {
     const turns = transcriptTurnsForItems([unconfirmed], { firstTurnComplete: true })
     expect(turns[0]!.prompt?.sendState).toEqual({
       _tag: 'Unconfirmed',
-      detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+      detail: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.',
     })
   })
 
@@ -289,6 +289,7 @@ describe('conversation feed mapping', () => {
     ['ungranted', undefined, 'ungranted', 'Conversation access not granted', 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
     ['unsupported', undefined, 'unsupported', 'Conversation not supported', 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.'],
     ['failed', 'not-found', 'not-found', 'Conversation not found', 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
+    ['failed', 'peer-too-old', 'peer-too-old', 'Host update required', 'This host runs an older Fractal version; update it to open subagent conversations. Your draft is unchanged.'],
     ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
     ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
   ] as const)('classifies Unavailable(%s, code %s) as %s with one fixed reason', (reason, code, classification, title, detail) => {

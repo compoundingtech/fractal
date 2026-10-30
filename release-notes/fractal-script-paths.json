@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use Fractal names for repository script paths and Python helpers",
+  "replay": { "status": "none", "detail": "No replay or backfill." },
+  "schema": { "status": "none", "detail": "Schema fixture bytes and wire formats are unchanged." },
+  "rules": { "status": "none", "detail": "No admission, checkpoint or digest changes." },
+  "compatibility": { "status": "none", "detail": "Installed soak unit and launchd identities, configuration paths and executable protocol values remain unchanged. Old soak, delivery-probe and Discord entry points exec their canonical Fractal sibling with the original interpreter style." },
+  "downtime": { "status": "none", "detail": "No service restart is required by the repository path changes." },
+  "manual": { "status": "none", "detail": "Source consumers use scripts/fractal-* and fractal_*.py. When copying an old-name bridge to an installation, copy its canonical sibling too; idle-soak also uses the canonical fractal-idle-sample. Existing service templates still invoke the installed old-name bridge because this repository has no installer that installs the canonical soak executable names." },
+  "recovery": { "status": "none", "detail": "No persisted state changes; previous binaries remain compatible." }
+}

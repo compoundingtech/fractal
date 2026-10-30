@@ -1,10 +1,11 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
 import { readOnlyBinaryCaches } from './workspace-ci.ts'
 
 // ci1 retains its Nix store and per-runner GC roots. No Actions cache or FlakeHub service
 // participates in this build. Fork pull requests remain covered by the public Linux gate.
-export default githubWorkflow(readyPRJobs({
+export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs({
   actionlint: {
     ...defaultActionlintConfig,
     selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), 'ci1'],
@@ -58,4 +59,4 @@ export default githubWorkflow(readyPRJobs({
       ]
     }
   }
-}))
+})))

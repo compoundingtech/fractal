@@ -140,7 +140,7 @@ move observers after acknowledgements.
 
 [`slo/targets.toml`](../../slo/targets.toml) holds the daemon's targets: reads a person waits on,
 writes and acks, terminal attach to first screen, one SQL statement, any transaction or hold of
-the writer, daemon CPU, and this member's database size. Every daemon builds the file in. CI's daemon_load reads the same file.
+the writer, daemon CPU, this member's database size, and CI's objectives. Every daemon builds the file in. CI's daemon_load reads the same file.
 A target describes what we aim for and gates nothing by itself.
 
 The request-latency read adds `targets` and `paths` to `routes`. Each target and each path keeps
@@ -156,7 +156,46 @@ still a wait a person sits through, so it is the path `GET /v1/client/agents (fr
 target and counts toward no other: a first page is held to the 100 ms of `person-read`, a fresh
 list to 300 ms. The `sql-statement`, `transaction` (`read`, `write`, `writer_hold`) and `cpu`
 rows cover the store's statements, its read and write transactions, each hold of its single
-writer, and the process's CPU in cores.
+writer, and the member's CPU in cores.
+
+The `cpu` row is the member's CPU: the daemon process and every replication worker process beside
+it, with nothing left out (maintenance, heartbeat, anti-entropy and replication all count), over
+closed UTC minutes. The daemon reads its own process clock at each minute's boundary. The worker
+(`st3 replication-worker`) sends its own cumulative process CPU, with its pid and start time, to
+`/v1/internal/replication/worker-status` every ten seconds, and the newest reading the daemon holds
+at a boundary stands for it there, so a worker's CPU lands in the minute the daemon heard it in, at
+most one report late. A minute's CPU is known only when every worker the member runs (one, on a
+member in a fleet) had a reading no older than 25 seconds at both its boundaries from the same
+process; a worker that restarted, went quiet or whose counter went backwards leaves it unknown.
+`windows` gives the cores over the last 1, 5 and 60 closed minutes, each `null` unless every minute
+in it is known; `minutes` is how many of the hour's 60 the daemon holds, fewer while it has been up
+less than an hour.
+
+Two targets read it. `max_cores` (1 core) is the member over the hour, `slo/cpu` in `st doctor` and
+`cpu` in `st slo`. `idle_max_cores` (0.5 core) is the mean over the hour's idle minutes,
+`slo/cpu/idle` and `cpu/idle`. A minute is idle only when that is known: its CPU is known, no seat
+on this member was in a working state in it, and none of a daemon start, a
+deploy check (`POST` to the deploy verification route) or a replication catch-up with a peer
+(sampled at each boundary and with each worker report) happened in it. A deploy restarts the daemon
+and its worker, so it also shows as a start and as minutes whose worker CPU is unknown.
+
+The seats come from two sources, checked a minute after the minute ends, once every row stamped
+in it has committed. A local driver's `harness.observed` is `latest` retention: every one is a
+row of `local_observations`, and a replicated claim only when the state changes. A seat's newest
+observation before the minute and every one inside it must be `ready`, `idle`, `blocked` or
+`ended` with no background jobs. And this member's reconciler's `runtime.observed` claims say
+which seats run here: a seat whose newest one is not `absent`, `exited`, `vanished` or `stopped`
+is busy unless its newest harness observation names the same incarnation and is quiet, so a
+running seat whose harness observations stop reaching the store fails closed, never quiet. A seat
+that starts inside the minute makes it busy; a seat this member ended no longer counts its last
+harness state. `idle`
+gives the idle `minutes`, their `cores`, and `not_idle`, the minutes each reason kept from being
+idle (`seat`, `start`, `deploy`, `catch-up`, `unknown`; a minute may have several). The idle target
+is judged only over a whole hour holding at least `idle_min_minutes` (10) idle minutes; otherwise
+it, like an hour that is not whole, is unknown: `no-data` in `st slo`, `info` with UNKNOWN in `st
+doctor`, never met. A seat last observed working whose driver stopped reporting keeps every minute
+from being idle until it is observed again or this member records its runtime ended. daemon_load holds the daemon to `load_max_cores`
+(2 cores) under its synthetic load in CI instead of the production target.
 
 The `writer-hold` row names who held the writer, against the transaction target (`max_ms`).
 It is always on, without `ST3_PROFILE_DIR`. A holder is the request route or background task
@@ -172,13 +211,25 @@ also says where its hold went: `stages` gives the time in each of `begin` (BEGIN
 `chunk-read` (the frontier and chunk bounds), `incremental`, `replay`, `after-projection`,
 `health` (the projection_health write), `commit`, `rollback`, `callbacks` (the caller's progress
 and log sinks, which run under the writer) and `release` (giving the connection back, with the
-commit observers it runs). `unattributed_ms` is the rest: the handoff between the writer thread
+commit observers it runs). Inside `incremental`, rebuilding an aggregate a late claim reached is
+its own stage: `rebuild-base` (a desired subject, document or mission), `rebuild-tree` (a whole
+run tree), `rebuild-part` (one part of a tree) or `rebuild-planning` (every planning session).
+Stages never overlap: a rebuild's time is not also in `incremental`, so the stages and
+`unattributed_ms` add up to `held_ms`. `rebuilt` counts, by the stage that ran them, the
+aggregates rebuilt and the claims they replayed. A full replay's own rebuilds count under
+`replay`. `unattributed_ms` is the rest: the handoff between the writer thread
 and the borrower. Its hold in progress names the `stage` it is in. Other holds carry no stages.
 `begin` and `chunk-read` are marked but no control slows them, so a small `unattributed_ms` does
 not by itself show that their marks are placed right. `open_reads` lists up to eight read
 snapshots open past the target now. `waiting` counts callers waiting for the writer and reads
 waiting for admission, and `threads` counts this process's threads, in all and by name. `st
 doctor` prints it as `slo/writer-hold`.
+
+A writer hold over 1 s also logs one WARN line when it ends, "a write held the store's writer
+over 1 s", so a stall can be attributed from the daemon's log after the hour has passed. It
+names the same holder (`holder`, `client`, `at`), with `kind`, `held_ms`, `writes`, `stages`
+(a staged lend's time by stage, or `-`) and `waited_ms`, how long that holder waited for the
+writer before its hold began.
 
 Three more fields show what keeps the WAL from recycling:
 - `read_loans` lists every read loan now, grouped by the route label of the read budget it works
@@ -213,7 +264,7 @@ to the WAL but not yet copied into the main file, so they are never added to the
 `physical_growth_bytes_per_day` compares it with the sample nearest exactly a day ago, within half
 an hour of it, scaled to a day. It is never extrapolated. A sample dated in the future, after the
 clock went back, is dropped. The newest sample is the one every reader uses
-(`st3::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
+(`fractal_daemon::slo::database_size`), so disk-filling conditions read the same ring. [Retention](retention.md) explains what keeps the store
 within it.
 
 The windows live in memory. Each is a ring of slots (12 of 5 seconds, 10 of 30 seconds, 12 of 5
@@ -231,7 +282,7 @@ the store), `window` (`1m`, `5m`, `1h`) and, on
 latency, `stat` (`p50`, `p99`, `max`), under the resource's `host.name`. The gauges are
 `st_slo_latency_ms`, `st_slo_over_target_ratio`, `st_slo_samples`, `st_slo_target_ms` (the
 figure from `slo/targets.toml`, so one query sets a host's number against its target),
-`st_slo_cpu_cores` and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
+`st_slo_cpu_cores` (the member's cores by `window`, sent only once known) and `st_slo_cpu_max_cores`. A window with no samples sends its count only. A
 phone's live share is a minimum over foreground milliseconds, so it is not in those: it goes out as
 `st_slo_live_share`, `st_slo_foreground_ms` and `st_slo_min_share_percent`. The task reads only
 the targets, not every path's snapshot.
@@ -240,12 +291,72 @@ the targets, not every path's snapshot.
 beside `/v1/usage`, serves it to the CLI. The phone and the web app read it through a client route
 that comes later, with its capability, schema and generated clients. An objective is a target with windows and an error budget: a p99
 target may have 1% of its samples over, so `LEFT` is how much of that 1% the last hour has not
-spent; a max target has no allowance, so it is whole or empty; CPU and the database's size read
-against their own ceilings; a phone's live share against the disconnected time its minimum
+spent; a max target has no allowance, so it is whole or empty; CPU (`cpu` over the hour and
+`cpu/idle` over its idle minutes) and the database's size read against their own ceilings; a phone's live share against the disconnected time its minimum
 allows. A budget is an allowance that resets: each account's weekly and 5-hour limit, with `LEFT`
 the part not yet used and a reset time. `st slo explain ID` says one row in plain words and `ID`
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
+
+The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
+percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
+`NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
+over; a name may declare several percentiles. A `[[count]]` is at most `max_per_hour` events an
+hour, the objective `NAME`. Each names the series that feeds it with `path`, `ci/NAME`, and one
+series feeds one name. They are `merge-latency/p50` and `merge-latency/p95` (a pull request's
+time in the merge queue until it merges, each at most 10 minutes), `ci-critical-path/p95` (the
+workspace CI's critical path from a change to green, at most 13 minutes) and `flakes` (tests
+nextest passed only on a retry and merge groups ejected from the queue, none an hour). They are
+not in the request-latency read, its gauges or `st doctor`.
+
+Workspace CI's runs (`fleet.yml`) feed them. The `github.repository` observer that reads
+`main_performance_failures` also reads, with the same token, conditional cache and five-minute
+cadence, two list-runs pages of that workflow: completed `pull_request` runs that succeeded and
+completed `merge_group` runs, each created since the start of the previous UTC day. The runs stay in
+the daemon's memory and are never recorded: not in the observer's facts, not in the store. So only
+the member that runs that observer has them; every other member, and that one until its first
+read or after a restart, lists the rows as `no-data`. A failed read keeps the last runs and never
+fails the observation, and the windows age them out. A daemon keeps one repository's runs, those of the
+first observer that read them; another repository's observer does not read them and logs a warning.
+If the listings return runs but none named `Workspace CI` at `.github/workflows/fleet.yml` (the
+workflow was renamed), the read fails with a warning, so the rows age out to `no-data` instead of
+reading as an idle day. Only run-level timestamps and, for `flakes`, artifact names are read, no
+jobs and no logs:
+
+- `ci-critical-path/p95`: each successful pull request run, from its `run_started_at` to its
+  `updated_at`, which a completed run last changes when it completes. Only a first attempt counts:
+  a rerun restarts `run_started_at` and reruns only some jobs. A run whose jobs were all skipped, such as a draft's, counts as a fast sample.
+- `merge-latency/p50` and `/p95`: each successful merge group run (head branch
+  `gh-readonly-queue/...`), from its `created_at`, when the group entered the queue, to its
+  `updated_at`, when it went green. This is a proxy for entering the queue until merging: the wait
+  before GitHub creates the group's run and the merge after it are not counted, and a pull request
+  whose group is rebuilt after an ejection counts once per green group, not from its first entry.
+- `flakes`: merge group runs that concluded `failure`, an ejected group, plus the tests nextest
+  passed only on a retry, in the runs that finished in the last hour. Workspace CI's four test lanes
+  name their count in an artifact, `nextest-flaky-<lane>-<N>` (none for 0, see `docs/ci.md`). Each
+  run that finished in the last hour, pull request or merge group, has its artifacts listed once
+  (`GET .../actions/runs/ID/artifacts?per_page=100`, the same token and actions read), at most 20
+  runs a poll, newest first, so a restart cannot burst; the rest are listed on the next polls. The
+  counts stay in the daemon's memory with the runs, kept only while a run is in the hour; a failed
+  listing is tried again on a later poll. Pull request runs are listed only when they succeeded, so
+  a failed pull request run's flaky tests are not counted. A run not listed yet adds no flaky test.
+  About one listing per Workspace CI run, a few hundred a day.
+
+A duration's samples are the runs that finished in the last day; its value is the nearest-rank
+percentile, and `LEFT` is how much of the `100 - percentile` share allowed over its target the
+day has not spent. The count is over the last hour, and with `max_per_hour = 0` one ejected group
+or one flaky test spends it all. A window without a sample, or without a finished pull request or
+merge group run for the count, is `no-data`.
+
+A missed CI objective is a fault. Each minute, when the SLO history samples the rows, a CI
+objective whose row is `missed` and has no open fault opens one `operational.failure` (condition
+`slo-objective-missed`, severity `warning`, so normal priority) on the member's own `daemon/NODE`
+subject, in the episode `slo-objective/NODE/ID`. Its reviewer is the fleet fault agent, the live
+agent declared with `handles-faults`, so the fault goes to that agent and to no person; with no
+fault agent, nothing opens. It stays the one fault while the row is missed, and the first sample
+that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
+before the observer has read any runs, neither opens nor ends one. The other objectives open no
+fault.
 
 `st slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
@@ -278,6 +389,7 @@ load.
 | --- | --- |
 | `ST3_PROFILE_DIR` | Turns profiling on and names the directory it writes to. |
 | `ST3_PROFILE_SLOW_MS` | Writes a line for each operation slower than this. The default is 250. |
+| `ST3_PROFILE_FILE_BYTES` | Positive byte cap for each JSONL file, including each record's newline. The default is 8 MiB (8,388,608 bytes). Invalid or zero values use the default. Read once at startup. |
 | `ST3_PROFILE_PTRACER` | Linux only. Lets any process of the same user trace the daemon, so a stack sampler such as `eu-stack` can attach on hosts that allow tracing only a process's own children. |
 
 The daemon records each request route (`GET /v1/messages/page`) and each background pass
@@ -302,9 +414,18 @@ It writes four files:
 - `totals.json` holds the totals since the daemon started.
 - `in-flight.jsonl` samples unfinished work every ten seconds when at least one tracked
   operation is a second old. It keeps the oldest 32 labels/callers and ages, including
-  queue wait; at most 4,096 weak registrations are retained. The current file and its
-  single rotated predecessor are capped at 8 MiB each. Labels and callers are capped
+  queue wait; at most 4,096 weak registrations are retained. Labels and callers are capped
   at 256 UTF-8 bytes with visible truncation flags.
+
+Each JSONL output retains its active file and one `.1` predecessor, both bounded by
+`ST3_PROFILE_FILE_BYTES`. The default maximum retained JSONL length is 48 MiB across all
+six files; `totals.json` is replaced separately and is not included in this bound.
+Rotation discards the old predecessor and keeps complete records in chronological order.
+Each append opens the active file under its output lock after any rotation, so concurrent
+slow writers cannot continue writing to a predecessor. On the next append, oversized
+files left by an older version or a reduced cap are removed. A record larger than the
+cap is dropped whole. These drops emit `st3: profile retention dropped ...` on stderr.
+Archive diagnostics before reducing the cap if older records must be kept.
 
 Work on a thread that runs no named operation appears as `(unlabeled THREAD)`.
 
@@ -337,12 +458,12 @@ The socket's existing 30-second timer remains the delivery cadence for clock-onl
 This cache covers the six collections named above.
 
 A disposable local single-client cold-read comparison is available with:
-`cargo test -p st3-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
+`cargo test -p fractal-daemon --lib shared_windows_local_single_client_cost -- --ignored --nocapture`.
 It compares uncached, cold cached and warm reads for 100 glass rows under Unix and paired
 sessions, alternating case order and reporting aggregate wall/process CPU. Debug-profile
 fixture results do not measure deployed paired-client CPU or production tail latency.
 
-`cargo test -p st3-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
+`cargo test -p fractal-daemon --lib mission_attention_projection_fixture_timing -- --ignored --nocapture`
 compares 22 uncached projections with shared cold and 22 warm reads over 70 generated missions
 and person steps, asserting projection parity. Its stage profile separates mission attention-run
 selection, definition reads, run overviews, step previews and attention snapshot work. The
@@ -438,12 +559,12 @@ request durations.
 
 ### Isolated native message-selector cost receipts
 
-The ignored native controls in `crates/st3-api-core/src/api/client_messages_selector_tests.rs`
+The ignored native controls in `crates/fractal-api-core/src/api/client_messages_selector_tests.rs`
 use fresh temporary stores, not daemon databases. Run them in the admitted native
 proof lane with the same optimized build, filesystem and durability settings for
 both designs; retain the exact source/build identity, command, machine/filesystem,
 complete stderr JSON and exit status. Focused Cargo filters (with
-`cargo test --release -p st3-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
+`cargo test --release -p fractal-api-core --lib FILTER -- --ignored --nocapture --test-threads=1`):
 
 - `benchmark_client_messages_selector_scaling`: 128/1,280/12,800 real messages,
   each with 32 metadata claims, explicit native rebuild and first/next pages.
@@ -707,7 +828,7 @@ five seconds. A warning log and the `mailbox-wake-dispatcher` doctor check expos
 startup and whether routing is currently degraded. There is no debounce. `mailbox.wake_dispatch`,
 `task mailbox-change-check` and `task mailbox-snapshot` expose the routing, checking and full-read
 costs separately in doctor and profiling counters. Run the isolated many-stream comparison with
-`cargo test --release -p st3-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
+`cargo test --release -p fractal-daemon --lib api::mailbox::profile::many_streams -- --ignored --exact --nocapture`;
 `ST_MAILBOX_PROFILE_DIR` retains its generated store, latency/CPU results, doctor counters and
 profile. Its load client and daemon run in separate processes.
 
@@ -777,7 +898,7 @@ projection's frontier, full-card reads bypass shared cached rows and cold-build 
 they do not borrow stale queue fields from an earlier physical snapshot.
 
 The isolated 60-agent, six-mission, 60-step fixture counts canonical claim kinds and local samples:
-`cargo test -p st3-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
+`cargo test -p fractal-daemon --lib agent_roster_typical_claim_kind_baseline -- --nocapture`.
 Its frozen pre-incremental classification distinguishes the old cold fallback from the current
 selected-card build count. Full JSON parity, including queues, todos and usage, is checked by
 `agent_roster_seeded_claim_sequences_match_cold_json` with reproducible proptest sequences,
@@ -835,20 +956,32 @@ policy. Only recording traced requests perform the additional read-only snapshot
 its cost under claim churn remains unmeasured until the focused native receipt is available.
 
 The focused 70-agent, 20-session fixture reports card-status, usage, repeated-projection and
-incremental-update costs with `cargo test -p st3-daemon --lib agent_roster_snapshot_fixture_timing --
+incremental-update costs with `cargo test -p fractal-daemon --lib agent_roster_snapshot_fixture_timing --
 --ignored --nocapture`. It is a serial fixture micro-measure, not a load benchmark. CI's
 `perf-load` workload holds concurrent agents WS subscribers and measures first-snapshot
 latency against the roster's 300 ms budget.
 
 Normal tests include a small cached-versus-uncached roster comparison before and after local
 timeline activity, in both history modes. Run the heartbeat-only fixture with
-`cargo test -p st3-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
+`cargo test -p fractal-daemon --lib agent_roster_heartbeat_only_local_stream_hit_rate -- --nocapture`:
 it prints append/probe/hit counts, hit rate and elapsed time, requires every heartbeat probe to
 reuse the same immutable rows, and requires a subsequent timeline append to miss before rebuild.
 The normal warm HTTP fixture
 `warm_agent_http_page_bypasses_unrelated_cold_roster_admission` holds store admission while reading
 a cached first page and prints its elapsed time. These are deterministic cache/admission
 regressions with diagnostic timings, not production latency guarantees.
+
+Published runtime and terminal resources keep the current shared status, harness and membership
+authority. Their cold status reductions omit full claim-id history and desired conflicts.
+The actual-state fold walks canonical order newest first and stops once the six consumed fields
+resolve; membership resolves status and retains the owning mission's mode for eval classification.
+Explicit nulls and state-transition field clearing retain the forward fold's semantics.
+Runtime source selection reuses the indexed per-origin selection used by runtime identity,
+reading the whole causal graph only when a rival requires an ancestry check.
+
+The published-list owner, cache invalidation and public full-status responses are unchanged.
+Measure cold reductions and published-list refill work independently of warm endpoint latency;
+a body-decode bound is not an endpoint latency guarantee.
 
 Every five seconds a dedicated native thread attempts a passive WAL checkpoint outside the
 writer queue. Once every frame is backfilled, it attempts `TRUNCATE` with zero busy timeout.
@@ -858,6 +991,13 @@ can take time on slow storage, but does not acquire the writer lock. Open failur
 caught panics reopen the connection after a one-minute cooldown. Worker error logs are
 limited to one per minute. The detached thread is not a Tokio blocking task, so runtime
 shutdown does not wait for a long backfill.
+
+`TRUNCATE` takes its turn in the writer queue, and the `WAL checkpoint` log line's report gives
+that wait as `writer_wait_ms`. When the wait reaches 100 ms, the same wait that makes the
+attempt abnormal, the report also gives `blocked_by`: the longest writer hold that ended while
+the checkpoint waited. It is named as the `writer-hold` row names a holder (`holder`, `client`,
+`at`), with its `kind`, `held_ms` and `holds`, the number of holds that ended during the wait.
+Otherwise `blocked_by` is null.
 
 `st doctor` reports open, idle and active reader counts, peak open readers, total connections
 opened since startup, the configured cache target, and summed current reader targets without
@@ -902,7 +1042,7 @@ Compare mailbox, work, interactive mission and replication API reads in fresh is
 processes using the existing generated benchmark store (scale 0.1):
 
 ```sh
-cargo build -p st3 --features test-support --example reader_cache
+cargo build -p fractal --features test-support --example reader_cache
 target/debug/examples/reader_cache /tmp/reader-cache-fixture --generate-only
 SMALLCLAIMS_READ_CACHE_KIB=8192 target/debug/examples/reader_cache /tmp/reader-cache-fixture
 SMALLCLAIMS_READ_CACHE_KIB=2048 target/debug/examples/reader_cache /tmp/reader-cache-fixture
@@ -983,8 +1123,8 @@ This is an explicit synthetic sizing probe, not an observed production unread di
 
 ## Browser perceived-UX traces
 
-The browser exports `service.name=webfractal-web` to the same-origin OTLP relay. Dogfood pages
-record **100%** of budget roots and SDK detail.
+The browser exports `service.name=fractal-web` to the explicitly configured
+`VITE_OTLP_TRACES_URL` endpoint. Dogfood pages record **100%** of budget roots and SDK detail.
 No local storage, transcript content, resource identifiers, credentials, or free-form error
 details enter production spans. The existing 200-span `SpanRing` is the dependency-free local
 assertion surface; adding the separate otelite package is unnecessary for these lifecycle tests.
@@ -1064,7 +1204,7 @@ not browser-specific back/forward-cache eligibility. This proves the early path 
 is loading; it does not promise that every network's WebSocket handshake outruns an already-cached
 bundle. Both commands close their ephemeral servers and browser sessions in `finally`.
 
-The daemon's existing [`CollectionSubscribe`](../../crates/st3-api-core/src/api/client_v0.rs)
+The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/api/client_v0.rs)
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 

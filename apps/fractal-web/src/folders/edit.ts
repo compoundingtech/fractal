@@ -1,6 +1,6 @@
-import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@smalltalk/st3-client'
-import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { ActionFailure, ArrangementActionPort } from '@st3/sdk/effect'
+import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
+import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@fractal/client/schema'
+import type { ActionFailure, ArrangementActionPort } from '@fractal/sdk/effect'
 import { Effect, Schema } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
 
@@ -102,7 +102,8 @@ export const optimisticArrangement = (base: Arrangement, operations: readonly Si
         break
       }
       case 'subject.place':
-        body.placements[operation.subject] = { value: { folder: operation.folder, key: operation.key }, revision: optimisticRevision }
+        // Version 2 layouts are folder-only; their members are ordered by membership actions.
+        if (body.version === 1) body.placements[operation.subject] = { value: { folder: operation.folder, key: operation.key }, revision: optimisticRevision }
         break
     }
   }
@@ -298,7 +299,7 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
             return
           }
           const parameters = { owner, subject: winner?.id ?? reservation, operations: winner === undefined ? [{ op: 'create', name: 'Sidebar' } as const, ...job.operations] : [...job.operations] }
-          if (!Schema.is(Schema.toEncoded(ArrangementEditParameters))(parameters)) {
+          if (!Schema.is(Schema.toEncoded(ArrangementEditParameters))(parameters as unknown)) {
             fail(job, unknown('The edit does not match the generated arrangement operation contract.', job))
             return
           }

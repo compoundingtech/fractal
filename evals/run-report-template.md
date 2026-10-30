@@ -29,7 +29,7 @@
 | --- | --- | --- | --- |
 | `<time>` | `<subject>` | `<old> -> <new>` | `<store index, event, or log>` |
 
-## Small Talk
+## Fractal
 
 - Runtime work messages: `<count>`
 - Direct agent messages: `<count>`

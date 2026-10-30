@@ -1,5 +1,5 @@
-import { ClientError, St3Client } from '@smalltalk/st3-client'
-import { ResourcesPage, type ResourceObservation } from '@smalltalk/st3-client/schema'
+import { ClientError, FractalClient } from '@fractal/client'
+import { ResourcesPage, type ResourceObservation } from '@fractal/client/schema'
 import { Effect, Option, Queue, Schedule, Schema, Stream } from 'effect'
 import * as AsyncResult from 'effect/reactivity/AsyncResult'
 import * as Atom from 'effect/reactivity/Atom'
@@ -69,7 +69,7 @@ export const gatewayResources = ({
         try: async (signal) => {
           // The generated getter has no signal option; this scoped transport preserves abort
           // through fetch and response.json without sharing mutable cancellation across readers.
-          const client = new St3Client({
+          const client = new FractalClient({
             baseUrl,
             fetchImpl: (input, init) => fetchImpl(input, { ...init, signal }),
           })

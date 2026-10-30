@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::json;
-use st2_resource_protocol::{ObservationResult, SnapshotDigest};
-use st2_resource_providers::{
+use fractal_resource_protocol::{ObservationResult, SnapshotDigest};
+use fractal_resource_providers::{
     GitHubIssueConfig, GitHubIssueModule, GitHubPrConfig, GitHubPrModule, PtyStatsConfig,
     PtyStatsModule, VistaConfig, VistaModule,
 };
-use st2_resource_wasip2::{Executor, ObservationRequest, RuntimeConfig};
+use fractal_resource_wasip2::{Executor, ObservationRequest, RuntimeConfig};
 
 #[test]
 fn pty_component_observes_replays_and_rejects_invalid_identity_before_spawn() {

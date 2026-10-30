@@ -1,7 +1,7 @@
 # Harness questions
 
 A seat's harness can ask its person a question natively: a multiple-choice prompt the harness
-shows in its own interface. st records that such a question exists, how it is shaped and how it
+shows in its own interface. Fractal records that such a question exists, how it is shaped and how it
 ended, so other clients can tell the question is waiting. It records **ids and positions only,
 never text**. The question text, option labels, free-text answers and notes stay in the harness's
 own timeline; a client that shows the question joins its text from there.
@@ -10,7 +10,7 @@ own timeline; a client that shows the question joins its text from there.
 
 A question is the subject `harness-question/ID`. `ID` is the first 16 bytes, in hex, of a SHA-256
 over the agent subject, harness session id and canonical native call id, each length-prefixed
-(`st3_schema::harness_questions::subject`). The canonical native id is `sha256:` plus the
+(`fractal_schema::harness_questions::subject`). The canonical native id is `sha256:` plus the
 64 lowercase hex digits of SHA-256 over the raw native call id. The store hashes every raw
 native id before deriving the subject or storing the observation; paths, command strings and
 other native text are never stored verbatim as ids. The same native call in the same session
@@ -80,5 +80,5 @@ same native call is refused even after history expiry or checkpoint trimming, in
 the resolution status is `expired`. Its original resolution and receipt remain authoritative.
 
 A question stays pending until the harness writes its end. The harness adapter writes `expired`
-or `cancelled` when the harness gives up on or withdraws a question; st does not end a pending
+or `cancelled` when the harness gives up on or withdraws a question; Fractal does not end a pending
 question by itself.

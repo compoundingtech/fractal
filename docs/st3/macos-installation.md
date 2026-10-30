@@ -82,7 +82,7 @@ on the receiving machine. Building/signing a candidate still requires the explic
 configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
 
-<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 For the default-host Fractal cutover, `st service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
 disabled without loading or starting them. On Linux the same command stages
@@ -103,6 +103,34 @@ override means enabled by default; because launchctl has no per-label unset oper
 restore uses an explicit `enable` for that case. Target jobs must still be unloaded
 when restoring a staging transaction.
 Normal installers retain legacy service names until cutover.
+
+`fractal migrate host --dry-run` checks the cutover without stopping services or
+writing a journal. The mover performs only same-filesystem renames and never
+copies. Before any service stop or journal write, preflight refuses mounts at or
+below either legacy product root or Fractal destination, naming the mount path,
+source and filesystem. Linux reads `/proc/self/mountinfo` (including bind mounts);
+macOS enumerates `statfs` records with `getfsstat`, resolving `/private/var` aliases
+and folding `/System/Volumes/Data` firmlink spellings only when both paths name
+the same object. Device-identity root checks and the same-filesystem check remain
+as backstops.
+
+For a legacy root or nested mount, stop the legacy units and move the mount out
+of the legacy root before cutover, preserving its data in ordinary directories
+under that root. Restart the legacy daemon so the mover can check quiescence,
+then run `fractal migrate host`. After cutover, stop the Fractal units and remount
+at the corresponding Fractal path without hiding migrated data, then restart
+Fractal. For example, `~/.local/state/st3/store` corresponds to
+`~/.local/state/fractal/store`; a mount at the whole `st3` root corresponds to
+the whole `fractal` root. This requires operator-managed data preservation and
+reconciliation; the mover does not copy data or mount/unmount filesystems.
+
+A mounted Fractal destination must be unmounted or relocated so the destination
+is absent or an empty ordinary directory before cutover. Simply remounting
+populated legacy data directly at the Fractal path and rerunning cannot complete
+the migration: without an existing committed journal, the mover requires real
+legacy directories (not absent paths or bridge symlinks), rejects populated
+destinations even if they contain a receipt, and only publishes receipts after
+the directory exchanges.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts

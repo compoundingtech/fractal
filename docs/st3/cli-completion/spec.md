@@ -1,6 +1,6 @@
-# st shell completion specification
+# Fractal shell completion specification
 
-This document specifies how st completes command lines and resolves short entity names.
+This document specifies how Fractal completes command lines and resolves short entity names.
 
 ## Status
 
@@ -16,9 +16,9 @@ Does not define: the entity model (see [../design.md](../design.md)) or the clie
 
 ## Mechanism
 
-st uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
-`crates/st3/Cargo.toml`). st pins the exact version and reviews the unstable API on
-each upgrade. The shell stub passes the command line back to st on every TAB:
+Fractal uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
+`crates/fractal/Cargo.toml`). Fractal pins the exact version and reviews the unstable API on
+each upgrade. The shell stub passes the command line back to Fractal on every TAB:
 
 ```
 shell TAB
@@ -32,7 +32,7 @@ shell TAB
 
 The engine prints one candidate per line in the shell's format. Values and descriptions are
 separated by a tab (fish) or a colon (zsh). Bash receives values only. Every TAB starts the
-st executable once.
+Fractal executable once.
 
 `CompleteEnv::complete()` runs early in `main`, after the recorder and contract-inventory
 checks and `--instance` activation, and before any config, runtime or daemon work. It returns
@@ -43,7 +43,7 @@ argument without a completer or a value set offers nothing.
 
 ## Entity kinds
 
-`crates/st3/src/completion.rs` defines `Entity`. Each kind lists through generated-client list
+`crates/fractal/src/completion.rs` defines `Entity`. Each kind lists through generated-client list
 calls with the operational (non-history) default. A list follows `next_cursor` page by page (200
 items per page) until the collection ends or 5,000 items are read, subject to the shared deadline.
 
@@ -137,7 +137,7 @@ differently per shell.
 
 `terminals attach, peek, send, signal`, `agents stop`, `missions cancel`, and `alerts show`
 resolve their subject before they act. A word that contains `/` is used as typed. For a bare word,
-st lists **all subjects of the kind**, without completion's running/unfinished filters or
+Fractal lists **all subjects of the kind**, without completion's running/unfinished filters or
 description joins. `agents stop`, `terminals send/signal`, and `missions cancel` use only steps
 1–2 below: destructive commands never accept prefix or substring matches. `attach`, `peek`, and
 `show` use all four steps. The first step that matches anything decides:
@@ -193,7 +193,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
 - Unit tests in `completion.rs` cover the resolution ladder, filters (terminal state, work
   filters, native sessions, people and actors), the terminal join and its age, pagination,
   `--endpoint` parsing, description bounds, ages, and plurals.
-- `crates/st3/tests/completion_shells.rs` serves an in-process daemon with 205 running terminals
+- `crates/fractal/tests/completion_shells.rs` serves an in-process daemon with 205 running terminals
   and one stopped terminal. It checks that completion offers every running terminal across pages
   with descriptions; that a missing or silent daemon yields no entity candidates, nothing on
   stderr, and an answer within seconds; and that the stubs from `st completions` complete a live
@@ -201,7 +201,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
   interactive zsh under `zpty`). The shells come from `nativeCheckInputs` and the dev shell; a
   missing shell fails the test. The interactive zsh phase is temporarily skipped on the
   persistent CI runner when `GITHUB_ACTIONS=true` and `CI_LOCAL_CARGO_HOME` is set
-  ([#1344](https://github.com/compoundingtech/smalltalk/issues/1344)); other phases still run,
+  ([#1344](https://github.com/compoundingtech/fractal/issues/1344)); other phases still run,
   and the zsh phase runs locally and on other runners.
 - `checks.st3-help` runs `scripts/check-installed-completions` against the built package with its
   `bin` directory on PATH: fish and bash complete a subcommand through `st`, zsh registers it,

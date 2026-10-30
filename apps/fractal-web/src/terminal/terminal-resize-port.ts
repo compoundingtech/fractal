@@ -1,5 +1,5 @@
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, type FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 
 /** One explicit resize attempt: confirmed geometry or a user-readable refusal. */
 export type TerminalResizeResult =
@@ -17,7 +17,7 @@ export interface TerminalResizePort {
 }
 
 /** One fresh fence and one submission. A stale or uncertain action is never retried automatically. */
-export const gatewayTerminalResize = (client: St3Client): TerminalResizePort => ({
+export const gatewayTerminalResize = (client: FractalClient): TerminalResizePort => ({
   resize: async ({ terminalId, incarnation, columns, rows }) => {
     if (!Number.isSafeInteger(columns) || !Number.isSafeInteger(rows) || columns < 1 || rows < 1) {
       return { _tag: 'Refused', detail: 'Use positive whole-number terminal dimensions.' }

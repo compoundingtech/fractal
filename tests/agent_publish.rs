@@ -331,7 +331,7 @@ fn incomplete_apply_marker_blocks_declarations_but_not_the_state_plane() {
     fs::write(agent.join("agent.kdl"), &active).unwrap();
     fs::create_dir_all(catalog.join(".st2")).unwrap();
     fs::write(
-        st2::catalog_lock::apply_marker_path(&catalog),
+        fractal_legacy_runner::catalog_lock::apply_marker_path(&catalog),
         "malformed still means incomplete",
     )
     .unwrap();
@@ -409,7 +409,7 @@ fn incomplete_apply_marker_blocks_declarations_but_not_the_state_plane() {
     );
 
     fs::write(
-        st2::catalog_lock::apply_marker_path(&catalog),
+        fractal_legacy_runner::catalog_lock::apply_marker_path(&catalog),
         format!(
             "{{\"schema\":\"st2.catalog-apply-incomplete.v1\",\"stageName\":\"catalog-apply-stage-{hash}\",\"expectedRootSha256\":\"{hash}\",\"preparedRootSha256\":\"{hash}\",\"originalPaths\":[\"agents/host/worker/agent.kdl\"]}}\n",
             hash = "0".repeat(64)
@@ -1203,7 +1203,7 @@ fn concurrent_publishers_serialize_and_only_one_wins_the_cas() {
 
     // Hold EX while both real CLI processes start, so neither can finish before the other is
     // contending on the same persistent lock.
-    let gate = st2::CatalogLock::exclusive(&catalog).unwrap();
+    let gate = fractal_legacy_runner::CatalogLock::exclusive(&catalog).unwrap();
     let first_attempt = temp.path().join("first-publisher-lock-attempt");
     let mut first = st2()
         .args([
@@ -1720,24 +1720,24 @@ fn canonical_tempdir() -> tempfile::TempDir {
 fn publication_judges_the_socket_bound_against_the_runtime_catalog_not_the_projection() {
     for headroom in [0_usize, 4, 8] {
         let temp = canonical_tempdir();
-        let socket_len = st2::run::PORTABLE_SOCKET_PATH_LIMIT - headroom;
+        let socket_len = fractal_legacy_runner::run::PORTABLE_SOCKET_PATH_LIMIT - headroom;
         // Everything the canonical socket path adds after the catalog root: the pty directory, the
         // separators and the `.sock` suffix. Probed through the shipped path construction rather
         // than spelled out, so the fixture cannot drift from it.
-        let suffix = st2::run::session_socket_path(&Path::new("x").join("pty"), "host.worker")
+        let suffix = fractal_legacy_runner::run::session_socket_path(&Path::new("x").join("pty"), "host.worker")
             .as_os_str()
             .len()
             - 1;
         let catalog = catalog_root_of_length(temp.path(), socket_len - suffix);
 
-        let canonical = st2::run::session_socket_path(&catalog.join("pty"), "host.worker");
+        let canonical = fractal_legacy_runner::run::session_socket_path(&catalog.join("pty"), "host.worker");
         assert_eq!(
             canonical.as_os_str().len(),
             socket_len,
             "fixture must place the canonical socket {headroom} bytes under the limit"
         );
         assert!(
-            st2::run::session_socket_overage(&catalog.join("pty"), "host.worker").is_none(),
+            fractal_legacy_runner::run::session_socket_overage(&catalog.join("pty"), "host.worker").is_none(),
             "fixture precondition: the canonical socket must be bindable"
         );
 
@@ -1769,7 +1769,7 @@ fn publication_still_refuses_an_unbindable_canonical_socket_path() {
     .unwrap();
 
     assert!(
-        st2::run::session_socket_overage(&catalog.join("pty"), &format!("host.{identity}"))
+        fractal_legacy_runner::run::session_socket_overage(&catalog.join("pty"), &format!("host.{identity}"))
             .is_some(),
         "fixture precondition: this canonical socket must exceed the limit"
     );

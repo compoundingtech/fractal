@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import type * as Native from '@smalltalk/st3-client/schema'
+import { ClientError, type FractalClient } from '@fractal/client'
+import type * as Native from '@fractal/client/schema'
 
 // Node rendering exercises the real composition, not the CSS compiler.
 vi.mock('@stylexjs/stylex', () => ({
@@ -18,7 +18,8 @@ import { gatewayPromptAnswers } from './prompt-answer-port.ts'
 
 const seat = 'agent/example/atlas'
 
-const alert = (id: string, answers: readonly string[], detail = 'Claude asks to use Bash'): Native.Attention =>
+// `callId` is the exact call st names; without it the prompt names none.
+const alert = (id: string, answers: readonly string[], detail = 'Claude asks to use Bash', callId?: string): Native.Attention =>
   ({
     id,
     kind: 'attention',
@@ -37,7 +38,7 @@ const alert = (id: string, answers: readonly string[], detail = 'Claude asks to 
     alert: true,
     actions: answers.length > 0 ? ['prompt.respond'] : [],
     action_parameters: answers.length > 0
-      ? { 'prompt.respond': { target_id: seat, episode: `${id}/episode`, answers } }
+      ? { 'prompt.respond': { target_id: seat, episode: `${id}/episode`, answers, ...(callId === undefined ? {} : { call_id: callId }) } }
       : {},
   }) as unknown as Native.Attention
 
@@ -58,7 +59,7 @@ describe('AgentAlerts', () => {
   })
 
   it('shows the one waiting call in full beside allow and deny', () => {
-    const html = render([alert('attention/one', ['allow', 'deny'])], [
+    const html = render([alert('attention/one', ['allow', 'deny'], undefined, 'c1')], [
       call('done', 'Bash', { command: 'ls' }, { status: 'ok' }),
       call('c1', 'Bash', { command: 'rm -rf build\necho done' }),
     ])
@@ -84,20 +85,22 @@ describe('AgentAlerts', () => {
   })
 
   it('withholds allow while it cannot say which call the prompt is about', () => {
-    const none = render([alert('attention/one', ['allow', 'deny'])], [])
+    const none = render([alert('attention/one', ['allow', 'deny'], undefined, 'c1')], [])
     expect(none).not.toContain('>Allow<')
     expect(none).toContain('>Deny<')
     expect(none).toContain('not in the conversation yet')
-    const two = render([alert('attention/one', ['allow', 'deny'])], [
-      call('c1', 'Bash', { command: 'make' }),
-      call('c2', 'Write', { file_path: 'notes.md' }),
-    ])
-    expect(two).not.toContain('>Allow<')
-    expect(two).toContain('2 calls are waiting')
+    // A prompt that names no call is only denied here, even beside a lone waiting call.
+    for (const waiting of [[call('c1', 'Bash', { command: 'make' })], [call('c1', 'Bash', { command: 'make' }), call('c2', 'Write', { file_path: 'notes.md' })]]) {
+      const unnamed = render([alert('attention/one', ['allow', 'deny'])], waiting)
+      expect(unnamed).not.toContain('>Allow<')
+      expect(unnamed).toContain('>Deny<')
+      expect(unnamed).not.toContain('command: make')
+      expect(unnamed).toContain('Fractal does not say which call this asks about')
+    }
   })
 
   it('offers a question\'s options to choose, and sends only once every question has a choice', () => {
-    const html = render([alert('attention/q', ['answer', 'deny'], 'Claude asks you a question')], [
+    const html = render([alert('attention/q', ['answer', 'deny'], 'Claude asks you a question', 'q1')], [
       call('q1', 'AskUserQuestion', { questions: [
         { question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }] },
         { question: 'Which pets?', header: 'Pets', multiSelect: true, options: [{ label: 'Cat', description: '' }, { label: 'Fish', description: '' }] },
@@ -111,13 +114,20 @@ describe('AgentAlerts', () => {
   })
 
   it('offers a plan\'s approval beside it, and a screen prompt\'s own answers', () => {
-    const plan = render([alert('attention/plan', ['approve', 'deny'])], [call('p1', 'ExitPlanMode', { plan: '1. Build\n2. Test' })])
+    const plan = render([alert('attention/plan', ['approve', 'deny'], undefined, 'p1')], [call('p1', 'ExitPlanMode', { plan: '1. Build\n2. Test' })])
     expect(plan).toContain('2. Test')
     expect(plan).toContain('>Approve plan<')
     const screen = render([alert('attention/mcp', ['use', 'use-all', 'skip'], 'New MCP server found in this project: probe-echo.')], [])
     for (const label of ['Use it', 'Use all', 'Skip']) expect(screen).toContain(`>${label}<`)
     const terminal = render([alert('attention/t', [], 'Codex asks a question')], [])
     expect(terminal).toContain('Answer it in the seat&#x27;s terminal.')
+  })
+
+  it('offers a trust prompt\'s own answers, and a denied call allowed once, for its kind or dismissed', () => {
+    const trust = render([alert('attention/trust', ['trust', 'exit'], 'Claude asks whether to trust its workspace /work/example.')], [])
+    for (const label of ['Trust', 'Exit']) expect(trust).toContain(`>${label}<`)
+    const denied = render([alert('attention/denied', ['approve-once', 'approve-kind', 'dismiss'], 'Auto mode denied a Bash call.')], [])
+    for (const label of ['Allow once', 'Allow this kind', 'Dismiss']) expect(denied).toContain(`>${label}<`)
   })
 })
 
@@ -133,7 +143,7 @@ describe('gatewayPromptAnswers', () => {
   })
   const promptAlert = { id: 'attention/one', revision: 'r1', source_id: seat, target_id: seat, episode: 'episode-1' } as const
 
-  it('sends one answer fenced on the alert, and says why st refused one', async () => {
+  it('sends one answer fenced on the alert, and says why Fractal refused one', async () => {
     const sent: unknown[] = []
     const client = {
       capabilities: async () => capabilities(true),
@@ -141,7 +151,7 @@ describe('gatewayPromptAnswers', () => {
         sent.push(request)
         return { value: { id: 'action/a', status: 'accepted', targets: [seat] }, snapshot }
       },
-    } as unknown as St3Client
+    } as unknown as FractalClient
     const port = gatewayPromptAnswers(client)
     const result = await port.respond({ alert: promptAlert as never, answer: '{"Which?":"Blue"}' })
     expect(sent).toHaveLength(1)
@@ -156,7 +166,7 @@ describe('gatewayPromptAnswers', () => {
       promptRespond: async () => {
         throw new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'stale-fence', message: 'that prompt is no longer waiting: it was answered or replaced', retryable: false, details: {} }, 422)
       },
-    } as unknown as St3Client)
+    } as unknown as FractalClient)
     expect(await gone.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
       _tag: 'Refused',
       detail: 'that prompt is no longer waiting: it was answered or replaced.',
@@ -167,15 +177,29 @@ describe('gatewayPromptAnswers', () => {
       const answered = gatewayPromptAnswers({
         capabilities: async () => capabilities(true),
         promptRespond: async () => ({ value: { id: 'action/b', status, targets: [seat] }, snapshot }),
-      } as unknown as St3Client)
+      } as unknown as FractalClient)
       expect((await answered.respond({ alert: promptAlert as never, answer: 'allow' }))._tag, status).toBe(tag)
     }
+    const rejected = gatewayPromptAnswers({
+      capabilities: async () => capabilities(true),
+      promptRespond: async () => ({ value: { id: 'action/b', status: 'rejected', targets: [seat] }, snapshot }),
+    } as unknown as FractalClient)
+    expect(await rejected.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
+      _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the seat\'s terminal.',
+    })
+    const unseen = gatewayPromptAnswers({
+      capabilities: async () => ({ value: { capabilities: [{ id: 'prompt.respond', state: 'granted' }] }, snapshot: {} }),
+      promptRespond: async () => ({ value: { id: 'action/b', status: 'completed', targets: [seat] }, snapshot }),
+    } as unknown as FractalClient)
+    expect(await unseen.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
+      _tag: 'Refused', detail: 'Fractal did not say what it last saw. Try again in a moment.',
+    })
 
     let called = false
     const ungranted = gatewayPromptAnswers({
       capabilities: async () => capabilities(false),
       promptRespond: async () => { called = true },
-    } as unknown as St3Client)
+    } as unknown as FractalClient)
     expect((await ungranted.respond({ alert: promptAlert as never, answer: 'allow' }))._tag).toBe('Refused')
     expect(called).toBe(false)
   })

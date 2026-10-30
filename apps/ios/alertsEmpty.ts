@@ -1,4 +1,4 @@
-import { syncView } from '@smalltalk/st3-views';
+import { syncView } from '@fractal/views';
 import type { SyncRead } from './syncWatch';
 
 /**

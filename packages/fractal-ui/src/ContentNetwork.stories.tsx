@@ -41,8 +41,39 @@ function ContentNetworkStory({ boundary, source, allow = false, hostOpens = fals
   const onLoadImage = hostOpens ? openImage : resolveOnConsent ? (src: string) => { consentImage(src); setApprovedSource(src) } : undefined
   return <main {...stylex.props(styles.root, ...baselineTheme, embraceDarkTheme)}><EmbraceRuntimeProvider options={options}>{boundary === 'ToolPreview' ? <EmbraceMarkdownPreview markdown={text} resolveImage={resolveImage} onLoadImage={onLoadImage} /> : boundary === 'Embrace' ? <EmbraceThread items={items} embrace="E3" composer={false} resolveImage={resolveImage} onLoadImage={onLoadImage} /> : <Transcript turns={[{ id: 'network', items, work }]} title="Image privacy" sync={{ _tag: 'Live', since: 0 }} now={0} observedAt={0} resolveImage={resolveImage} onLoadImage={onLoadImage} />}</EmbraceRuntimeProvider></main>
 }
-const meta = { title: 'Fractal UI/Content network safety', component: ContentNetworkStory, parameters: { layout: 'fullscreen' } } satisfies Meta<typeof ContentNetworkStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Content network safety', component: ContentNetworkStory, parameters: { scenario: { _tag: 'contract-fixture', reason: "Local remote, loopback, metadata and attachment URLs exercise content network policy boundaries." }, layout: 'fullscreen' } } satisfies Meta<typeof ContentNetworkStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'EmbraceAllowedAttachment:contract-fixture',
+  'EmbraceData:contract-fixture',
+  'EmbraceHostOpensMetadata:contract-fixture',
+  'EmbraceHostOpensRemote:contract-fixture',
+  'EmbraceLinked:contract-fixture',
+  'EmbraceLocal:contract-fixture',
+  'EmbraceLoopback:contract-fixture',
+  'EmbraceMetadata:contract-fixture',
+  'EmbraceRemote:contract-fixture',
+  'ToolPreviewAllowedAttachment:contract-fixture',
+  'ToolPreviewData:contract-fixture',
+  'ToolPreviewHostOpensLinked:contract-fixture',
+  'ToolPreviewHostOpensRemote:contract-fixture',
+  'ToolPreviewLinked:contract-fixture',
+  'ToolPreviewLocal:contract-fixture',
+  'ToolPreviewLoopback:contract-fixture',
+  'ToolPreviewMetadata:contract-fixture',
+  'ToolPreviewRemote:contract-fixture',
+  'TranscriptAllowedAttachment:contract-fixture',
+  'TranscriptData:contract-fixture',
+  'TranscriptHostOpensLoopback:contract-fixture',
+  'TranscriptHostOpensRemote:contract-fixture',
+  'TranscriptLinked:contract-fixture',
+  'TranscriptLocal:contract-fixture',
+  'TranscriptLoopback:contract-fixture',
+  'TranscriptMetadata:contract-fixture',
+  'TranscriptRemote:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const deferredStory = (boundary: Boundary, source: string): Story => ({
   args: { boundary, source, resolveOnConsent: source !== sources.Data && source !== sources.Local },

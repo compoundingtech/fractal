@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Fail scenario story inventory checks closed on symlinked files and directories",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "The scenario check expands nested brace alternatives before deriving roots and rejects patterns whose static roots cannot be determined. Patterns containing a node_modules segment are unsupported and explicitly require extending the check. For supported patterns, traversal and discovery always exclude node_modules. The check rejects symlinks under story roots, including literal file entries, without following them; diagnostics identify the offending path instead of silently omitting linked stories." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}

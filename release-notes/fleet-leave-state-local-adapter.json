@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose verified fleet membership and durable leave confirmation to local adapters",
+  "replay": {"status": "none", "detail": "No claim replay changes."},
+  "schema": {"status": "none", "detail": "The claim schema is unchanged; leave receipts are local worker state."},
+  "rules": {"status": "none", "detail": "Verified membership remains authoritative. Read-only adapter requests do not extend leave grace or admit ended members to ordinary replication."},
+  "compatibility": {"status": "changed", "detail": "The trusted local API supports fleet membership reads and a read-only leave-state snapshot. Authenticated leave receipts distinguish confirmed departures from unconfirmed departures with a bounded 120-second carrier grace."},
+  "downtime": {"status": "changed", "detail": "Restart the daemon and replication worker to expose leave-state snapshots."},
+  "manual": {"status": "none", "detail": "No operator migration."},
+  "recovery": {"status": "changed", "detail": "Durable receiver observations preserve grace deadlines across worker restarts. Missing worker authority or persistence failures fail closed rather than manufacturing confirmation."}
+}

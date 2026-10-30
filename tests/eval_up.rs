@@ -127,8 +127,8 @@ fn owned_test_child_group_dies_after_hard_parent_death() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
-    assert!(st2::host_lock::process_alive(leader_pid));
-    assert!(st2::host_lock::process_alive(descendant_pid));
+    assert!(fractal_legacy_runner::host_lock::process_alive(leader_pid));
+    assert!(fractal_legacy_runner::host_lock::process_alive(descendant_pid));
 
     unsafe {
         libc::kill(owner.id() as i32, libc::SIGKILL);
@@ -136,15 +136,15 @@ fn owned_test_child_group_dies_after_hard_parent_death() {
     owner.terminate();
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while (st2::host_lock::process_alive(leader_pid)
-        || st2::host_lock::process_alive(descendant_pid))
+    while (fractal_legacy_runner::host_lock::process_alive(leader_pid)
+        || fractal_legacy_runner::host_lock::process_alive(descendant_pid))
         && Instant::now() < deadline
     {
         std::thread::sleep(Duration::from_millis(2));
     }
     let survivors = [leader_pid, descendant_pid]
         .into_iter()
-        .filter(|pid| st2::host_lock::process_alive(*pid))
+        .filter(|pid| fractal_legacy_runner::host_lock::process_alive(*pid))
         .collect::<Vec<_>>();
     for pid in &survivors {
         unsafe {

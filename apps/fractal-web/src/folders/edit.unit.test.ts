@@ -1,6 +1,6 @@
-import { St3Client, type ActionOf, type Arrangement, type ErrorEnvelope } from '@smalltalk/st3-client'
-import { ArrangementEditParameters, ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { ActionRefused, ActionTransportFailure, arrangementActions, type ActionFailure } from '@st3/sdk/effect'
+import { FractalClient, type ActionOf, type Arrangement, type ErrorEnvelope } from '@fractal/client'
+import { ArrangementEditParameters, ActionResult, decodeUnknownSync } from '@fractal/client/schema'
+import { ActionRefused, ActionTransportFailure, arrangementActions, type ActionFailure } from '@fractal/sdk/effect'
 import { Effect, Schema } from 'effect'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { arrangementSidebarDoc } from './client.ts'
@@ -513,7 +513,7 @@ it('uses the SDK HTTP action port and fresh snapshots while retaining native err
   const requests: { readonly url: string; readonly body?: unknown }[] = []
   let reads = 0
   const error: ErrorEnvelope = refused('arrangement-cycle', 'A cycle is not allowed.').response
-  const client = new St3Client({ baseUrl: 'https://gateway.example.test', fetchImpl: async (input, init) => {
+  const client = new FractalClient({ baseUrl: 'https://gateway.example.test', fetchImpl: async (input, init) => {
     requests.push({ url: String(input), ...(typeof init?.body === 'string' ? { body: JSON.parse(init.body) as unknown } : {}) })
     if (init?.method === 'POST') return Response.json(error, { status: 409 })
     reads++

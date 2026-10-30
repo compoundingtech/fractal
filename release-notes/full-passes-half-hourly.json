@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The reconciler re-checks every settled item in a full pass once every half hour instead of every minute or so. It wakes for a full pass only when one is due, and the profile notes each full pass and each correction one makes",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Incremental passes are unchanged. An item an incremental pass would miss is now corrected within half an hour instead of a minute; none was corrected in a day on a large node."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the minute's spacing."}
+}

@@ -1,5 +1,5 @@
-import type { St3Client } from '../../clients/typescript/st3-client';
-import type { Fence, TerminalScreen } from '../../clients/typescript/st3-client/Models.generated';
+import type { FractalClient } from '../../clients/typescript/fractal-client';
+import type { Fence, TerminalScreen } from '../../clients/typescript/fractal-client/Models.generated';
 
 const FENCE_ATTEMPTS = 8;
 
@@ -11,7 +11,7 @@ function isStaleFence(error: unknown): boolean {
     && 'code' in error.response && error.response.code === 'stale-fence';
 }
 
-/** An st that predates unfenced typing refuses a key without the screen's sequence, and says so. */
+/** A Fractal version that predates unfenced typing refuses a key without the screen's sequence, and says so. */
 export function wantsScreenSequence(error: unknown): boolean {
   const message = !!error && typeof error === 'object' && 'response' in error && !!error.response && typeof error.response === 'object' && 'message' in error.response
     ? String(error.response.message) : '';
@@ -22,12 +22,12 @@ export function wantsScreenSequence(error: unknown): boolean {
 // fence or a prior action's screen sequence, and never redirect input into a
 // new process that happens to reuse the same terminal ID.
 export async function withFreshTerminalFence<T>(
-  client: Pick<St3Client, 'terminalScreen'>,
+  client: Pick<FractalClient, 'terminalScreen'>,
   terminalId: string,
   expectedIncarnation: string,
   action: (fence: TerminalFence) => Promise<T>,
 ): Promise<T> {
-  // st fences terminal actions to its whole store's index, which a busy host moves several
+  // Fractal fences terminal actions to its whole store's index, which a busy host moves several
   // times a second; a fresh read and a quick resend usually lands.
   for (let attempt = 0; attempt < FENCE_ATTEMPTS; attempt++) {
     const screen = await client.terminalScreen(terminalId);

@@ -67,6 +67,25 @@ def named_steps(source):
         yield source[start.start():end]
 
 
+class MegarepoMembersTest(unittest.TestCase):
+    def test_every_pnpm_job_materializes_megarepo_members_first(self):
+        # pnpm reads workspace packages from repos/, which the megarepo step fills (Main upkeep's
+        # warm-typescript failed with ERR_PNPM_FS_PACKLIST_IO without it while typescript-client passed).
+        checked = []
+        for workflow in sorted((REPO / '.github/workflows').glob('*.yml')):
+            source = workflow.read_text()
+            for name, job in re.findall(r'^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)', source, re.MULTILINE | re.DOTALL):
+                pnpm = re.search(r'\bpnpm (?:install|fetch)\b', job)
+                if pnpm is None:
+                    continue
+                checked.append((workflow.name, name))
+                megarepo = job.find('- name: Materialize megarepo members')
+                self.assertNotEqual(megarepo, -1, f'{workflow.name} {name}: runs pnpm without materializing megarepo members')
+                self.assertLess(megarepo, pnpm.start(), f'{workflow.name} {name}: materialize megarepo members before pnpm')
+        self.assertIn(('fleet.yml', 'typescript-client'), checked)
+        self.assertIn(('main-upkeep.yml', 'typescript-cache'), checked)
+
+
 class WebShellKeyTest(unittest.TestCase):
     def test_cheap_production_key(self):
         with tempfile.TemporaryDirectory(prefix='web-shell-key-') as temporary:

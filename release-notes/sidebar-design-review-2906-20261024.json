@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The agent sidebar uses theme-aware native popovers, gives titles their available width, and keeps the same header in the dock and drawer. Touch targets follow coarse-pointer input. The drawer has an elevated surface and returns focus to its opening control. Remove the redundant attention mark and the thread spend line.",
+  "replay": {"status": "none", "detail": "The application does not replay graph data."},
+  "schema": {"status": "none", "detail": "Storage and wire schemas do not change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules do not change."},
+  "compatibility": {"status": "none", "detail": "The web application retains the existing client and extension contracts."},
+  "downtime": {"status": "none", "detail": "The operator can reload the web application without service interruption."},
+  "manual": {"status": "none", "detail": "The operator does not need an upgrade step."},
+  "recovery": {"status": "none", "detail": "The operator can restore the previous web build without persistent state repair."}
+}

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Print a checksum-verified previous-release st3 path, without installing it."""
+"""Print a checksum-verified previous-release st3 path, without installing it.
+
+COMPAT_BASELINE_ARCHIVE names a local copy of the pinned bundle (a Nix build has no network and
+supplies it as a fixed-output fetch). It is read in place of the download and held to the same
+SHA-256 and BUILD.json checks."""
 import argparse
 import hashlib
 import json
@@ -36,7 +40,9 @@ def main():
             work = Path(temporary)
             archive = work / "bundle.tar.gz"
             digest = hashlib.sha256()
-            with urllib.request.urlopen(bundle["url"], timeout=60) as response, archive.open("wb") as stream:
+            local = os.environ.get("COMPAT_BASELINE_ARCHIVE")
+            source = Path(local).open("rb") if local else urllib.request.urlopen(bundle["url"], timeout=60)
+            with source as response, archive.open("wb") as stream:
                 while chunk := response.read(1024 * 1024):
                     digest.update(chunk)
                     stream.write(chunk)

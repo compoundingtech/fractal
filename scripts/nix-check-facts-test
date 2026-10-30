@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""nix-check-facts: what it records for a miss, a cache hit, a failing build, unsigned output, and what it refuses.
+
+A stand-in `nix` plays the store; the facts it writes must also pass the signer's own shape check, so the producer and
+the signer cannot drift apart."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+FACTS = ROOT / 'scripts/nix-check-facts'
+DRV = '/nix/store/wndx1738rbbrs30ap8l6ma5nkxgcjb89-genie-freshness-0.1.0.drv'
+OUT = '/nix/store/hh43mxh295bdyfb96mx8qp37ii3dkzx0-genie-freshness-0.1.0'
+REF_A = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a'
+SIGNATURE = 'test-nix-evidence-1:' + 'A' * 86 + '=='
+
+STUB = r'''#!%(python)s
+import json, os, sys
+args = [a for a in sys.argv[1:] if a not in ('--extra-experimental-features', 'nix-command flakes')]
+state = os.environ['STUB_STATE']
+valid = os.path.exists(state)
+if args[0] == 'eval':
+    ref = args[-1]
+    if 'missing' in ref:
+        print('error: attribute missing', file=sys.stderr); sys.exit(1)
+    print(os.environ['STUB_DRV'] if ref.endswith('.drvPath') else os.environ['STUB_OUT']); sys.exit(0)
+if args[0] == 'path-info' and '--json' not in args:
+    sys.exit(0 if valid else 1)
+if args[0] == 'path-info':
+    if os.environ.get('STUB_OLD_NIX') and '--json-format' in args:
+        print('error: unknown flag --json-format', file=sys.stderr); sys.exit(1)
+    entry = {'narHash': 'sha256-d6xi4mKdjkX2JFicDIv5niSzpyI0m/Hnm8GGAIU04kY=', 'narSize': 112,
+             'references': json.loads(os.environ.get('STUB_REFS', '[]')), 'signatures': json.loads(os.environ.get('STUB_SIGS', '[]'))}
+    print(json.dumps({os.environ['STUB_OUT']: entry} if '--json-format' in args else [dict(entry, path=os.environ['STUB_OUT'])])); sys.exit(0)
+if args[0] == 'build':
+    if os.environ.get('STUB_FAIL'):
+        print('error: builder failed with exit code 1', file=sys.stderr); sys.exit(1)
+    open(state, 'w').write('built'); sys.exit(0)
+sys.exit(2)
+'''
+
+
+def load_signer():
+    loader = importlib.machinery.SourceFileLoader('evidence_sign', str(ROOT / 'scripts/evidence-sign'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+signer = load_signer()
+
+
+with tempfile.TemporaryDirectory() as directory:
+    tmp = Path(directory)
+    (tmp / 'bin').mkdir()
+    (tmp / 'bin/nix').write_text(STUB % {'python': sys.executable})
+    (tmp / 'bin/nix').chmod(0o755)
+
+    def facts(check='genie-freshness', fresh=True, **env):
+        state = tmp / 'state'
+        if fresh and state.exists():
+            state.unlink()
+        out = tmp / 'facts.json'
+        out.unlink(missing_ok=True)
+        done = subprocess.run([sys.executable, str(FACTS), '--check', check, '--out', str(out)], capture_output=True, text=True,
+                              env={**os.environ, 'PATH': f'{tmp / "bin"}:{os.environ["PATH"]}', 'STUB_STATE': str(state),
+                                   'STUB_DRV': DRV, 'STUB_OUT': OUT, **env})
+        return done, (json.loads(out.read_text()) if out.exists() else None)
+
+    def request(found, check='genie-freshness'):
+        """What evidence-wrap would send the signer for these facts."""
+        wrapper = {'flake_lock_sha256': '1' * 64, 'toolchain_sha256': '2' * 64, 'wrapper_sha256': '3' * 64, 'system': 'x86_64-linux', 'attempt': '1'}
+        return {'commit': 'a' * 40, 'check': check, 'command': found['command'], 'exit_code': found['exit_code'], 'runner': found['runner'],
+                'output_sha256': found['output_sha256'], 'change_id': 'local:x', 'inputs': {**wrapper, **found['inputs']}}
+
+    # A miss: built here, signed by the daemon.
+    done, found = facts(STUB_SIGS=json.dumps([SIGNATURE]))
+    assert done.returncode == 0, done.stderr
+    assert found['runner'] == 'nix' and found['command'] == ['nix', 'build', '.#checks.x86_64-linux.genie-freshness'] and found['exit_code'] == 0
+    inputs = found['inputs']
+    assert inputs['drv_path'] == DRV and inputs['out_path'] == OUT and inputs['cache_hit'] == 'false'
+    assert inputs['nar_hash'].startswith('sha256-') and inputs['nar_size'] == '112' and inputs['references'] == '-'
+    assert inputs['nix_signatures'] == SIGNATURE and inputs['nix_key_id'] == 'test-nix-evidence-1' and inputs['nix_unsigned'] == 'false'
+    signer.validate(request(found))
+    print('passed: a built check records its derivation, output path, NAR hash and size, references and the daemon signature, in the shape the signer accepts')
+
+    # A hit: the output is already valid in the store, and the record says so with the same derivation.
+    again_done, again = facts(fresh=False, STUB_SIGS=json.dumps([SIGNATURE]))
+    assert again_done.returncode == 0 and again['inputs']['cache_hit'] == 'true' and again['inputs']['drv_path'] == DRV
+    assert {k: v for k, v in again['inputs'].items() if k != 'cache_hit'} == {k: v for k, v in inputs.items() if k != 'cache_hit'}
+    signer.validate(request(again))
+    print('passed: an output that is already valid is recorded as a cache hit with the same derivation and path')
+
+    # References are sorted and joined; an unsigned output says so; an old Nix without --json-format still works.
+    done, found = facts(STUB_REFS=json.dumps([OUT, REF_A]), STUB_OLD_NIX='1')
+    assert done.returncode == 0, done.stderr
+    assert found['inputs']['references'] == ','.join(sorted([OUT, REF_A]))
+    assert found['inputs']['nix_signatures'] == 'none' and found['inputs']['nix_key_id'] == 'none' and found['inputs']['nix_unsigned'] == 'true'
+    signer.validate(request(found))
+    print('passed: references are sorted and joined, unsigned output reads none, and a Nix without --json-format is read in its old shape')
+
+    # A failing build is a record: exit code 1, the derivation, no output path.
+    done, found = facts(STUB_FAIL='1')
+    assert done.returncode == 1 and found['exit_code'] == 1 and found['inputs'] == {'drv_path': DRV}, (done.stderr, found)
+    signer.validate(request(found))
+    print('passed: a failing build is recorded with its derivation, no output path, and exit 1')
+
+    # What it refuses to write.
+    done, found = facts(check='missing-check')
+    assert done.returncode == 2 and found is None and 'cannot name' in done.stderr
+    done, found = facts(check='Bad/Name')
+    assert done.returncode == 2 and found is None
+    done, found = facts(STUB_DRV='/tmp/not-a-store-path.drv')
+    assert done.returncode == 2 and found is None
+    print('passed: a check that cannot be named, a bad check name and a derivation outside the store write nothing and exit 2')

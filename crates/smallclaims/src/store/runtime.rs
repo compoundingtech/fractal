@@ -194,6 +194,17 @@ pub trait Runtime: Send + Sync {
     /// Projections changed beneath whatever the runtime keeps in memory about them.
     fn forget_views(&self);
 
+    /// A projection catching up projected more of the claims already admitted: reductions at
+    /// the same graph cut changed with no new claim, and nothing was replaced. `caught_up` is
+    /// true for the chunk that finished the backlog. By default, as for any other change
+    /// beneath the views. A runtime whose published lists can keep serving their previous rows
+    /// until they refold overrides it, so readers are not refused while a replication backlog
+    /// projects in chunks, and refolds once the backlog is in rather than after every chunk.
+    fn projection_advanced(&self, caught_up: bool) {
+        let _ = caught_up;
+        self.forget_views();
+    }
+
     /// Shared tables the projection digest covers, with the columns each leaves out.
     fn digest_tables(&self) -> &'static [(&'static str, &'static [&'static str])];
 

@@ -4,7 +4,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
-import { alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@smalltalk/st3-views';
+import { alertsHeading, detailRow, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@fractal/views';
 import type { RootParams } from '../navigation';
 import { agentName } from '../agentsView';
 import { alertsEmptyText } from '../alertsEmpty';
@@ -17,7 +17,7 @@ import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
-// Now: what needs the person, as stui's Home lists it.
+// Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
@@ -31,7 +31,7 @@ export function NowScreen() {
     const agent = data.agents.find(candidate => candidate.id === id);
     return agent ? agentName(agent) : id.replace(/^agent\//, '');
   };
-  // Start something, as stui's launcher does: a shell or a mission.
+  // Start something, as the Fractal terminal UI's launcher does: a shell or a mission.
   useLayoutEffect(() => {
     navigation.setOptions({
       unstable_headerRightItems: () => [{
@@ -46,7 +46,7 @@ export function NowScreen() {
   // The count of what waits on the person, as the other clients print it: nothing at zero.
   const heading = alertsHeading(openAlerts(data.attention, caps?.session_actor).length);
   const sections = useMemo(() => homeSections(rows).map(section => ({ ...section, data: section.rows })), [rows]);
-  // Dismiss, as stui's x: a request is closed with word to its asker that there is nothing for
+  // Dismiss, as the Fractal terminal UI's x: a request is closed with word to its asker that there is nothing for
   // the person to do (after a confirm), an update or a message is read. A decision has none.
   const dismiss = (row: HomeRow): (() => void) | undefined => {
     const item = row.item;
@@ -89,7 +89,7 @@ export function NowScreen() {
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
-        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
+        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
       </View>}
       style={{ flex: 1 }}
     />
@@ -106,7 +106,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   if (found) kept.current = found;
   const item = found ?? kept.current;
   if (!item) return <Screen><Banners /><Empty text={loadErrors.attention ? 'This alert could not be loaded.' : !hasSynced ? 'Checking for this alert…' : status !== 'online' ? 'This alert is not in the offline snapshot. Reconnect to check it.' : 'This item is no longer open.'} /></Screen>;
-  const [row] = homeRows([item], undefined);
+  const row = detailRow(item);
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;

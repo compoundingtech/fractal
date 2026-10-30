@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test materializes the tree's megarepo members (repos/effect-utils) in its clean worktree with the same mr apply command as CI's megarepoApplyStep, so genie-freshness can be run and signed locally again.",
+  "replay": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "st-test runs CI's megarepo apply in its throwaway worktree; developer tooling only."
+  }
+}

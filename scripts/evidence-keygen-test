@@ -57,6 +57,18 @@ class Keygen(unittest.TestCase):
                                    '-s', str(message) + '.sig'], input='hello', capture_output=True, text=True)
         self.assertEqual(verified.returncode, 0, verified.stderr)
 
+    def test_the_agent_level_names_an_agent_principal_and_an_account_keeps_one_level(self):
+        done = self.keygen('--name', 'seat-one', '--level', 'agent')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.startswith('agent/seat-one namespaces="git" ssh-ed25519 '), done.stdout)
+        config = json.loads((self.home / '.config/st/evidence-sign.json').read_text())
+        self.assertEqual(config['signer'], 'agent/seat-one')
+        # The same account cannot quietly switch level: the configuration differs, so it is refused.
+        switched = self.keygen('--name', 'seat-one')
+        self.assertEqual(switched.returncode, 1)
+        self.assertIn('differs', switched.stderr)
+        self.assertEqual(self.keygen('--name', 'seat-one', '--level', 'fleet').returncode, 2)  # only host or agent
+
     def test_running_it_again_prints_the_same_line_and_changes_nothing(self):
         first = self.keygen('--name', 'box-1')
         key = (self.home / '.config/st/evidence-sign-key').read_bytes()

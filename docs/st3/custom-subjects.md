@@ -6,11 +6,11 @@ manifest, facts and answers. The daemon interprets a descriptor; it runs no exte
 
 ## Register and answer a question
 
-The complete example manifest is [custom-review.json](../../examples/st3/custom-review.json).
+The complete example manifest is [custom-review.json](../../examples/fractal/custom-review.json).
 All identities below are invented. Run the commands against your own daemon:
 
 ```sh
-st schema register examples/st3/custom-review.json --as agent/garden/seed
+st schema register examples/fractal/custom-review.json --as agent/garden/seed
 st claim custom/garden/review/v1/review-001 custom.garden.review.v1.requested \
   --actor agent/garden/seed \
   --field 'title=Retain the seed history?' \
@@ -88,13 +88,13 @@ retention rules, native actions, or contributed UI are accepted.
 
 ## Shared reference carriers
 
-Register [image-file-reference.json](../../examples/st3/image-file-reference.json) and
-[onepassword-field-reference.json](../../examples/st3/onepassword-field-reference.json)
+Register [image-file-reference.json](../../examples/fractal/image-file-reference.json) and
+[onepassword-field-reference.json](../../examples/fractal/onepassword-field-reference.json)
 to use the same `reference.image-file` and `reference.onepassword-field` v1 kinds across fleets:
 
 ```sh
-st schema register examples/st3/image-file-reference.json --as agent/garden/seed
-st schema register examples/st3/onepassword-field-reference.json --as agent/garden/seed
+st schema register examples/fractal/image-file-reference.json --as agent/garden/seed
+st schema register examples/fractal/onepassword-field-reference.json --as agent/garden/seed
 st claim custom/reference/image-file/v1/seed-picture custom.reference.image-file.v1.created \
   --actor agent/garden/seed --field 'file=file/alder:/srv/garden/seed.png' \
   --field content_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -113,7 +113,7 @@ read, embed, replicate or verify the image bytes; a consumer must check the file
 The 1Password carrier accepts only an exact `op://vault/item/field` locator (≤1024 JSON
 bytes). Each of its three components starts with an ASCII letter or digit and contains only
 ASCII letters, digits, `_` or `-`. Use IDs or simple names; v1 deliberately excludes spaces,
-section-qualified fields, query strings, fragments and encoded components. st never resolves
+section-qualified fields, query strings, fragments and encoded components. Fractal never resolves
 the locator. The schema has no secret-value, document, content or free-text field, and rejects
 extra fields. A locator's identifiers are graph data visible to graph readers; use invented
 names in public examples and keep credentials in the [sekrets](sekrets.md) workflow.
@@ -150,11 +150,11 @@ the output kind, dependency cycles are invalid, and bounds are enforced.
 
 ## Decision trees
 
-[decision-tree.json](../../examples/st3/decision-tree.json) registers `decision.tree` version 1
+[decision-tree.json](../../examples/fractal/decision-tree.json) registers `decision.tree` version 1
 for the external decision-tree tool. Register it once per fleet:
 
 ```sh
-st schema register examples/st3/decision-tree.json --as agent/example/decisions
+st schema register examples/fractal/decision-tree.json --as agent/example/decisions
 ```
 
 Each logical tree is one subject, `custom/decision/tree/v1/<seat>`, named after the durable seat

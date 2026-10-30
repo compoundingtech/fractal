@@ -47,7 +47,7 @@ Measuring a change (docs/ci.md, "Performance gate")
   budget, and the daemon's CPU in cores. The budgets that apply are the absolute p99 budget of
   every request and the 2-core CPU ceiling (slo/targets.toml); locally there is no baseline, so
   those are the whole gate. CI adds the relative gate, twice the worst of main's last five
-  reports, when your PR runs Performance. A run that misses a budget fails; do not retry it into
+  reports, when you dispatch Performance on your branch. A run that misses a budget fails; do not retry it into
   passing, find the cause.
 
 Evidence for the PR
@@ -215,7 +215,7 @@ def watchdog(directory, gate, result, slot_fd, args, owner, since):
     waitid(WNOWAIT) observes exit without freeing our child's PID/group identity.
     """
     os.setsid()
-    from st3_test_process import set_child_subreaper, reap_descendants
+    from fractal_test_process import set_child_subreaper, reap_descendants
     set_child_subreaper()
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         # Caught handlers reset to SIG_DFL on exec; SIG_IGN would survive

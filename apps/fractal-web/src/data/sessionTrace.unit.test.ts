@@ -1,6 +1,6 @@
 import { it } from '@effect/vitest'
-import { St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
+import { FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
 import { Context, Effect, Layer, Schema } from 'effect'
 import { describe, expect } from 'vitest'
 
@@ -208,7 +208,7 @@ describe('native trace gateway adapter', () => {
             },
           })
       }
-      const client = new St3Client({ baseUrl: 'https://gateway.invalid', fetchImpl })
+      const client = new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl })
       const subjects = gatewaySubjectReads({ options: { baseUrl: 'https://gateway.invalid', fetchImpl } })
       const trace = yield* sessionTrace(query).pipe(Effect.provide(
         gatewaySessionTraceLayer(client).pipe(Layer.provide(Layer.succeed(SubjectReadPort, subjects))),
@@ -225,7 +225,7 @@ describe('native trace gateway adapter', () => {
         expect(trace.meters.tokens.input._tag).toBe('Unknown')
         expect(trace.native_session_id).toEqual({
           _tag: 'Unknown', reason: mode === 'missing' || mode === 'ambiguous' ? 'not-attributed' : 'failed',
-          ...(mode === 'failed' || mode === 'invalid' ? { detail: 'Native usage is unavailable' } : {}),
+          ...(mode === 'failed' || mode === 'invalid' ? { detail: 'Session usage is unavailable' } : {}),
         })
         expect(requests.some((url) => url.pathname.includes('/agents/'))).toBe(false)
       }

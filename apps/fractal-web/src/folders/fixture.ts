@@ -1,6 +1,6 @@
 import * as Atom from 'effect/reactivity/Atom'
 
-import type { Arrangement } from '@smalltalk/st3-client'
+import type { Arrangement } from '@fractal/client'
 import { arrangementSidebarDoc, type FolderState } from './client.ts'
 import { optimisticArrangement, type EditOutcome, type SidebarOperation } from './edit.ts'
 import { emptyDoc } from './core.mts'

@@ -1,6 +1,6 @@
-# The st3 module graph and its layering rule
+# The Fractal module graph and its layering rule
 
-st3 is one crate of about a hundred top-level modules, so every change that touches it recompiles
+Fractal is one crate of about a hundred top-level modules, so every change that touches it recompiles
 and retests all of it, and the merge queue cannot tell which part of a combined tree two changes
 could both affect. This page defines the module graph that the tooling uses, the rule it enforces,
 and how to read the number it reports. The plan to split the crate is in the mission document
@@ -8,13 +8,13 @@ and how to read the number it reports. The plan to split the crate is in the mis
 
 ## The graph
 
-A module is a top-level file or directory under `crates/st3/src` (and, once the library is split,
+A module is a top-level file or directory under `crates/fractal/src` (and, once the library is split,
 under the source directories of the crates it is split into). A reference from module A to module B
-is a path in non-test code that starts `crate::B` or `st3::B`, or a name inside a `crate::{...}`
+is a path in non-test code that starts `crate::B` or `fractal_daemon::B`, or a name inside a `crate::{...}`
 group. Left out: comments, `#[cfg(test)]` items, `*_tests.rs`, `tests/` and `test_support.rs`.
 Items the library re-exports at its root (`parse_intent`, `St3Error`, the `cli_print` macros)
 count toward the module that defines them. Binary-side modules (those `main.rs` declares) refer to
-the library as `st3::X` and are part of the graph.
+the library as `fractal_daemon::X` and are part of the graph.
 
 `scripts/module_layers.py` builds it; `scripts/check-module-layers` reports on it.
 
@@ -41,7 +41,7 @@ The `protocol` class in `docs/st3/change-impact.md` lists `api.rs` whole, so nea
 change is a full run for now; narrowing it is a decision for the owners of the affected-set work.
 
 `scripts/check-module-layers --affected PATH...` prints the modules whose dependency closure
-contains the changed paths (the reverse closure), as JSON; paths outside `crates/st3` are listed
+contains the changed paths (the reverse closure), as JSON; paths outside `crates/fractal` are listed
 under `other_paths` for the caller to map to crates. `--metric` reads a JSON list of changed-path
 lists and prints the distribution of the sizes.
 

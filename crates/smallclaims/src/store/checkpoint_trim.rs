@@ -20,6 +20,15 @@ use super::checkpoint_agreement::{
 use super::*;
 use crate::replication::InventoryCheckpoint;
 
+/// The kinds a member that trims locally drops, each by its audited rule in
+/// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
+/// same from the full and the trimmed log. A kind joins only with such a test. Two audited rules
+/// stay out because a reader reads the history they drop, which no projection digest covers:
+/// `harness.observed`, where a dropped credential transition moves the `since` of a seat's
+/// needs-login state, and `resource.observed`, where a GitHub watch finds when a pull request left
+/// the merge queue by walking its observations back.
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed"];
+
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
@@ -53,6 +62,9 @@ pub enum TrimFault {
     TouchGraph,
     /// The first chunk changes a graph table, as a trim must never do.
     ChangeGraph,
+    /// A local cut's plan drops the newest claim of a subject and kind, as a planner defect
+    /// would.
+    DropNewest,
 }
 
 /// The newest stable checkpoint, when this node cannot trim it from its own plan. A peer that
@@ -330,19 +342,7 @@ impl Store {
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<Option<CheckpointManifestNeed>> {
         self.runtime.checkpoint_preflight()?;
-        let interrupted = {
-            let connection = self.readers.get();
-            connection
-                .prepare_cached("SELECT id FROM checkpoints WHERE state='trimming' ORDER BY id")?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        {
-            let _span = crate::profile::span("trim.resume");
-            for checkpoint in interrupted {
-                self.finish_trim(&checkpoint, actions)?;
-            }
-        }
+        self.finish_interrupted_trims(actions)?;
         match self.newest_application(claims)? {
             None | Some(Application::Done) => Ok(None),
             Some(Application::Manifest(need)) => Ok(Some(need)),
@@ -394,11 +394,97 @@ impl Store {
         }
     }
 
+    /// Finish every trim a crash interrupted after its tombstones committed (`trimming`). A
+    /// checkpoint still `recording` is not committed and stays as it is.
+    pub(crate) fn finish_interrupted_trims(&self, actions: &mut Vec<CheckpointAction>) -> Result<()> {
+        let interrupted = {
+            let connection = self.readers.get();
+            connection
+                .prepare_cached("SELECT id FROM checkpoints WHERE state='trimming' ORDER BY id")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let _span = crate::profile::span("trim.resume");
+        for checkpoint in interrupted {
+            self.finish_trim(&checkpoint, actions)?;
+        }
+        Ok(())
+    }
+
+    /// Trim this member's own due cut, while it trims locally: capture the set before the cut,
+    /// plan its drop with the same rules and guards a shared checkpoint uses, and trim it. There
+    /// is no seal, verification or copy-proof. Two checks stand in for the proof: the plan is
+    /// refused whole, before anything is recorded, if it would drop the newest claim of any
+    /// subject and kind; and `finish_trim` compares the projection digests around every chunk
+    /// it deletes and stops at the first change. The cut moves only forward, once a day; a
+    /// stopped trim halts the next ones until it is resumed.
+    pub fn trim_local_cut(
+        &self,
+        context: &super::checkpoint_agreement::CheckpointContext,
+        actions: &mut Vec<CheckpointAction>,
+    ) -> Result<()> {
+        if self.checkpoint_halted()? {
+            return Ok(());
+        }
+        let cut = super::checkpoint::newest_due_cut(context.now_unix_ms);
+        let trimmed: Option<i64> = self.readers.get().query_row(
+            // A cut set aside after a stop is done too; the next day's cut goes on.
+            "SELECT MAX(cut_unix_ms) FROM checkpoints WHERE state IN ('trimming', 'trimmed', 'set-aside')",
+            [],
+            |row| row.get(0),
+        )?;
+        if cut == 0 || trimmed.is_some_and(|trimmed| u128::try_from(trimmed).unwrap_or(0) >= cut) {
+            return self.remove_checkpoint_staging(&context.scratch);
+        }
+        let checkpoint = checkpoint_name(cut);
+        // A shared checkpoint this member was still recording before it chose local trim was
+        // never a deletion; its candidates must not outlive that plan.
+        if local_checkpoint(&self.readers.get(), &checkpoint)?
+            .is_some_and(|(state, _)| state == "recording")
+        {
+            self.forget_recording_tombstones(&checkpoint)?;
+        }
+        let _completion = super::checkpoint_completion::Completion::outer();
+        let staged = self.checkpoint_staged_set(cut, None, &context.scratch)?;
+        staged.protect_all_but(LOCAL_TRIM_KINDS)?;
+        // The in-memory reference planner tests builds compare with knows no kind restriction.
+        #[cfg(any(test, feature = "test-support"))]
+        let plan = super::checkpoint_staging::without_reference_plan(|| self.plan_staged_checkpoint(&staged))?;
+        #[cfg(not(any(test, feature = "test-support")))]
+        let plan = self.plan_staged_checkpoint(&staged)?;
+        {
+            let mut fault = self.trim_fault.lock().unwrap_or_else(PoisonError::into_inner);
+            if *fault == Some(TrimFault::DropNewest) {
+                *fault = None;
+                staged.drop_newest_for_test()?;
+            }
+        }
+        if let Some(claim) = staged.dropped_newest_claim()? {
+            staged.remove()?;
+            self.set_checkpoint_state(&checkpoint, cut, "graph-changed")?;
+            self.checkpoint_diagnostic(
+                "local-trim-would-drop-newest",
+                &format!(
+                    "the plan for {checkpoint} drops claim {claim}, the newest of its subject and \
+                     kind; nothing is deleted and no local trim runs until it is resumed"
+                ),
+                &checkpoint,
+            )?;
+            actions.push(CheckpointAction::TrimGraphChanged { checkpoint });
+            return Ok(());
+        }
+        self.trim_staged_checkpoint(&checkpoint, &staged, &plan, actions)?;
+        staged.remove()
+    }
+
     /// The newest stable checkpoint this node needs a manifest for, if any. The replication
     /// worker asks when a peer advertises a checkpoint this node has not applied, and fetches
-    /// the manifest from a peer that applied this one.
+    /// the manifest from a peer that applied this one. A member that trims locally needs none.
     pub fn checkpoint_manifest_need(&self) -> Result<Option<CheckpointManifestNeed>> {
         self.runtime.checkpoint_preflight()?;
+        if self.trims_locally() {
+            return Ok(None);
+        }
         let claims = self.checkpoint_claims()?;
         Ok(match self.newest_application(&claims)? {
             Some(Application::Manifest(need)) => Some(need),
@@ -435,6 +521,12 @@ impl Store {
         manifest: &CheckpointManifest,
     ) -> Result<Vec<CheckpointAction>, St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
+        if self.trims_locally() {
+            return Err(St3Error::new(
+                "trim-is-local",
+                "this member trims locally ([trim] local), so it adopts no checkpoint manifest",
+            ));
+        }
         self.adopt_checkpoint_checked(manifest, true)
     }
 
@@ -1115,3 +1207,5 @@ mod capture_lifetime_tests;
 mod phase_span_tests;
 #[cfg(test)]
 mod pacing_tests;
+#[cfg(test)]
+mod local_trim_tests;

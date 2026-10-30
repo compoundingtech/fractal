@@ -1,6 +1,6 @@
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
-import * as Native from '@smalltalk/st3-client/schema'
-import type { TerminalScreen } from '@smalltalk/st3-client/schema'
+import { ClientError, type FractalClient } from '@fractal/client'
+import * as Native from '@fractal/client/schema'
+import type { TerminalScreen } from '@fractal/client/schema'
 
 import { makeActionTerminalInput, type TerminalInputAttempt, type TerminalInputOutcome } from './actionTerminalInput.ts'
 import type { TerminalInputPortFactory } from './orderedTerminalInput.ts'
@@ -41,7 +41,7 @@ export const gatewayTerminalInput = ({
   granted,
 }: {
   /** The gateway action client over the given fetch, configured like every other client. */
-  readonly connect: (fetchImpl: typeof fetch) => St3Client
+  readonly connect: (fetchImpl: typeof fetch) => FractalClient
   /** The fetch the client would otherwise use. */
   readonly transport: typeof fetch
   /** The freshest snapshot id this client holds, or undefined when none can be obtained. */
