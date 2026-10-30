@@ -47,7 +47,7 @@ independent re-review exists.
 | `flags` | `public_contract`, `stored_format`, `trust_or_permission`, `global_view`, each `yes` or `no` with one sentence |
 | `read` | what was read in full, what was read as structure only, what was served from the review record |
 | `patch_ids` | the per-file patch-ids of the head's diff, which the next review's delta read starts from |
-| `answers` | for a round after the first: which earlier finding each change answers |
+| `answers` | for a round after the first: which earlier finding each change answers (empty for a delta read after a `GO`, which left none) |
 | `reviewer` | the model, its family and the harness that ran it |
 | `standard` | the digest of this document, so a verdict names the rule it was made under |
 | `text` | the full review text, as the reviewer wrote it |
