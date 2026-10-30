@@ -79,16 +79,19 @@ pub fn control_socket() -> Result<PathBuf> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Source {
-    Runtime { owner: String },
+    Runtime {
+        owner: String,
+        expires_at: Option<u64>,
+    },
     Static { path: PathBuf },
 }
 impl Source {
     fn owned_by(&self, owner: &str) -> bool {
-        matches!(self, Self::Runtime { owner: source_owner } if source_owner == owner)
+        matches!(self, Self::Runtime { owner: source_owner, .. } if source_owner == owner)
     }
     fn describe(&self) -> String {
         match self {
-            Self::Runtime { owner } => format!("runtime owner {owner}"),
+            Self::Runtime { owner, .. } => format!("runtime owner {owner}"),
             Self::Static { path } => format!("static {}", path.display()),
         }
     }
@@ -271,7 +274,66 @@ fn desired(
 
 type DesiredPolicy = BTreeMap<String, BTreeSet<String>>;
 
-fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy) -> Vec<Value> {
+#[derive(Debug, Deserialize, Serialize)]
+struct Rotation {
+    old_node: String,
+    next_node: String,
+    deadline: u64,
+    state: String,
+}
+
+type Expiries = BTreeMap<String, u64>;
+
+fn rotations(
+    view: &FleetView,
+    own_key: &str,
+    desired: &mut DesiredPolicy,
+    now: u64,
+) -> Result<(Expiries, Vec<(String, Rotation)>)> {
+    let mut expiries = Expiries::new();
+    let mut receipts = Vec::new();
+    if !view.members.iter().any(|member| member.member_key == own_key && member.state == "current") {
+        return Ok((expiries, receipts));
+    }
+    for member in view.members.iter().filter(|member| member.member_key != own_key && member.state == "current") {
+        let entries = member.endpoints.iter().filter(|entry| entry["transport"] == "fabric-rekey").collect::<Vec<_>>();
+        ensure!(entries.len() <= 1, "member has multiple Fabric rekey transitions");
+        let Some(entry) = entries.first() else { continue };
+        let rotation: Rotation = serde_json::from_value((*entry).clone()).context("invalid signed Fabric rekey transition")?;
+        ensure!(!rotation.old_node.is_empty() && !rotation.next_node.is_empty() && rotation.old_node != rotation.next_node, "invalid Fabric rekey identities");
+        ensure!(rotation.deadline <= i64::MAX as u64 && rotation.deadline > 0, "invalid Fabric rekey deadline");
+        ensure!(matches!(rotation.state.as_str(), "prepared" | "committed" | "aborted"), "invalid Fabric rekey state");
+        let advertised = if rotation.state == "committed" { &rotation.next_node } else { &rotation.old_node };
+        let services = desired.get(advertised).cloned().context("Fabric rekey does not match signed routing endpoint")?;
+        desired.remove(&rotation.old_node);
+        desired.remove(&rotation.next_node);
+        let live = rotation.deadline > now;
+        match rotation.state.as_str() {
+            "prepared" => {
+                desired.insert(rotation.old_node.clone(), services.clone());
+                if live {
+                    desired.insert(rotation.next_node.clone(), services);
+                    expiries.insert(rotation.next_node.clone(), rotation.deadline);
+                }
+            }
+            "committed" => {
+                desired.insert(rotation.next_node.clone(), services.clone());
+                if live {
+                    desired.insert(rotation.old_node.clone(), services);
+                    expiries.insert(rotation.old_node.clone(), rotation.deadline);
+                }
+            }
+            "aborted" => { desired.insert(rotation.old_node.clone(), services); }
+            _ => unreachable!(),
+        }
+        if live && rotation.state != "aborted" {
+            receipts.push((member.member_key.clone(), rotation));
+        }
+    }
+    Ok((expiries, receipts))
+}
+
+fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy, expiries: &Expiries) -> Vec<Value> {
     let owned = snapshot
         .peers
         .iter()
@@ -288,21 +350,30 @@ fn plan(snapshot: &Snapshot, owner: &str, desired: &DesiredPolicy) -> Vec<Value>
         operations.push(json!({"op":"remove_peer", "node_id":node}));
     }
     for (node, grants) in desired {
-        if let Some(peer) = owned.get(node.as_str()) {
-            let actual = peer
-                .services
-                .iter()
-                .filter(|(_, sources)| sources.iter().any(|source| source.owned_by(owner)))
-                .map(|(service, _)| service.clone())
-                .collect::<BTreeSet<_>>();
-            if actual == *grants {
-                continue;
-            }
-        } else {
-            // No label: avoid conflicting with a static source's user-selected name.
+        let peer = owned.get(node.as_str());
+        let actual_expiry = peer.and_then(|peer| peer.trust_sources.iter().find_map(|source| match source {
+            Source::Runtime { owner: source_owner, expires_at } if source_owner == owner => Some(*expires_at),
+            _ => None,
+        })).flatten();
+        let expected_expiry = expiries.get(node).copied();
+        // Fabric expiry is immutable. Promotion/abort replaces the record in
+        // this same atomic batch, never renews a staged record by add_peer alone.
+        let replace = actual_expiry.is_some() && actual_expiry != expected_expiry;
+        if replace {
+            operations.push(json!({"op":"remove_peer", "node_id":node}));
+        }
+        let actual = peer.map(|peer| peer.services.iter()
+            .filter(|(_, sources)| sources.iter().any(|source| source.owned_by(owner)))
+            .map(|(service, _)| service.clone()).collect::<BTreeSet<_>>());
+        if peer.is_none() || replace {
             operations.push(json!({"op":"add_peer", "node_id":node}));
         }
-        operations.push(json!({"op":"set_grants", "node_id":node, "grants":grants}));
+        if replace || actual.as_ref() != Some(grants) {
+            operations.push(json!({"op":"set_grants", "node_id":node, "grants":grants}));
+        }
+        if expected_expiry.is_some() && (replace || actual_expiry != expected_expiry) {
+            operations.push(json!({"op":"set_expiry", "node_id":node, "expires_at":expected_expiry}));
+        }
     }
     operations
 }
@@ -390,7 +461,7 @@ async fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
     .await?
 }
 
-fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
+fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy, expiries: &Expiries) -> bool {
     pending.request["operations"]
         .as_array()
         .is_some_and(|operations| {
@@ -400,7 +471,9 @@ fn pending_matches_desired(pending: &Pending, desired: &DesiredPolicy) -> bool {
                 };
                 match operation["op"].as_str() {
                     Some("add_peer") => desired.contains_key(node),
-                    Some("remove_peer") => !desired.contains_key(node),
+                    Some("remove_peer") => !desired.contains_key(node)
+                        || pending.request["operations"].as_array().is_some_and(|ops| ops.iter().any(|op| op["op"] == "add_peer" && op["node_id"] == node)),
+                    Some("set_expiry") => expiries.get(node).is_some_and(|deadline| operation["expires_at"].as_u64() == Some(*deadline)),
                     Some("set_grants") => desired.get(node).is_some_and(|grants| {
                         operation["grants"].as_array().is_some_and(|services| {
                             services.len() == grants.len()
@@ -464,11 +537,12 @@ async fn resolve_pending(
     socket: &Path,
     journal: &mut Journal,
     desired: &DesiredPolicy,
+    expiries: &Expiries,
 ) -> Result<Option<Mutation>> {
     let Some(pending) = &journal.pending else {
         return Ok(None);
     };
-    let replay_allowed = pending_matches_desired(pending, desired);
+    let replay_allowed = pending_matches_desired(pending, desired, expiries);
     match complete_pending(socket, pending, replay_allowed).await {
         Ok(mutation) => {
             journal.pending = None;
@@ -516,19 +590,20 @@ async fn apply(
     socket: &Path,
     fleet_id: &str,
     desired: DesiredPolicy,
+    expiries: Expiries,
     ended: BTreeSet<String>,
     withdrawing: bool,
 ) -> Result<ReconcileStatus> {
     let owner = format!("st/fleet/{fleet_id}");
     let grants = grants(fleet_id);
     let mut journal = load_journal(state_dir).await?;
-    resolve_pending(state_dir, socket, &mut journal, &desired).await?;
+    resolve_pending(state_dir, socket, &mut journal, &desired, &expiries).await?;
     let mut journal_changed = false;
     for node in ended {
         journal_changed |= journal.retired.insert(node);
     }
     let mut current = snapshot(socket).await?;
-    let operations = plan(&current, &owner, &desired);
+    let operations = plan(&current, &owner, &desired, &expiries);
     ensure!(
         operations.len() <= 128,
         "Fabric reconciliation requires {} operations (limit 128); no partial policy was installed",
@@ -560,7 +635,7 @@ async fn apply(
         // Durable before sending: restarting st must not forget an uncertain commit
         // or replace a pending/timed-out cancellation with an empty-diff success.
         save_journal(state_dir, &journal).await?;
-        let mutation = resolve_pending(state_dir, socket, &mut journal, &desired)
+        let mutation = resolve_pending(state_dir, socket, &mut journal, &desired, &expiries)
             .await?
             .expect("pending transaction");
         journal_changed = false;
@@ -570,6 +645,10 @@ async fn apply(
             "Fabric policy revision regressed after mutation"
         );
     }
+    ensure!(
+        plan(&current, &owner, &desired, &expiries).is_empty(),
+        "Fabric final snapshot does not match the desired exact grants and expiry; no rekey receipt is safe"
+    );
     let retired_count = journal.retired.len();
     journal.retired.retain(|node| {
         !desired.contains_key(node)
@@ -619,7 +698,7 @@ pub async fn reconcile(
         .members
         .iter()
         .any(|member| member.member_key == own_key && member.state == "current");
-    let desired = desired
+    let mut desired: DesiredPolicy = desired
         .into_iter()
         .map(|node| {
             let peer_current = view.members.iter().any(|member| {
@@ -636,6 +715,7 @@ pub async fn reconcile(
             (node, services)
         })
         .collect();
+    let (expiries, _) = rotations(view, own_key, &mut desired, (now_ms() / 1000) as u64)?;
     let ended = view
         .members
         .iter()
@@ -644,7 +724,7 @@ pub async fn reconcile(
         .filter(|endpoint| endpoint["transport"] == "fabric")
         .filter_map(|endpoint| endpoint["node"].as_str().map(str::to_owned))
         .collect();
-    let mut status = apply(state_dir, socket, fleet_id, desired, ended, false).await?;
+    let mut status = apply(state_dir, socket, fleet_id, desired, expiries, ended, false).await?;
     if status.state == "applied"
         && view.members.iter().any(|member| {
             member.state == "ended"
@@ -658,6 +738,35 @@ pub async fn reconcile(
     Ok(status)
 }
 
+/// Receipts are authored under the adapter's own signed membership by the local
+/// daemon, and bind every transition selector, including the installation phase.
+pub async fn acknowledge(
+    client: &reqwest::Client,
+    socket: &Path,
+    fleet_id: &str,
+    own_key: &str,
+    view: &FleetView,
+) -> Result<()> {
+    let nodes = desired(view, own_key, fleet_id, &BTreeSet::new())?;
+    let mut policy = nodes.into_iter().map(|node| (node, grants(fleet_id))).collect();
+    let (expiries, receipts) = rotations(view, own_key, &mut policy, (now_ms() / 1000) as u64)?;
+    if receipts.is_empty() { return Ok(()); }
+    let current = snapshot(socket).await?;
+    ensure!(plan(&current, &format!("st/fleet/{fleet_id}"), &policy, &expiries).is_empty(),
+        "Fabric receipt verification failed: exact installed grants/expiry differ");
+    for (member_key, rotation) in receipts {
+        ensure!(u128::from(rotation.deadline) * 1000 > now_ms(), "Fabric rekey expired before receipt publication");
+        client.post("http://localhost/v1/internal/fleet/fabric-rekey")
+            .json(&json!({
+                "action":"receipt", "member_key":member_key,
+                "old_node":rotation.old_node, "next_node":rotation.next_node,
+                "deadline":rotation.deadline, "state":rotation.state,
+            }))
+            .send().await?.error_for_status()?;
+    }
+    Ok(())
+}
+
 /// Revoke this fleet's runtime records after it disappears from local fleet settings.
 /// Call with the same adapter state-directory lock used by reconciliation.
 pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result<ReconcileStatus> {
@@ -666,6 +775,7 @@ pub async fn withdraw(state_dir: &Path, socket: &Path, fleet_id: &str) -> Result
         socket,
         fleet_id,
         DesiredPolicy::new(),
+        Expiries::new(),
         BTreeSet::new(),
         true,
     )

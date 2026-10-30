@@ -1900,6 +1900,7 @@ impl Backend for MainBackend {
                 &crate::model::FleetEndpointsRequest {
                     mode: mode.into(),
                     endpoints: endpoints.to_vec(),
+                    clear_fabric_rekey: false,
                 },
             )
             .await?;

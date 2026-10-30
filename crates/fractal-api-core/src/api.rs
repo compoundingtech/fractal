@@ -843,6 +843,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/internal/fleet/endpoints",
             post(fleet::fleet_publish_endpoints),
         )
+        .route(
+            "/v1/internal/fleet/fabric-rekey",
+            post(fleet::fleet_fabric_rekey),
+        )
         .route("/v1/internal/replication-wake", post(replication::replication_wake))
         .route(
             crate::peer::CLIENT_READ_FORWARD_PATH,
@@ -8608,6 +8612,7 @@ async fn replication_worker_status(
 }
 
 pub use crate::model::FleetEndpointsRequest;
+pub use smallclaims::store::fabric_rekey::{FabricRekeyAction, FabricRekeyRequest, FabricRekeyState};
 
 /// The peers a node reports on: its config peers and the current listening members it dials.
 /// A dial-out member is never dialed, and an ended name is history, so neither is reported.

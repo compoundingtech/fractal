@@ -9,8 +9,8 @@
     # The runtime, Rust crates and native terminal library share one producer revision.
     pty.url = "github:compoundingtech/pty/79d526d1be4f77bb3764dc1d880492806f8a07fc";
     pty.inputs.nixpkgs.follows = "nixpkgs";
-    # Merged pairing stack, including the daemon-identity restricted client.
-    fabric.url = "github:compoundingtech/fabric/1e6e93e9a662a40749f91d63eeecc4e98de114bd";
+    # Identity prepare/activate recovery fixes; move to v0.9.4 before readiness.
+    fabric.url = "github:compoundingtech/fabric/bd45ec9cac98c217266855a696f772d364fe66a5";
     fabric.inputs.nixpkgs.follows = "nixpkgs";
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
