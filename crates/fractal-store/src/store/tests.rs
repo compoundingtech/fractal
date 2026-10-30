@@ -7783,6 +7783,34 @@ fn agent_usage_legacy_response_cost_requires_every_delta_priced_in_one_currency(
 }
 
 #[test]
+fn a_local_step_state_write_takes_its_claims_time_as_replay_does() {
+    let store = Store::open_memory("host-one").unwrap();
+    let step = "step-run/example/build";
+    let mut connection = store.connection.lock().unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    // The writer stamped the row from its clock before it appended the claim.
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h219b471e3472 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
+                goals, activated_at_unix_ms, created_at_unix_ms, updated_at_unix_ms)
+             VALUES (?1, 'example', 'example', 'build', 'hash', 'blocked', 1, '[]', '1', '1', '1')",
+        [step],
+    ).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let times = |transaction: &Transaction<'_>| -> (String, String) {
+        transaction.query_row(
+            "SELECT updated_at_unix_ms, activated_at_unix_ms FROM step_runs WHERE subject=?1",
+            [step],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap()
+    };
+    let state = |status: &str| json!({"fields": {"status": status, "reason": null, "readiness_epoch": 1}});
+    normalize_local_projection_timestamps_tx(&transaction, step, "step-run.state", &state("blocked"), 5).unwrap();
+    assert_eq!(times(&transaction), ("5".into(), "1".into()), "only a ready step is activated");
+    normalize_local_projection_timestamps_tx(&transaction, step, "step-run.state", &state("ready"), 7).unwrap();
+    assert_eq!(times(&transaction), ("7".into(), "7".into()));
+}
+
+#[test]
 fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
     let store = Store::open_memory("host-one").unwrap();
     let subject = "agent/example.worker";
@@ -8561,6 +8589,186 @@ fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
     assert_eq!(total, resting + 2, "{total} usage claims for {responses} responses");
     let newest = store.latest_claim(subject, Some("harness.usage")).unwrap().unwrap();
     assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
+}
+
+/// A rollup series replicates its first reading, the last reading of each UTC hour once that hour
+/// is over, and its final totals when the seat ends. Measured on the fleet (2026-10-29), rollups
+/// were 456 of 1528 harness claims in three hours, about one per turn per series. A seat answering
+/// every 4 s through 2.5 hours of 5-minute turns now replicates 4, while its host reads the newest.
+#[test]
+fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |tokens: u64, at: u128| ClaimInput {
+        subject: subject.into(),
+        kind: "harness.usage".into(),
+        actor: Some(subject.into()),
+        fields: BTreeMap::from([
+            ("driver".into(), json!("codex")),
+            ("incarnation_id".into(), json!("inc-1")),
+            ("semantics".into(), json!("response_rollup")),
+            ("model".into(), json!("example-model")),
+            ("total_tokens".into(), json!(tokens)),
+            ("observed_at_unix_ms".into(), json!(at as u64)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(format!("rollup:{tokens}")),
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    // As the cards read: at the request's snapshot index.
+    let host_total = || {
+        let at = Some(store.index().unwrap());
+        let cards = store.usage_summaries_at(&[subject.to_owned()], at).unwrap()[subject].total_tokens;
+        assert_eq!(store.usage_summary_at(subject, None, at).unwrap().unwrap().total_tokens, cards);
+        cards
+    };
+    let mut tokens = 0;
+    let mut at = start;
+    let end = start + 2 * hour + hour / 2;
+    let mut last_of_hour = BTreeMap::new();
+    while at < end {
+        let turn = (at - start) / 300_000;
+        state(if (at - start) % 300_000 < 240_000 { "working" } else { "idle" }, at);
+        tokens += 1;
+        store.append_latest_observation(&rollup(tokens, at), at).unwrap();
+        last_of_hour.insert(at / hour, tokens);
+        assert_eq!(host_total(), tokens, "the host reads its newest rollup at once (turn {turn})");
+        at += 4_000;
+    }
+    let hours = last_of_hour.values().copied().collect::<Vec<_>>();
+    assert_eq!(replicated(), [1, hours[0], hours[1]], "the first reading, then each hour's last once it is over");
+    state("ended", end);
+    assert_eq!(replicated(), [1, hours[0], hours[1], tokens], "the final totals when the seat ends");
+    assert_eq!(host_total(), tokens);
+}
+
+/// A native binding that arrives while a newer rollup waits for its hour binds that reading when
+/// it replicates. The stop flush that binds an older, already replicated rollup must not drop it.
+#[test]
+fn a_late_native_binding_keeps_the_rollup_waiting_for_its_hour() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |tokens: u64, at: u128| {
+        let reading = ClaimInput {
+            subject: subject.into(),
+            kind: "harness.usage".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-1")),
+                ("semantics".into(), json!("response_rollup")),
+                ("model".into(), json!("example-model")),
+                ("total_tokens".into(), json!(tokens)),
+                ("observed_at_unix_ms".into(), json!(at as u64)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("rollup:{tokens}")),
+        };
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| (claim.body["fields"]["total_tokens"].as_u64().unwrap(),
+                claim.body["fields"]["native_session_id"].as_str().map(str::to_owned)))
+            .collect::<Vec<_>>()
+    };
+    state("working", start);
+    rollup(10, start + 1_000);
+    rollup(20, start + 60_000);
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status": "running", "incarnation_id": "inc-1"})),
+        ("harness.session-file", json!({"harness": "codex", "session_id": "native-example", "incarnation_id": "inc-1"})),
+    ] {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state("idle", start + 120_000);
+    assert_eq!(replicated(), [(10, None)], "the turn end binds nothing that would drop the waiting reading");
+    assert_eq!(store.usage_summaries_at(&[subject.to_owned()], Some(store.index().unwrap())).unwrap()[subject].total_tokens, 20);
+    state("ended", start + 180_000);
+    assert_eq!(replicated(), [(10, None), (20, Some("native-example".to_owned()))], "the end replicates it, bound");
+}
+
+/// A held rollup has a deadline and survives the trim. The hourly local trim first replicates a
+/// rollup whose hour is over for a seat that stopped re-stamping, it never deletes a reading its
+/// slot still waits on, and a reading after the seat ended replicates at once.
+#[test]
+fn a_held_rollup_has_a_deadline_and_survives_the_trim() {
+    let store = Store::open_memory("node").unwrap();
+    let hour = 3_600_000_u128;
+    let now = now_ms();
+    let state = |subject: &str, state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |subject: &str, tokens: u64, at: u128| {
+        let reading = ClaimInput {
+            subject: subject.into(),
+            kind: "harness.usage".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-1")),
+                ("semantics".into(), json!("response_rollup")),
+                ("model".into(), json!("example-model")),
+                ("total_tokens".into(), json!(tokens)),
+                ("observed_at_unix_ms".into(), json!(at as u64)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("rollup:{subject}:{tokens}")),
+        };
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = |subject: &str| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    // A seat that died two hours ago, its last rollup still held, and a live one this hour.
+    let (dead, live) = ("agent/node.dead", "agent/node.live");
+    let past = (now / hour - 2) * hour + 1_000;
+    state(dead, "working", past);
+    rollup(dead, 10, past + 1_000);
+    rollup(dead, 20, past + 60_000);
+    state(live, "working", now);
+    rollup(live, 1, now);
+    rollup(live, 2, now);
+    // A newer usage reading of another slot, so the held one is no longer the newest row.
+    store.append_latest_observation(&harness_usage(live, "context_occupancy", 5, 0), now).unwrap();
+    let replicated = |subject: &str| replicated(subject).into_iter().filter(|tokens| *tokens != 0).collect::<Vec<_>>();
+    assert_eq!((replicated(dead), replicated(live)), (vec![10], vec![1]));
+    store.trim_local_observations(u128::MAX, 1, 100).unwrap();
+    assert_eq!(replicated(dead), [10, 20], "the trim replicates a rollup whose hour is over");
+    assert_eq!(replicated(live), [1], "one whose hour is still on waits");
+    let at = Some(store.index().unwrap());
+    assert_eq!(store.usage_summaries_at(&[live.to_owned()], at).unwrap()[live].total_tokens, 2, "and was not trimmed");
+    state(live, "ended", now + 1);
+    assert_eq!(replicated(live), [1, 2]);
+    rollup(live, 3, now + 2);
+    assert_eq!(replicated(live), [1, 2, 3], "a reading after the end replicates at once");
 }
 
 /// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at

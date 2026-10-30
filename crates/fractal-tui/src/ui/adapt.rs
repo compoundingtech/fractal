@@ -47,6 +47,8 @@ pub struct Extras {
     /// each one that was selected.
     pub slo: Load<Vec<fractal_client::SloRow>>,
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
+    /// Why the last refresh failed, while `slo` still holds the rows of an earlier read.
+    pub slo_stale: Option<String>,
 }
 
 fn age(then: &str, now: &str) -> String {
@@ -291,6 +293,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         },
         slo: extras.slo.clone(),
         slo_history: extras.slo_history.clone(),
+        slo_stale: extras.slo_stale.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items
@@ -1997,6 +2000,7 @@ mod tests {
                 store_index: 1,
                 projection_version: "1".into(),
                 created_at: "2026-09-29T10:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,

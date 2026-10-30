@@ -70,6 +70,7 @@ const harness = () => {
         subscribeArrangements: (...args) => { socket.subscribed.push(args) },
         subscribe: () => undefined,
         subscribeAgent: async () => undefined,
+        subscribeAgentsPublication: async () => undefined,
         subscribeTerminal: () => undefined,
         subscribeConversation: () => undefined,
         unsubscribe: () => undefined,

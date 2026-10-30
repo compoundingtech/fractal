@@ -12,6 +12,11 @@
 //! still moving, and the same key is left out by every member that holds that claim. The cut
 //! never selects an older claim of a key, since a trimmed member may no longer hold it.
 //!
+//! A key that gains a claim after the cut leaves the summary on each member when that claim
+//! arrives, so two members that compute at different times can differ only in such keys. The
+//! keys a narrowing lists therefore carry them too, marked `moving`, and a key moving on either
+//! member is no difference.
+//!
 //! `keys` counts the keys a kind's digest covers and `claims` the kind's claims older than the
 //! cut. A member that trims holds fewer claims than one that does not, so callers compare
 //! `claims` only between members that trim the same way.
@@ -47,6 +52,11 @@ pub struct KindAnswers {
     pub claims: u64,
     /// SHA-256 over every counted key and its newest claim, in key order.
     pub digest: String,
+    /// SHA-256 over every key and its newest claim older than the cut, in key order, the moving
+    /// keys too. Members that both still hold those claims agree on it whenever they computed;
+    /// empty from a member that does not compute it, and for fold readers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub before_cut: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +76,10 @@ pub struct AnswerKey {
     pub subject: String,
     pub origin: String,
     pub claim: String,
+    /// The key's newest claim is at or after the cut: no digest counts it, and a member that has
+    /// not yet received that claim still counts the older one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub moving: bool,
 }
 
 /// One kind's bucket digests at a cut, with the keys of the buckets asked for.
@@ -75,7 +89,7 @@ pub struct KindBuckets {
     pub cut_unix_ms: u128,
     /// One digest per bucket; an empty bucket's is empty.
     pub buckets: Vec<String>,
-    /// The keys of the buckets asked for, in key order.
+    /// The keys of the buckets asked for, in key order, with the moving ones.
     pub keys: Vec<AnswerKey>,
 }
 
@@ -116,64 +130,94 @@ pub fn bucket(subject: &str, origin: &str) -> usize {
     usize::from(hash.finalize()[0])
 }
 
-/// Call `visit` with each key of `kind` whose newest claim is older than `cut_unix_ms`, in key
-/// order, and return how many claims of the kind are older than the cut.
+/// The claims that share one key's newest accepted time, and that time.
+type Newest = (u128, Vec<String>);
+
+fn newer(newest: &mut Option<Newest>, accepted: u128, id: &str) {
+    match newest {
+        Some((at, ids)) if accepted <= *at => {
+            if accepted == *at {
+                ids.push(id.to_owned());
+            }
+        }
+        _ => *newest = Some((accepted, vec![id.to_owned()])),
+    }
+}
+
+/// The newest of claims that share one accepted time: claims accepted in the same millisecond go
+/// in canonical order.
+fn pick(connection: &Connection, mut ids: Vec<String>) -> Result<String> {
+    if ids.len() == 1 {
+        return Ok(ids.pop().expect("one claim"));
+    }
+    let mut keyed = ids
+        .into_iter()
+        .map(|id| canonical::claim_key(connection, &id))
+        .collect::<Result<Vec<_>>>()?;
+    keyed.sort();
+    Ok(keyed.pop().expect("claims share the time").5)
+}
+
+/// The claims a `record.repaired` replaced. A member that admitted one before the repair arrived,
+/// or wrote it, keeps its row, and a member that received the repair first never admits it, so
+/// no member counts them; see #4282.
+fn repaired_claims(connection: &Connection) -> Result<BTreeSet<String>> {
+    let mut statement = connection.prepare_cached("SELECT id FROM projection_digest_repaired_claims")?;
+    let mut rows = statement.query([])?;
+    let mut repaired = BTreeSet::new();
+    while let Some(row) = rows.next()? {
+        repaired.insert(row.get(0)?);
+    }
+    Ok(repaired)
+}
+
+/// Call `visit` with each key of `kind` and its newest claim, in key order, marked `moving` when
+/// that claim is not older than `cut_unix_ms`, and with the key's newest claim older than the cut
+/// if it holds one. Return how many claims of the kind are older than the cut. Claims a repair
+/// replaced count nowhere.
 fn each_answer(
     connection: &Connection,
     kind: &str,
     cut_unix_ms: u128,
-    mut visit: impl FnMut(AnswerKey) -> Result<()>,
+    mut visit: impl FnMut(AnswerKey, Option<String>) -> Result<()>,
 ) -> Result<u64> {
     let mut statement = connection.prepare_cached(
         "SELECT subject, origin, id, accepted_at_unix_ms FROM claims INDEXED BY claims_kind_index
          WHERE kind=?1 ORDER BY subject, origin",
     )?;
+    let repaired = repaired_claims(connection)?;
     let mut rows = statement.query([kind])?;
     let mut claims = 0;
-    // The current key, and the claims that share its newest accepted time.
-    let mut current: Option<(String, String, u128, Vec<String>)> = None;
-    let mut finish = |key: Option<(String, String, u128, Vec<String>)>| -> Result<()> {
-        let Some((subject, origin, accepted, mut newest)) = key else { return Ok(()) };
-        if accepted >= cut_unix_ms {
-            return Ok(());
-        }
-        let claim = if newest.len() == 1 {
-            newest.pop().expect("one claim")
-        } else {
-            // Claims accepted in the same millisecond go in canonical order.
-            let mut keyed = newest
-                .into_iter()
-                .map(|id| canonical::claim_key(connection, &id))
-                .collect::<Result<Vec<_>>>()?;
-            keyed.sort();
-            keyed.pop().expect("claims share the time").5
+    // The current key, its newest claims, and its newest claims older than the cut.
+    let mut current: Option<(String, String, Option<Newest>, Option<Newest>)> = None;
+    let mut finish = |key: Option<(String, String, Option<Newest>, Option<Newest>)>| -> Result<()> {
+        let Some((subject, origin, Some((accepted, newest)), before)) = key else { return Ok(()) };
+        let before = before.map(|(_, ids)| pick(connection, ids)).transpose()?;
+        let claim = match &before {
+            Some(before) if accepted < cut_unix_ms => before.clone(),
+            _ => pick(connection, newest)?,
         };
-        visit(AnswerKey { subject, origin, claim })
+        visit(AnswerKey { subject, origin, claim, moving: accepted >= cut_unix_ms }, before)
     };
     while let Some(row) = rows.next()? {
         let subject: String = row.get(0)?;
         let origin: String = row.get(1)?;
         let id: String = row.get(2)?;
+        if repaired.contains(&id) {
+            continue;
+        }
         let accepted: u128 = row
             .get::<_, String>(3)?
             .parse()
             .with_context(|| format!("claim {id} has an unreadable acceptance time"))?;
+        if !matches!(&current, Some((key_subject, key_origin, ..)) if *key_subject == subject && *key_origin == origin) {
+            finish(current.replace((subject, origin, None, None)))?;
+        }
+        let (_, _, newest, before) = current.as_mut().expect("the current key");
+        newer(newest, accepted, &id);
         if accepted < cut_unix_ms {
             claims += 1;
-        }
-        match &mut current {
-            Some((key_subject, key_origin, newest, ids))
-                if *key_subject == subject && *key_origin == origin =>
-            {
-                if accepted > *newest {
-                    *newest = accepted;
-                    ids.clear();
-                }
-                if accepted == *newest {
-                    ids.push(id);
-                }
-            }
-            _ => finish(current.replace((subject, origin, accepted, vec![id])))?,
+            newer(before, accepted, &id);
         }
     }
     finish(current)?;
@@ -202,15 +246,30 @@ fn kinds(connection: &Connection) -> Result<Vec<String>> {
 pub fn kind_answers(connection: &Connection, kind: &str, cut_unix_ms: u128) -> Result<KindAnswers> {
     let mut hash = Sha256::new();
     domain(&mut hash, kind);
+    let mut before_hash = Sha256::new();
+    domain(&mut before_hash, kind);
     let mut keys = 0;
-    let claims = each_answer(connection, kind, cut_unix_ms, |key| {
+    let claims = each_answer(connection, kind, cut_unix_ms, |key, before| {
+        if let Some(before) = before {
+            field(&mut before_hash, &key.subject);
+            field(&mut before_hash, &key.origin);
+            field(&mut before_hash, &before);
+        }
+        if key.moving {
+            return Ok(());
+        }
         keys += 1;
         field(&mut hash, &key.subject);
         field(&mut hash, &key.origin);
         field(&mut hash, &key.claim);
         Ok(())
     })?;
-    Ok(KindAnswers { keys, claims, digest: hex::encode(hash.finalize()) })
+    Ok(KindAnswers {
+        keys,
+        claims,
+        digest: hex::encode(hash.finalize()),
+        before_cut: hex::encode(before_hash.finalize()),
+    })
 }
 
 /// Every kind's answers at a cut. Each kind is read in its own statement, so no read holds one
@@ -232,7 +291,7 @@ pub const READER_PREFIX: &str = "reader/";
 /// still change their answers by dropping an older claim they fold, so the summary covers them
 /// too. Given a reader connection and the cut, they return each reader's answers by name: one
 /// key per subject they answer for, `origin` empty and `claim` a digest of the answer, in key
-/// order. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
+/// order, and a `moving` key for each subject with a claim at or after the cut. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
 pub type FoldReaders = Arc<dyn Fn(&Connection, u128) -> Result<BTreeMap<String, Vec<AnswerKey>>> + Send + Sync>;
 
 /// A fold reader's answers as a kind: its summary entry, and every key with its bucket digests.
@@ -241,7 +300,7 @@ pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (S
     let mut hash = Sha256::new();
     domain(&mut hash, &kind);
     let mut hashes: Vec<Option<Sha256>> = (0..BUCKETS).map(|_| None).collect();
-    for key in &keys {
+    for key in keys.iter().filter(|key| !key.moving) {
         let bucket_hash = hashes[bucket(&key.subject, &key.origin)].get_or_insert_with(|| {
             let mut hash = Sha256::new();
             domain(&mut hash, &kind);
@@ -253,7 +312,9 @@ pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (S
             field(hash, &key.claim);
         }
     }
-    let answers = KindAnswers { keys: keys.len() as u64, claims: 0, digest: hex::encode(hash.finalize()) };
+    let counted = keys.iter().filter(|key| !key.moving).count();
+    let answers =
+        KindAnswers { keys: counted as u64, claims: 0, digest: hex::encode(hash.finalize()), before_cut: String::new() };
     let buckets = KindBuckets {
         kind: kind.clone(),
         cut_unix_ms,
@@ -275,16 +336,18 @@ pub fn kind_buckets(
 ) -> Result<KindBuckets> {
     let mut hashes: Vec<Option<Sha256>> = (0..BUCKETS).map(|_| None).collect();
     let mut keys = Vec::new();
-    each_answer(connection, kind, cut_unix_ms, |key| {
+    each_answer(connection, kind, cut_unix_ms, |key, _| {
         let index = bucket(&key.subject, &key.origin);
-        let hash = hashes[index].get_or_insert_with(|| {
-            let mut hash = Sha256::new();
-            domain(&mut hash, kind);
-            hash
-        });
-        field(hash, &key.subject);
-        field(hash, &key.origin);
-        field(hash, &key.claim);
+        if !key.moving {
+            let hash = hashes[index].get_or_insert_with(|| {
+                let mut hash = Sha256::new();
+                domain(&mut hash, kind);
+                hash
+            });
+            field(hash, &key.subject);
+            field(hash, &key.origin);
+            field(hash, &key.claim);
+        }
         if wanted.contains(&index) {
             keys.push(key);
         }
@@ -324,7 +387,11 @@ pub fn differing_kinds(
                 let digest = if side.keys == 0 { String::new() } else { side.digest };
                 (side.keys, digest, compare_claims.then_some(side.claims))
             };
-            (answers(a) != answers(b)).then(|| KindDifference {
+            // Members that computed at different times agree on the claims older than the cut.
+            let (before_a, before_b) = (a.map(|a| a.before_cut.as_str()), b.map(|b| b.before_cut.as_str()));
+            let before_cut_agrees =
+                before_a.is_some_and(|before| !before.is_empty()) && before_a == before_b && answers(a).2 == answers(b).2;
+            (answers(a) != answers(b) && !before_cut_agrees).then(|| KindDifference {
                 kind: kind.clone(),
                 ours: a.cloned(),
                 theirs: b.cloned(),
@@ -340,10 +407,18 @@ pub fn differing_buckets(ours: &[String], theirs: &[String]) -> BTreeSet<usize> 
         .collect()
 }
 
-/// The keys whose answers differ, from both members' keys of the same buckets.
+/// The keys whose answers differ, from both members' keys of the same buckets. A key moving on
+/// either member is left out: the members differ only in when they computed.
 pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDifference> {
+    let moving = ours
+        .iter()
+        .chain(theirs)
+        .filter(|key| key.moving)
+        .map(|key| (key.subject.clone(), key.origin.clone()))
+        .collect::<BTreeSet<_>>();
     let side = |keys: &[AnswerKey]| {
         keys.iter()
+            .filter(|key| !key.moving)
             .map(|key| ((key.subject.clone(), key.origin.clone()), key.claim.clone()))
             .collect::<BTreeMap<_, _>>()
     };
@@ -352,7 +427,7 @@ pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDiffer
         .chain(theirs.keys())
         .collect::<BTreeSet<_>>()
         .into_iter()
-        .filter(|key| ours.get(*key) != theirs.get(*key))
+        .filter(|key| !moving.contains(*key) && ours.get(*key) != theirs.get(*key))
         .map(|key| KeyDifference {
             subject: key.0.clone(),
             origin: key.1.clone(),

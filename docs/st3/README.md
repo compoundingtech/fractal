@@ -11,6 +11,7 @@ Use these documents for implementation details:
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
+- [Accountable fleet roots](accountable-roots.md) defines person-authored trace attribution and its upgrade and rollback requirements.
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
@@ -61,6 +62,8 @@ Use these documents for implementation details:
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
   and tests their harnesses run, on Linux and macOS, and what needs root. It also explains how
   stopping a seat ends every process the seat started, and what a host without systemd misses.
+- [Seat lanes](seat-lanes.md) explains how a seat that declares `capacity` runs with its builds in a
+  CPU and memory cap of its own, behind a per-host switch, and what a host guard must not count.
 - [Subagents](subagents.md) explains how Fractal records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Harness questions](harness-questions.md) explains how Fractal records the questions a seat's harness
@@ -87,8 +90,6 @@ Use these documents for implementation details:
   milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
   mission run summaries, and the five-minute performance report in `st doctor`.
-- [Agent migration](agent-migration.md) defines isolated rehearsal, cutover, and rollback.
-- [Eval audit](eval-audit.md) records the test intent and prompt boundary for each Fractal eval.
 - [Running Fractal with omp](omp.md) covers omp seat setup, behavior, and known limits.
 - [Product roadmap](roadmap.md) records accepted future work.
 - [CLI reference](../site/reference/cli.md) introduces the command surface and exact installed help.

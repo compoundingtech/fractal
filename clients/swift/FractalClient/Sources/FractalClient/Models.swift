@@ -36,7 +36,8 @@ public struct Snapshot: Codable, Sendable, Equatable {
     public let storeIndex: UInt64
     public let projectionVersion: String
     public let createdAt: String
-    enum CodingKeys: String, CodingKey { case id, hostID = "host_id", storeIndex = "store_index", projectionVersion = "projection_version", createdAt = "created_at" }
+    public let publishedAt: String?
+    enum CodingKeys: String, CodingKey { case id, hostID = "host_id", storeIndex = "store_index", projectionVersion = "projection_version", createdAt = "created_at", publishedAt = "published_at" }
 }
 
 /// Node-local source cut; do not compare across nodes or publication epochs.
@@ -62,6 +63,63 @@ public struct AgentsPublication: Codable, Sendable {
     public let order: [String]
     public let hasMore: Bool
     enum CodingKeys: String, CodingKey { case publication, items, order, hasMore = "has_more" }
+}
+
+public struct AgentsSnapshotChunk: Codable, Sendable {
+    public let kind, id, collection: String
+    public let snapshot: Snapshot
+    public let publication: AgentsPublicationMetadata
+    public let chunkIndex, chunkCount: UInt64
+    public let items: [AgentResource]
+    public let order: [String]
+    public let hasMore: Bool
+    enum CodingKeys: String, CodingKey { case kind, id, collection, snapshot, publication, items, order, chunkIndex = "chunk_index", chunkCount = "chunk_count", hasMore = "has_more" }
+}
+
+public struct AgentsChanges: Codable, Sendable {
+    public let kind, id, collection: String
+    public let snapshot: Snapshot
+    public let publication: AgentsPublicationMetadata
+    public let baseRevision: UInt64
+    public let upserts: [AgentResource]
+    public let removes, order: [String]
+    public let hasMore: Bool
+    enum CodingKeys: String, CodingKey { case kind, id, collection, snapshot, publication, upserts, removes, order, baseRevision = "base_revision", hasMore = "has_more" }
+}
+
+public struct AgentsPublicationSubscribe: Encodable, Sendable {
+    public let kind = "subscribe"
+    public let id: String
+    public let collection = "agents"
+    public let agentsPublicationVersion = 1
+    public init(id: String) { self.id = id }
+    enum CodingKeys: String, CodingKey { case kind, id, collection, agentsPublicationVersion = "agents_publication_version" }
+}
+
+public struct CollectionNotice: Codable, Sendable {
+    public let kind: String
+    public let id, collection: String?
+    public let code: ErrorCode?
+    public let message: String?
+    public let retryable: Bool?
+}
+
+public enum AgentsCollectionEvent: Decodable, Sendable {
+    case snapshotChunk(AgentsSnapshotChunk)
+    case changes(AgentsChanges)
+    case error(CollectionNotice)
+    case resync(CollectionNotice)
+    private enum CodingKeys: String, CodingKey { case kind }
+    public init(from decoder: Decoder) throws {
+        let kind = try decoder.container(keyedBy: CodingKeys.self).decode(String.self, forKey: .kind)
+        switch kind {
+        case "snapshot": self = .snapshotChunk(try AgentsSnapshotChunk(from: decoder))
+        case "changes": self = .changes(try AgentsChanges(from: decoder))
+        case "error": self = .error(try CollectionNotice(from: decoder))
+        case "resync": self = .resync(try CollectionNotice(from: decoder))
+        default: throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown agents collection frame \(kind)"))
+        }
+    }
 }
 
 public struct ErrorEnvelope: Codable, Error, Sendable {
@@ -93,6 +151,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case peerTooOld
     case validationFailed
     case idempotencyConflict
+    case agentsPublicationRowTooLarge
     case attentionMigrated
     case issuerRequired
     case suspendAuthoredSessionSelection
@@ -162,6 +221,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "retirement-upgrade-required": .retirementUpgradeRequired
         case "invalid-custody-successor": .invalidCustodySuccessor
         case "custody-pending": .custodyPending
+        case "agents-publication-row-too-large": .agentsPublicationRowTooLarge
         case "attention-migrated": .attentionMigrated
         case "not-found": .notFound
         case "forbidden": .forbidden
@@ -239,6 +299,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .retirementUpgradeRequired: "retirement-upgrade-required"
         case .invalidCustodySuccessor: "invalid-custody-successor"
         case .custodyPending: "custody-pending"
+        case .agentsPublicationRowTooLarge: "agents-publication-row-too-large"
         case .attentionMigrated: "attention-migrated"
         case .notFound: "not-found"
         case .forbidden: "forbidden"
@@ -515,7 +576,7 @@ public struct HarnessTodoTotals: Codable, Sendable {
 public struct AgentHandoff: Codable, Sendable { public let phase, destination, desiredToken: String; public let sources, pendingSources: [String]; public let overriddenSources: [String]?; enum CodingKeys: String, CodingKey { case phase, destination, desiredToken = "desired_token", sources, pendingSources = "pending_sources", overriddenSources = "overridden_sources" } }
 public struct AgentSuspension: Codable, Sendable { public let action, phase, operationID, updatedAt: String; public let harness, nativeSessionID, incarnationID, suspendedAt, code, reason, host, sourceHost: String?; public let blocking: [String]; enum CodingKeys: String, CodingKey { case action, phase, host, sourceHost = "source_host", operationID = "operation_id", updatedAt = "updated_at", harness, nativeSessionID = "native_session_id", incarnationID = "incarnation_id", suspendedAt = "suspended_at", code, reason, blocking } }
 public struct AgentSubagent: Codable, Sendable { public let id: String; public let subagentType, description: String?; public let driver: String; public let sessionID, workID, startedAt: String?; public let leaseExpiresAt: String; enum CodingKeys: String, CodingKey { case id, subagentType = "subagent_type", description, driver, sessionID = "session_id", workID = "work_id", startedAt = "started_at", leaseExpiresAt = "lease_expires_at" } }
-public struct AgentDelivery: Codable, Sendable { public let state: String; public let reason: String?; public let polledSecondsAgo: UInt64?; public let transport: String?; enum CodingKeys: String, CodingKey { case state, reason, polledSecondsAgo = "polled_seconds_ago", transport } }
+public struct AgentDelivery: Codable, Sendable { public let state: String; public let reason: String?; public let polledSecondsAgo: UInt64?; public let sinceUnixMs: UInt64?; public let transport: String?; enum CodingKeys: String, CodingKey { case state, reason, polledSecondsAgo = "polled_seconds_ago", sinceUnixMs = "since_unix_ms", transport } }
 public enum AgentQueuePlacement: String, Codable, Sendable { case top, bottom, before, after }
 public struct AgentQueue: Codable, Sendable { public let kind: String; public let agentID: String; public let currentWorkIDs: [String]; public let nextWorkID: String?; public let runs: [AgentQueueRun]; public let moves: [AgentQueueMove]; public let moveCount: UInt64; enum CodingKeys: String, CodingKey { case kind, agentID = "agent_id", currentWorkIDs = "current_work_ids", nextWorkID = "next_work_id", runs, moves, moveCount = "move_count" } }
 public struct AgentQueueRun: Codable, Sendable { public let missionRunID: String; public let position: UInt32; public let state: String; public let runState: String; public let joinedAt: String; public let claimedWorkIDs: [String]; public let readyWorkIDs: [String]; public let waitingWorkIDs: [String]; public let waitingForRunID: String?; enum CodingKeys: String, CodingKey { case missionRunID = "mission_run_id", position, state, runState = "run_state", joinedAt = "joined_at", claimedWorkIDs = "claimed_work_ids", readyWorkIDs = "ready_work_ids", waitingWorkIDs = "waiting_work_ids", waitingForRunID = "waiting_for_run_id" } }
@@ -1291,6 +1352,7 @@ public struct GlassDelete: Codable, Sendable {
 public struct GlassCollectionFrame: Codable, Sendable {
     public let kind: String
     public let id: String?
+    public let collection: String?
     public let snapshot: Snapshot?
     public let items: [Glass]?
     public let upserts: [Glass]?
@@ -1299,7 +1361,8 @@ public struct GlassCollectionFrame: Codable, Sendable {
     public let hasMore: Bool?
     public let code: String?
     public let message: String?
-    enum CodingKeys: String, CodingKey { case kind, id, snapshot, items, upserts, removes, order, code, message, hasMore = "has_more" }
+    public let retryable: Bool?
+    enum CodingKeys: String, CodingKey { case kind, id, collection, snapshot, items, upserts, removes, order, code, message, retryable, hasMore = "has_more" }
 }
 
 public struct AgentCollectionFrame: Codable, Sendable {

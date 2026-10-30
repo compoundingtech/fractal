@@ -127,6 +127,8 @@ export type CollectionStreamOptions = {
 export type CollectionStream = {
     /** Hold a window of up to `limit` (1–200) current items. A held ID is replaced. */
     subscribeGlasses(id: string): void;
+    /** Complete unfiltered version-1 roster. The caller stages chunks and applies deltas atomically. */
+    subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribe(id: string, collection: Exclude<CollectionName, 'arrangements'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
@@ -146,6 +148,7 @@ export type CollectionWindow = { items: Resource[]; hasMore: boolean; snapshot: 
  * frame's complete order. A `changes` frame without an earlier snapshot has nothing to apply to. */
 export function applyWindow(window: CollectionWindow | undefined, frame: CollectionFrame): CollectionWindow | undefined {
     if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return window;
+    if ('publication' in frame) throw new Error('Revisioned agents frames require atomic chunk/delta application, not applyWindow');
     if (frame.kind === 'changes' && !window) return undefined;
     const rows = new Map<string, Resource>(frame.kind === 'snapshot' ? [] : window!.items.map(item => [item.id, item]));
     if (frame.kind === 'changes') for (const id of frame.removes) rows.delete(id);
@@ -604,6 +607,7 @@ export class FractalClient {
         socket.onerror = () => end(new Error('The collections socket failed'));
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
+            subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribe: (id, collection, limit, filters = {}) => {
                 // Only subscribeAgent may send an exact selector: it first checks the daemon.

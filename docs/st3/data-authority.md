@@ -57,7 +57,7 @@ may drop the claims each newer one replaced. `harness.observed` replicates when 
 than `observed_at_ms` changes. `harness.usage` replicates the first reading of each incarnation and
 semantics, a compaction or model change, a reading at least five minutes after the last replicated
 one while the harness works, and any reading while it does not. The newest pending reading
-replicates when the harness stops working.
+replicates when the harness stops working. Response rollups are the exception: below.
 
 A node can also send every local observation to an OpenTelemetry collector. The exporter is off
 unless the config names a collector:
@@ -80,8 +80,22 @@ the turn ID, model, agent, mission run, and step on the producing node. `local_u
 each counted provider response, so replay across harness incarnations does not count it again;
 `local_usage_spend` keeps cumulative buckets per agent incarnation, model, account, mission run and
 step, and host even after the observation log is trimmed, and `local_usage_provenance` their pricing. The node replicates
-`harness.usage` response rollups by agent, incarnation, model, mission step, and host. Fleet usage
-queries subtract the last rollup before a period from the last rollup inside it.
+`harness.usage` response rollups by agent, incarnation, model, mission step, and host: each
+series' first reading, then the last reading of each UTC hour once that hour is over (on the
+series' next reading or the resting seat's next re-stamp), and its final totals when the seat
+ends or its step completes, fails or is released: the run is judged on its origin, and a loop's
+token budget reads the seat's replicated usage then. A reading after the seat ended, or from an
+incarnation a restart replaced, replicates at once. The hourly local trim replicates any rollup
+whose hour is over first, for a seat that stopped re-stamping, and never deletes a reading a slot
+still waits on. The readings between stay pending in the host's local log. Fleet usage queries subtract the
+last rollup before a period from the last rollup inside it, so they are exact to the hour. On the
+seat's host, a period also counts every reading since each series' last replication, and the
+agent, mission and run cards fold the newest, so current totals and any boundary since then are
+exact there; other members lag by up to about an hour. Card reads pass the request's snapshot
+index, and a read at that index counts as current. The host finds the readings since a slot's last
+publication by local arrival time, so after the clock steps back they stay hidden from its reads
+until it catches up; they still replicate. A configured OpenTelemetry collector
+receives every response.
 
 Claude event hooks submit `harness.telemetry` observations to their local daemon. They retain
 the counter recorded at the shared hook's actual application point, bounded warning/error logs,

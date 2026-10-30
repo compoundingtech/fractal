@@ -390,6 +390,18 @@ fn denial_fixture(actions: &[&str]) -> (Store, ClaimRecord, DelegationProof) {
     (store, denial, proof)
 }
 
+/// `denial_fixture` over a file store, for tests whose callers race. The in-memory store shares
+/// one cache between its connections, where a reader and the writer find each other's tables
+/// locked at once (SQLITE_LOCKED); a file store waits on its busy timeout, as the daemon's does.
+fn file_denial_fixture(
+    path: &std::path::Path,
+    actions: &[&str],
+) -> (Store, ClaimRecord, DelegationProof) {
+    let store = Store::open(path, "alder").unwrap();
+    let (denial, proof) = seed_denial(&store, actions);
+    (store, denial, proof)
+}
+
 pub fn seed_denial(store: &Store, actions: &[&str]) -> (ClaimRecord, DelegationProof) {
     let source = "version 2\nagent \"worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n";
     let intent = crate::graph::parse_internal_intent(source, "alder").unwrap();
@@ -878,7 +890,9 @@ fn sender_withdraws_its_update_without_releasing_its_held_step_and_retains_histo
 
 #[test]
 fn concurrent_delegated_dismissals_have_one_source_answer_and_one_notice() {
-    let (store, denial, proof) = denial_fixture(&["close-item"]);
+    let directory = tempfile::tempdir().unwrap();
+    let (store, denial, proof) =
+        file_denial_fixture(&directory.path().join("dismissals.sqlite3"), &["close-item"]);
     let store = std::sync::Arc::new(store);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let handles = (0..2)
@@ -909,6 +923,64 @@ fn concurrent_delegated_dismissals_have_one_source_answer_and_one_notice() {
     assert_eq!(answers.len(), 1);
     for result in results.into_iter().flatten() {
         assert_eq!(result.id, answers[0].id);
+    }
+    assert_eq!(store.messages(Some(SEAT), true).unwrap().len(), 1);
+}
+
+#[test]
+fn delegated_dismissals_that_both_pass_the_fence_record_one_answer() {
+    // Hold the writer until both dismissals have read the fence, so the second one's fence read
+    // cannot see the first one's answer. Each caller's own probe says when it passed.
+    use fractal_store::store::attention_snapshot::delegated_write_probe;
+    let (store, denial, proof) = denial_fixture(&["close-item"]);
+    let (denial, proof) = (&denial, &proof);
+    let (held, is_held) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(1);
+    let (fenced, passed) = std::sync::mpsc::channel();
+    let results = std::thread::scope(|scope| {
+        let store = &store;
+        // Owned here, so a failed wait below drops it while unwinding and frees the writer.
+        let release = release;
+        let writer = scope.spawn(move || {
+            store.hold_writer_for_test(|| {
+                held.send(()).unwrap();
+                let _ = released.recv();
+            })
+        });
+        is_held.recv().unwrap();
+        let callers = (0..2)
+            .map(|_| {
+                let fenced = fenced.clone();
+                scope.spawn(move || {
+                    delegated_write_probe::set(move || {
+                        let _ = fenced.send(());
+                    });
+                    store.respond_native_prompt(SEAT, &denial.id, "dismiss", ACTOR, Some(proof))
+                })
+            })
+            .collect::<Vec<_>>();
+        for _ in 0..2 {
+            passed
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("both dismissals pass the reader fence while the writer is held");
+        }
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        callers
+            .into_iter()
+            .map(|caller| caller.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let answers = store
+        .claims_for(SEAT, Some("harness.diagnostic"))
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.body["fields"]["code"] == "native-prompt-answered")
+        .collect::<Vec<_>>();
+    assert_eq!(answers.len(), 1);
+    // The same dismissal retried is answered with the recorded answer, not refused.
+    for result in results {
+        assert_eq!(result.unwrap().id, answers[0].id);
     }
     assert_eq!(store.messages(Some(SEAT), true).unwrap().len(), 1);
 }

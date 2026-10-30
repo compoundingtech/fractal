@@ -6325,6 +6325,47 @@ mod tests {
     }
 
     #[test]
+    fn an_unread_objectives_list_never_reads_as_no_spend_all_clear() {
+        let mut ui = glass();
+        ui.world.usage = Load::Ready(Vec::new());
+        ui.world.usage_limits.clear();
+        ui.world.agent_messages = None;
+        ui.click(Hit::Usage);
+        // Nothing is spent and the objectives are not yet known: say so, not "no spend".
+        ui.world.slo = Load::Loading;
+        let shown = screen(&ui);
+        assert!(shown.contains("Loading objectives"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+        // An old daemon's answer reaches the person instead of a green all clear.
+        ui.world.slo = Load::Failed(
+            "This st does not serve objectives and budgets yet: its daemon needs an update.".into(),
+        );
+        let shown = screen(&ui);
+        assert!(shown.contains("daemon needs"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+        // Only a read that came back empty is an all clear.
+        ui.world.slo = Load::Ready(Vec::new());
+        let shown = screen(&ui);
+        assert!(shown.contains("No spend recorded in this"), "{shown}");
+        // An empty reading that could not be read again is the last reading, not an all clear.
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+    }
+
+    #[test]
+    fn a_failed_refresh_marks_the_objectives_shown_as_the_last_reading() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        assert!(!screen(&ui).contains("Last reading"));
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading") && shown.contains("read again (timed out)"), "{shown}");
+        assert!(shown.contains("anthropic-weekl"), "the rows stay:\n{shown}");
+    }
+
+    #[test]
     fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
         let mut ui = glass();
         let initial = ui.inventories_wanted();

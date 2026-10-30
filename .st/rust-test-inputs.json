@@ -188,6 +188,8 @@
   "fractal-feed": {
    "extra": [
     "README.md",
+    "docs/st3/client-v0/fixtures/agents-publication-chunk.json",
+    "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/events.json",
     "docs/st3/client-v0/fixtures/resources.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json"
@@ -221,6 +223,8 @@
    "extra": [
     ".config",
     ".github/workflows/fleet.yml",
+    ".fractal/evidence-policy.json",
+    ".st/evidence-policy.json",
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
