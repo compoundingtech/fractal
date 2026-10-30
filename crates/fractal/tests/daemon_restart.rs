@@ -1094,10 +1094,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     )
     .await;
     assert_alive(&mut driver, "a running Claude driver");
-    // The graph records the delivery outage and its recovery for this incarnation.
+    // The seat's node records the delivery outage and its recovery for this incarnation, in
+    // its local observation log: they are observability codes.
     let diagnostics = daemon
         .store
-        .claims_for(seat, Some("harness.diagnostic"))
+        .observations_for(seat, "harness.diagnostic")
         .unwrap()
         .into_iter()
         .map(|claim| {
@@ -3100,7 +3101,7 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
                 || {
                     !daemon
                         .store
-                        .claims_for("agent/quartz", Some("harness.diagnostic"))
+                        .observations_for("agent/quartz", "harness.diagnostic")
                         .unwrap()
                         .is_empty()
                 },
