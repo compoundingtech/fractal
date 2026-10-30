@@ -1,20 +1,20 @@
 {
-  description = "AttentionTray — native SwiftUI thin client over st";
+  description = "AttentionTray — native SwiftUI thin client over fractal";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/4ba99f3209788ed04f01af38f77ddb803ad6ec63";
-    smalltalk = {
-      url = "github:compoundingtech/smalltalk/e9a9167884ea56ae22ed0605bdf284610b6fa9fb";
+    fractal = {
+      url = "github:compoundingtech/fractal/05b5f5d96c369a37c18766b4740b80959c320102";
       flake = false;
     };
   };
 
   outputs =
-    { nixpkgs, smalltalk, ... }:
+    { nixpkgs, fractal, ... }:
     let
       system = "aarch64-darwin";
       pkgs = import nixpkgs { inherit system; };
-      clientPath = "${smalltalk}/clients/swift/St3Client";
+      clientPath = "${fractal}/clients/swift/FractalClient";
       infoPlist = pkgs.writeText "attention-tray-Info.plist" (
         pkgs.lib.generators.toPlist { escape = true; } {
           CFBundleDisplayName = "Attention";
@@ -46,7 +46,7 @@
             cp -R ${./.} source
             chmod -R u+w source
             cd source
-            export HOME="$TMPDIR" ST3_CLIENT_PATH=${clientPath}
+            export HOME="$TMPDIR" FRACTAL_CLIENT_PATH=${clientPath}
             export PATH=/usr/bin:/bin:/usr/sbin:/sbin
             /usr/bin/swift build --configuration release --jobs 2 --disable-sandbox
             app="$out/Applications/AttentionTray.app"
@@ -61,7 +61,7 @@
         attention-tray = tray;
       };
       devShells.${system}.default = pkgs.mkShell {
-        ST3_CLIENT_PATH = clientPath;
+        FRACTAL_CLIENT_PATH = clientPath;
       };
     };
 }

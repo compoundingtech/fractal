@@ -1,6 +1,6 @@
 import AttentionCore
 import Foundation
-import St3Client
+import FractalClient
 
 struct TrayConfiguration: Sendable {
   let endpoint: URL
@@ -39,18 +39,18 @@ struct TrayConfiguration: Sendable {
       return url
     }
     return try Self(
-      endpoint: url("ATTENTION_ST_ENDPOINT"),
-      credential: value("ATTENTION_ST_CREDENTIAL"),
+      endpoint: url("ATTENTION_FRACTAL_ENDPOINT"),
+      credential: value("ATTENTION_FRACTAL_CREDENTIAL"),
       fractalURL: url("ATTENTION_FRACTAL_URL"))
   }
 }
 
-actor STAttentionAdapter: AttentionAdapter {
-  private let client: St3Client
+actor FractalAttentionAdapter: AttentionAdapter {
+  private let client: FractalClient
   private let fractalURL: URL
 
   init(configuration: TrayConfiguration) {
-    client = St3Client(
+    client = FractalClient(
       fabricLoopbackURL: configuration.endpoint, credential: configuration.credential)
     fractalURL = configuration.fractalURL
   }
@@ -87,7 +87,7 @@ actor STAttentionAdapter: AttentionAdapter {
 
   private enum ReadError: Error { case incompletePage }
 
-  // Mirrors Fractal src/data/attention.ts at the pinned smalltalk revision.
+  // Mirrors Fractal apps/fractal-web/src/data/attention.ts at the pinned revision.
   // Open informational cards, approvals, faults and terminal-only prompts are not asks.
   private static func isWaitingForAnswer(_ item: AttentionResource) -> Bool {
     guard item.state == "open", item.update == nil else { return false }
@@ -107,7 +107,7 @@ actor STAttentionAdapter: AttentionAdapter {
   }
 
   func control(_ action: NoticeControl, notice: NoticeSnapshot) async throws {
-    // Intentionally no transport until smalltalk#3476 PR1 supplies typed fenced actions.
+    // Intentionally no transport until fractal#3476 PR1 supplies typed fenced actions.
     // AttentionModel presents an explicit preview-only result, never optimistic success.
   }
 }

@@ -10,20 +10,22 @@ not persist or send unsupported actions. Ask answering happens in Fractal.
 
 `nix build ./flakes/attention-tray#attention-tray` produces an unsigned
 `Applications/AttentionTray.app` for `aarch64-darwin`, using Apple's host Swift
-SDK. SwiftPM consumes the exact locked smalltalk Swift client via
-`ST3_CLIENT_PATH`; builds use two Swift jobs.
+SDK. SwiftPM consumes the exact locked Fractal Swift client via
+`FRACTAL_CLIENT_PATH`; builds use two Swift jobs. The root tray input follows
+the root Fractal source; the standalone flake pins the same revision.
 
 Standalone launches require three explicit environment variables:
-`ATTENTION_ST_ENDPOINT`, `ATTENTION_ST_CREDENTIAL`, `ATTENTION_FRACTAL_URL`.
+`ATTENTION_FRACTAL_ENDPOINT`, `ATTENTION_FRACTAL_CREDENTIAL`, `ATTENTION_FRACTAL_URL`.
 There are no endpoint, localhost, or Boss fallbacks. The application itself
 loads no keychain, 1Password item or device-profile file.
 
 On mbp2025, `services.attentionTray.enable = true` imports the Home Manager
 module. Its activation bundle installs `~/Applications/AttentionTray.app`, signs
 it ad-hoc, registers it with Launch Services and converges the GUI launch agent
-`com.schickling.attention.tray`. Its `KeepAlive.PathState` condition starts it
-only while the configured profile exists; `RunAtLoad` is absent. An unpaired
-installation is inert, including across unrelated Home Manager activations.
+`com.schickling.attention.tray`. Its dual `KeepAlive.PathState` conditions start
+it while either the configured profile or its legacy filename exists;
+`RunAtLoad` is absent. An unpaired installation is inert, including across
+unrelated Home Manager activations.
 Once paired, missing web prerequisites fail with a clear wrapper log under
 `ThrottleInterval = 60`, not a tight loop. There is no separate Login Items or
 SMAppService enrollment. Changed paired payloads restart once; unchanged
@@ -42,15 +44,30 @@ condition. Filesystem notifications can be lossy: if a completed pairing does
 not start it, inspect the resolved domain and kickstart only this paired job.
 
 The stable wrapper reads one dedicated paired-device profile at
-`~/.config/attention-tray/fractal/stui-devices.json` (regular, owned, readable
+`~/.config/attention-tray/fractal/fractal-devices.json` (regular, owned, readable
 owner-only `0400` or `0600`; parent `0700`). It accepts exactly one
 `person/schickling` device whose `session.scopes` is exactly the pinned
 `--read-only` observation set: `read.projections`, `read.glasses`, `terminal.read`.
 Missing scopes, extra scopes and a broader person grant fail closed. The profile
-stores that session at pinned `device.rs:166-176`; `generated.rs:4522` supplies
+stores that session at pinned `device.rs:166-177`; `generated.rs:4523` supplies
 the scopes field and CLI `main.rs:2023` defines the read-only set.
 Its endpoint and bearer are exported only to the app process. Never put the
 bearer into Nix options, launchd configuration, shell arguments or logs.
+
+Launcher/readiness preflight atomically migrates the old `stui-devices.json`
+filename to `fractal-devices.json` with a no-replace rename
+(`renameatx_np(RENAME_EXCL)` on Darwin, `renameat2(RENAME_NOREPLACE)` on Linux).
+The rename preserves the inode and mode and never overwrites an existing
+destination, even in a race; the new file wins and a warning is logged. Dual PathState
+conditions let an existing profile start the launcher before migration.
+Activation also recognizes the old file when deciding whether a changed paired
+payload must restart. New pairing writes the configured filename directly.
+
+Run the standalone Linux migration check from the repository root:
+
+```sh
+gate-slot --class eval --max-wait 3600 -- nix build --impure --no-link --option builders '' --option max-jobs 2 --expr 'let root = builtins.getFlake ("git+file:" + toString ./.); pkgs = import root.inputs.nixpkgs { system = "x86_64-linux"; }; in (import ./nixpkgs/shared/attention-tray-profile-migration.nix { inherit pkgs; }).test'
+```
 
 The Fractal URL has one source of truth: the configured local Fractal daemon's
 `<services.smalltalk.stateDir>/web-launch-url`. This is the same private
@@ -186,20 +203,28 @@ printf '%s\n' '{"status":"paired-profile-path-verified"}'
 ```
 
 The explicit supported `--profile` flag bypasses migration-dependent
-`product_dirs::resolve(st3, fractal)` defaults. No migration receipt is needed.
+product-directory defaults. No upstream migration receipt is needed.
 The completion `.profile` check is mandatory before deployment and proves the
 CLI writer and HM consumer agree. Do not print completion/error files or the
 saved profile. Report only status; record actual nonsecret device inventory
 through a separately allowlisted metadata read after pairing.
 
-Pinned source evidence (`99dce55f6286c0a03f77bbb6f42daad940ee6994`):
+Pinned source evidence (`05b5f5d96c369a37c18766b4740b80959c320102`):
 `crates/fractal/src/main.rs:2042-2044` defines `--read-only`,
 `:2071-2084` defines `--profile` and `--fingerprint`, `:8738-8745`
 uses the explicit profile before considering the product-directory default,
 and `:8747-8757` emits a safe completion JSON with `.profile`.
 `crates/fractal-client/src/device.rs:921-929` accepts non-terminal stdin.
-The challenge fields are defined in `crates/fractal-client/src/generated.rs:4476-4482`;
+The challenge fields are defined in `crates/fractal-client/src/generated.rs:4476-4483`;
 `main.rs:8898-8905` preserves the `.value` envelope for JSON output.
+`clients/swift/FractalClient/Package.swift:5-10` exports `FractalClient`;
+`Sources/FractalClient/Client.swift:253` retains `attentionList`.
+`crates/fractal-api-core/src/api.rs:592-593` routes attention GETs to
+`api/client_reads.rs:848-892`, which returns person-filtered projection pages,
+not `attention-migrated`. `api/client_v0.rs:789-801` admits these GETs with
+`read.projections`, included in the read-only set above. The migration error
+belongs to the legacy mutation `attention.resolve`
+(`crates/fractal-api-client-v0/src/api/client_v0.rs:7735-7738`), not these reads.
 
 On **every success or failure**, send this cleanup to the **dev5 person PTY**:
 

@@ -59,7 +59,7 @@ public protocol AttentionAdapter: Sendable {
       adapter == nil
       ? .unconfigured(
         configurationError
-          ?? "Configure ATTENTION_ST_ENDPOINT, ATTENTION_ST_CREDENTIAL and ATTENTION_FRACTAL_URL.")
+          ?? "Configure ATTENTION_FRACTAL_ENDPOINT, ATTENTION_FRACTAL_CREDENTIAL and ATTENTION_FRACTAL_URL.")
       : .loading
   }
 
@@ -87,7 +87,7 @@ public protocol AttentionAdapter: Sendable {
       try await adapter.control(action, notice: notice)
       // PR1 is not available: never fabricate a committed person-control state.
       controlMessage =
-        "Notice controls are preview-only until smalltalk#3476 PR1; nothing was changed."
+        "Notice controls are preview-only until fractal#3476 PR1; nothing was changed."
     } catch {
       controlMessage = "Notice control failed: \(error)"
     }
