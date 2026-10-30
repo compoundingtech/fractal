@@ -29,6 +29,6 @@ parallel_tests \
   evidence-wrap-test ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test \
   ci-evidence-gate-test evidence-flip-ready-test evidence-skip-report-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test \
   ci-nextest-flaky-test ci-parallel-tests-test nix-typescript-client-test ci-nix-fixed-outputs-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test \
-  ci-rust-test-notes-test lane-definition-closure-test review-risk-test review-validate-test \
+  ci-rust-test-notes-test lane-definition-closure-test review-risk-test review-validate-test dep-info-check-test \
   classify-risk-test \
   check-pty-boot-identities-test review-test

@@ -23,6 +23,16 @@ GENV = dict(BASE, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', 
             GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live repository source, not old-layout fixtures.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
+
 def helper(*args, env=None, check=None, cwd=None):
     done = subprocess.run([sys.executable, str(HELPER), *args], capture_output=True, text=True, env=dict(BASE, **(env or {})), cwd=cwd)
     return done
@@ -71,7 +81,7 @@ with tempfile.TemporaryDirectory() as directory:
     repo.mkdir()
     git(repo, 'init', '-q', '-b', 'main')
     (repo / '.st').mkdir()
-    (repo / '.st/evidence-authors.json').write_text((ROOT / '.st/evidence-authors.json').read_text())
+    (repo / '.st/evidence-authors.json').write_text(root_config('evidence-authors.json').read_text())
 
     def commit(message, email, files=None, committer='me@nathanherald.com'):
         for name, text in (files or {'f.txt': message}).items():
@@ -148,9 +158,30 @@ with tempfile.TemporaryDirectory() as directory:
     badlist_head = commit('on top', 'me@nathanherald.com', {'z.txt': 'z'})
     refused = pr(badlist_base, badlist_head)
     assert refused.returncode == 1 and 'Traceback' not in refused.stderr + refused.stdout and 'nonempty strings' in refused.stdout, refused.stdout + refused.stderr
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — accepted author list wins in either layout.
+    git(repo, 'checkout', '-q', '-b', 'preferred-list', base)
+    preferred_base = commit('preferred author list', 'me@nathanherald.com',
+                            {'.fractal/evidence-authors.json': root_config('evidence-authors.json').read_text()})
+    preferred_head = commit('preferred head', 'me@nathanherald.com')
+    assert pr(preferred_base, preferred_head).returncode == 0
+    malformed_base = commit('malformed preferred list', 'me@nathanherald.com',
+                            {'.fractal/evidence-authors.json': '{broken'})
+    malformed_head = commit('malformed head', 'me@nathanherald.com')
+    assert pr(malformed_base, malformed_head).returncode == 1, 'valid old list must not rescue malformed new list'
+    assert pr(preferred_base, malformed_head).returncode == 0, 'candidate list cannot change the pinned base list'
+    commit('restore preferred list', 'me@nathanherald.com',
+           {'.fractal/evidence-authors.json': root_config('evidence-authors.json').read_text()})
+    git(repo, 'rm', '-q', '-r', '.st')
+    new_base = commit('new only list', 'me@nathanherald.com')
+    new_head = commit('new only head', 'me@nathanherald.com')
+    assert pr(new_base, new_head).returncode == 0
 # the address matcher itself, on forms a commit cannot carry or that look close to a listed one
 import importlib.machinery  # noqa: E402
-signing = importlib.machinery.SourceFileLoader('ci_evidence_signing', str(HELPER)).load_module()
+import importlib.util  # noqa: E402
+loader = importlib.machinery.SourceFileLoader('ci_evidence_signing', str(HELPER))
+spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+signing = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(signing)
 import re as _re  # noqa: E402
 _noreply = [_re.compile(r'(?:[0-9]+\+)?myobie@users\.noreply\.github\.com', _re.IGNORECASE)]
 _emails = {'me@nathanherald.com'}
@@ -194,8 +225,12 @@ with tempfile.TemporaryDirectory() as directory:
     repo = tmp / 'repo'
     subprocess.run(['git', 'init', '-q', str(repo)], check=True, env=GENV)
     (repo / 'flake.lock').write_text('{}\n')
+    (repo / '.st').mkdir()
+    (repo / '.st/evidence-keys').write_text(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
     git(repo, 'add', '.')
     git(repo, 'commit', '-q', '-m', 'one')
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — the wrapper must resolve a real accepted revision.
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
     signers = tmp / 'allowed'
     signers.write_text(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
     done = subprocess.run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', '1' * 64,
@@ -413,6 +448,27 @@ with tempfile.TemporaryDirectory() as directory:
     with_verify(f'import json\nprint(json.dumps({{"source_inputs": {KEY!r}}}))\n')
     assert 'source_inputs' not in project_run(dict(PROJECT_BASE_SHA=''))[1]['inputs'], 'no base commit, no key'
     print('passed: source_inputs is signed only when the base evidence-verify projects a well-formed key; every other case is an exact-tree note')
+
+    # --- base_inputs: the digest of a base file the verdict depends on, taken at the base the job compared against (BASE_INPUTS_SHA)
+    DIGEST = 'e' * 64
+    calls = tmp / 'verify-calls.jsonl'
+    with_verify(f'import json,sys\nopen({str(calls)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                f'print(json.dumps({{"source_inputs": {KEY!r}, "base_inputs": {{"clippy_base_baseline_sha256": {DIGEST!r}}}}}))\n')
+    done, facts = project_run(dict(BASE_INPUTS_SHA='c' * 40))
+    assert done.returncode == 0 and facts['inputs']['clippy_base_baseline_sha256'] == DIGEST, done.stdout + done.stderr
+    bases = [argv[argv.index('--policy-from') + 1] for argv in map(json.loads, calls.read_text().splitlines())]
+    assert bases == ['b' * 40, 'c' * 40], bases  # the key from the project base, the base inputs from the job's own base
+    calls.unlink()
+    assert project_run()[1]['inputs']['clippy_base_baseline_sha256'] == DIGEST, 'without BASE_INPUTS_SHA, the project base'
+    assert 'clippy_base_baseline_sha256' not in project_run(dict(BASE_INPUTS_SHA=''))[1]['inputs'], 'set but empty: no base'
+    assert 'clippy_base_baseline_sha256' not in project_run(dict(BASE_INPUTS_SHA='0' * 40))[1]['inputs'], \
+        'a job that compared against no base records none, so its note covers no run that judges one'
+    for bad in ('"E' + 'e' * 63 + '"', '"present"', '7', 'null'):
+        with_verify(f'print(\'{{"source_inputs": null, "base_inputs": {{"clippy_base_baseline_sha256": {bad}}}}}\')\n')
+        assert 'clippy_base_baseline_sha256' not in project_run()[1]['inputs'], bad
+    with_verify('print(\'{"source_inputs": null, "base_inputs": {"absent_base": "absent", "Bad-Name": "absent"}}\')\n')
+    assert project_run()[1]['inputs'].get('absent_base') == 'absent' and 'Bad-Name' not in project_run()[1]['inputs']
+    print('passed: base_inputs are signed from the base the job compared against, well-formed values only, none when it compared against none')
 
     # --- the linux-gate aggregate carries its input key too; its job sets no PROJECT_BASE_SHA, so the base comes from the event payload
     def aggregate_run(payload, extra=None):

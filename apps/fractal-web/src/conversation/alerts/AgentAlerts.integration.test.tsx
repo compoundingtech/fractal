@@ -12,7 +12,7 @@ import { AgentAlerts, waitingCalls } from './AgentAlerts.tsx'
 
 const seat = 'agent/example/atlas'
 
-const prompting = (episode: string, answers: readonly string[]): Native.Attention =>
+const prompting = (episode: string, answers: readonly string[], callId: string): Native.Attention =>
   ({
     id: 'attention/one',
     kind: 'attention',
@@ -30,7 +30,7 @@ const prompting = (episode: string, answers: readonly string[]): Native.Attentio
     episode,
     alert: true,
     actions: ['prompt.respond'],
-    action_parameters: { 'prompt.respond': { target_id: seat, episode, answers } },
+    action_parameters: { 'prompt.respond': { target_id: seat, episode, answers, call_id: callId } },
   }) as unknown as Native.Attention
 
 const asking = (callId: string, labels: readonly string[]) => ({
@@ -65,7 +65,7 @@ describe('AgentAlerts, pressed', () => {
     const show = (alert: Native.Attention, items: Parameters<typeof waitingCalls>[0]) =>
       act(async () => root.render(<AgentAlerts alerts={[alert]} calls={waitingCalls(items)} onAnswer={onAnswer} />))
 
-    await show(prompting('episode-1', ['answer', 'deny']), [asking('q1', ['Red', 'Blue'])])
+    await show(prompting('episode-1', ['answer', 'deny'], 'q1'), [asking('q1', ['Red', 'Blue'])])
     expect(button('Send')!.disabled).toBe(true)
     await press('Blue')
     expect(button('✓ Blue')).toBeDefined()
@@ -74,7 +74,7 @@ describe('AgentAlerts, pressed', () => {
     expect(host.textContent).toContain('Answered.')
 
     // The same alert now asks a new question: nothing chosen for the old one carries over.
-    await show(prompting('episode-2', ['answer', 'deny']), [asking('q2', ['Left', 'Right', 'Up'])])
+    await show(prompting('episode-2', ['answer', 'deny'], 'q2'), [asking('q2', ['Left', 'Right', 'Up'])])
     expect(button('✓ Blue')).toBeUndefined()
     expect(host.querySelector('[aria-pressed="true"]')).toBeNull()
     expect(button('Send')!.disabled).toBe(true)
@@ -86,7 +86,7 @@ describe('AgentAlerts, pressed', () => {
 
   it('allows the one waiting call it shows, by pressing Allow', async () => {
     const answered: string[] = []
-    const alert = { ...prompting('episode-3', ['allow', 'deny']), detail: 'Claude asks to use Bash' } as Native.Attention
+    const alert = { ...prompting('episode-3', ['allow', 'deny'], 'c1'), detail: 'Claude asks to use Bash' } as Native.Attention
     await act(async () => root.render(
       <AgentAlerts alerts={[alert]} calls={waitingCalls([{ _tag: 'ToolCall', id: 'item/c1', callId: 'c1', name: 'Bash', input: { command: 'make' }, callSeen: true }])}
         onAnswer={async (_alert, answer, sent) => { answered.push(`${answer}:${sent}`); return { _tag: 'Sent' } }} />,

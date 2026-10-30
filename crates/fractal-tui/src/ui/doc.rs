@@ -12,12 +12,13 @@ use ratatui::text::{Line, Span};
 /// What a button on an alert does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlertTap {
-    /// Send one of its typed answers: `allow`, `deny`, or a structured answer's id.
+    /// Send one of its typed answers: a prompt's (`allow`, `deny`, `skip`, ...), or a structured
+    /// answer's id.
     Answer(String),
     /// Choose, or for a multi-select also unchoose, an option of a harness's question: the
     /// question's and the option's places in the pending call.
     Choose(usize, usize),
-    /// Open the alert's whole card in Now, where every kind is answered.
+    /// Open the alert's whole card in Inbox: a call too long for the band is read whole there.
     Open,
     /// Expand or collapse the band: the `Hit` names the agent's conversation, not an alert.
     Toggle,
@@ -98,6 +99,8 @@ pub enum Hit {
     GlassAdd(usize),
     /// Glasses: open a palette row.
     PaletteChoice(usize),
+    /// A document page's or the documents list's own button: back, try again, more.
+    Document(super::documents::Tap),
 }
 
 pub type Target = fractal_conversation_ui::doc::Target<Hit>;

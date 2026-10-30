@@ -1,5 +1,6 @@
-//! What a mission run waits on: the answer to "why is this stuck" read from state st already
-//! keeps current, never from claim history (docs/st3/waiting-on.md).
+//! What a mission run waits on, and the fleet's blocked runs grouped by cause: the answer to "why
+//! is this stuck" read from state st already keeps current, never from claim history
+//! (docs/st3/waiting-on.md).
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +58,22 @@ impl WaitKind {
             WaitKind::NoProgress => "no-progress",
             WaitKind::Unclaimed => "unclaimed",
             WaitKind::Hold => "hold",
+            WaitKind::Working => "working",
+            WaitKind::Verifying => "verifying",
+            WaitKind::Ready => "ready",
+            WaitKind::Queued => "queued",
+            WaitKind::Watching => "watching",
+        }
+    }
+
+    /// The heading a fleet list groups runs of this cause under.
+    pub fn heading(self) -> &'static str {
+        match self {
+            WaitKind::Ask => "waiting on a person",
+            WaitKind::SeatDown => "agent stopped or down",
+            WaitKind::NoProgress => "claimed, no progress",
+            WaitKind::Unclaimed => "ready, nobody claims it",
+            WaitKind::Hold => "held",
             WaitKind::Working => "working",
             WaitKind::Verifying => "verifying",
             WaitKind::Ready => "ready",
@@ -150,6 +167,38 @@ pub struct RunWaitingOn {
     /// The quiet limit a held step's progress and a ready step's age are measured against.
     pub quiet_after_ms: u64,
     /// The graph cut of the published work the open steps were read from.
+    pub work_cut: u64,
+    pub as_of_unix_ms: u128,
+}
+
+/// One blocked run in the fleet list: its cause and the step that causes it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedRun {
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<String>,
+    pub cause: WaitKind,
+    pub verdict: RunVerdict,
+    /// The step that causes it, and what that step waits on.
+    pub step: StepWait,
+    /// How many of the run's open steps are blocked.
+    pub blocked_steps: usize,
+}
+
+/// The runs of one cause.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedGroup {
+    pub cause: WaitKind,
+    pub runs: Vec<BlockedRun>,
+}
+
+/// Every blocked run in the fleet, grouped by cause in the causes' order, longest blocked first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedRuns {
+    pub groups: Vec<BlockedGroup>,
+    /// How many runs with open work were read.
+    pub runs_read: usize,
+    pub quiet_after_ms: u64,
     pub work_cut: u64,
     pub as_of_unix_ms: u128,
 }

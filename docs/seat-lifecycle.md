@@ -104,7 +104,7 @@ st agents show agent/garden/worker
 `--timeout 2m` changes the default ten-minute wait; a failure or timeout explains why
 the agent is not running again.
 
-When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible: `st agents show` prints it on its `WHY` line and `st agents ls` under its row, with the time st parked it. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
 
 A failed start with unverified producer closure can be superseded only by a still-current restart request accepted within the last hour. The selected desired declaration must still match the request, with no later suspension, resume, stop, termination or retirement; a current suspension also blocks recovery. Otherwise reconciliation records `restart-retired-obsolete-request` and completes the request as `retired` without launching or asserting producer closure. A new explicit restart is required after intent changes or expiry. The existing minimum failed-start age, absent-runtime check and kernel launch lock still apply. Synthesized start control requests are attributed to `agent/st3/reconciler`, with the original requester-authored restart retained as evidence; they do not impersonate a new request from that actor.
 
@@ -126,9 +126,12 @@ mission step with `fresh-context` starts an agent on a new session on purpose.
 Stop and start explicitly when you want it off between uses:
 
 ```sh
-st agents stop agent/garden/worker --as person/ada
+st agents stop agent/garden/worker --as person/ada --reason 'Done for the week.'
 st agents start garden/worker --as person/ada
 ```
+
+The reason is optional. It is kept in the stop declaration (`stop "agent/garden/worker" { reason "Done for the week." }`), and
+`st agents show` and `st agents ls` print it with who stopped the agent and when.
 
 Stopping an agent ends every process it started, including builds and tests that outlived
 its harness, on hosts with a systemd user manager; [Stopping a session](st3/priority.md#stopping-a-session)
@@ -163,9 +166,15 @@ Suspend refuses a busy agent with its blockers: a turn, claimed work, pending qu
 
 Client-v0 agent rows optionally carry `end_reason`: a derived terminal classification,
 not a new lifecycle write. Its `kind` distinguishes clean completion, a stop requested
-by a person or agent, a crash, a diagnostic harness exit, a lost host, and retirement.
-`ended_at` identifies the observed boundary; available actor, reason, exit code/signal,
-and diagnostic accompany it.
+by a person or agent (`stopped-by-person`, `stopped-by-agent`, with the stop's reason),
+a stop by the mission run that owns the seat as the run ended (`stopped-by-mission`, its
+actor the run), a seat st parked after failed starts or a failed restart (`parked`, its
+actor `daemon/runtime` and its reason st's), a crash, a diagnostic harness exit, a lost
+host, and retirement. `ended_at` identifies the observed boundary; available actor, reason,
+exit code/signal, and diagnostic accompany it. A parked seat reads `parked` until it runs
+again or a new declaration replaces the one st parked. `st agents show` prints the end
+reason on its `WHY` line and `st agents ls` under the row of each seat that is not running;
+a stopped seat without one says it has no recorded reason.
 
 Missing evidence remains absent. Completion requires a current ended harness or an
 observed exited runtime, explicit exit 0, no signal, and no stop request. Terminal

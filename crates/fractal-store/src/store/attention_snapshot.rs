@@ -10,9 +10,15 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
 #[cfg(any(test, feature = "test-support"))]
+pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How often this thread folded the operational failure claims.
     pub static OPERATIONAL_FAILURE_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Runs after an incarnation lookup, never after a memo hit.
+    pub static FAULT_INCARNATION_READ_HOOK: std::cell::RefCell<Option<FaultIncarnationReadHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How long a run whose cleanup failed shows that fault after it finishes.
@@ -29,7 +35,43 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     WHERE assignee>='person/' AND assignee<'person0'
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
+/// Only fault revalidation fences, without queue positions or execution clocks.
+struct FaultStepState {
+    subject: String,
+    run: String,
+    generation: String,
+    status: String,
+    assigned_to: Option<String>,
+    attempt: u32,
+    readiness_epoch: u32,
+}
+
+impl From<StepRunView> for FaultStepState {
+    fn from(step: StepRunView) -> Self {
+        Self {
+            subject: step.subject,
+            run: step.run,
+            generation: step.generation,
+            status: step.status,
+            assigned_to: step.assigned_to,
+            attempt: step.attempt,
+            readiness_epoch: step.readiness_epoch,
+        }
+    }
+}
+
 impl Store {
+    fn fault_step_effective_state(&self, subject: &str) -> Result<Option<FaultStepState>> {
+        let connection = self.readers.get();
+        let mut step = person_work::step(&connection, &normalize_step_run(subject))?;
+        if let Some(step) = &mut step {
+            // step_run applies these fences at wall-clock time, not the fault's as_of.
+            // Keep that reducer, but omit queue, timing, wake and presentation enrichment.
+            apply_effective_step_state(&connection, step, now_ms())?;
+        }
+        Ok(step.map(FaultStepState::from))
+    }
+
     /// A step's name within its mission, while st has the step.
     pub fn step_path(&self, step: &str) -> Result<Option<String>> {
         Ok(self
@@ -714,85 +756,56 @@ impl Store {
         }))
     }
 
+    /// A fault for each seat st parked after it failed to start, or after a failed explicit
+    /// restart, that has not run since: one per park episode. Its owner is the agent that
+    /// declared the seat when no mission run owns it, else the run's requester, else the
+    /// fleet's fault agent (`fault_owner`). It is never a person's.
     fn parked_runtime_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        if person.is_some() {
+            return Ok(Vec::new());
+        }
         let connection = self.readers.get();
-        let mut items = Vec::new();
-        for desired in self
+        let seats = self
             .desired_subjects()?
             .into_iter()
             .filter(|desired| desired.kind == "agent")
-        {
-            // Most agents have never been parked. Do not resolve their identities or
-            // declarations just to discover that there is no crash-loop decision.
-            let decisions =
-                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
-            if !decisions.iter().any(|decision| {
-                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
-                key.starts_with("runtime-crash-loop:") || key.starts_with("codex-crash-loop:")
-            }) {
-                continue;
-            }
-            if !person_work::declaration_live(&connection, &desired.subject)? {
-                continue;
-            }
-            let Some(token) = self.selected_desired_token(&desired.subject)? else {
-                continue;
-            };
-            let decision = decisions.iter().find(|decision| {
-                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
-                key == format!("runtime-crash-loop:{token}")
-                    || key == format!("codex-crash-loop:{token}")
-            });
-            let Some(decision) = decision else { continue };
-            if decision.accepted_at_unix_ms > as_of {
-                continue;
-            }
-            // A retry of the parked launch that has since succeeded resolves the fault: the seat is
-            // running again without anyone revising its declaration.
-            let retry_prefix = format!("runtime-crash-loop-retry:{token}:");
-            let last_retry = decisions
-                .iter()
-                .filter(|retry| {
-                    retry.body["fields"]["key"].as_str().is_some_and(|key| key.starts_with(&retry_prefix))
-                })
-                .map(crate::store::claim_log_order)
-                .max();
-            if let Some(last_retry) = last_retry
-                && self
-                    .observations_for(&desired.subject, "runtime.action.succeeded")?
-                    .iter()
-                    .any(|success| {
-                        crate::store::claim_log_order(success) > last_retry
-                            && success.body["fields"]["desired_token"].as_str() == Some(token.as_str())
-                    })
+            .map(|desired| (desired.subject.clone(), desired))
+            .collect::<BTreeMap<_, _>>();
+        let subjects = seats.keys().cloned().collect::<Vec<_>>();
+        let mut items = Vec::new();
+        for (source, parked) in self.parked_seats_for(&subjects, current_index(&connection)?)? {
+            if parked.parked_at_unix_ms > as_of
+                || !person_work::declaration_live(&connection, &source)?
             {
                 continue;
             }
-            let codex = decision.body["fields"]["key"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with("codex-crash-loop:");
-            let reviewer = if codex {
-                "person/alex"
-            } else {
-                "person/operator"
+            let Some(desired) = seats.get(&source) else { continue };
+            // A seat no run owns answers to the agent that declared it; a run's seat to its run.
+            let owner = match &desired.owner_run {
+                Some(_) => String::new(),
+                None => self
+                    .desired_subject_with_writer(&source)?
+                    .and_then(|(_, writer)| writer)
+                    .filter(|writer| writer.starts_with("agent/"))
+                    .unwrap_or_default(),
             };
-            if person.is_some_and(|person| person != reviewer) {
-                continue;
-            }
-            let source = desired.subject;
+            let codex = desired.member.as_ref().and_then(|member| member.driver.as_deref()) == Some("codex");
             let diagnostic = self.last_driver_diagnostic(&source)?;
             items.push(AttentionItemView {
-                episode: decision.id.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
-                subject: source.clone(), person: reviewer.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
+                episode: parked.episode.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: source.clone(), person: owner, requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: if codex { "A Codex agent stopped after repeated failures" } else { "An agent stopped after repeated runtime failures" }.into(),
-                detail: format!("{source}: {}.{} Inspect the seat and revise its desired declaration before restarting.", decision.body["fields"]["reason"].as_str().unwrap_or("the runtime is parked"), diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default()),
-                mission: None, mission_run: desired.owner_run, step: None, targets: vec![source.clone()], requested_at_unix_ms: decision.accepted_at_unix_ms,
-                actions: vec![attention_action("inspect source", &["st", "subject", &source])],
+                detail: format!(
+                    "{source}: {}.{} Fix what keeps it from starting, then `st agents restart {source}`; this fault clears when it runs again.",
+                    parked.reason.trim_end_matches('.'),
+                    diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default(),
+                ),
+                mission: None, mission_run: desired.owner_run.clone(), step: None, targets: vec![source.clone()], requested_at_unix_ms: parked.parked_at_unix_ms,
+                actions: vec![attention_action("inspect source", &["st", "agents", "show", &source])],
                 request: None,
             });
         }
@@ -1163,14 +1176,40 @@ impl Store {
         Ok(items)
     }
 
-    /// Return this call's history cut for the broken-gate reducer, without caching authority.
-    /// Read it at its original first-use point, after the derived fault families below.
+    /// Revalidate operational failures at one SQLite read cut, including all nested readers.
+    /// The history cut returned for broken gates and the local incarnation memo share that cut.
     pub fn operational_attention_items_with_failures(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
+        self.read_snapshot_unindexed(|| {
+            self.operational_attention_items_with_failures_impl::<true>(person, as_of)
+        })
+    }
+
+    /// The pre-optimization reader, retained only as an exact-output and SQL-work oracle.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn operational_attention_items_with_failures_reference(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
+        self.read_snapshot_unindexed(|| {
+            self.operational_attention_items_with_failures_impl::<false>(person, as_of)
+        })
+    }
+
+    fn operational_attention_items_with_failures_impl<const MEMOIZE: bool>(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
+        // Negative results matter too. This map is discarded before the next snapshot,
+        // and is filled lazily at the original incarnation fence's first use.
+        let mut incarnations = BTreeMap::<String, Option<String>>::new();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
@@ -1316,22 +1355,27 @@ impl Store {
                 }
             }
             if let Some(incarnation) = f["incarnation"].as_str() {
-                let actual = self.latest_actual_value(source)?;
-                let current = actual
-                    .as_ref()
-                    .and_then(|v| {
-                        v.pointer("/fields/incarnation_id")
-                            .or_else(|| v.get("incarnation_id"))
-                    })
-                    .and_then(Value::as_str);
-                if current != Some(incarnation) {
+                if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
+                    let actual = self.latest_actual_value(source)?;
+                    let current = actual.as_ref().and_then(|v| {
+                        v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
+                    }).and_then(Value::as_str).map(str::to_owned);
+                    #[cfg(any(test, feature = "test-support"))]
+                    FAULT_INCARNATION_READ_HOOK.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().as_mut() {
+                            hook(source);
+                        }
+                    });
+                    incarnations.insert(source.clone(), current);
+                }
+                if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
                     continue;
                 }
             }
             // Diagnostic history stays immutable; current work/runtime state decides whether
             // this episode still needs an owner. This changes no canonical timing fold.
             let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
+                let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
                     continue;
                 };
                 Some(context)
@@ -1375,11 +1419,11 @@ impl Store {
         Ok((items, failures))
     }
 
-    fn current_exhausted_work_wake(
+    fn current_exhausted_work_wake<const MINIMAL: bool>(
         &self,
         failure: &AttentionRequestView,
         as_of: u128,
-    ) -> Result<Option<(StepRunView, ClaimRecord)>> {
+    ) -> Result<Option<(FaultStepState, ClaimRecord)>> {
         let [agent, step_subject, diagnostic_id] = failure.targets.as_slice() else {
             return Ok(None);
         };
@@ -1396,7 +1440,12 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(step) = self.step_run(step_subject)? else {
+        let current = if MINIMAL {
+            self.fault_step_effective_state(step_subject)?
+        } else {
+            self.step_run(step_subject)?.map(FaultStepState::from)
+        };
+        let Some(step) = current else {
             return Ok(None);
         };
         if step.status != "ready"
@@ -1952,9 +2001,16 @@ impl Store {
                 .expect("a native answer has an idempotency key");
             let body = json!({"fields":input.fields,"evidence":input.evidence,
                 "_operation":{"id":operation_id,"request_digest":request_digest}});
+            #[cfg(any(test, feature = "test-support"))]
+            delegated_write_probe::reached();
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
             return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
+                // The fence above read a reader's snapshot. A concurrent dismissal may have
+                // committed its answer since: it is the answer, and a second one is not written.
+                if let Some(previous) = native_prompt_answer_claim(tx, episode).map_err(internal)? {
+                    return same_delegated_dismissal(previous, seat, actor, proof).map(Some);
+                }
                 let recorded = append_claim_tx(tx, &self.origin, seat, "harness.diagnostic", Some(actor),
                     &body, &[episode.to_owned()], None).map_err(claim_append_error)?;
                 register_operation_tx(tx, &recorded).map_err(internal)?;
@@ -2337,6 +2393,65 @@ pub fn native_prompt_answer(connection: &Connection, observation: &str) -> Resul
         .flatten())
 }
 
+/// Tells a test that this thread's delegated dismissal passed its reader fence and is about to
+/// ask the writer for its answer. The probe is per thread, so only the test's own callers see it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod delegated_write_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PROBE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// Call `probe` each time this thread's delegated dismissal reaches its write.
+    pub fn set(probe: impl Fn() + 'static) {
+        PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+    }
+
+    pub(crate) fn reached() {
+        PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow().as_ref() {
+                probe();
+            }
+        });
+    }
+}
+
+/// The claim that answered the native prompt `observation`, if one is recorded.
+fn native_prompt_answer_claim(connection: &Connection, observation: &str) -> Result<Option<ClaimRecord>> {
+    connection
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8472dc4d0454 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id') IS NOT NULL
+               AND json_extract(body, '$._operation.id')=?1
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation))], claim_from_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+/// An earlier answer is this delegated dismissal's own result when it is the same dismissal by the
+/// same agent under the same proof; any other answer means the denial is no longer waiting.
+fn same_delegated_dismissal(
+    previous: ClaimRecord,
+    seat: &str,
+    actor: &str,
+    proof: &crate::model::DelegationProof,
+) -> std::result::Result<ClaimRecord, St3Error> {
+    if previous.subject == seat
+        && previous.actor.as_deref() == Some(actor)
+        && previous.body["fields"]["status"] == "dismiss"
+        && previous.body["fields"]["delegation"] == json!(proof)
+    {
+        return Ok(previous);
+    }
+    Err(St3Error::new(
+        "stale-fence",
+        "the denial already has another answer",
+    ))
+}
+
 /// Fold the native prompt's terminal-only release into the shared harness view.
 /// Driver heartbeats can restate the old blocked file after Esc/No; their
 /// unchanged episode must not resurrect a resolved hold in sender status/cards.
@@ -2468,6 +2583,19 @@ impl Store {
             Ok((id, at.parse()?, body.get("fields").cloned().unwrap_or(body)))
         })
         .transpose()
+    }
+
+    /// The id of the exact call the native prompt `episode` of `seat` asks about, while it is the
+    /// seat's newest observation: what its hook (Claude) or driver (Codex) published for it.
+    pub fn native_prompt_call(&self, seat: &str, episode: &str) -> Result<Option<String>> {
+        let Some((claim, _, harness)) = self.newest_harness_observation(seat)? else {
+            return Ok(None);
+        };
+        if claim != episode {
+            return Ok(None);
+        }
+        let connection = self.readers.get();
+        prompt_call(&connection, seat, &harness)
     }
 
     /// The prompt a hook waits on: the very observation it published, named by the state
@@ -2664,29 +2792,9 @@ impl Store {
         }
         // An identical retry returns the actual previous result, not a second
         // denial answer or a new grant-dependent side effect.
-        let previous = {
-            let connection = self.readers.get();
-            connection.query_row(/* sqlite-large-value: allow-for-now lv-hf9df02d62f06 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-                 FROM claims INDEXED BY claims_operation_index
-                 WHERE json_extract(body, '$._operation.id') IS NOT NULL
-                   AND json_extract(body, '$._operation.id')=?1
-                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&proof.episode))], claim_from_row)
-                .optional().map_err(internal)?
-        };
+        let previous = native_prompt_answer_claim(&self.readers.get(), &proof.episode).map_err(internal)?;
         if let Some(previous) = previous {
-            if previous.subject == seat
-                && previous.actor.as_deref() == Some(actor)
-                && previous.body["fields"]["status"] == "dismiss"
-                && previous.body["fields"]["delegation"] == json!(proof)
-            {
-                return Ok(previous);
-            }
-            return Err(St3Error::new(
-                "stale-fence",
-                "the denial already has another answer",
-            ));
+            return same_delegated_dismissal(previous, seat, actor, proof);
         }
         self.answer_denial(seat, &proof.episode, "dismiss", actor, Some(proof))?
             .ok_or_else(|| {

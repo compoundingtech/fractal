@@ -99,9 +99,13 @@ pub fn materialize_run_agents(state: &AppState, run: &MissionRunView) {
 }
 
 pub fn checked_agent_cache(store: &Store, history: bool, index: u64) -> Vec<Value> {
-    let cached = client_agent_resources_cached(store, history, index).unwrap();
-    let mut direct = client_agent_resources_uncached(store, history, index).unwrap();
-    add_agent_todos(store, &mut direct, index).unwrap();
-    assert_eq!(cached, direct);
-    cached
+    // Both sides build as the roster refresher does, on a pinned snapshot. Unpinned and outside a
+    // request, a card-fault read has a 25 ms wall bound that a loaded host can spend waiting.
+    store.read_snapshot(|_| {
+        let cached = client_agent_resources_cached(store, history, index).unwrap();
+        let mut direct = client_agent_resources_uncached(store, history, index).unwrap();
+        add_agent_todos(store, &mut direct, index).unwrap();
+        assert_eq!(cached, direct);
+        Ok(cached)
+    }).unwrap()
 }

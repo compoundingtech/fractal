@@ -82,6 +82,12 @@ pub fn list(world: &World, items: &mut Vec<Item>, ids: &mut Vec<String>) {
             return;
         }
     };
+    if let Some(why) = &world.slo_stale {
+        items.push(Item::Note(Line::from(span(
+            format!(" Last reading: could not read again ({why})"),
+            theme::fg(theme::YELLOW),
+        ))));
+    }
     for (kind, title) in [("budget", "budgets"), ("objective", "objectives")] {
         let group = rows.iter().filter(|row| row.kind == kind).collect::<Vec<_>>();
         if group.is_empty() {
@@ -149,6 +155,12 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
         return doc;
     };
     let color = color(row);
+    if let Some(why) = &world.slo_stale {
+        doc.line(Line::from(span(
+            format!("Last reading: could not read again ({why})"),
+            theme::fg(theme::YELLOW),
+        )));
+    }
     doc.line(Line::from(vec![
         span("● ", theme::fg(color)),
         span(row.id.clone(), theme::bold()),
@@ -297,15 +309,21 @@ pub fn chart(history: &SloHistory, width: usize) -> Vec<Line<'static>> {
         format!("      {from} UTC{}{to}", " ".repeat(gap)),
         theme::dim(),
     )));
-    let low = steps.iter().flatten().copied().fold(f64::INFINITY, f64::min);
-    let latest = steps.iter().rev().flatten().next().copied().unwrap_or_default();
-    lines.push(Line::from(span(
-        format!(
-            "low {low:.0}% · latest {latest:.0}% · {} readings · a column is its lowest reading",
+    // A pane narrower than the period shows only the latest steps, which can all be unmeasured.
+    let footer = match steps.iter().flatten().copied().reduce(f64::min) {
+        Some(low) => {
+            let latest = steps.iter().rev().flatten().next().copied().unwrap_or(low);
+            format!(
+                "low {low:.0}% · latest {latest:.0}% · {} readings · a column is its lowest reading",
+                history.samples
+            )
+        }
+        None => format!(
+            "no reading in these columns · {} readings in the period",
             history.samples
         ),
-        theme::dim(),
-    )));
+    };
+    lines.push(Line::from(span(footer, theme::dim())));
     lines
 }
 
@@ -356,6 +374,18 @@ mod tests {
 
     fn history(samples: u64, steps: Vec<Option<f64>>) -> SloHistory {
         SloHistory { id: "example".into(), since_ms: 0, until_ms: 3_600_000, samples, steps }
+    }
+
+    #[test]
+    fn a_chart_whose_visible_steps_were_all_unmeasured_has_no_low_to_report() {
+        // A narrow pane keeps only the latest steps, which a daemon that just started never
+        // measured: no "low inf%" and no invented "latest 0%".
+        let mut steps = vec![Some(40.0); 10];
+        steps.extend(vec![None; 20]);
+        let lines = chart(&history(10, steps), 17);
+        let footer = lines.last().unwrap().to_string();
+        assert!(footer.contains("no reading in these columns"), "{footer}");
+        assert!(!footer.contains("inf") && !footer.contains("latest"), "{footer}");
     }
 
     #[test]

@@ -14,6 +14,22 @@ fn context(scratch: &Path) -> CheckpointContext {
     }
 }
 
+/// A plain store with the projection tables a local cut's capture reads for protected claims.
+fn local_store() -> Store {
+    let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+    store
+        .connection
+        .write()
+        .execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h0e67e1bad682 owner=smallclaims::store::checkpoint_trim::local_trim_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS desired(claim_id TEXT);
+             CREATE TABLE IF NOT EXISTS mission_definitions(claim_id TEXT);
+             CREATE TABLE IF NOT EXISTS mission_revisions(claim_id TEXT);
+             CREATE TABLE IF NOT EXISTS documents(binding_claim_id TEXT);",
+        )
+        .unwrap();
+    store
+}
+
 fn seals(store: &Store) -> i64 {
     store
         .readers
@@ -50,12 +66,16 @@ fn a_member_that_trims_locally_seals_verifies_and_adopts_nothing() {
     let refused = ordinary.adopt_checkpoint(&manifest()).err().map(|error| error.code);
     assert_ne!(refused, Some("trim-is-local"));
 
-    let local = Store::open_memory("writer", Arc::new(Plain)).unwrap();
-    local.trim_locally(true);
+    let local = local_store();
+    local.trim_locally(true).unwrap();
     assert!(local.trims_locally());
-    for _ in 0..2 {
-        assert!(local.checkpoint_step(&context(scratch.path())).unwrap().is_empty());
-    }
+    // It trims its own due cut, once, and never seals, verifies or asks for a manifest.
+    let first = local.checkpoint_step(&context(scratch.path())).unwrap();
+    assert!(
+        first.iter().all(|action| matches!(action, CheckpointAction::Trimmed { .. })),
+        "{first:?}"
+    );
+    assert!(local.checkpoint_step(&context(scratch.path())).unwrap().is_empty());
     assert_eq!(seals(&local), 0);
     assert!(local.checkpoint_manifest_need().unwrap().is_none());
     assert_eq!(local.adopt_checkpoint(&manifest()).unwrap_err().code, "trim-is-local");
@@ -64,7 +84,7 @@ fn a_member_that_trims_locally_seals_verifies_and_adopts_nothing() {
 #[test]
 fn a_member_that_trims_locally_finishes_a_committed_trim_and_keeps_an_uncommitted_one() {
     let scratch = tempfile::tempdir().unwrap();
-    let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+    let store = local_store();
     store
         .connection
         .write()
@@ -78,7 +98,7 @@ fn a_member_that_trims_locally_finishes_a_committed_trim_and_keeps_an_uncommitte
                         'checkpoint/uncommitted');",
         )
         .unwrap();
-    store.trim_locally(true);
+    store.trim_locally(true).unwrap();
     let actions = store.checkpoint_step(&context(scratch.path())).unwrap();
     assert!(actions.iter().any(|action| matches!(
         action,

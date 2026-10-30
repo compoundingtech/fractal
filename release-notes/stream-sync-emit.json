@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Attention window frames on the collections stream carry sync: every snapshot, and a changes frame whenever this host's sync state or the peers it names change",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites; the frame field was added to the client contract by stream-sync-contract."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The daemon now sends the optional StreamSync on attention snapshot and changes frames. Clients that predate it ignore the field; a client that reads it no longer needs a page read to learn this host's sync."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator actions, client re-pairing or configuration changes required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or swap-back restrictions; an older daemon sends no sync and clients fall back to a page's."
+  }
+}
