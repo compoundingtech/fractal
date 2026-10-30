@@ -1,5 +1,6 @@
 //! Portable rename evidence is built from the real signed replication history.
 use super::*;
+use super::identities::IdentityKind;
 use smallclaims::proof::RenameProofBundle;
 
 impl Store {
