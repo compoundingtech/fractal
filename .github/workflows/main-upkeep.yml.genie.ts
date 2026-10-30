@@ -1,6 +1,7 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
+import { fleetWorkflow } from './fleet.yml.genie.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import {
   buildEnv,
@@ -23,6 +24,34 @@ import {
   readOnlyBinaryCaches,
   workspacePreparationSteps,
 } from './workspace-ci.ts'
+
+const proofId = (id: string) => `proof-${id}`
+const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
+// Preserve fleet's dependency identities inside aggregate evidence JSON, while namespacing actual jobs.
+export const proofJobs = Object.fromEntries(Object.entries(fleetWorkflow.jobs).map(([id, job]) => {
+  const dependencies: string[] = job.needs == null ? [] : typeof job.needs === 'string' ? [job.needs] : job.needs
+  const jsonFormat = `{{${dependencies.map((name, i) => `"${name}":{${i}}`).join(',')}}}`
+  const needsJson = dependencies.length
+    ? `format('${jsonFormat}', ${dependencies.map(name => `toJSON(needs.${proofId(name)})`).join(', ')})`
+    : "'{}'"
+  const expression = (text: string) => text.replaceAll('toJSON(needs)', needsJson)
+    .replace(/\bneeds(?:\.([\w-]+)|\[['"]([\w-]+)['"]\])/g, (whole, dot, bracket) => {
+      const name = dot ?? bracket
+      return Object.hasOwn(fleetWorkflow.jobs, name) ? `needs.${proofId(name)}` : whole
+    }).replaceAll('github.job', `'${id}'`)
+  const rewrite = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(rewrite)
+    if (value !== null && typeof value === 'object')
+      return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
+        [key, key === 'if' && typeof entry === 'string' ? expression(entry) : rewrite(entry)]))
+    if (typeof value !== 'string') return value
+    return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, text: string) => '${{' + expression(text) + '}}')
+  }
+  const projected = rewrite(job) as Record<string, unknown>
+  const condition = String(projected.if ?? 'success()').replace(/\$\{\{|\}\}/g, '')
+  return [proofId(id), { ...projected, name: `post-merge ${job.name ?? id}`,
+    needs: ['main-checks', ...dependencies.map(proofId)], if: `\${{ ${proofSelected} && (${condition}) }}` }]
+}))
 
 const missing = "steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true'"
 const whenMissing = (steps: readonly unknown[], conditionMissing = missing) => steps.map((value) => {
@@ -74,7 +103,7 @@ fi`,
   ],
 })
 
-export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
+const upkeepWorkflow = scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
@@ -99,19 +128,10 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
         { name: 'Confirm main retains the queue checks', id: 'queue', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
       ],
     },
-    'hosted-proof': {
-      name: 'post-merge hosted proof',
-      needs: ['main-checks'],
-      if: "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'",
-      // Reuse the complete fleet, including its signing jobs, at this push's exact SHA.
-      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'read' },
-      uses: './.github/workflows/fleet.yml',
-      secrets: 'inherit',
-    },
     'hosted-proof-failure': {
       name: 'report red main',
-      needs: ['hosted-proof'],
-      if: "always() && (needs.hosted-proof.result == 'failure' || needs.hosted-proof.result == 'cancelled')",
+      needs: Object.keys(proofJobs),
+      if: "always() && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))",
       'runs-on': 'ubuntu-latest',
       permissions: {},
       steps: [{
@@ -216,4 +236,6 @@ fi`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
+}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."}))
+
+export default githubWorkflow({ ...upkeepWorkflow, jobs: { ...upkeepWorkflow.jobs, ...proofJobs } })

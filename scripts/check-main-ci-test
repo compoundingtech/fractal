@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -97,13 +98,39 @@ check('reject a red fractal-web', [run], fractal_red, 1)
 fleet = (ROOT / '.github/workflows/fleet.yml').read_text()
 trigger = fleet.split('\non:\n', 1)[1].split('\npermissions:', 1)[0]
 assert 'push:' not in trigger and 'merge_group:' in trigger and 'pull_request:' in trigger
-assert 'workflow_call:' in trigger
 upkeep = (ROOT / '.github/workflows/main-upkeep.yml').read_text()
 assert "needs.main-checks.outputs.evidence-skipped == 'true'" in upkeep
-assert 'uses: ./.github/workflows/fleet.yml' in upkeep
+assert 'proof-linux-gate:' in upkeep
 assert "github.run_id" in upkeep.split('concurrency:', 1)[1].split('jobs:', 1)[0]
 assert 'main is red; revert the merged change.' in upkeep
 assert "'failure'" in upkeep and "'cancelled'" in upkeep
+
+# Every fleet job is reused once with a namespaced graph and the same common opt-in guard.
+def job_blocks(text):
+    text = text.split('\njobs:\n', 1)[1]
+    starts = list(re.finditer(r'^  ([\w-]+):\n', text, re.M))
+    return {match[1]: text[match.end():starts[i + 1].start() if i + 1 < len(starts) else len(text)]
+            for i, match in enumerate(starts)}
+
+original, composed = job_blocks(fleet), job_blocks(upkeep)
+assert module.GATES == {name for name in original if name.startswith('evidence-gate-')}
+assert {name for name in composed if name.startswith('proof-')} == {'proof-' + name for name in original}
+for name in original:
+    body = composed['proof-' + name]
+    condition = re.search(r'^    if: (.*)$', body, re.M)[1]
+    assert "needs.main-checks.outputs.evidence-skipped == 'true'" in condition, name
+    assert "github.event_name == 'push'" in condition, name
+    declared = re.search(r'^    needs:([^\n]*(?:\n      [^\n]*)*)', body, re.M)[1]
+    assert 'main-checks' in declared, name
+    # All expression references, including bare step conditions, use the namespaced graph.
+    for dependency in re.findall(r'\bneeds(?:\.([\w-]+)|\[[\'"]([\w-]+)[\'"]\])', body):
+        used = dependency[0] or dependency[1]
+        assert used == 'main-checks' or used.startswith('proof-'), (name, used)
+aggregate = composed['proof-evidence-note-linux-gate']
+assert 'toJSON(needs)' not in aggregate
+assert 'toJSON(needs.proof-linux-gate)' in aggregate
+assert '"linux-gate":{' in aggregate  # evidence commands retain original dependency names
+print('passed: every composed hosted lane is conditional and dependency-safe')
 
 # Any accidental test execution defeats deduplication. Exercise every cache-fill stage with
 # command stand-ins which reject cargo test without --no-run, and cargo run/nextest execution.
@@ -115,6 +142,10 @@ with tempfile.TemporaryDirectory() as tmp:
         stub = scratch / command
         stub.write_text(f'''#!{bash}
 printf '%s\\n' "$*" >> "$COMMAND_LOG"
+if [ {command} = cargo ] && [ "${{1:-}}" = metadata ]; then
+  printf '%s\\n' '{{"workspace_members":[],"packages":[]}}'
+  exit 0
+fi
 if [ "${{1:-}}" = test ] && [[ " $* " != *" --no-run "* ]]; then exit 90; fi
 if [ "${{1:-}}" = run ] || {{ [ "${{1:-}}" = nextest ] && [ "${{2:-}}" != archive ]; }}; then exit 91; fi
 ''')

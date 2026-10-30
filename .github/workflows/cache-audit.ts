@@ -9,8 +9,6 @@ export const noBuildCache = (reason: string) => ({
 
 export const auditCaches = <T extends { jobs: Record<string, any> }>(workflow: T, noBuild: Record<string, string> = {}): T => {
   const jobs = Object.fromEntries(Object.entries(workflow.jobs).map(([name, job]) => {
-    // Reusable workflows audit their executable jobs themselves; callers cannot have steps.
-    if (job.uses && job.steps === undefined) return [name, job]
     const entries: Record<string, unknown>[] = []
     const steps = job.steps.map((step: any, index: number) => {
       if (step.id !== 'build-snapshot' && !/^(actions\/cache(?:\/restore)?@|Swatinem\/rust-cache@)/.test(step.uses ?? '')) return step
