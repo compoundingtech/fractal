@@ -311,21 +311,30 @@ incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-t
 with “This host runs an older Fractal version; update it to open subagent conversations.”
 No session-detail POST or changed child ID is sent to that peer.
 
-Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`. Its
-request names up to 2,048 `agent/` subjects. The signed answer gives, for each seat whose host
-holds a local `harness.observed` of it, the incarnation and when the host last heard it.
+Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`, on which
+a seat's host pushes when it last heard its seats. A re-stamp that changes nothing stays in the
+host's local observation log, so this is how another member hears a resting seat.
 
-A re-stamp that changes nothing stays in the host's local observation log, so this is how
-another member hears a resting seat. Every 30 seconds, each member asks each other member, or
-configured peer, whose own newest `daemon.started` advertises `features.seat_freshness = 1`. It
-asks only about the seats its declarations place on that host, all of them in one request, and
-asks directly, never through a relay hop. It keeps each answer in memory for 90 seconds.
+The push is reactive:
+- A commit on the host wakes its pusher. Within 10 seconds of that commit it reads the newest
+  local `harness.observed` of every seat its declarations place on it, in one statement.
+- It sends each other member, or configured peer, only the seats that changed since its last
+  push to that member. Every member is sent at once, directly, never through a relay hop. A push
+  names up to 2,048 seats, each with its incarnation and the time the host heard it.
+- It pushes only to a member whose own newest `daemon.started` advertises
+  `features.seat_freshness = 1`. A member whose `daemon.started` changed restarted, and gets
+  every seat again.
+- A failed push is retried a minute later, with or without a new commit. Nothing is sent while
+  nothing changes.
 
-An agent card's freshness and a mail hold read the latest of the replicated report, the local
-log, and that answer. A member that doesn't advertise the feature is never sent the request,
-and its seats keep replicating their re-stamps. A worker that advertises it but answers the
-unsigned 404/405 of a build without the route gives no answer. Its seats then read from the
-replicated report, as before.
+The receiver records a seat only when its declaration places the seat on the member that pushed
+it, and keeps the newest time per seat and incarnation, in memory. An agent card's freshness and a
+mail hold read the latest of the replicated report, the local log, and that time. The card's
+90-second rule ages it, so a host that stops pushing reads stale.
+
+A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
+re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
+route records nothing. Its peers read the replicated report, as before.
 
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the

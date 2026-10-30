@@ -3294,7 +3294,7 @@ impl HeardSeats {
         let local = self.0.get(subject).filter(|(of, _)| *of == harness.incarnation_id).map(|(_, at)| *at);
         let relayed = store
             .extension::<crate::store::RelayedFreshness>()
-            .heard_at(subject, &harness.incarnation_id, now);
+            .heard_at(subject, &harness.incarnation_id);
         harness.observed_at_unix_ms.max(local.unwrap_or(0)).max(relayed.unwrap_or(0))
     }
 }

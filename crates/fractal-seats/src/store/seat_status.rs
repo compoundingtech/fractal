@@ -75,7 +75,7 @@ impl SeatStatusStore for Store {
         // On another member, the seat's host's latest answer about when it heard the seat.
         if let Some(at) = self
             .extension::<fractal_store::store::RelayedFreshness>()
-            .heard_at(subject, &harness.incarnation_id, now)
+            .heard_at(subject, &harness.incarnation_id)
         {
             observed = observed.max(at);
         }

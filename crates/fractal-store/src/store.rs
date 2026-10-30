@@ -5755,11 +5755,11 @@ impl Store {
             .map(|(_, at)| at))
     }
 
-    /// When this node, or the seat's host when it answered within [`RELAYED_FRESHNESS_TTL_MS`],
-    /// last heard `subject`'s harness for `incarnation`.
-    pub fn heard_harness_at(&self, subject: &str, incarnation: &str, now: u128) -> Result<Option<u128>> {
+    /// When this node, or the seat's host as it last pushed, heard `subject`'s harness for
+    /// `incarnation`.
+    pub fn heard_harness_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
         let local = self.local_harness_observed_at(subject, incarnation)?;
-        let relayed = self.extension::<RelayedFreshness>().heard_at(subject, incarnation, now);
+        let relayed = self.extension::<RelayedFreshness>().heard_at(subject, incarnation);
         Ok(local.max(relayed))
     }
 
@@ -22455,39 +22455,31 @@ pub mod checkpoint_agreement_tests_shared_attention_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
 
-/// How long a host's answer about its seats stands. A member asks each host every 30 seconds,
-/// so three missed answers in a row leave its seats to the replicated reports.
-pub const RELAYED_FRESHNESS_TTL_MS: u128 = 90_000;
-
-/// What each seat's host last said about when it heard the seat, kept in memory by the member
-/// that asked. It is never stored: a restart asks again.
+/// When each seat's host last heard it, as the host pushed it (`seat_freshness`), kept in memory
+/// by the member it pushed to. It is never stored: a restart starts empty, and each host pushes
+/// its seats in full to a member whose `daemon.started` changed. The card's freshness rule ages
+/// the time itself, so an answer needs no expiry: a host that stops pushing reads stale.
 #[derive(Default)]
-pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, RelayedHeard>>);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RelayedHeard {
-    incarnation: String,
-    heard_at: u128,
-    answered_at: u128,
-}
+pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, (String, u128)>>);
 
 impl RelayedFreshness {
-    /// Record a host's answer, received at `answered_at`, about the seats it names.
-    pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>, answered_at: u128) {
+    /// Record when the seat's host heard each `(agent, incarnation, heard_at)`, keeping the newest.
+    pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>) {
         let mut heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        heard.retain(|_, entry| answered_at.saturating_sub(entry.answered_at) < RELAYED_FRESHNESS_TTL_MS);
         for (agent, incarnation, heard_at) in seats {
-            heard.insert(agent, RelayedHeard { incarnation, heard_at, answered_at });
+            let newer = heard
+                .get(&agent)
+                .is_none_or(|(of, at)| *of != incarnation || *at < heard_at);
+            if newer {
+                heard.insert(agent, (incarnation, heard_at));
+            }
         }
     }
 
-    /// When the seat's host heard `subject`'s `incarnation`, if it said so within the TTL.
-    pub fn heard_at(&self, subject: &str, incarnation: &str, now: u128) -> Option<u128> {
+    /// When the seat's host last said it heard `subject`'s `incarnation`.
+    pub fn heard_at(&self, subject: &str, incarnation: &str) -> Option<u128> {
         let heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        heard
-            .get(subject)
-            .filter(|entry| entry.incarnation == incarnation && now.saturating_sub(entry.answered_at) < RELAYED_FRESHNESS_TTL_MS)
-            .map(|entry| entry.heard_at)
+        heard.get(subject).filter(|(of, _)| of == incarnation).map(|(_, at)| *at)
     }
 }
 
