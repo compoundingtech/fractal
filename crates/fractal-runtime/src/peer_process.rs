@@ -47,13 +47,8 @@ impl PeerProcessIdentity {
         }
     }
 
-    /// Capture immediately from a duplicated accepted local socket.
-    ///
-    /// Darwin LOCAL_PEERTOKEN resolves the peer socket's mutable last_pid to
-    /// a live audit token, not a stored connect-time token. This cannot exclude
-    /// PID reuse before capture or identify a pre-accept descriptor transfer.
-    /// Retaining and rechecking the socket refuses observed accessor changes;
-    /// live pidversion checks refuse changes after the captured token.
+    /// Darwin: capture the peer's pid and process version at accept and
+    /// revalidate them around each use; refuse on any change or missing evidence.
     #[cfg(target_os = "macos")]
     pub fn capture_local_socket(socket: OwnedFd) -> Result<Self> {
         let token = local_socket_audit_token(&socket)?;
