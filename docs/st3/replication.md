@@ -1164,9 +1164,18 @@ summarizes that per claim kind, at a cut, so members can compare it:
   in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
 - A key counts once its newest claim is older than the cut. A key with a newer claim is still
   moving and is left out; the cut never selects an older claim, which a trimmed member may no
-  longer hold.
+  longer hold. A member that computes before a key's newer claim arrives still counts the key,
+  so two members that computed minutes apart can differ only in such keys. Each kind also
+  reports `before_cut`, a digest over every key's newest claim older than the cut, moving keys
+  included: members that still hold those claims agree on it whenever they computed, and a kind
+  whose `before_cut` agrees is no difference. Where it does not, because one member trimmed a
+  moving key's older claim, the keys a narrowing lists carry each moving key, marked `moving`,
+  and a key moving on either member is no difference.
 - Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
   keys and answers. `claims` is compared only between members that trim the same way.
+- A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
+  depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
+  leaves out every claim in `projection_digest_repaired_claims`.
 - Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
   difference narrows to a bucket and then to its keys without listing a whole kind.
 
@@ -1184,7 +1193,10 @@ them, so a request never waits for a pass over the store.
 
 When a kind differs the member compares again every half hour, when both members have computed
 again and counted any claim that arrived late. A difference that lasts two hours is narrowed:
-bucket digests for each differing kind, then the keys of the differing buckets. The member records
+bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
+kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
+where those compare, is no difference. The member records
 one `operational.failure` on its own `daemon/NODE` subject with the condition
 `answers-disagreement`, an episode per member pair, and a `reproduction` that names every
 differing kind with its counts and up to twenty keys, each with both members' answers. The fault
@@ -1343,7 +1355,28 @@ checkpoint agreement. It is off by default. The member then seals, verifies and 
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
 and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
-members until a person excuses it. No claim family is trimmed locally yet.
+members until a person excuses it.
+
+Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
+it captures the set before the cut, plans the drop with the same audited rules and guards a shared
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
+and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+rules stay out because a reader reads the history they drop, which no projection digest covers.
+`harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
+needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
+and a watch walks those observations back to find when the pull request left the merge queue. Two checks stand in for the
+proof. A plan that would drop the newest claim of any subject and kind is refused before anything
+is recorded. While deleting, every chunk compares the projection digests before and after and
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
+an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
+trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
+disk cannot hold.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges

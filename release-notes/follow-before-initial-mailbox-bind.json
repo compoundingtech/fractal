@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pi and OMP channels follow binary replacements even while their initial mailbox bind is blocked, preserving the existing ownership fence across re-exec",
+  "replay": {"status": "none", "detail": "No graph replay; only channel startup scheduling changes."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Mailbox ownership and resume formats are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores blocking startup; no stored data requires recovery."}
+}

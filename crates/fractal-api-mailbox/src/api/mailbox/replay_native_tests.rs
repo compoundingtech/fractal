@@ -181,6 +181,67 @@ async fn deployed_pty_0_13_0_record_without_boot_id_binds_mailbox() {
     assert!(bound.epoch > 0);
 }
 
+#[tokio::test]
+async fn rejected_bind_callers_preserve_healthy_primary_delivery() {
+    for outside_runtime in [false, true] {
+        let fixture = NativeReplay::new(if outside_runtime {
+            "eval.refusal-outside-runtime"
+        } else { "eval.refusal-wrong-provider" });
+        delivery_presence::record_fenced(&fixture.fence, &json!({
+            "transport":"app-server", "pid":fixture.peer.pid, "ready":true,
+            "image":"fixture-running-binary",
+        }).to_string());
+        let before = delivery_presence::assess_current(
+            &fixture.fence.subject, "codex", Some(&fixture.fence.incarnation));
+        assert!(!before.stale(), "{before:?}");
+        let mut peer = fixture.peer.clone();
+        // Same provider but a real sibling process outside the declared runtime,
+        // or the correct process claiming a different provider.
+        let mut outsider = outside_runtime.then(native_peer_process);
+        if let Some(process) = &outsider { peer.pid = process.id(); }
+        else { peer.transport = "omp-channel"; }
+        let mut request = fixture.fence.clone();
+        request.epoch = 0;
+        let error = bind(State(fixture.state.clone()), Some(Extension(peer)), Json(request))
+            .await.unwrap_err();
+        assert_eq!(error.code, "stale-mailbox-session");
+        assert!(error.message.contains(if outside_runtime {
+            "outside the exact live physical runtime"
+        } else { "another provider" }), "{}", error.message);
+        let after = delivery_presence::assess_current(
+            &fixture.fence.subject, "codex", Some(&fixture.fence.incarnation));
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.reason, before.reason);
+        assert_eq!(after.since_unix_ms, before.since_unix_ms);
+        fixture.state.store.check_mailbox(&fixture.fence).unwrap();
+        if let Some(process) = &mut outsider {
+            process.kill().unwrap();
+            process.wait().unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn authenticated_primary_bind_refusal_still_updates_delivery() {
+    let fixture = NativeReplay::new("eval.refusal-authenticated-primary");
+    delivery_presence::record_fenced(&fixture.fence, &fixture.report(None));
+    let mut terminal: Value = serde_json::from_slice(&harness_events::read_runtime_state(
+        &fixture.agent_dir, &fixture.fence.incarnation).unwrap().unwrap()).unwrap();
+    terminal["state"] = json!("ended");
+    terminal["exit"] = json!("completed");
+    harness_events::write_snapshot(&fixture.agent_dir, "harness-state",
+        &serde_json::to_vec(&terminal).unwrap()).unwrap();
+    let mut request = fixture.fence.clone();
+    request.epoch = 0;
+    let error = bind(State(fixture.state.clone()), Some(Extension(fixture.peer.clone())), Json(request))
+        .await.unwrap_err();
+    assert_eq!(error.code, "stale-mailbox-session");
+    let after = delivery_presence::assess_current(
+        &fixture.fence.subject, "codex", Some(&fixture.fence.incarnation));
+    assert_eq!(after.state, "refused");
+    assert_eq!(after.reason.as_deref(), Some("delivery refused: stale-mailbox-session"));
+}
+
 async fn heartbeat(stream: &mut ControlledStream) {
     stream.heartbeat.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {

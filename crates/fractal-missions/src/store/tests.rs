@@ -3153,6 +3153,52 @@ fn work_extensions_sync_authority_with_previous_projection_rules_without_compari
     );
 }
 
+/// A step's end replicates the seat's held usage rollups with its receipt. The run is judged on its
+/// origin, maybe another member, as soon as the step ends, and a loop's token budget reads the
+/// seat's replicated usage then, before any `ended` flush could arrive.
+#[test]
+fn completing_a_step_replicates_the_seats_held_rollups_with_its_receipt() {
+    let (_controller, worker, step) = replicated_step_pair();
+    let seat = "agent/worker.one";
+    let request = |key: &str| WorkRequest {
+        wait_ms: None,
+        wait_on: None,
+        actor: Some(seat.into()),
+        incarnation: Some("worker-generation".into()),
+        summary: Some("done".into()), reason: None, evidence: Vec::new(),
+        idempotency_key: key.into(),
+    };
+    worker.work_action(&step, "claim", &request("held-usage-claim")).unwrap();
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let observe = |kind: &str, fields: Value, at: u128| {
+        worker
+            .append_latest_observation(
+                &ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{kind}:{at}")),
+                },
+                at,
+            )
+            .unwrap();
+    };
+    observe("harness.observed", json!({"state": "working", "incarnation_id": "inc-1", "observed_at_ms": start as u64}), start);
+    for (tokens, at) in [(10, start + 1_000), (20, start + 60_000)] {
+        observe("harness.usage", json!({"semantics": "response_rollup", "driver": "codex", "incarnation_id": "inc-1",
+            "model": "example-model", "total_tokens": tokens, "observed_at_unix_ms": at as u64}), at);
+    }
+    let replicated = || worker.claims_for(seat, Some("harness.usage")).unwrap().iter()
+        .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap()).collect::<Vec<_>>();
+    assert_eq!(replicated(), [10], "the second waits for its hour");
+    worker.work_action(&step, "complete", &request("held-usage-complete")).unwrap();
+    assert_eq!(replicated(), [10, 20], "the step's end replicates it");
+}
+
 #[test]
 fn quiet_renewals_preserve_the_shared_step_reason_and_projection_digest() {
     for working in [false, true] {
