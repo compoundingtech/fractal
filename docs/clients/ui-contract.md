@@ -1,11 +1,5 @@
 # Fractal client UI contract
 
-The terminal UI records up to 50 device-local content destinations across spaces.
-Stops track stable local group and tab identities, Inbox selection, and pane content;
-focus-only movement does not add a stop. Workspace format 3 persists this history
-and still reads formats 1 and 2. Local identities are not sent in graph layouts.
-
-
 For package choices and a runnable client, see [Build your own client](build-your-own.md).
 
 What every Fractal client shows and does. Three clients implement it: the terminal UI
@@ -243,8 +237,17 @@ An agent with a live terminal can be opened in place from its conversation: the 
 with its colours and styles (never polled), follows the terminal's size, and says so when the
 terminal restarts. With the `terminal.input` capability the person can send a line and the keys
 Enter, Tab, Esc, Up, Down, and a confirmed Ctrl-C; every input takes a fresh terminal fence and
-refuses a changed runtime incarnation. Leaving the view detaches. Terminal UI: Ctrl+] on an agent's conversation attaches its terminal
-and Ctrl+\ returns; iOS: a Terminal button on the agent screen.
+refuses a changed runtime incarnation. Leaving the view detaches. Terminal UI: Enter on a detached terminal pane attaches it; the Attach button opens an agent's terminal.
+Ctrl+\ then c returns to the conversation; iOS: a Terminal button on the agent screen.
+
+The terminal UI remembers the last 50 content destinations per device alongside its workspace.
+Opening content or changing a tab or space adds a stop; moving focus between already-visible
+splits does not. Back/forward restores the destination in its original space, split and tab,
+skipping removed destinations. Ctrl+[ and Ctrl+] navigate only with negotiated enhanced
+keyboard input; Escape is never interpreted as back. On legacy input, unambiguous Ctrl+5
+(0x1D) goes forward. Ctrl+\ then [ or ] works in either keyboard mode, including over an
+attached program. Direct navigation chords reach attached programs unchanged.
+
 
 ### Starting a mission
 
@@ -707,7 +710,7 @@ Same capabilities, native idioms:
 | Drag to select and copy | Native text selection on messages |
 | Composer grows to eight lines | Growing text input above the keyboard |
 | Loading / empty / failed | The same three states, never an empty list while loading |
-| `Ctrl+]` on an agent: its terminal | Terminal button on the agent screen; keys as buttons |
+| Enter on a detached terminal pane; Attach on an agent | Terminal button on the agent screen; keys as buttons |
 | New mission control | A New mission button opening a composer sheet |
 
 iOS demo screenshots use `apps/ios/demoGateway.mjs`: invented data, nothing real.

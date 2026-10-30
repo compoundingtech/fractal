@@ -233,7 +233,7 @@ pub(super) fn prompt_form(
     let Some(model) = prompt_model(world, item) else {
         doc.wrap(
             &text::inline(
-                "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
+                "Answer it in the seat's terminal (Attach). This clears when the prompt is gone, however it was answered.",
                 theme::dim(),
             ),
             width,
@@ -284,9 +284,9 @@ pub(super) fn prompt_form(
             note(
                 doc,
                 &match model.unread {
-                    Some(why) => format!("{why}, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+])."),
-                    None if model.named => "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+]).".into(),
-                    None => "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in the terminal (Ctrl+]).".into(),
+                    Some(why) => format!("{why}, so Fractal offers only what needs no reading. Or answer it in the terminal (Attach)."),
+                    None if model.named => "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in the terminal (Attach).".into(),
+                    None => "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in the terminal (Attach).".into(),
                 },
             );
             doc.blank();
@@ -379,8 +379,8 @@ pub(super) fn prompt_form(
         note(
             doc,
             match place {
-                Place::Band => "The call is too long to show here in full: click here to read it whole in Inbox, or answer it in the terminal (Ctrl+]).",
-                Place::Inbox => "The call is too long to show here in full: answer it in the terminal (Ctrl+]).",
+                Place::Band => "The call is too long to show here in full: click here to read it whole in Inbox, or answer it in the terminal (Attach).",
+                Place::Inbox => "The call is too long to show here in full: answer it in the terminal (Attach).",
                 Place::Terminal => "The call is too long to show here in full: click here to read it whole in Inbox, or answer it in this terminal.",
             },
         );
@@ -897,7 +897,7 @@ impl Ui {
                 card.wrap(
                     &[text::run(
                         format!(
-                            "{} · {} seat{} share this sign-in. Sign in in the seat's terminal (Ctrl+]).",
+                            "{} · {} seat{} share this sign-in. Sign in in the seat's terminal (Attach).",
                             first_line(login),
                             seats.len().max(1),
                             if seats.len() > 1 { "s" } else { "" }
@@ -1043,7 +1043,7 @@ impl Ui {
             &[text::run(
                 match place {
                     Place::Terminal => "Its form does not fit here: click here to answer it in Inbox, or answer it in this terminal.",
-                    Place::Band | Place::Inbox => "Its form does not fit here: click here to answer it in Inbox, or answer it in the terminal (Ctrl+]).",
+                    Place::Band | Place::Inbox => "Its form does not fit here: click here to answer it in Inbox, or answer it in the terminal (Attach).",
                 },
                 theme::dim(),
             )],
@@ -1286,7 +1286,7 @@ impl Ui {
         } else if answer == "answer" {
             self.flash("Choose an answer to each question first");
         } else {
-            self.flash("That answer is not in view in full here: open it in Inbox, or answer it in the terminal (Ctrl+])");
+            self.flash("That answer is not in view in full here: open it in Inbox, or answer it in the terminal (Attach)");
         }
     }
 
@@ -1308,7 +1308,7 @@ impl Ui {
             AttentionKind::Prompt { call: None, .. }
                 if matches!(answer, "allow" | "approve" | "answer") =>
             {
-                self.flash("Fractal does not say which call this asks about: answer it in the terminal (Ctrl+])");
+                self.flash("Fractal does not say which call this asks about: answer it in the terminal (Attach)");
                 return;
             }
             // st allows only the one call it serves beside the prompt, whole. The card may have
@@ -1317,7 +1317,7 @@ impl Ui {
                 if matches!(answer, "allow" | "approve" | "answer")
                     && !(*allow && prompt_calls(item).is_ok_and(|calls| calls.len() == 1)) =>
             {
-                self.flash("Fractal does not let this call through from here: answer it in the terminal (Ctrl+])");
+                self.flash("Fractal does not let this call through from here: answer it in the terminal (Attach)");
                 return;
             }
             AttentionKind::Prompt { answers, .. }
@@ -1389,7 +1389,7 @@ impl Ui {
                 self.flash(notice);
             }
             Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash("Fractal does not offer that answer here: answer it in the terminal (Ctrl+])"),
+            None => self.flash("Fractal does not offer that answer here: answer it in the terminal (Attach)"),
         }
     }
 

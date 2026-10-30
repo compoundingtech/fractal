@@ -106,6 +106,12 @@ records this boundary.
 
 Ctrl+\ is the leader, including through the palette, and is never sent to the
 child: it lists what to press next, and Ctrl+\ then c detaches (Ctrl+\ twice closes the tab). Legacy Ctrl+4 is its crossterm alias. Ctrl+K (or Command+K) opens the palette.
+Enter attaches a detached terminal pane; the Attach button opens an agent's terminal.
+Ctrl+[ and Ctrl+] are place-history shortcuts only outside attached programs and only
+with negotiated enhanced keyboard input. Legacy Ctrl+5 (0x1D) goes forward, never attaches.
+Inside an attached program these keys pass through. Ctrl+\ then [ or ] navigates back or
+forward across spaces on every terminal; these leader aliases do not switch tabs.
+Tab navigation remains [ and ] (when not typing), and Ctrl+PageUp/PageDown.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception
