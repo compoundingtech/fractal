@@ -6,8 +6,10 @@
 //!   without a row reads on from there and delivers only what differs from the recorded facts;
 //! - the mirror: every pull request's and issue's full facts, every head SHA with its checks, and
 //!   the keyed events derived from each change. The poller serves `/v1/plugins/github/*` from it,
-//!   and other members relay those reads here. It is a cache of what the poller recorded, seeded
-//!   from the graph's item facts the first time this process mirrors a repository.
+//!   and other members relay those reads here. It is filled from GitHub itself, by a look the
+//!   poller records nowhere else, and then follows each look the poller records. Until it is
+//!   filled, and again whenever a look finds it behind the poll cursor, reads answer from the
+//!   graph and say so. It needs no backup: GitHub is its source.
 //!
 //! `PRAGMA user_version` stays 1, the cursor table's version, so a build from before the mirror
 //! still opens this file after a rollback and ignores the mirror tables. The mirror's own
@@ -65,8 +67,6 @@ pub struct GithubPluginStore {
     connection: Mutex<Connection>,
     /// Observers this process knows have no row, so forgetting them again reads nothing.
     absent: Mutex<HashSet<String>>,
-    /// The repositories this process has seeded from the graph.
-    seeded: Mutex<HashSet<String>>,
 }
 
 impl GithubPluginStore {
@@ -77,7 +77,7 @@ impl GithubPluginStore {
     /// place.
     pub fn open(state_dir: &Path) -> Result<Self> {
         let connection = super::plugin_store::open(state_dir, MANIFEST.name, Self::migrate)?;
-        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default(), seeded: Mutex::default() })
+        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default() })
     }
 
     /// The one handle this process keeps on the database beneath `state_dir`, opened on first
@@ -101,7 +101,7 @@ impl GithubPluginStore {
     pub fn memory() -> Self {
         let connection = Connection::open_in_memory().expect("an in-memory database opens");
         Self::migrate(&connection).expect("an in-memory database migrates");
-        Self { connection: Mutex::new(connection), absent: Mutex::default(), seeded: Mutex::default() }
+        Self { connection: Mutex::new(connection), absent: Mutex::default() }
     }
 
     fn migrate(connection: &Connection) -> Result<()> {
@@ -141,7 +141,8 @@ impl GithubPluginStore {
                      observer TEXT NOT NULL,
                      locator TEXT NOT NULL,
                      mirrored_at_unix_ms INTEGER,
-                     seeded_at_unix_ms INTEGER
+                     filled_at_unix_ms INTEGER,
+                     cursor_digest TEXT
                  ) WITHOUT ROWID;
                  CREATE TABLE IF NOT EXISTS mirror_items(
                      repository TEXT NOT NULL,
@@ -258,52 +259,66 @@ impl GithubPluginStore {
         Ok(())
     }
 
-    /// Whether this process has seeded `repository` from the graph yet. The first time it mirrors
-    /// a repository, the poller seeds it, so a mirror a rollback or a crash left behind catches up.
-    pub fn seeded(&self, repository: &str) -> bool {
-        self.seeded.lock().unwrap_or_else(PoisonError::into_inner).contains(repository)
+    /// Whether `repository`'s mirror was filled from GitHub and has followed every look since:
+    /// only then does it answer reads. A new, moved, restored or set-aside mirror is not, and
+    /// neither is one a look found behind the poll cursor, as after a rollback or a crash.
+    pub fn filled(&self, repository: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .query_row(
+                "SELECT filled_at_unix_ms IS NOT NULL FROM mirror_repositories WHERE repository=?1",
+                [repository],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
-    /// Lay the graph's recorded items for `repository` into the mirror, without events: each
-    /// item whose recording claim the mirror does not hold replaces the mirror's row. Items the
-    /// graph does not have stay. A mirror row is only ever as new as the graph's, since the
-    /// poller mirrors what it just recorded, so a different claim means the graph is newer.
-    pub fn seed(&self, repository: &str, observer: &str, locator: &str, items: &[MirrorItem]) -> Result<usize> {
-        // A row for the observer now exists, so forgetting it must read again.
+    /// Fill `repository`'s mirror from one look at GitHub that recorded nothing else: each item
+    /// it saw replaces the mirror's row, without events, and the mirror then answers reads. The
+    /// mirror must still be at the poll cursor the last [`Self::mirror`] recorded; otherwise
+    /// nothing is filled and the next look tries again.
+    pub fn fill(&self, repository: &str, observer: &str, locator: &str, cursor: Option<&str>, items: &[MirrorItem]) -> Result<bool> {
         self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         let at = super::now_ms();
         let mut connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
         let transaction = connection.transaction()?;
+        let followed: Option<Option<String>> = transaction
+            .query_row("SELECT cursor_digest FROM mirror_repositories WHERE repository=?1", [repository], |row| row.get(0))
+            .optional()?;
+        if followed.flatten().as_deref() != Some(cursor_digest(cursor).as_str()) {
+            return Ok(false);
+        }
         upsert_repository(&transaction, repository, observer, locator)?;
-        let mut replaced = 0;
         for item in items {
             let Some(number) = item_number(item) else { continue };
-            let held: Option<Option<String>> = transaction
-                .query_row(
-                    "SELECT claim FROM mirror_items WHERE repository=?1 AND number=?2",
-                    params![repository, number as i64],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if held.as_ref().is_some_and(|claim| claim.is_some() && *claim == item.claim) {
-                continue;
-            }
             write_item(&transaction, repository, number, item, at)?;
-            replaced += 1;
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h641845a77ded owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET seeded_at_unix_ms=?2 WHERE repository=?1",
+            "UPDATE mirror_repositories SET filled_at_unix_ms=?2 WHERE repository=?1",
             params![repository, at as i64],
         )?;
         transaction.commit()?;
-        self.seeded.lock().unwrap_or_else(PoisonError::into_inner).insert(repository.to_owned());
-        Ok(replaced)
+        Ok(true)
     }
 
     /// Record the items one look at `repository` recorded, and the keyed events each change
-    /// holds, in one transaction. An item the mirror did not hold is a baseline and holds no
-    /// event. Returns the events, oldest first, as the read API shows them.
-    pub fn mirror(&self, repository: &str, observer: &str, locator: &str, items: &[MirrorItem]) -> Result<Vec<Value>> {
+    /// holds, in one transaction. `polled_from` is the cursor the look started from and `cursor`
+    /// the one it ended at. A mirror that did not end at `polled_from`, because looks went by
+    /// without it, holds stale rows: it is no longer filled and this look derives no event. An
+    /// item the mirror did not hold is a baseline and holds no event either. Returns the
+    /// events, oldest first, as the read API shows them.
+    pub fn mirror(
+        &self,
+        repository: &str,
+        observer: &str,
+        locator: &str,
+        polled_from: Option<&str>,
+        cursor: Option<&str>,
+        items: &[MirrorItem],
+    ) -> Result<Vec<Value>> {
         self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         let at = super::now_ms();
         let at_text = chrono::DateTime::from_timestamp_millis(at as i64)
@@ -311,18 +326,28 @@ impl GithubPluginStore {
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let mut connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
         let transaction = connection.transaction()?;
+        let followed: Option<Option<String>> = transaction
+            .query_row("SELECT cursor_digest FROM mirror_repositories WHERE repository=?1", [repository], |row| row.get(0))
+            .optional()?;
+        let current = followed.flatten().as_deref() == Some(cursor_digest(polled_from).as_str());
         upsert_repository(&transaction, repository, observer, locator)?;
+        if !current {
+            transaction.execute(
+                "UPDATE mirror_repositories SET filled_at_unix_ms=NULL WHERE repository=?1",
+                [repository],
+            )?;
+        }
         let mut recorded = Vec::new();
         for item in items {
             let Some(number) = item_number(item) else { continue };
-            let old: Option<Map<String, Value>> = transaction
+            let old: Option<Map<String, Value>> = if !current { None } else { transaction
                 .query_row(
                     "SELECT facts FROM mirror_items WHERE repository=?1 AND number=?2",
                     params![repository, number as i64],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?
-                .and_then(|facts| serde_json::from_str(&facts).ok());
+                .and_then(|facts| serde_json::from_str(&facts).ok()) };
             for event in github_events::derive(old.as_ref(), &item.facts) {
                 // Every key ever handed out stays taken, after its event ages out of the mirror,
                 // so a repeated event never reuses the subject of an earlier one.
@@ -356,8 +381,8 @@ impl GithubPluginStore {
             write_item(&transaction, repository, number, item, at)?;
         }
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h8cd0425703e2 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET mirrored_at_unix_ms=?2 WHERE repository=?1",
-            params![repository, at as i64],
+            /* sqlite-large-value: allow-for-now lv-h8cd0425703e2 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "UPDATE mirror_repositories SET mirrored_at_unix_ms=?2, cursor_digest=?3 WHERE repository=?1",
+            params![repository, at as i64, cursor_digest(cursor)],
         )?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h9927b63f8690 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mirror_events WHERE repository=?1 AND recorded_at_unix_ms < ?2",
@@ -368,11 +393,11 @@ impl GithubPluginStore {
     }
 
     /// The repositories this member mirrors whose resource or locator is `owner/repo`, ignoring
-    /// case: each one's resource, observer, locator and when it was last mirrored and seeded.
+    /// case: each one's resource, observer, locator and when it was last mirrored and filled.
     pub fn repositories(&self, locator: &str) -> Result<Vec<Value>> {
         let connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
         let mut statement = connection.prepare_cached(
-            "SELECT repository, observer, locator, mirrored_at_unix_ms, seeded_at_unix_ms
+            "SELECT repository, observer, locator, mirrored_at_unix_ms, filled_at_unix_ms
              FROM mirror_repositories WHERE lower(locator)=lower(?1) ORDER BY repository",
         )?;
         let rows = statement.query_map([locator], |row| {
@@ -381,7 +406,7 @@ impl GithubPluginStore {
                 "observer": row.get::<_, String>(1)?,
                 "locator": row.get::<_, String>(2)?,
                 "mirrored_at_unix_ms": row.get::<_, Option<i64>>(3)?,
-                "seeded_at_unix_ms": row.get::<_, Option<i64>>(4)?,
+                "filled_at_unix_ms": row.get::<_, Option<i64>>(4)?,
             }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -523,6 +548,15 @@ fn shared_handles() -> &'static Mutex<HashMap<PathBuf, Arc<GithubPluginStore>>> 
     HANDLES.get_or_init(Mutex::default)
 }
 
+/// What the mirror keeps of a poll cursor to tell whether it followed every look.
+fn cursor_digest(cursor: Option<&str>) -> String {
+    use sha2::Digest as _;
+    match cursor {
+        None => "none".into(),
+        Some(cursor) => hex::encode(sha2::Sha256::digest(cursor.as_bytes())),
+    }
+}
+
 /// The number an item resource names, `.../pull-request/N` or `.../issue/N`.
 fn item_number(item: &MirrorItem) -> Option<u64> {
     item.subject.rsplit('/').next().and_then(|number| number.parse().ok())
@@ -614,25 +648,47 @@ mod tests {
     const REPOSITORY: &str = "resource/github/acme/garden";
     const OBSERVER: &str = "observer/github/acme/garden";
 
+    /// A poller's looks at acme/garden, each from the cursor the one before ended at.
+    struct Poller<'a> {
+        store: &'a GithubPluginStore,
+        at: std::cell::Cell<u32>,
+    }
+
+    impl<'a> Poller<'a> {
+        fn new(store: &'a GithubPluginStore) -> Self {
+            Self { store, at: std::cell::Cell::new(0) }
+        }
+
+        fn cursor(&self) -> String {
+            format!("cursor-{}", self.at.get())
+        }
+
+        fn look(&self, items: &[MirrorItem]) -> Vec<Value> {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let from = self.cursor();
+            self.at.set(self.at.get() + 1);
+            self.store.mirror(REPOSITORY, OBSERVER, "acme/garden", Some(&from), Some(&self.cursor()), items).unwrap()
+        }
+    }
+
     #[test]
     fn the_mirror_keeps_each_item_its_heads_and_the_events_of_each_change() {
         let store = GithubPluginStore::memory();
+        let poller = Poller::new(&store);
         let opened = json!({"number": 7, "title": "Garden paths", "state": "open", "draft": false,
             "head_sha": "a", "checks_state": "pending", "required_checks": {"state": "pending"},
             "checks": [{"name": "build", "status": "in_progress"}]});
-        assert!(store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, opened, "c1")]).unwrap().is_empty(),
-            "an item new to the mirror is a baseline");
-        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert!(poller.look(&[item(7, opened, "c1")]).is_empty(), "an item new to the mirror is a baseline");
         let pushed = json!({"number": 7, "title": "Garden paths", "state": "open", "draft": false,
             "head_sha": "b", "checks_state": "failure", "required_checks": {"state": "fail", "failed": ["build"]},
             "checks": [{"name": "build", "status": "completed", "conclusion": "failure"}]});
-        let events = store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, pushed.clone(), "c2")]).unwrap();
+        let events = poller.look(&[item(7, pushed.clone(), "c2")]);
         let subjects: Vec<_> = events.iter().map(|event| event["subject"].as_str().unwrap()).collect();
         assert_eq!(subjects, [
             "github-event/github/acme/garden/pull-request/7/head/b",
             "github-event/github/acme/garden/pull-request/7/checks/b/fail",
         ]);
-        store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(8, json!({"number": 8, "state": "closed", "head_sha": "z"}), "c3")]).unwrap();
+        poller.look(&[item(8, json!({"number": 8, "state": "closed", "head_sha": "z"}), "c3")]);
 
         let pulls = store.pulls(REPOSITORY, Some("open"), 10).unwrap();
         assert_eq!(pulls.len(), 1);
@@ -655,7 +711,7 @@ mod tests {
         assert!(store.events(REPOSITORY, None, 10).unwrap().is_empty());
         assert!(store.repositories("acme/garden").unwrap().is_empty());
         // Mirrored again after it was forgotten, it is forgotten again.
-        store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": "open"}), "c4")]).unwrap();
+        poller.look(&[item(7, json!({"state": "open"}), "c4")]);
         store.forget(OBSERVER).unwrap();
         assert!(store.repositories("acme/garden").unwrap().is_empty());
     }
@@ -665,10 +721,8 @@ mod tests {
     #[test]
     fn a_repeated_event_keeps_a_new_key_after_the_first_ages_out() {
         let store = GithubPluginStore::memory();
-        let look = |state: &str, claim: &str| {
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": state}), claim)]).unwrap()
-        };
+        let poller = Poller::new(&store);
+        let look = |state: &str, claim: &str| poller.look(&[item(7, json!({"state": state}), claim)]);
         look("open", "c1");
         assert_eq!(look("closed", "c2")[0]["key"], "closed");
         store.connection.lock().unwrap().execute("UPDATE mirror_events SET recorded_at_unix_ms=0", []).unwrap();
@@ -682,20 +736,32 @@ mod tests {
         assert_eq!(look("closed", "c6")[0]["key"], "closed/3");
     }
 
+    /// A mirror answers only once a look at GitHub filled it, and only while it follows every look:
+    /// one a look finds behind the cursor, as after a rollback, is unfilled and derives no event
+    /// from its stale rows.
     #[test]
-    fn a_seed_replaces_only_items_the_graph_recorded_since() {
+    fn a_mirror_is_filled_from_github_and_unfilled_when_it_falls_behind() {
         let store = GithubPluginStore::memory();
-        store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": "open", "head_sha": "a"}), "c1")]).unwrap();
-        assert!(!store.seeded(REPOSITORY));
-        let replaced = store.seed(REPOSITORY, OBSERVER, "acme/garden", &[
-            item(7, json!({"state": "open", "head_sha": "a"}), "c1"),
-            item(9, json!({"state": "open", "head_sha": "q"}), "c9"),
-        ]).unwrap();
-        assert_eq!(replaced, 1);
-        assert!(store.seeded(REPOSITORY));
-        assert!(store.events(REPOSITORY, None, 10).unwrap().is_empty(), "a seed derives no event");
-        store.seed(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": "closed", "merged": true}), "c4")]).unwrap();
-        assert_eq!(store.item(REPOSITORY, 7).unwrap().unwrap()["facts"]["merged"], true);
+        let poller = Poller::new(&store);
+        poller.look(&[item(7, json!({"state": "open", "head_sha": "a"}), "c1")]);
+        assert!(!store.filled(REPOSITORY).unwrap(), "a new mirror is not filled");
+        assert!(!store.fill(REPOSITORY, OBSERVER, "acme/garden", Some("elsewhere"), &[]).unwrap(),
+            "a fill from another cursor than the mirror followed fills nothing");
+        let mut full = item(9, json!({"state": "open", "title": "Orchard", "head_sha": "q"}), "unused");
+        full.claim = None;
+        assert!(store.fill(REPOSITORY, OBSERVER, "acme/garden", Some(&poller.cursor()), &[full]).unwrap());
+        assert!(store.filled(REPOSITORY).unwrap());
+        assert_eq!(store.item(REPOSITORY, 9).unwrap().unwrap()["facts"]["title"], "Orchard");
+        assert!(store.events(REPOSITORY, None, 10).unwrap().is_empty(), "a fill derives no event");
+        assert_eq!(poller.look(&[item(7, json!({"state": "closed"}), "c2")])[0]["event"], "closed");
+        assert!(store.filled(REPOSITORY).unwrap());
+
+        // Looks went by without the mirror, as under an older build after a rollback.
+        poller.at.set(poller.at.get() + 3);
+        assert!(poller.look(&[item(7, json!({"state": "open"}), "c3")]).is_empty(), "stale rows derive nothing");
+        assert!(!store.filled(REPOSITORY).unwrap());
+        assert!(store.fill(REPOSITORY, OBSERVER, "acme/garden", Some(&poller.cursor()), &[]).unwrap());
+        assert!(store.filled(REPOSITORY).unwrap());
     }
 
     /// A step 1 database, cursors only, opens with its cursors and gains the mirror, and its
@@ -714,7 +780,7 @@ mod tests {
         ).unwrap();
         let store = GithubPluginStore::open(state.path()).unwrap();
         assert_eq!(store.cursor(OBSERVER).unwrap(), Some(Some("c1".into())));
-        store.mirror(REPOSITORY, OBSERVER, "acme/garden", &[item(7, json!({"state": "open"}), "c1")]).unwrap();
+        Poller::new(&store).look(&[item(7, json!({"state": "open"}), "c1")]);
         drop(store);
         let older = Connection::open(&path).unwrap();
         let version: i64 = older.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();

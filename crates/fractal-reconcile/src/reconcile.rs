@@ -16945,7 +16945,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 }
                                 durable_changed = wrote;
                                 if spec.provider == "github.repository" {
-                                    mirror_observation(&store, &github_plugin, &observer_subject, &spec, &outcome.recorded_items);
+                                    mirror_observation(
+                                        &github_plugin, &observer_subject, &spec,
+                                        cursor.as_deref(), observation.cursor.as_deref(), &outcome.recorded_items,
+                                    );
+                                    // A mirror that is new, moved, restored, set aside or behind
+                                    // the cursor refills from GitHub once the listing has caught up.
+                                    if !continuing && !github_plugin.filled(&spec.resource).unwrap_or(true) {
+                                        refill_mirror(
+                                            provider.as_ref(), &github_plugin, &observer_subject, &spec,
+                                            observation.cursor.as_deref(),
+                                        ).await;
+                                    }
                                 }
                                 previous_facts = Some(observation.facts);
                                 // The cursor survives a restart only in the plugin database. A poll
@@ -18509,42 +18520,78 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 }
 
-/// Lay what one look at a GitHub repository recorded into the poller's plugin mirror. The first
-/// time this process mirrors the repository it first seeds the mirror from the graph's items, so
-/// a mirror left behind by a rollback or a crash catches up. The mirror is a cache: a failure is
-/// logged and the reads it serves fall back to the graph, never failing the observer.
+/// Lay what one look at a GitHub repository recorded into the poller's plugin mirror, with the
+/// cursor the look started from and ended at, so the mirror knows whether it followed every
+/// look. The mirror is a cache: a failure is logged and the reads it serves fall back to the
+/// graph, never failing the observer.
 fn mirror_observation(
-    store: &Store,
     plugin: &github_plugin_store::GithubPluginStore,
     observer: &str,
     spec: &crate::model::ObserverSpec,
+    polled_from: Option<&str>,
+    cursor: Option<&str>,
     recorded: &[crate::model::RecordedItem],
 ) {
-    let item = |recorded: &crate::model::RecordedItem| {
-        recorded.facts.as_object().map(|facts| github_plugin_store::MirrorItem {
-            subject: recorded.subject.clone(),
-            item_kind: recorded.kind.clone(),
-            facts: facts.clone(),
-            claim: Some(recorded.claim.clone()),
+    let items = recorded
+        .iter()
+        .filter_map(|recorded| {
+            recorded.facts.as_object().map(|facts| github_plugin_store::MirrorItem {
+                subject: recorded.subject.clone(),
+                item_kind: recorded.kind.clone(),
+                facts: facts.clone(),
+                claim: Some(recorded.claim.clone()),
+            })
         })
-    };
-    let result = (|| -> Result<()> {
-        if !plugin.seeded(&spec.resource) {
-            // This look's own items are already in the graph; they are mirrored below, against
-            // the mirror's older row, so their change is an event.
-            let items = store.repository_items(&spec.resource, None)?
-                .into_iter()
-                .filter(|graph| !recorded.iter().any(|recorded| recorded.subject == graph.subject))
-                .collect::<Vec<_>>();
-            plugin.seed(&spec.resource, observer, &spec.locator, &items.iter().filter_map(item).collect::<Vec<_>>())?;
-        }
-        if !recorded.is_empty() {
-            plugin.mirror(&spec.resource, observer, &spec.locator, &recorded.iter().filter_map(item).collect::<Vec<_>>())?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
+        .collect::<Vec<_>>();
+    if let Err(error) = plugin.mirror(&spec.resource, observer, &spec.locator, polled_from, cursor, &items) {
         tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+    }
+}
+
+/// Fill a repository's mirror from GitHub itself: one fresh look by the repository provider, as a
+/// new poller's first look reads (the open items, with each open pull request's details), within
+/// the same request budget as the observer's own polls. It records nothing in the graph and
+/// moves no cursor: the observer's own looks keep delivering from where they read to. Each item
+/// is laid over the mirror's row as a recording would lay it.
+async fn refill_mirror(
+    provider: &dyn ResourceProvider,
+    plugin: &github_plugin_store::GithubPluginStore,
+    observer: &str,
+    spec: &crate::model::ObserverSpec,
+    cursor: Option<&str>,
+) {
+    let request = ObservationRequest {
+        provider: spec.provider.clone(),
+        locator: spec.locator.clone(),
+        fields: spec.fields.iter().cloned().collect(),
+        cursor: None,
+        previous_facts: None,
+        every_ms: spec.every_ms,
+        refresh: false,
+    };
+    let filled = async {
+        let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
+        let mut known = |subject: &str| {
+            let number = subject.rsplit('/').next()?.parse::<u64>().ok()?;
+            Some(plugin.item(&spec.resource, number).ok()??["facts"].clone())
+        };
+        let items = crate::store::repository_item_facts(&spec.resource, &observation.facts, &mut known)
+            .into_iter()
+            .map(|(subject, kind, facts)| github_plugin_store::MirrorItem {
+                subject,
+                item_kind: kind.to_owned(),
+                facts,
+                claim: None,
+            })
+            .collect::<Vec<_>>();
+        let count = items.len();
+        plugin.fill(&spec.resource, observer, &spec.locator, cursor, &items).map(|filled| (filled, count))
+    }
+    .await;
+    match filled {
+        Ok((true, items)) => tracing::info!(observer, resource = %spec.resource, items, "the GitHub plugin mirror refilled from GitHub"),
+        Ok((false, _)) => {}
+        Err(error) => tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror could not refill from GitHub; reads answer from the graph until it does: {error:#}"),
     }
 }
 
@@ -40656,10 +40703,11 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // A restart reopens the plugin database: the older build's claim is not adopted again.
         poll(disk(), listing(&[1, 3]), cursor(12)).await;
         assert_eq!(delivered(), 1, "issue 3 opened after the last poll");
-        // The poller's mirror holds what the graph recorded before this process mirrored, and
-        // each item the poll recorded since; a first sighting is a baseline and holds no event.
+        // The poller's new mirror refilled from a look at GitHub of its own, then took each item
+        // the poll recorded; a first sighting is a baseline and holds no event.
         let mirror = disk();
-        assert_eq!(mirror.item("resource/repo", 1).unwrap().expect("seeded from the graph")["facts"]["title"], "issue 1");
+        assert!(mirror.filled("resource/repo").unwrap());
+        assert_eq!(mirror.item("resource/repo", 1).unwrap().expect("filled from GitHub")["facts"]["title"], "issue 1");
         assert_eq!(mirror.item("resource/repo", 3).unwrap().expect("mirrored from the poll")["kind"], "vcs.issue");
         assert_eq!(mirror.repositories("acme/garden").unwrap()[0]["observer"], "observer/repo");
         assert!(mirror.events("resource/repo", None, 10).unwrap().is_empty());
@@ -40679,8 +40727,10 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // from the claim's position: only issue 4, opened meanwhile, delivers.
         poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing(&[1, 3, 4]), cursor(13)).await;
         assert_eq!(delivered(), 2, "a lost database delivers only what is new");
+        // Each poller whose mirror was not filled also looked once from no cursor, recording
+        // nothing: the first poll of this build, and the member without the database.
         assert_eq!(*asked.lock().unwrap(), [
-            Some("old-build".into()), Some(cursor(11)), Some(position(12).to_string()),
+            Some("old-build".into()), None, Some(cursor(11)), Some(position(12).to_string()), None,
         ]);
         assert_eq!(claimed(&newest_observed()), position(13));
 
