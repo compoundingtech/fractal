@@ -569,10 +569,11 @@ impl Store {
         at_index: Option<u64>,
     ) -> Result<Option<UsageSummary>> {
         let connection = self.readers.get();
-        // A current read on the seat's host also folds the rollups not yet replicated. Callers
-        // pass the request's index, the latest one, for a current read.
+        // A current read on the seat's host also folds the rollups and occupancy not yet
+        // replicated, at the time each was observed. Callers pass the request's index, the
+        // latest one, for a current read.
         let pending = if at_index.is_none_or(|at| at >= self.index().unwrap_or(u64::MAX)) {
-            crate::store::pending_usage_rollups(&connection, Some(subject))?
+            crate::store::pending_usage(&connection, Some(subject), false)?
         } else {
             Vec::new()
         };
@@ -589,7 +590,7 @@ impl Store {
                 row.get::<_, String>(2)?,
             ))
         })?;
-        let pending = pending.into_iter().map(|(_, body)| Ok((at_index, body, String::new())));
+        let pending = pending.into_iter().map(|(_, body, at)| Ok((at_index, body, at.to_string())));
         Self::usage_summary_from_rows(rows.chain(pending), incarnation)
     }
 
@@ -704,11 +705,11 @@ impl Store {
         }
         let mut summaries = BTreeMap::new();
         for (subject, cached) in &folded {
-            // A current read on the seat's host also folds the rollups not yet replicated
-            // (rollups replicate hourly); the kept fold stays the replicated claims' alone.
+            // A current read on the seat's host also folds the rollups and occupancy not yet
+            // replicated (both are held); the kept fold stays the replicated claims' alone.
             // Card reads pass the request's snapshot index: a read at the snapshot is current.
             let pending = if at_index.is_none_or(|at| at >= snapshot) {
-                crate::store::pending_usage_rollups(&connection, Some(subject))?
+                crate::store::pending_usage(&connection, Some(subject), false)?
             } else {
                 Vec::new()
             };
@@ -716,8 +717,8 @@ impl Store {
                 cached.fold.summary()
             } else {
                 let mut fold = cached.fold.clone();
-                for (_, body) in &pending {
-                    fold.apply(through, body, &cached.last_accepted, None)?;
+                for (_, body, at) in &pending {
+                    fold.apply(through, body, &at.to_string(), None)?;
                 }
                 fold.summary()
             };
