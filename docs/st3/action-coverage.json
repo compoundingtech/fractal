@@ -468,7 +468,7 @@
         "crates/fractal/src/main_tests.rs::harness_answer_action_identity_is_retryable_and_question_scoped",
         "crates/fractal/src/main_tests.rs::harness_answer_cli_requires_positions_file_explicit_person_key_and_fences",
         "crates/fractal/src/main_tests.rs::harness_answer_clap_orders_explicit_fences_before_retry_key",
-        "crates/fractal/src/actor_contract.rs::tests::harness_question_contract_requires_an_explicit_person_for_every_command"
+        "crates/fractal/src/actor_contract.rs::harness_question_contract_requires_an_explicit_person_for_every_command"
       ],
       "verification": "CLI parser refuses missing revision or incarnation; handler obtains only snapshot provenance from capabilities and posts the exact supplied fences without fetching question detail"
     },
