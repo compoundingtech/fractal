@@ -1,5 +1,6 @@
 //! Real in-memory SQLite stores, real member keys and sealed replication bytes; no mocks.
 use super::*;
+use super::identities::{IdentityKind, IdentityStore, RenameReceipt, RenameRequest};
 use crate::store::fleet_admission_tests_shared_seats::{FLEET, key, node};
 use smallclaims::proof::{RenameProofBundle, verify_rename_proof};
 
