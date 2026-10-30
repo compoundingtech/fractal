@@ -36,12 +36,14 @@ impl std::fmt::Display for MountRefusal {
 
 impl std::error::Error for MountRefusal {}
 
-#[cfg(any(target_os = "linux", test))]
-#[derive(Debug, PartialEq, Eq)]
-struct Mount {
-    path: PathBuf,
-    source: String,
-    fstype: String,
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(super) struct Mount {
+    pub(super) path: PathBuf,
+    pub(super) source: String,
+    pub(super) fstype: String,
+    pub(super) id: String,
+    pub(super) device: String,
+    pub(super) root: String,
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -71,6 +73,9 @@ fn parse_mountinfo(text: &[u8]) -> Result<Vec<Mount>> {
         let separator = fields.iter().position(|field| *field == b"-").context("mountinfo separator missing")?;
         ensure!(separator >= 6 && fields.len() >= separator + 4, "incomplete mountinfo record");
         Ok(Mount {
+            id: String::from_utf8(fields[0].to_vec())?,
+            device: String::from_utf8(fields[2].to_vec())?,
+            root: String::from_utf8(decode(fields[3])?)?,
             path: PathBuf::from(std::ffi::OsString::from_vec(decode(fields[4])?)),
             fstype: String::from_utf8(decode(fields[separator + 1])?)?,
             source: String::from_utf8_lossy(&decode(fields[separator + 2])?).into_owned(),
@@ -99,7 +104,7 @@ fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
 }
 
 // Resolve symlinked XDG ancestors before comparing with kernel mount paths.
-fn resolved(path: &Path) -> Result<PathBuf> {
+pub(super) fn resolved(path: &Path) -> Result<PathBuf> {
     match fs::canonicalize(path) {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -108,6 +113,15 @@ fn resolved(path: &Path) -> Result<PathBuf> {
         }
         Err(error) => Err(error).with_context(|| format!("resolve product root {}", path.display())),
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(super) fn observe() -> Result<Vec<Mount>> {
+    parse_mountinfo(&fs::read("/proc/self/mountinfo").context("read mountinfo before host cutover")?)
+}
+#[cfg(not(any(target_os = "linux", test)))]
+pub(super) fn observe() -> Result<Vec<Mount>> {
+    bail!("mounted-state adoption requires Linux mountinfo")
 }
 
 pub(super) fn preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
@@ -144,6 +158,7 @@ mod tests {
         assert_eq!(mounts, vec![Mount {
             path: PathBuf::from("/state/st3/store with\ttab\nline\\slash"),
             source: "pool/data set".into(), fstype: "zfs".into(),
+            id: "36".into(), device: "0:32".into(), root: "/".into(),
         }]);
         for malformed in [b"bad".as_slice(), b"36 25 0:32 / /bad\\04 rw - zfs pool rw", b"36 25 0:32 / /bad\\999 rw - zfs pool rw"] {
             assert!(parse_mountinfo(malformed).is_err());

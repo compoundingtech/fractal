@@ -124,11 +124,86 @@ reconciliation; the mover does not copy data or mount/unmount filesystems.
 
 A mounted Fractal destination must be unmounted or relocated so the destination
 is absent or an empty ordinary directory before cutover. Simply remounting
-populated legacy data directly at the Fractal path and rerunning cannot complete
-the migration: without an existing committed journal, the mover requires real
+populated legacy data directly at the Fractal path and rerunning **ordinary**
+migration cannot complete the migration: without an existing committed journal, the mover requires real
 legacy directories (not absent paths or bridge symlinks), rejects populated
 destinations even if they contain a receipt, and only publishes receipts after
 the directory exchanges.
+
+### Adopting a dedicated Linux state dataset
+
+When the **entire** legacy state root is a dedicated dataset (including
+`claims.sqlite3`, possibly inside the configured `store/` directory), use the
+explicit two-phase adoption instead of ordinary migration. This is Linux-only;
+config must still pass ordinary same-filesystem rename checks. Nested state
+mounts, config mounts, destination mounts during preparation, and populated
+ordinary destinations refuse. The mover never copies data or mounts/unmounts.
+
+With the legacy daemon running and Fractal units staged, prepare:
+
+```sh
+fractal migrate host --adopt-mounted-state prepare
+```
+
+Preparation checks quiescence and writes only the cutover journal (and its
+coordination lock), not product paths or services. The journal records all path
+pairs, original service state, mount source/type/device/subtree and mount ID,
+the stable writer in `node-identity.json`, and the device/inode of
+`claims.sqlite3`. The node pin is the daemon's persisted writer/origin identity;
+`.st-instance` is a named-instance directory, not default-host store identity.
+The database inode additionally distinguishes a copied store with the same
+writer. Mount ID is audit evidence only: unmount/remount changes it; source,
+filesystem, device and subtree must match.
+
+For a dedicated ZFS dataset, substitute the actual dataset name shown by
+prepare for `pool/state` below. Keep Home Manager in its staged generation; do
+not activate another generation between prepare, commit and any rollback.
+Use the exact legacy unit list printed by prepare (Home Manager uses
+`smalltalk.service smalltalk-apply.service`; native installs use `st3.service`
+and `st3-replication.service`).
+
+```sh
+systemctl --user disable --now smalltalk.service smalltalk-apply.service
+# zfs set unmounts/remounts the dataset and persists its boot mountpoint.
+sudo zfs set mountpoint="$HOME/.local/state/fractal" pool/state
+# Remove only the empty directory left at the former mountpoint, if present.
+if test -d "$HOME/.local/state/st3"; then rmdir "$HOME/.local/state/st3"; fi
+fractal migrate host --adopt-mounted-state commit
+```
+
+For a non-ZFS filesystem, an operator can instead create the empty destination
+and use `sudo mount --move "$HOME/.local/state/st3" "$HOME/.local/state/fractal"`,
+then `rmdir "$HOME/.local/state/st3"` and update its durable mount configuration.
+The legacy path must be **absent**, not an empty directory or symlink, at commit.
+
+Commit refuses active legacy/Fractal units, a different mount or writer/database,
+or any pre-existing migration receipt. With the daemon state lock held, it runs
+read-only `PRAGMA integrity_check` on the adopted `claims.sqlite3`; only a single
+`ok` result permits cutover. On a roughly 35 GB database this scans the database
+and can take substantial time; keep services stopped and do not interrupt it.
+This check precedes the bounded service-swap budget. Commit then creates the
+state bridge, uses the ordinary config/drop-in swaps, publishes both receipts,
+starts Fractal and probes its local API before committing.
+
+If commit fails before API readiness, recovery removes receipts and the state
+bridge and reverses config/drop-ins, **leaving the dataset mounted at Fractal**.
+Legacy units remain disabled and stopped. Do not restart them manually there:
+
+```sh
+fractal migrate host --rollback
+# Recovery prints that the remount is still required; it cannot mount for you.
+sudo zfs set mountpoint="$HOME/.local/state/st3" pool/state
+if test -d "$HOME/.local/state/fractal"; then rmdir "$HOME/.local/state/fractal"; fi
+fractal migrate host --rollback
+```
+
+The last command verifies the original mount and store at the legacy path
+before restoring the journaled legacy running/enablement state. The journal
+survives interrupted recovery; repeat `--rollback` after remounting. A prepared
+but not committed adoption can also be cancelled with `--rollback` while the
+original dataset is still at the legacy path. After a successful local API
+probe migration is committed and rollback is refused, just as for ordinary
+migration.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal -->
 
 A second install for testing: `scripts/install --instance NAME` (or `install.sh --instance NAME`) puts

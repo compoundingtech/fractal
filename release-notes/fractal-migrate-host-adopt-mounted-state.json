@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Adopt a dedicated mounted Linux state root through journaled prepare and commit without copying",
+  "replay": { "status": "none", "detail": "Preserves the existing claims database without replay or rewrite." },
+  "schema": { "status": "none", "detail": "No store schema changes; the host cutover journal records optional mounted-state adoption evidence." },
+  "rules": { "status": "none", "detail": "Claim and runtime rules are unchanged." },
+  "compatibility": { "status": "changed", "detail": "fractal migrate host --adopt-mounted-state prepare|commit permits an explicitly prepared whole-state mount relocation on Linux; ordinary migration continues refusing mounted roots." },
+  "downtime": { "status": "changed", "detail": "Legacy units must remain stopped during operator remount and read-only claims.sqlite3 integrity_check, which may take substantial time on large databases." },
+  "manual": { "status": "changed", "detail": "Prepare while legacy is running, stop and disable its units, remount the same filesystem at the Fractal state path, remove the empty legacy mountpoint, then commit. The mover never mounts, unmounts or copies." },
+  "recovery": { "status": "changed", "detail": "Before API readiness, rollback restores config/drop-ins and removes receipts and the state bridge but leaves the dataset mounted. Remount it at the legacy path and rerun --rollback; legacy restart is fenced by mount and writer/database identity." }
+}

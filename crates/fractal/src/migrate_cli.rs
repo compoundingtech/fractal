@@ -18,6 +18,7 @@ use fractal_client::product_dirs::{MIGRATION_ID, RECEIPT_FILE};
 mod native;
 mod home_manager;
 mod mounts;
+mod adopt;
 #[cfg(test)]
 mod tests;
 
@@ -29,6 +30,9 @@ pub(super) struct HostArgs {
     /// Recover an interrupted swap that has not passed its API probe.
     #[arg(long)]
     rollback: bool,
+    /// Journal a dedicated state-root remount, then adopt it without copying.
+    #[arg(long, value_enum, conflicts_with_all = ["dry_run", "rollback"])]
+    adopt_mounted_state: Option<adopt::Phase>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -62,6 +66,8 @@ struct Receipt {
     local_api: &'static str,
     effective: Protection,
     gap_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operator_steps: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +168,8 @@ struct Journal {
     after: Option<Protection>,
     #[serde(default)]
     gap_ms: u128,
+    #[serde(default)]
+    adopt: Option<adopt::Prepared>,
 }
 
 trait Manager {
@@ -189,6 +197,7 @@ pub(super) async fn run(endpoint: &Endpoint, args: HostArgs, json: bool) -> Resu
     if json {
         super::print_value(&receipt, true)
     } else {
+        if let Some(steps) = &receipt.operator_steps { fractal_daemon::cli_println!("{steps}"); }
         fractal_daemon::cli_println!("{}: {} · {} · {}", receipt.host, receipt.status, receipt.local_api, receipt.migration);
         fractal_daemon::cli_println!("memory.swap.max={} MemoryLow={} gap={}ms manager={}",
             receipt.effective.memory_swap_max.as_deref().unwrap_or("not-applicable (launchd)"),
@@ -340,6 +349,11 @@ fn validate_journal(layout: &Layout, journal: &Journal, current: &Services) -> R
 }
 
 async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: &HostArgs) -> Result<Receipt> {
+    cutover_observed(layout, manager, host, args, &mounts::observe).await
+}
+
+async fn cutover_observed(layout: &Layout, manager: &mut impl Manager, host: &str, args: &HostArgs,
+    observe: &impl Fn() -> Result<Vec<mounts::Mount>>) -> Result<Receipt> {
     let _lock = if args.dry_run { None } else { Some(lock(layout)?) };
     let services = manager.inspect()?;
     if layout.journal.exists() {
@@ -347,8 +361,30 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         validate_journal(layout, &journal, &services)?;
         if args.rollback {
             ensure!(!journal.committed, "the local API probe succeeded; rollback to legacy state is no longer permitted");
-            rollback(layout, manager, &mut journal)?;
+            rollback_observed(layout, manager, &mut journal, observe)?;
             return Ok(receipt(manager, host, "rolled-back", "legacy restored", journal.before, 0));
+        }
+        if journal.adopt.is_some() && !journal.committed {
+            ensure!(args.adopt_mounted_state == Some(adopt::Phase::Commit), "prepared mounted-state adoption exists; run `fractal migrate host --adopt-mounted-state commit` or `fractal migrate host --rollback`");
+            ensure!(!journal.adopt.as_ref().context("missing adoption record")?.begun, "an interrupted host swap exists; run `fractal migrate host --rollback` before retrying");
+            ensure!(services.legacy.iter().chain(&services.target).all(|unit| !unit.running), "adoption commit requires all legacy and Fractal units stopped");
+            adopt::validate(layout, journal.adopt.as_ref().context("missing adoption record")?, &observe()?, true)?;
+            ensure!(fs::symlink_metadata(&layout.directories[1].0).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound), "adoption commit requires the legacy state path absent");
+            mounts::preflight(&layout.directories[..1])?;
+            for (index, (old, new)) in journal.pairs.iter().enumerate() {
+                if index != 1 && (index == 0 || old.exists()) { destination_free(old, new)?; }
+                if index < 2 {
+                    let root = if index == 1 { new } else { old };
+                    for name in [RECEIPT_FILE, PENDING_RECEIPT] {
+                        ensure!(fs::symlink_metadata(root.join(name)).is_err(), "adopted source contains reserved migration marker {name}");
+                    }
+                }
+            }
+            let state_lock = fractal_daemon::node_identity::lock_after_stop(&layout.target_daemon_state()).await?;
+            adopt::integrity(&layout.target_daemon_state())?;
+            journal.adopt.as_mut().context("missing adoption record")?.begun = true;
+            save(layout, &journal)?;
+            return execute(layout, manager, host, journal, observe, Some(state_lock)).await;
         }
         ensure!(journal.committed, "an interrupted host swap exists; run `fractal migrate host --rollback` before retrying");
         ensure!(services.target[0].running && !services.legacy.iter().any(|unit| unit.running),
@@ -360,6 +396,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         return Ok(receipt(manager, host, if args.dry_run { "dry-run (already committed)" } else { "completed" }, "local API listening", protection, journal.gap_ms));
     }
     ensure!(!args.rollback, "no interrupted host cutover journal exists");
+    ensure!(args.adopt_mounted_state != Some(adopt::Phase::Commit), "no prepared mounted-state adoption journal exists");
     ensure!(!services.legacy.is_empty() && !services.target.is_empty(), "legacy and pre-staged Fractal daemon definitions are required");
     ensure!(services.legacy[0].installed, "legacy daemon unit is not installed");
     ensure!(!services.legacy.iter().any(|unit| unit.running) || !services.target.iter().any(|unit| unit.running), "legacy and Fractal services both run; stop and investigate before cutover");
@@ -370,9 +407,17 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
         ensure!(unit.installed && unit.file.is_file() && !unit.enabled && !unit.running, "{} must be pre-staged, disabled and stopped", unit.name);
     }
     let pairs = layout.pairs(&services);
-    mounts::preflight(&layout.directories)?;
+    let adoption = if args.adopt_mounted_state == Some(adopt::Phase::Prepare) {
+        mounts::preflight(&layout.directories[..1])?;
+        Some(adopt::prepare(layout, &observe()?)?)
+    } else {
+        mounts::preflight(&layout.directories)?;
+        None
+    };
     for (index, (old, new)) in pairs.iter().enumerate() {
-        if index < 2 || old.exists() { destination_free(old, new)?; }
+        if index != 1 || adoption.is_none() {
+            if index < 2 || old.exists() { destination_free(old, new)?; }
+        }
         if index < 2 {
             for name in [RECEIPT_FILE, PENDING_RECEIPT] {
                 ensure!(fs::symlink_metadata(old.join(name)).is_err(), "legacy source contains reserved migration marker {name}");
@@ -392,14 +437,25 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
     if args.dry_run {
         return Ok(receipt(manager, host, "dry-run: preflight passed; no changes", "legacy API listening", before, 0));
     }
-    let mut journal = Journal { migration: MIGRATION_ID.into(), services, pairs,
-        moves: Vec::new(), emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false, committed: false, before, after: None, gap_ms: 0 };
+    let journal = Journal { migration: MIGRATION_ID.into(), services, pairs,
+        moves: Vec::new(), emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false, committed: false, before, after: None, gap_ms: 0, adopt: adoption };
     save(layout, &journal)?;
-    let attempt = swap(layout, manager, &mut journal).await;
+    if journal.adopt.is_some() {
+        let steps = adopt::steps(layout, &journal, false);
+        let mut result = receipt(manager, host, "prepared: operator remount required", "legacy API listening", journal.before, 0);
+        result.operator_steps = Some(steps);
+        return Ok(result);
+    }
+    execute(layout, manager, host, journal, observe, None).await
+}
+
+async fn execute(layout: &Layout, manager: &mut impl Manager, host: &str, mut journal: Journal,
+    observe: &impl Fn() -> Result<Vec<mounts::Mount>>, state_lock: Option<fractal_daemon::node_identity::StateLock>) -> Result<Receipt> {
+    let attempt = swap(layout, manager, &mut journal, state_lock).await;
     let (protection, gap_ms) = match attempt {
         Ok(result) => result,
         Err(error) => {
-            return match rollback(layout, manager, &mut journal) {
+            return match rollback_observed(layout, manager, &mut journal, observe) {
                 Ok(()) => Err(error).context("host cutover failed before API readiness; legacy paths and services restored"),
                 Err(rollback) => Err(error).context(format!("host cutover failed and rollback needs repair: {rollback:#}; journal {} retained", layout.journal.display())),
             };
@@ -415,7 +471,7 @@ async fn cutover(layout: &Layout, manager: &mut impl Manager, host: &str, args: 
 }
 
 fn receipt(manager: &impl Manager, host: &str, status: &'static str, local_api: &'static str, effective: Protection, gap_ms: u128) -> Receipt {
-    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), local_api, effective, gap_ms }
+    Receipt { migration: MIGRATION_ID, host: host.into(), status, manager: manager.kind(), local_api, effective, gap_ms, operator_steps: None }
 }
 
 fn stop_legacy(manager: &mut impl Manager, journal: &Journal) -> Result<()> {
@@ -426,13 +482,17 @@ fn stop_legacy(manager: &mut impl Manager, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
-async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<(Protection, u128)> {
+async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal,
+    state_lock: Option<fractal_daemon::node_identity::StateLock>) -> Result<(Protection, u128)> {
     // Quiescence is checked again immediately before changing service state.
-    manager.idle().await?;
+    if journal.adopt.is_none() { manager.idle().await?; }
     let stopped_at = Instant::now();
     stop_legacy(manager, journal)?;
-    let state_lock = fractal_daemon::node_identity::lock_after_stop(&layout.daemon_state).await
-        .context("legacy daemon still owns its state after service stop")?;
+    let state_lock = match state_lock {
+        Some(lock) => lock,
+        None => fractal_daemon::node_identity::lock_after_stop(&layout.daemon_state).await
+            .context("legacy daemon still owns its state after service stop")?,
+    };
     if home_manager(&journal.services) {
         journal.config_fence = true;
         save(layout, journal)?;
@@ -440,6 +500,13 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     }
     for index in 0..journal.pairs.len() {
         let (old, new) = &journal.pairs[index];
+        if index == 1 && journal.adopt.is_some() {
+            journal.links.push(index);
+            save(layout, journal)?;
+            symlink(new, old)?;
+            File::open(old.parent().context("state has no parent")?)?.sync_all()?;
+            continue;
+        }
         if !old.exists() { continue; }
         if let Ok(metadata) = fs::symlink_metadata(new) {
             ensure!(metadata.is_dir() && fs::read_dir(new)?.next().is_none(), "destination changed since preflight: {}", new.display());
@@ -484,7 +551,8 @@ async fn swap(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal
     Ok((protection, stopped_at.elapsed().as_millis()))
 }
 
-fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) -> Result<()> {
+fn rollback_observed(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal,
+    observe: &impl Fn() -> Result<Vec<mounts::Mount>>) -> Result<()> {
     for unit in journal.services.target.iter().rev() {
         manager.stop(unit)?;
         manager.enable(unit, false)?;
@@ -496,6 +564,14 @@ fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) 
         if path.exists() {
             ensure!(fs::read_to_string(&path)? == format!("{MIGRATION_ID}\n"), "receipt changed during rollback: {}", path.display());
             fs::remove_file(path)?;
+        }
+    }
+    if journal.adopt.is_some() && journal.links.contains(&1) {
+        let (old, new) = &journal.pairs[1];
+        if let Ok(target) = fs::read_link(old) {
+            ensure!(target == *new, "invalid adopted rollback bridge");
+            fs::remove_file(old)?;
+            File::open(old.parent().context("state has no parent")?)?.sync_all()?;
         }
     }
     while let Some(index) = journal.moves.last().copied() {
@@ -521,6 +597,11 @@ fn rollback(layout: &Layout, manager: &mut impl Manager, journal: &mut Journal) 
         }
     }
     manager.reload()?;
+    if let Some(prepared) = &journal.adopt {
+        if adopt::validate(layout, prepared, &observe()?, false).is_err() {
+            bail!("{}", adopt::steps(layout, journal, true));
+        }
+    }
     for unit in &journal.services.legacy {
         if unit.running { manager.start(unit)?; }
         manager.enable(unit, unit.enabled)?;

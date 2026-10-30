@@ -176,7 +176,7 @@ impl Fixture {
     }
 
     async fn run(&mut self, dry_run: bool, rollback: bool) -> Result<Receipt> {
-        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback }).await
+        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback, adopt_mounted_state: None }).await
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -481,7 +481,7 @@ async fn explicit_rollback_recovers_an_interrupted_uncommitted_swap() -> Result<
     }
     let journal = Journal { migration: MIGRATION_ID.into(), services, moves: (0..pairs.len()).collect(),
         pairs, emptied: Vec::new(), receipts: vec![0, 1], links: vec![0, 1], config_fence: false, committed: false,
-        before: memory_protection(), after: None, gap_ms: 0 };
+        before: memory_protection(), after: None, gap_ms: 0, adopt: None };
     save(&fixture.layout, &journal)?;
     fixture.manager.services.legacy.iter_mut().for_each(|unit| unit.running = false);
     fixture.manager.services.target[0].running = true;
@@ -542,7 +542,7 @@ fn interrupted_journal(fixture: &Fixture) -> Journal {
         migration: MIGRATION_ID.into(), services: fixture.manager.services.clone(),
         pairs: fixture.layout.pairs(&fixture.manager.services), moves: Vec::new(),
         emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false,
-        committed: false, before: memory_protection(), after: None, gap_ms: 0,
+        committed: false, before: memory_protection(), after: None, gap_ms: 0, adopt: None,
     }
 }
 
@@ -794,6 +794,190 @@ fn retained_generation_array_mutations_refuse_with_generation_number() -> Result
         let message = format!("{error:#}");
         assert!(message.contains("retained Home Manager generation 17"), "{message}");
         assert!(message.contains("unsupported forcedPaths references"), "{message}");
+        assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+fn adopted_fixture() -> Result<Fixture> {
+    let fixture = Fixture::new()?;
+    fs::write(fixture.layout.daemon_state.join("node-identity.json"), b"\"stable-writer\"\n")?;
+    let database = rusqlite::Connection::open(fixture.layout.daemon_state.join("claims.sqlite3"))?;
+    database.execute_batch("CREATE TABLE evidence(value TEXT); INSERT INTO evidence VALUES ('authority');")?;
+    Ok(fixture)
+}
+
+fn observed_mount(fixture: &Fixture, destination: bool) -> mounts::Mount {
+    mounts::Mount {
+        path: if destination { fixture.layout.directories[1].1.clone() } else { fixture.layout.directories[1].0.clone() },
+        source: "pool/state".into(), fstype: "zfs".into(), id: "36".into(), device: "0:32".into(), root: "/".into(),
+    }
+}
+
+async fn adoption(fixture: &mut Fixture, phase: Option<adopt::Phase>, rollback: bool, observed: Vec<mounts::Mount>) -> Result<Receipt> {
+    cutover_observed(&fixture.layout, &mut fixture.manager, "test-host",
+        &HostArgs { dry_run: false, rollback, adopt_mounted_state: phase }, &|| Ok(observed.clone())).await
+}
+
+async fn prepared_and_remounted() -> Result<Fixture> {
+    let mut fixture = adopted_fixture()?;
+    let observed = vec![observed_mount(&fixture, false)];
+    let receipt = adoption(&mut fixture, Some(adopt::Phase::Prepare), false, observed).await?;
+    assert_eq!(receipt.status, "prepared: operator remount required");
+    assert!(!fixture.manager.changed_services());
+    for unit in &mut fixture.manager.services.legacy { unit.running = false; unit.enabled = false; }
+    fs::rename(&fixture.layout.directories[1].0, &fixture.layout.directories[1].1)?;
+    Ok(fixture)
+}
+
+#[tokio::test]
+async fn adoption_prepare_refuses_missing_nested_destination_mounts_and_populated_destination() -> Result<()> {
+    for case in ["missing", "nested", "destination", "populated"] {
+        let mut fixture = adopted_fixture()?;
+        let mut observed = vec![observed_mount(&fixture, false)];
+        let expected = match case {
+            "missing" => { observed.clear(); "adoption requires the state root to be an exact mount point" }
+            "nested" => {
+                let mut nested = observed[0].clone(); nested.path.push("nested"); observed.push(nested);
+                "adoption requires exactly one state-root mount and no nested or destination mounts"
+            }
+            "destination" => {
+                observed.push(observed_mount(&fixture, true));
+                "adoption requires exactly one state-root mount and no nested or destination mounts"
+            }
+            _ => {
+                fs::create_dir(&fixture.layout.directories[1].1)?;
+                fs::write(fixture.layout.directories[1].1.join("foreign"), b"foreign")?;
+                "adoption destination must be absent or an empty ordinary directory"
+            }
+        };
+        assert_eq!(adoption(&mut fixture, Some(adopt::Phase::Prepare), false, observed).await.unwrap_err().to_string(), expected);
+        assert!(!fixture.layout.journal.exists());
+        assert!(!fixture.manager.changed_services());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn adoption_commit_uses_shared_swap_and_accepts_new_mount_id() -> Result<()> {
+    let mut fixture = prepared_and_remounted().await?;
+    let mut mount = observed_mount(&fixture, true);
+    mount.id = "99".into();
+    let receipt = adoption(&mut fixture, Some(adopt::Phase::Commit), false, vec![mount]).await?;
+    assert_eq!(receipt.status, "completed");
+    for (old, new) in &fixture.layout.directories {
+        assert_eq!(fs::read_link(old)?, *new);
+        assert_eq!(fs::read_to_string(new.join(RECEIPT_FILE))?, format!("{MIGRATION_ID}\n"));
+    }
+    assert!(fixture.manager.events.contains(&"probe".into()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn adoption_commit_refuses_mount_and_store_identity_changes() -> Result<()> {
+    for case in ["source", "filesystem", "device", "subtree", "writer"] {
+        let mut fixture = prepared_and_remounted().await?;
+        fixture.manager.events.clear();
+        let mut mount = observed_mount(&fixture, true);
+        match case {
+            "source" => mount.source = "foreign".into(),
+            "filesystem" => mount.fstype = "foreign".into(),
+            "device" => mount.device = "0:99".into(),
+            "subtree" => mount.root = "/foreign".into(),
+            _ => fs::write(fixture.layout.target_daemon_state().join("node-identity.json"), b"\"foreign\"")?,
+        }
+        let expected = if case == "writer" { "adopted store identity differs from prepared writer/database" }
+            else { "adopted mount identity differs from prepared source/filesystem/device/root" };
+        assert_eq!(adoption(&mut fixture, Some(adopt::Phase::Commit), false, vec![mount]).await.unwrap_err().to_string(), expected);
+        assert!(!fixture.manager.changed_services());
+        assert!(!fixture.layout.directories[1].0.exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn adoption_corrupt_database_refuses_before_bridge_or_service_changes() -> Result<()> {
+    let mut fixture = prepared_and_remounted().await?;
+    fs::write(fixture.layout.target_daemon_state().join("claims.sqlite3"), b"not a sqlite database")?;
+    fixture.manager.events.clear();
+    let observed = vec![observed_mount(&fixture, true)];
+    assert_eq!(adoption(&mut fixture, Some(adopt::Phase::Commit), false, observed).await.unwrap_err().to_string(),
+        "adopted claims.sqlite3 integrity_check failed");
+    assert!(!fixture.manager.changed_services());
+    assert!(!fixture.layout.directories[1].0.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn adoption_probe_failure_reverses_paths_and_waits_for_operator_remount_before_restart() -> Result<()> {
+    let mut fixture = prepared_and_remounted().await?;
+    let mut before = fixture.snapshot()?;
+    before.remove(&fixture.layout.journal);
+    fixture.manager.probe_failure = true;
+    let observed = vec![observed_mount(&fixture, true)];
+    let error = adoption(&mut fixture, Some(adopt::Phase::Commit), false, observed.clone()).await.unwrap_err();
+    let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+    let steps = adopt::steps(&fixture.layout, &journal, true);
+    assert_eq!(error.to_string(), format!("host cutover failed and rollback needs repair: {steps}; journal {} retained", fixture.layout.journal.display()));
+    let mut after = fixture.snapshot()?;
+    after.remove(&fixture.layout.journal);
+    assert_eq!(after, before);
+    assert!(fixture.manager.services.legacy.iter().all(|unit| !unit.running && !unit.enabled));
+    assert!(!fixture.manager.events.iter().any(|event| event == "start:st3.service"));
+    let error = adoption(&mut fixture, None, true, observed).await.unwrap_err();
+    assert_eq!(error.to_string(), steps);
+    fs::rename(&fixture.layout.directories[1].1, &fixture.layout.directories[1].0)?;
+    let observed = vec![observed_mount(&fixture, false)];
+    assert_eq!(adoption(&mut fixture, None, true, observed).await?.status, "rolled-back");
+    assert!(fixture.manager.services.legacy.iter().all(|unit| unit.running && unit.enabled));
+    assert!(!fixture.layout.journal.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn adoption_preparation_prints_exact_zfs_commands_and_changes_no_product_paths() -> Result<()> {
+    let mut fixture = adopted_fixture()?;
+    let before = fixture.snapshot()?;
+    let observed = vec![observed_mount(&fixture, false)];
+    adoption(&mut fixture, Some(adopt::Phase::Prepare), false, observed).await?;
+    let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
+    let units = fixture.manager.services.legacy.iter().map(|unit| unit.name.as_str()).collect::<Vec<_>>().join(" ");
+    let (old, new) = &fixture.layout.directories[1];
+    assert_eq!(adopt::steps(&fixture.layout, &journal, false), format!(
+        "Mounted-state adoption prepared; no services or product paths changed.\nsystemctl --user disable --now {units}\nsudo zfs set mountpoint='{}' 'pool/state'\nif test -d '{}'; then rmdir '{}'; fi\nfractal migrate host --adopt-mounted-state commit",
+        new.display(), old.display(), old.display()));
+    let mut after = fixture.snapshot()?;
+    after.remove(&fixture.layout.journal);
+    assert_eq!(after, before);
+    assert!(!fixture.manager.changed_services());
+    Ok(())
+}
+
+#[tokio::test]
+async fn adoption_commit_refuses_active_units_markers_and_legacy_path() -> Result<()> {
+    for case in ["active", "receipt", "legacy", "unmounted"] {
+        let mut fixture = prepared_and_remounted().await?;
+        let mut observed = vec![observed_mount(&fixture, true)];
+        let expected = match case {
+            "active" => {
+                fixture.manager.services.legacy[0].running = true;
+                "adoption commit requires all legacy and Fractal units stopped".to_owned()
+            }
+            "receipt" => {
+                fs::write(fixture.layout.directories[1].1.join(RECEIPT_FILE), b"foreign")?;
+                format!("adopted source contains reserved migration marker {RECEIPT_FILE}")
+            }
+            "legacy" => {
+                fs::create_dir(&fixture.layout.directories[1].0)?;
+                "adoption commit requires the legacy state path absent".to_owned()
+            }
+            _ => {
+                observed.clear();
+                "adoption requires the state root to be an exact mount point".to_owned()
+            }
+        };
+        fixture.manager.events.clear();
+        assert_eq!(adoption(&mut fixture, Some(adopt::Phase::Commit), false, observed).await.unwrap_err().to_string(), expected);
         assert!(!fixture.manager.changed_services());
     }
     Ok(())
