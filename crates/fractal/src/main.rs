@@ -1126,6 +1126,9 @@ struct UpArgs {
     node: Option<String>,
     #[arg(long)]
     state_dir: Option<PathBuf>,
+    /// Existing directory for only claims.sqlite3 and its WAL/SHM; defaults to --state-dir.
+    #[arg(long)]
+    store_dir: Option<PathBuf>,
     /// Use an existing PTY registry during an st2-to-fractal cutover.
     #[arg(long)]
     pty_root: Option<PathBuf>,
@@ -2509,6 +2512,26 @@ enum ReplicationCommand {
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
+    },
+    /// The claim signature migration on this member.
+    Signatures {
+        #[command(subcommand)]
+        command: SignaturesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SignaturesCommand {
+    /// Clear this member's persisted signature-state-corrupt fault and let the migration go on.
+    /// If the defect it named is still there, the next page persists the same fault again.
+    Resume {
+        /// What was repaired, or why the fault was not local corruption.
+        #[arg(long)]
+        reason: String,
+        /// The person resuming, or the fleet's fault agent.
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        #[arg(long = "as")]
+        actor: Option<String>,
     },
 }
 
@@ -5681,7 +5704,8 @@ async fn run(cli: Cli) -> Result<()> {
                 file,
                 database: Some(database),
             } => {
-                let header = fractal_daemon::backup::create_from_database(&database, &file)?;
+                let state_root = backup_state_root(&config, &database)?;
+                let header = fractal_daemon::backup::create_from_database(&database, &state_root, &file)?;
                 if cli.json {
                     println!("{}", serde_json::to_string(&header)?);
                 } else {
@@ -5694,8 +5718,9 @@ async fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             BackupCommand::Restore { file, database } => {
-                let database = database.unwrap_or_else(|| config.state_dir.join("claims.sqlite3"));
-                let report = fractal_daemon::backup::restore(&file, &database)?;
+                let database = database.unwrap_or_else(|| config.store_path());
+                let state_root = backup_state_root(&config, &database)?;
+                let report = fractal_daemon::backup::restore(&file, &database, &state_root)?;
                 if cli.json {
                     println!("{}", serde_json::to_string(&report)?);
                 } else {
@@ -6302,6 +6327,34 @@ fn gateway_path_for_comparison(socket: &Path) -> Result<PathBuf> {
     ))
 }
 
+fn backup_state_root(config: &Config, database: &Path) -> Result<PathBuf> {
+    let configured = config.store_path();
+    let same_database = database == configured
+        || canonical_database_path(database).ok().zip(canonical_database_path(&configured).ok())
+            .is_some_and(|(database, configured)| database == configured);
+    if same_database {
+        Ok(config.state_dir.clone())
+    } else {
+        database.parent().map(Path::to_path_buf).context("the database path has no parent")
+    }
+}
+
+fn canonical_database_path(database: &Path) -> std::io::Result<PathBuf> {
+    match fs::canonicalize(database) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let absolute = std::path::absolute(database)?;
+            let parent = absolute.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path has no parent")
+            })?;
+            let name = absolute.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path has no file name")
+            })?;
+            fs::canonicalize(parent).map(|parent| parent.join(name))
+        }
+        result => result,
+    }
+}
+
 fn select_private_gateway(
     config: &mut Config,
     private_state: bool,
@@ -6349,6 +6402,98 @@ fn daemon_start_version(machine_version: &str) -> Result<&str> {
     )
 }
 
+fn open_daemon_store(
+    config: &Config,
+    identity: &fractal_daemon::node_identity::StateLock,
+) -> Result<Store> {
+    let admitted = identity.admitted_store();
+    let store = match &admitted {
+        Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
+        None => Store::open(&config.store_path(), &config.node)?,
+    };
+    if admitted.is_some() {
+        fractal_daemon::node_identity::record_store_writer(
+            config, admitted.as_deref(), &config.node,
+        )?;
+    }
+    Ok(store)
+}
+
+fn begin_admitted_startup(
+    config: &Config,
+    identity: &fractal_daemon::node_identity::StateLock,
+) -> Result<Arc<fractal_daemon::startup::Startup>> {
+    identity.verify_store_directory(config)?;
+    let startup = Arc::new(fractal_daemon::startup::Startup::begin(&config.socket)?);
+    identity.verify_store_directory(config)?;
+    Ok(startup)
+}
+
+#[cfg(test)]
+#[test]
+fn admitted_explicit_state_alias_is_not_recreated_at_startup_boundary() {
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let alias = root.path().join("legacy");
+    std::os::unix::fs::symlink(&state, &alias).unwrap();
+    let mut config = Config {
+        state_dir: state.clone(),
+        store_dir: Some(alias),
+        socket: state.join("run/daemon.sock"),
+        ..Config::default()
+    };
+    let identity = fractal_daemon::node_identity::acquire(&mut config).unwrap();
+    fs::rename(&state, root.path().join("moved")).unwrap();
+    assert!(begin_admitted_startup(&config, &identity).is_err());
+    assert!(!state.exists());
+    assert!(!config.socket.exists());
+}
+
+#[cfg(test)]
+#[test]
+fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_write() {
+    let snapshot = |directory: &Path| {
+        fractal_daemon::config::STORE_DATABASE_FILES.map(|name| fs::read(directory.join(name)).ok())
+    };
+    for replace in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        let other = root.path().join("other");
+        let moved = root.path().join("moved");
+        fs::create_dir(&directory).unwrap();
+        fs::create_dir(&other).unwrap();
+        let mut config = Config {
+            node: "orchid".into(),
+            state_dir: root.path().join("state"),
+            store_dir: Some(directory.clone()),
+            ..Config::default()
+        };
+        let identity = fractal_daemon::node_identity::acquire(&mut config).unwrap();
+        drop(open_daemon_store(&config, &identity).unwrap());
+        drop(Store::open(&other.join("claims.sqlite3"), "fern").unwrap());
+        let original_bytes = snapshot(&directory);
+        let other_bytes = snapshot(&other);
+        let swapped_directory = directory.clone();
+        let swapped_other = other.clone();
+        let moved_directory = moved.clone();
+        identity.admitted_store().unwrap().set_before_open_hook_for_test(move || {
+            fs::rename(&swapped_directory, &moved_directory).unwrap();
+            if replace {
+                fs::rename(&swapped_other, &swapped_directory).unwrap();
+            }
+        });
+        assert!(open_daemon_store(&config, &identity).is_err());
+        assert_eq!(snapshot(&moved), original_bytes);
+        if replace {
+            assert_eq!(snapshot(&directory), other_bytes);
+        } else {
+            assert!(!directory.exists(), "explicit directory must not be recreated");
+            assert_eq!(snapshot(&other), other_bytes);
+        }
+    }
+}
+
 async fn run_up(args: UpArgs) -> Result<()> {
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
@@ -6369,6 +6514,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     if let Some(state_dir) = args.state_dir {
         config.state_dir = state_dir;
+    }
+    if let Some(store_dir) = args.store_dir {
+        config.store_dir = Some(store_dir);
     }
     if let Some(pty_root) = args.pty_root {
         config.pty_root = Some(pty_root);
@@ -6421,7 +6569,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         identity_duration,
         state_identity.is_err(),
     );
-    let _state_identity = match state_identity {
+    let state_identity = match state_identity {
         Ok(identity) => identity,
         Err(error) => {
             drop(startup_telemetry);
@@ -6433,30 +6581,35 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::resource::configure_github(&config)?;
     validate_unix_socket_path(&config.socket, "--socket")?;
     validate_unix_socket_path(&config.client_gateway_socket, "--client-gateway-socket")?;
-    fs::create_dir_all(&config.state_dir)?;
-    let startup = Arc::new(fractal_daemon::startup::Startup::begin(&config.socket)?);
+    let startup = begin_admitted_startup(&config, &state_identity)?;
     startup_phases.configuration_ms = phase_elapsed_ms();
     startup.phase("bind-listeners");
     let state_socket = config.state_dir.join("run/st3.sock");
+    state_identity.verify_store_directory(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
         fractal_daemon::api::reserve_unix_socket(&config.client_gateway_socket, None),
     )?;
+    state_identity.verify_store_directory(&config)?;
     // Only addresses are bound. Until initialization finishes, connections are
     // refused and clients use the existing live startup-phase observation.
     let reserved_bind_ms = phase_elapsed_ms();
     startup.phase("install-hooks");
     startup_telemetry.phase("install-hooks");
+    state_identity.verify_store_directory(&config)?;
     fractal_daemon::hooks::ensure_installed(&fractal_daemon::hooks::root(&config.state_dir)).context(
         "publishing this st binary's required lifecycle hook set before starting the daemon",
     )?;
+    state_identity.verify_store_directory(&config)?;
     fractal_daemon::profile::init_from_env();
     raise_open_file_limit();
     startup_phases.install_hooks_ms = phase_elapsed_ms();
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
     let store = Arc::new(startup_telemetry.task("startup.open_store", || {
-        fractal_daemon::task_cpu::blocking("startup.open_store", || Store::open(&config.state_dir.join("claims.sqlite3"), &config.node))
+        fractal_daemon::task_cpu::blocking("startup.open_store", || {
+            open_daemon_store(&config, &state_identity)
+        })
     })?);
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
@@ -6488,7 +6641,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_phases.open_store_ms = phase_elapsed_ms();
     startup.phase("judge-claims");
     startup_telemetry.phase("judge-claims");
-    startup_telemetry.task("startup.judge_claims", || fractal_daemon::task_cpu::blocking("startup.judge_claims", || store.judge_claims(true)))?;
+    startup_telemetry.task("startup.judge_claims", || fractal_daemon::task_cpu::blocking("startup.judge_claims", || store.judge_claims_slice(true)))?;
     startup_phases.judge_claims_ms = phase_elapsed_ms();
     startup.phase("validate-replication-backlog");
     startup_telemetry.phase("validate-replication-backlog");
@@ -6641,7 +6794,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
-    store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?);
+    store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?)?;
     store.set_ask_deadlines(config.asks.deadlines);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
@@ -19064,7 +19217,9 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
-                store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline"));
+                if let Err(error) = store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline")) {
+                    tracing::warn!("the ask deadline default could not be recorded: {error:#}");
+                }
                 store.set_ask_deadlines(asks.deadlines);
                 limits = reloaded;
                 last_error = None;
@@ -19493,52 +19648,93 @@ async fn build_transport_observation_index(store: Arc<Store>) {
     }
 }
 
-/// A finite bootstrap job: committed pages yield the background writer to live requests.
-/// Local corruption is persisted and visible through doctor/faults; it stops this job.
+/// The signature job: the finite bootstrap, then any verdict backlog ordinary passes leave.
+/// Committed pages yield the background writer to live requests.
+/// Local corruption is persisted and visible through doctor/faults; it stops this job until
+/// `st replication signatures resume` clears it. A transient SQLite error (busy, locked, cannot
+/// open) is not corruption: it is logged and the job retries after `SIGNATURE_BOOTSTRAP_RETRY`.
 /// Background inventory/judgment gets one quiet unit per unit of page wall time.
-/// This bounds duty to 50%; it neither retries nor suppresses a local failure.
+/// This bounds duty to 50%.
 const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
+const SIGNATURE_BOOTSTRAP_RETRY: Duration = Duration::from_secs(30);
 
 async fn migrate_signature_candidates(store: Arc<Store>) {
-    let worker = store.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<()> {
-        let initial = worker.signature_migration()?;
-        let mut phase = initial.phase.clone();
-        if !initial.done() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
-        loop {
-            let page_started = std::time::Instant::now();
-            let report = worker.advance_signature_migration()?;
-            if report.phase != phase {
-                stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
-                phase = report.phase.clone();
-            }
-            if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
-                anyhow::bail!("{reason}");
-            }
-            if report.phase == "judging" {
-                worker.advance_signature_judgment()?;
-            }
-            // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
-            // each page gets an equally long quiet interval (at most 50% worker duty).
-            let page_elapsed = page_started.elapsed();
-            std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
-            if worker.signature_migration()?.done() {
-                let complete = worker.signature_migration()?;
-                if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
-                loop {
-                    let retired_started = std::time::Instant::now();
-                    if !worker.retire_legacy_signature_page()? { break; }
-                    std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+    let mut reported_fault = None;
+    loop {
+        let worker = store.clone();
+        // Ok(Some(fault)): the job stopped on a fault already persisted, which it must not rewrap.
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let initial = worker.signature_migration()?;
+            let mut phase = initial.phase.clone();
+            if !initial.done() && initial.fault.is_none() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
+            loop {
+                let page_started = std::time::Instant::now();
+                let report = worker.advance_signature_migration()?;
+                if report.phase != phase {
+                    stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
+                    phase = report.phase.clone();
                 }
-                return Ok(());
+                if let Some(fault) = report.fault {
+                    return Ok(Some(fault));
+                }
+                if report.phase == "judging" {
+                    worker.advance_signature_judgment()?;
+                }
+                // Finite cursor work, not a readiness poll. Yield CPU as well as the writer:
+                // each page gets an equally long quiet interval (at most 50% worker duty).
+                let page_elapsed = page_started.elapsed();
+                std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                if worker.signature_migration()?.done() {
+                    let complete = worker.signature_migration()?;
+                    if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
+                    loop {
+                        let retired_started = std::time::Instant::now();
+                        if !worker.retire_legacy_signature_page()? { break; }
+                        std::thread::sleep(retired_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                    }
+                    // A resume or a trust-root change can leave a large verdict backlog. Ordinary
+                    // passes take only a slice of it; this job drains the rest at the same duty.
+                    if worker.verdicts_pending()? {
+                        stderr_message("st3", format_args!("signature verdict backlog draining"));
+                        let drain_started = std::time::Instant::now();
+                        let mut judged = 0;
+                        while worker.verdicts_pending()? {
+                            let loan_started = std::time::Instant::now();
+                            judged += worker.advance_signature_judgment()?;
+                            if let Some(fault) = worker.signature_migration()?.fault { return Ok(Some(fault)); }
+                            std::thread::sleep(loan_started.elapsed() * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
+                        }
+                        stderr_message("st3", format_args!("signature verdict backlog drained: {judged} verdicts in {:.0}s", drain_started.elapsed().as_secs_f64()));
+                    }
+                    return Ok(None);
+                }
+            }
+        }).await;
+        match result {
+            // Idle until an ordinary pass leaves a verdict backlog, or a resume.
+            Ok(Ok(None)) => reported_fault = None,
+            Ok(Ok(Some(fault))) => {
+                if reported_fault.as_ref() != Some(&fault) {
+                    stderr_message("st3", format_args!("signature candidate migration stopped on a persisted fault; repair it, then run `st replication signatures resume`: {fault}"));
+                    reported_fault = Some(fault);
+                }
+            }
+            Ok(Err(error)) if smallclaims::store::principals::transient_storage_error(&error) => {
+                store.note_signature_retry(Some(&error));
+                stderr_message("st3", format_args!("signature candidate migration retrying in {}s after a transient storage error: {error:#}", SIGNATURE_BOOTSTRAP_RETRY.as_secs()));
+                tokio::time::sleep(SIGNATURE_BOOTSTRAP_RETRY).await;
+                continue;
+            }
+            result => {
+                // An inventory page persists its own fault; keep that text rather than wrap it.
+                let persisted = store.signature_migration().is_ok_and(|migration| migration.fault.is_some());
+                if !persisted && let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+                    stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
+                }
+                stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
             }
         }
-    }).await;
-    if !matches!(result, Ok(Ok(()))) {
-        if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
-            stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
-        }
-        stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
+        store.signature_job_wake.notified().await;
     }
 }
 

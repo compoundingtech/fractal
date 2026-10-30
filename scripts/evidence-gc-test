@@ -199,7 +199,7 @@ class Gc(unittest.TestCase):
         self.assertEqual(result['reasons']['deleted: dead input key'], 1)
         self.assertNotIn(stale, self.refs())
 
-    def crates(self, broken_pr=False):
+    def crates(self, broken_pr=False, layout='old'):
         """A two-crate workspace on main (b depends on a), keyed by main's scripts/rust-test-keys, and the commits whose crate keys matter:
         an old main commit (20 d, outside main_days), a recent one (1 d), and an open pull request head that changes only crate b."""
         (self.f.repo / 'scripts').mkdir(exist_ok=True)
@@ -209,7 +209,12 @@ class Gc(unittest.TestCase):
             (self.f.repo / f'crates/{name}/src').mkdir(parents=True)
             (self.f.repo / f'crates/{name}/Cargo.toml').write_text(f'[package]\nname = "{name}"\nversion = "0.1.0"\n{extra}')
             (self.f.repo / f'crates/{name}/src/lib.rs').write_text('// 0\n')
-        (self.f.repo / '.st/rust-test-inputs.json').write_text(json.dumps({'global': ['Cargo.toml'], 'crates': {'a': {'extra': []}, 'b': {'extra': []}}}))
+        directory = '.st' if layout == 'old' else '.fractal'
+        (self.f.repo / directory).mkdir(exist_ok=True)
+        (self.f.repo / directory / 'rust-test-inputs.json').write_text(json.dumps(
+            {'global': ['Cargo.toml'], 'crates': {'a': {'extra': []}, 'b': {'extra': []}}}))
+        if layout == 'both':
+            (self.f.repo / '.st/rust-test-inputs.json').write_text('{')
         self.f.git('add', '-A')
         with At(40):
             self.f.git('commit', '-q', '-m', 'base')
@@ -272,8 +277,67 @@ class Gc(unittest.TestCase):
         self.assertIn(old_a, self.refs())
         self.assertEqual(result['crate_keys']['unreadable'], [pr[1]])
 
-    def test_a_partial_clone_fetches_the_manifests_it_lacks_in_one_go_before_keying(self):
+    def test_missing_accepted_key_tool_blob_cannot_disable_crate_protection(self):
         old, recent, pr = self.crates()
+        protected = self.crate_index(old[0], old[1], 'a', 25)
+        oid = self.f.git('rev-parse', 'main:scripts/rust-test-keys')
+        (self.f.repo / '.git/objects' / oid[:2] / oid[2:]).unlink()
+        code, _, error = self.run_gc('--head', pr[0], '--apply')
+        self.assertNotEqual(code, 0, error)
+        self.assertIn(protected, self.refs())
+
+    def check_preferred_crate_retention(self, layout):
+        old, recent, pr = self.crates(layout=layout)
+        protected = self.crate_index(pr[0], pr[1], 'b', 29)
+        dead = self.crate_index(old[0], old[1], 'a', 25)
+        code, result, error = self.run_gc('--head', pr[0], '--apply')
+        self.assertEqual(code, 0, error)
+        self.assertIn(protected, self.refs())
+        self.assertNotIn(dead, self.refs())
+        self.assertEqual(result['crate_keys']['unreadable'], [])
+
+    def test_new_only_crate_inputs_protect_live_keys(self):
+        self.check_preferred_crate_retention('new')
+
+    def test_preferred_crate_inputs_win_over_malformed_legacy(self):
+        self.check_preferred_crate_retention('both')
+
+    def check_bad_preferred_crate_inputs(self, missing_blob=False):
+        old, recent, pr = self.crates()
+        protected = self.crate_index(old[0], old[1], 'a', 25)
+        new = self.f.repo / '.fractal/rust-test-inputs.json'
+        new.parent.mkdir()
+        new.write_text('{"global": ["preferred-only"], "crates": {}}' if missing_blob else '{')
+        self.f.git('add', '-A')
+        with At(0.5):
+            self.f.git('commit', '-q', '-m', 'selected crate inputs')
+        if missing_blob:
+            oid = self.f.git('rev-parse', 'main:.fractal/rust-test-inputs.json')
+            (self.f.repo / '.git/objects' / oid[:2] / oid[2:]).unlink()
+        code, result, error = self.run_gc('--head', pr[0], '--apply')
+        self.assertEqual(code, 0, error)
+        self.assertIn(protected, self.refs(), 'selected input failure keeps all crate keys, never uses valid legacy')
+        self.assertEqual(result['crate_keys']['unreadable'], ['main'])
+
+    def test_malformed_preferred_crate_inputs_keep_every_key(self):
+        self.check_bad_preferred_crate_inputs()
+
+    def test_missing_preferred_crate_blob_keeps_every_key(self):
+        self.check_bad_preferred_crate_inputs(missing_blob=True)
+
+    def test_unresolvable_crate_revision_cannot_mean_no_inputs(self):
+        self.crates()
+        with self.assertRaises(evidence_gc.Refused):
+            evidence_gc.crate_keys(str(self.f.repo), set(), 'f' * 40, [])
+
+    def test_new_layout_partial_clone_prefetches_selected_inputs_and_manifests(self):
+        self.check_partial_clone_crate_prefetch('new')
+
+    def test_a_partial_clone_fetches_the_manifests_it_lacks_in_one_go_before_keying(self):
+        self.check_partial_clone_crate_prefetch('old')
+
+    def check_partial_clone_crate_prefetch(self, layout):
+        old, recent, pr = self.crates(layout=layout)
         self.f.git('config', 'uploadpack.allowFilter', 'true')
         self.f.git('config', 'uploadpack.allowAnySHA1InWant', 'true')
         clone = self.f.root / 'partial.git'
@@ -724,7 +788,13 @@ sys.exit({exit_code})
         code, result, error = self.run_gc('--retention', self.retention(reason='why the numbers are these'))
         self.assertEqual(code, 0, error)
         self.assertEqual(result['retention']['reason'], 'why the numbers are these')
-        main_file = json.loads((ROOT / '.st/evidence-retention.json').read_text())
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
+        retention_path = ROOT / '.fractal/evidence-retention.json'
+        try:
+            retention_path.lstat()
+        except FileNotFoundError:
+            retention_path = ROOT / '.st/evidence-retention.json'
+        main_file = json.loads(retention_path.read_text())
         self.assertEqual(evidence_gc.load_retention(json.dumps(main_file)), main_file, "this repository's own retention file is valid")
         self.assertEqual(self.run_gc('--head', 'short')[0], 1)
         done = subprocess.run([sys.executable, str(GC), '--repo', str(self.f.repo), '--main', 'main'], capture_output=True, text=True)
@@ -744,6 +814,41 @@ sys.exit({exit_code})
         result = json.loads(done.stdout)
         self.assertEqual(result['retention']['grace_hours'], 264)
         self.assertEqual(result['reasons'].get('kept: grace'), 1, kept)
+
+    def test_new_retention_wins_and_malformed_new_does_not_fall_back(self):
+        self.world()
+        new = self.f.repo / '.fractal/evidence-retention.json'
+        new.parent.mkdir()
+        new.write_text(json.dumps({**RETENTION, 'grace_hours': 123}))
+        (self.f.repo / '.st/evidence-retention.json').write_text(json.dumps(RETENTION))
+        self.f.git('add', '-A')
+        with At(0.5):
+            self.f.git('commit', '-q', '-m', 'new retention')
+        command = [sys.executable, str(GC), '--repo', str(self.f.repo), '--main', 'main', '--as-of', str(NOW)]
+        done = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)['retention']['grace_hours'], 123)
+        new.write_text('{')
+        self.f.git('add', '-A')
+        with At(0.4):
+            self.f.git('commit', '-q', '-m', 'malformed retention')
+        done = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('not valid JSON', done.stderr)
+
+    def test_selected_skip_policy_malformed_or_revision_missing_fails_closed(self):
+        self.world()
+        new = self.f.repo / '.fractal/evidence-skip-policy.json'
+        new.parent.mkdir()
+        new.write_text('{')
+        self.f.git('add', '-A')
+        with At(0.5):
+            self.f.git('commit', '-q', '-m', 'malformed new policy')
+        code, _, error = self.run_gc()
+        self.assertNotEqual(code, 0)
+        self.assertIn('cannot read selected skip policy', error)
+        code, _, _ = self.run_gc('--policy-from', 'f' * 40)
+        self.assertNotEqual(code, 0)
 
     def test_a_branch_tip_protects_its_tree_until_it_is_older_than_branch_days(self):
         old, recent, pr = self.world()  # the pull request head is 30 days old

@@ -247,6 +247,7 @@ mod socket_tests {
                             key: "a0".into(),
                         },
                     ],
+                version: None,
                 },
             )
             .await
