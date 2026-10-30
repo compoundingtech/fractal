@@ -14,10 +14,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
+use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 /// One isolated daemon whose API can stop and start again over the same durable graph.
@@ -26,7 +26,10 @@ struct Daemon {
     socket: PathBuf,
     store: Arc<Store>,
     event_notify: watch::Sender<u64>,
-    server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
+    server: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        std::thread::JoinHandle<()>,
+    )>,
 }
 
 impl Daemon {
@@ -73,19 +76,23 @@ impl Daemon {
     }
 
     fn state(&self) -> AppState {
-        AppState { owning_person: None,
-        store: self.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: self.event_notify.clone(),
-        node: "restart-node".into(),
-        state_dir: self.root.join("daemon"),
-        pty_root: self.root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        AppState {
+            owning_person: None,
+            store: self.store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: self.event_notify.clone(),
+            node: "restart-node".into(),
+            state_dir: self.root.join("daemon"),
+            pty_root: self.root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
     }
 
     async fn start_with_binding(&mut self, native: bool) {
@@ -140,7 +147,9 @@ impl Daemon {
     async fn stop(&mut self) {
         if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
-            tokio::task::spawn_blocking(move || thread.join().unwrap()).await.unwrap();
+            tokio::task::spawn_blocking(move || thread.join().unwrap())
+                .await
+                .unwrap();
         }
         wait_until(
             "the stopped daemon refuses new connections",
@@ -162,7 +171,8 @@ impl Daemon {
                 idempotency_key: None,
             })
             .unwrap();
-        self.event_notify.send_modify(|value| *value = value.wrapping_add(1));
+        self.event_notify
+            .send_modify(|value| *value = value.wrapping_add(1));
     }
 
     /// The runtime observation the reconciler recorded before the restart.
@@ -242,7 +252,10 @@ impl Drop for Daemon {
 }
 
 async fn wait_until(what: &str, limit: Duration, condition: impl FnMut() -> bool) {
-    assert!(wait_until_for(limit, condition).await, "timed out waiting until {what}");
+    assert!(
+        wait_until_for(limit, condition).await,
+        "timed out waiting until {what}"
+    );
 }
 
 /// `wait_until`'s poll and limit, returning instead of panicking so the caller can print
@@ -335,7 +348,10 @@ fn channel_evidence(daemon: &Daemon, root: &Path, mark: u64, channel: Child) -> 
             .map(|event| {
                 let body = event.body.to_string();
                 let body: String = body.chars().take(600).collect();
-                format!("{} {} {} {body}", event.store_index, event.kind, event.subject)
+                format!(
+                    "{} {} {} {body}",
+                    event.store_index, event.kind, event.subject
+                )
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -457,16 +473,31 @@ async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached(
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .env("ST3_CLAUDE_ATTACH_WINDOW_MS", "50")
-            .args(["driver", "claude", "--subject", seat, "--", "sh", "-c", provider])
+            .args([
+                "driver",
+                "claude",
+                "--subject",
+                seat,
+                "--",
+                "sh",
+                "-c",
+                provider,
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn().unwrap(),
+            .spawn()
+            .unwrap(),
     ));
-    wait_until("the policy-blocked driver reports no attachment", Duration::from_secs(10), || {
-        assert_alive(&mut driver, "policy-blocked driver");
-        daemon.has_diagnostic(seat, incarnation, "claude-channel-unattached")
-    }).await;
+    wait_until(
+        "the policy-blocked driver reports no attachment",
+        Duration::from_secs(10),
+        || {
+            assert_alive(&mut driver, "policy-blocked driver");
+            daemon.has_diagnostic(seat, incarnation, "claude-channel-unattached")
+        },
+    )
+    .await;
     // Read only the three flushed banner lines; the still-running provider owns the pipe.
     let mut output = BufReader::new(driver.stdout.take().unwrap());
     let mut banner = String::new();
@@ -694,8 +725,8 @@ fn declare_claude(daemon: &Daemon, seat: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_quiet_idle_seat_ages_stale_and_recovers_new_evidence_after_daemon_restart() {
-    use sha2::{Digest as _, Sha256};
     use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    use sha2::{Digest as _, Sha256};
 
     let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
@@ -724,8 +755,17 @@ time.sleep(300)
         command
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
-            .args(["driver", "claude", "--subject", seat, "--", "python3", "-c", provider,
-                test_env!("CARGO_BIN_EXE_fractal-fixture")])
+            .args([
+                "driver",
+                "claude",
+                "--subject",
+                seat,
+                "--",
+                "python3",
+                "-c",
+                provider,
+                test_env!("CARGO_BIN_EXE_fractal-fixture"),
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -748,17 +788,29 @@ time.sleep(300)
     )
     .await;
     let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
-    wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
-        daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
-            && daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap()
-                .iter().any(|claim| {
-                    claim.body["fields"]["code"] == "claude-channel-initialized"
-                        && claim.body["fields"]["incarnation_id"] == incarnation
-                        && claim.body["fields"]["reason"].as_str().is_some_and(|reason| {
-                            reason.contains("legacy ownership: unprotected until next natural restart")
-                        })
-                })
-    })
+    wait_until(
+        "the quiet seat's channel attaches",
+        Duration::from_secs(10),
+        || {
+            daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
+                && daemon
+                    .store
+                    .claims_for(seat, Some("harness.diagnostic"))
+                    .unwrap()
+                    .iter()
+                    .any(|claim| {
+                        claim.body["fields"]["code"] == "claude-channel-initialized"
+                            && claim.body["fields"]["incarnation_id"] == incarnation
+                            && claim.body["fields"]["reason"]
+                                .as_str()
+                                .is_some_and(|reason| {
+                                    reason.contains(
+                                        "legacy ownership: unprotected until next natural restart",
+                                    )
+                                })
+                    })
+        },
+    )
     .await;
     // Stand in for this wrapper's Stop hook. Retain the same provider ownership for a
     // genuine transition after the restart; quiet evidence is allowed to become stale.
@@ -772,12 +824,13 @@ time.sleep(300)
         owned.evidence_incarnation.unwrap(),
         owned.ownership_sequence.unwrap(),
     );
-    writer.observe(Observation::new(
-        Activity::Idle,
-        BlockedOn::None,
-        InputBuffer::Empty,
-    ))
-    .unwrap();
+    writer
+        .observe(Observation::new(
+            Activity::Idle,
+            BlockedOn::None,
+            InputBuffer::Empty,
+        ))
+        .unwrap();
     wait_until("the driver publishes idle", Duration::from_secs(10), || {
         daemon
             .harness_states(seat, incarnation)
@@ -798,16 +851,22 @@ time.sleep(300)
     // Accepted legacy startup stays silent in the terminal, but operators retain both
     // its delivery-report warning and its durable initialization diagnostic.
     let warning = "legacy ownership: unprotected until next natural restart";
-    assert!(before["delivery"]["reason"].as_str().is_some_and(|reason| {
-        reason.contains(warning)
-    }), "{before}");
-    let initialized = daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    assert!(
+        before["delivery"]["reason"]
+            .as_str()
+            .is_some_and(|reason| { reason.contains(warning) }),
+        "{before}"
+    );
+    let initialized = daemon
+        .store
+        .claims_for(seat, Some("harness.diagnostic"))
+        .unwrap();
     assert!(initialized.iter().any(|claim| {
         claim.body["fields"]["code"] == "claude-channel-initialized"
             && claim.body["fields"]["incarnation_id"] == incarnation
-            && claim.body["fields"]["reason"].as_str().is_some_and(|reason| {
-                reason.contains(warning)
-            })
+            && claim.body["fields"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(warning))
     }));
     daemon.stop().await;
     // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
@@ -818,10 +877,18 @@ time.sleep(300)
     daemon.store = Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap());
     daemon.start_admitted_protocol().await;
     let stale: Value = client.get("/v1/client/agents").await.unwrap();
-    let stale = stale["items"].as_array().unwrap().iter().find(|row| row["id"] == seat).unwrap();
+    let stale = stale["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == seat)
+        .unwrap();
     assert_eq!(stale["observation"], "stale", "{stale}");
     assert_eq!(stale["harness_state"], "indeterminate", "{stale}");
-    assert_eq!(stale["operational"]["runtime_incarnation"], incarnation, "{stale}");
+    assert_eq!(
+        stale["operational"]["runtime_incarnation"], incarnation,
+        "{stale}"
+    );
     assert_eq!(stale["delivery"]["transport"], "claude-channel", "{stale}");
     assert!(daemon.has_diagnostic(seat, incarnation, "claude-channel-attached"));
     assert_alive(&mut driver, "the same quiet driver after daemon restart");
@@ -830,8 +897,20 @@ time.sleep(300)
     fractal_daemon::test_support::skew_client_clock(0);
     // A provider transition bypasses the five-minute unchanged-evidence guard. Require the
     // fresh idle record to recover through the restarted daemon without restarting the seat.
-    writer.observe(Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Empty)).unwrap();
-    writer.observe(Observation::new(Activity::Idle, BlockedOn::None, InputBuffer::Empty)).unwrap();
+    writer
+        .observe(Observation::new(
+            Activity::Active,
+            BlockedOn::None,
+            InputBuffer::Empty,
+        ))
+        .unwrap();
+    writer
+        .observe(Observation::new(
+            Activity::Idle,
+            BlockedOn::None,
+            InputBuffer::Empty,
+        ))
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(40);
     let recovered = loop {
         let view: Value = client.get("/v1/client/agents").await.unwrap();
@@ -966,7 +1045,9 @@ enum Ending {
 /// neither an answer nor a close.
 fn request_ending(socket: &Path, path: &str) -> Ending {
     let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").unwrap();
     let mut buffer = [0u8; 4096];
     match stream.read(&mut buffer) {
@@ -998,7 +1079,9 @@ async fn a_stopped_daemon_cannot_answer_a_request_it_was_already_handling() {
             }
         })
     };
-    daemon.start_with_routes(axum::Router::new().route("/test/held", held)).await;
+    daemon
+        .start_with_routes(axum::Router::new().route("/test/held", held))
+        .await;
     let socket = daemon.socket.clone();
     let client = std::thread::spawn(move || request_ending(&socket, "/test/held"));
     tokio::task::spawn_blocking(move || handler_entered.recv_timeout(Duration::from_secs(10)))
@@ -1008,7 +1091,9 @@ async fn a_stopped_daemon_cannot_answer_a_request_it_was_already_handling() {
     daemon.stop().await;
     // A handler that outlived the stop answers now: stopping only the listener left it running.
     release.add_permits(1);
-    let ending = tokio::task::spawn_blocking(move || client.join().unwrap()).await.unwrap();
+    let ending = tokio::task::spawn_blocking(move || client.join().unwrap())
+        .await
+        .unwrap();
     assert_eq!(ending, Ending::Closed);
 }
 
@@ -1129,7 +1214,8 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     let log = driver_log(root);
     // The outage shows up as a refused connection, or as a page request the stop cut short.
     assert!(
-        log.contains("is not reachable") || log.contains("closed the connection before it answered"),
+        log.contains("is not reachable")
+            || log.contains("closed the connection before it answered"),
         "{log}"
     );
     assert!(log.contains("may be restarting"), "{log}");
@@ -1141,7 +1227,10 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         log.contains("native conversation delivery resumed"),
         "{log}"
     );
-    assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
+    assert!(
+        !log.contains("st3 up") && !log.contains("fractal up"),
+        "{log}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1235,7 +1324,10 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
-    assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
+    assert!(
+        !log.contains("st3 up") && !log.contains("fractal up"),
+        "{log}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1255,12 +1347,18 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
     let _socket = std::os::unix::net::UnixListener::bind(registry.join("seat.sock")).unwrap();
     std::fs::write(registry.join("seat.pid"), std::process::id().to_string()).unwrap();
     let started = "2026-10-03T20:00:00.000Z";
-    std::fs::write(registry.join("seat.json"), json!({
-        "createdAt": started, "tags": {"st3.subject": seat},
-    }).to_string()).unwrap();
+    std::fs::write(
+        registry.join("seat.json"),
+        json!({
+            "createdAt": started, "tags": {"st3.subject": seat},
+        })
+        .to_string(),
+    )
+    .unwrap();
     let incarnation = format!("{}:{started}", std::process::id());
     use sha2::Digest as _;
-    let dir = root.join("catalog/.st3-channel-outbox")
+    let dir = root
+        .join("catalog/.st3-channel-outbox")
         .join(hex::encode(sha2::Sha256::digest(seat.as_bytes())))
         .join(hex::encode(sha2::Sha256::digest(incarnation.as_bytes())));
     let todo = json!({"type":"todo", "session":"native", "observed_at":"2026-10-03T20:00:01Z",
@@ -1269,49 +1367,84 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
         ]}], "totals":{"pending":0,"in_progress":1,"completed":0,"blocked":0},
         "truncated":false});
     fractal_drivers::harness_events::enable(&dir, &incarnation).unwrap();
-    let mut fields = fractal_drivers::pi_channel::todo_observation(&todo, "omp", Some("native"), &incarnation).unwrap();
+    let mut fields =
+        fractal_drivers::pi_channel::todo_observation(&todo, "omp", Some("native"), &incarnation)
+            .unwrap();
     fields.get_mut("phases").unwrap()[0]["tasks"][0]["content"] = "Older rejected hydration".into();
-    fractal_drivers::harness_events::write_channel_todo(&dir, &incarnation, &json!(fields)).unwrap();
-    let event = fractal_drivers::harness_events::pending(&dir, 10).unwrap().remove(0);
+    fractal_drivers::harness_events::write_channel_todo(&dir, &incarnation, &json!(fields))
+        .unwrap();
+    let event = fractal_drivers::harness_events::pending(&dir, 10)
+        .unwrap()
+        .remove(0);
     let mut bad_fields: BTreeMap<String, Value> = serde_json::from_value(event.payload).unwrap();
     bad_fields.remove("incarnation");
     let rejected = ClaimInput {
-        subject: seat.into(), kind: "harness.todo.observed".into(), actor: Some(seat.into()),
-        fields: bad_fields, evidence: vec![], expected_subject: None,
-        idempotency_key: Some(format!("harness-todo:{seat}:{incarnation}:{}", event.sequence)),
+        subject: seat.into(),
+        kind: "harness.todo.observed".into(),
+        actor: Some(seat.into()),
+        fields: bad_fields,
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: Some(format!(
+            "harness-todo:{seat}:{incarnation}:{}",
+            event.sequence
+        )),
     };
-    fractal_drivers::harness_events::prepare_publication(&dir, event.sequence,
-        "harness.todo.observed:", &serde_json::to_value(rejected).unwrap()).unwrap();
+    fractal_drivers::harness_events::prepare_publication(
+        &dir,
+        event.sequence,
+        "harness.todo.observed:",
+        &serde_json::to_value(rejected).unwrap(),
+    )
+    .unwrap();
     let mut channel = seat_command(root, &daemon.socket)
         .env("PTY_ROOT", &registry)
         .env("ST_AGENT", seat)
-        .env("ST3_ACCOUNT", std::env::var("ST3_ACCOUNT").unwrap_or_default())
-        .arg("--catalog").arg(root.join("catalog"))
+        .env(
+            "ST3_ACCOUNT",
+            std::env::var("ST3_ACCOUNT").unwrap_or_default(),
+        )
+        .arg("--catalog")
+        .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "restart-todo"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut input = channel.stdin.take().unwrap();
     let output = channel.stdout.take().unwrap();
     let (frames, received) = std::sync::mpsc::channel::<Value>();
     std::thread::spawn(move || {
         for line in BufReader::new(output).lines() {
             let Ok(line) = line else { break };
-            if let Ok(frame) = serde_json::from_str(&line) { let _ = frames.send(frame); }
+            if let Ok(frame) = serde_json::from_str(&line) {
+                let _ = frames.send(frame);
+            }
         }
     });
-    assert_eq!(received.recv_timeout(Duration::from_secs(10)).unwrap()["type"], "hello");
+    assert_eq!(
+        received.recv_timeout(Duration::from_secs(10)).unwrap()["type"],
+        "hello"
+    );
     for frame in [
         json!({"type":"ready", "sessionId":"native"}),
         json!({"type":"state", "state":"idle"}),
         todo,
-    ] { writeln!(input, "{frame}").unwrap(); }
+    ] {
+        writeln!(input, "{frame}").unwrap();
+    }
     input.flush().unwrap();
     daemon.send("message/restart-todo-mail", seat, "GRAPH LAG MAIL");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let frame = match received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        let frame = match received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
             Ok(frame) => frame,
-            Err(error) => panic!("waiting for graph-lag delivery: {error}; stderr: {}", stop(channel)),
+            Err(error) => panic!(
+                "waiting for graph-lag delivery: {error}; stderr: {}",
+                stop(channel)
+            ),
         };
         assert_ne!(frame["type"], "hello", "delivery must not reconnect");
         if frame["type"] == "message" {
@@ -1320,29 +1453,67 @@ async fn todo_graph_lag_on_first_open_keeps_delivery_and_publishes_hydration_aft
         }
     }
     assert_alive(&mut channel, "the graph-lag channel");
-    assert!(daemon.store.claims_for(seat, Some("harness.todo.observed")).unwrap().is_empty());
+    assert!(
+        daemon
+            .store
+            .claims_for(seat, Some("harness.todo.observed"))
+            .unwrap()
+            .is_empty()
+    );
     daemon.observe_running(seat, &incarnation);
     let deadline = Instant::now() + Duration::from_secs(65);
-    while !daemon.store.claims_for(seat, Some("harness.todo.observed")).unwrap_or_default().iter()
-            .any(|claim| claim.body.pointer("/fields/incarnation_id").and_then(Value::as_str)
-                    == Some(incarnation.as_str())
-                && claim.body.pointer("/fields/phases/0/tasks/0/content").and_then(Value::as_str)
-                    == Some("Preserved through graph lag"))
+    while !daemon
+        .store
+        .claims_for(seat, Some("harness.todo.observed"))
+        .unwrap_or_default()
+        .iter()
+        .any(|claim| {
+            claim
+                .body
+                .pointer("/fields/incarnation_id")
+                .and_then(Value::as_str)
+                == Some(incarnation.as_str())
+                && claim
+                    .body
+                    .pointer("/fields/phases/0/tasks/0/content")
+                    .and_then(Value::as_str)
+                    == Some("Preserved through graph lag")
+        })
     {
-        assert!(Instant::now() < deadline, "hydration after graph catch-up: {}", driver_log(root));
+        assert!(
+            Instant::now() < deadline,
+            "hydration after graph catch-up: {}",
+            driver_log(root)
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_alive(&mut channel, "the caught-up channel");
-    wait_until("the repaired retry is acknowledged", Duration::from_secs(5), || {
-        fractal_drivers::harness_events::pending(&dir, 10).unwrap().is_empty()
-    }).await;
-    let connection = rusqlite::Connection::open(fractal_drivers::harness_events::database_path(&dir)).unwrap();
-    let old_slots: u64 = connection.query_row(
-        "SELECT COUNT(*) FROM prepared WHERE slot='harness.todo.observed:'", [], |row| row.get(0),
-    ).unwrap();
+    wait_until(
+        "the repaired retry is acknowledged",
+        Duration::from_secs(5),
+        || {
+            fractal_drivers::harness_events::pending(&dir, 10)
+                .unwrap()
+                .is_empty()
+        },
+    )
+    .await;
+    let connection =
+        rusqlite::Connection::open(fractal_drivers::harness_events::database_path(&dir)).unwrap();
+    let old_slots: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM prepared WHERE slot='harness.todo.observed:'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(old_slots, 0);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(!driver_log(root).contains("unknown-claim-field"), "{}", driver_log(root));
+    assert!(
+        !driver_log(root).contains("unknown-claim-field"),
+        "{}",
+        driver_log(root)
+    );
     assert_alive(&mut channel, "the repaired channel after later retry ticks");
     let _ = stop(channel);
 }
@@ -1362,56 +1533,177 @@ async fn native_outbox_drain_preserves_captured_limits_and_usage_account_attribu
     daemon.observe_running(seat, incarnation);
     daemon.start_with_binding(true).await;
     let mut channel = seat_command(root, &daemon.socket)
-        .env("ST_AGENT", seat).env("ST3_ACCOUNT", "successor/different-account")
-        .arg("--catalog").arg(root.join("catalog"))
+        .env("ST_AGENT", seat)
+        .env("ST3_ACCOUNT", "successor/different-account")
+        .arg("--catalog")
+        .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "drain-accounts"])
-        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped())
-        .spawn().unwrap();
-    let dir = root.join("catalog/.st3-channel-outbox")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let dir = root
+        .join("catalog/.st3-channel-outbox")
         .join(hex::encode(sha2::Sha256::digest(seat.as_bytes())))
         .join(hex::encode(sha2::Sha256::digest(incarnation.as_bytes())));
-    wait_until("the native drain binds its spool", Duration::from_secs(10), || {
-        fractal_drivers::harness_events::enabled(&dir) && fractal_drivers::harness_events::pending(&dir, 1).is_ok()
-    }).await;
-    fractal_drivers::harness_state::claim(&dir, "drain-accounts", "omp", "account-producer").unwrap();
+    wait_until(
+        "the native drain binds its spool",
+        Duration::from_secs(10),
+        || {
+            fractal_drivers::harness_events::enabled(&dir)
+                && fractal_drivers::harness_events::pending(&dir, 1).is_ok()
+        },
+    )
+    .await;
+    fractal_drivers::harness_state::claim(&dir, "drain-accounts", "omp", "account-producer")
+        .unwrap();
     let now = fractal_drivers::message::now_ms();
-    fractal_drivers::harness_events::write_snapshot(&dir, "harness-context", &serde_json::to_vec(&json!({
-        "schema":"st.harness-context.v1", "agent":"drain-accounts", "harness":"omp",
-        "incarnation":"account-producer", "observedAtMs":now, "writtenAtMs":now,
-        "sessionTotalTokens":123, "account":"omp/provider-account",
-        "rateLimits":{"fiveHour":37,"sevenDay":41,"observedAtMs":now - 120_000},
-    })).unwrap()).unwrap();
-    let mut timeline = fractal_drivers::harness_timeline::Writer::new(&dir, "omp", "account-producer");
-    timeline.append("account-response", fractal_drivers::harness_timeline::Role::System,
-        fractal_drivers::harness_timeline::EntryType::Usage, json!({
-            "semantics":"response", "model":"example", "account":"omp/provider-account",
-            "input_tokens":10,"output_tokens":2,"total_tokens":12,
-        }), true).unwrap();
-    wait_until("limits and usage publish through the native drain", Duration::from_secs(10), || {
-        !daemon.store.observations_for(seat, "harness.limits").unwrap_or_default().is_empty()
-            && daemon.store.observations_for(seat, "harness.usage").unwrap_or_default().iter()
-                .any(|claim| claim.body.pointer("/fields/semantics").and_then(Value::as_str)
-                    == Some("session_cumulative"))
-            && !daemon.store.observations_for(seat, "harness.timeline").unwrap_or_default().is_empty()
-    }).await;
-    let limits = daemon.store.observations_for(seat, "harness.limits").unwrap().pop().unwrap();
-    let cumulative = daemon.store.observations_for(seat, "harness.usage").unwrap().into_iter()
-        .find(|claim| claim.body.pointer("/fields/semantics").and_then(Value::as_str)
-            == Some("session_cumulative")).unwrap();
-    let timeline = daemon.store.observations_for(seat, "harness.timeline").unwrap().pop().unwrap();
-    let captured = std::env::var("ST3_ACCOUNT").ok().filter(|account| !account.is_empty());
-    let account = captured.as_ref().map(|account| {
-        fractal_drivers::account::account_label("omp", &format!("declared:{account}"))
-    }).unwrap_or_else(|| "omp/provider-account".into());
-    assert_eq!(limits.body.pointer("/fields/account").and_then(Value::as_str), Some(account.as_str()));
-    assert_eq!(limits.body.pointer("/fields/account_ref").and_then(Value::as_str), captured.as_deref());
-    assert_eq!(limits.body.pointer("/fields/five_hour_percent").and_then(Value::as_f64), Some(37.0));
-    assert_eq!(limits.body.pointer("/fields/measured_at_unix_ms").and_then(Value::as_u64), Some(now - 120_000));
-    assert_eq!(cumulative.body.pointer("/fields/total_tokens").and_then(Value::as_u64), Some(123));
-    assert_eq!(cumulative.body.pointer("/fields/account").and_then(Value::as_str),
-        captured.as_ref().map(|_| account.as_str()));
-    assert_eq!(timeline.body.pointer("/fields/body/account").and_then(Value::as_str), Some(account.as_str()));
-    assert_eq!(timeline.body.pointer("/fields/body/total_tokens").and_then(Value::as_u64), Some(12));
+    fractal_drivers::harness_events::write_snapshot(
+        &dir,
+        "harness-context",
+        &serde_json::to_vec(&json!({
+            "schema":"st.harness-context.v1", "agent":"drain-accounts", "harness":"omp",
+            "incarnation":"account-producer", "observedAtMs":now, "writtenAtMs":now,
+            "sessionTotalTokens":123, "account":"omp/provider-account",
+            "rateLimits":{"fiveHour":37,"sevenDay":41,"observedAtMs":now - 120_000},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut timeline =
+        fractal_drivers::harness_timeline::Writer::new(&dir, "omp", "account-producer");
+    timeline
+        .append(
+            "account-response",
+            fractal_drivers::harness_timeline::Role::System,
+            fractal_drivers::harness_timeline::EntryType::Usage,
+            json!({
+                "semantics":"response", "model":"example", "account":"omp/provider-account",
+                "input_tokens":10,"output_tokens":2,"total_tokens":12,
+            }),
+            true,
+        )
+        .unwrap();
+    wait_until(
+        "limits and usage publish through the native drain",
+        Duration::from_secs(10),
+        || {
+            !daemon
+                .store
+                .observations_for(seat, "harness.limits")
+                .unwrap_or_default()
+                .is_empty()
+                && daemon
+                    .store
+                    .observations_for(seat, "harness.usage")
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|claim| {
+                        claim
+                            .body
+                            .pointer("/fields/semantics")
+                            .and_then(Value::as_str)
+                            == Some("session_cumulative")
+                    })
+                && !daemon
+                    .store
+                    .observations_for(seat, "harness.timeline")
+                    .unwrap_or_default()
+                    .is_empty()
+        },
+    )
+    .await;
+    let limits = daemon
+        .store
+        .observations_for(seat, "harness.limits")
+        .unwrap()
+        .pop()
+        .unwrap();
+    let cumulative = daemon
+        .store
+        .observations_for(seat, "harness.usage")
+        .unwrap()
+        .into_iter()
+        .find(|claim| {
+            claim
+                .body
+                .pointer("/fields/semantics")
+                .and_then(Value::as_str)
+                == Some("session_cumulative")
+        })
+        .unwrap();
+    let timeline = daemon
+        .store
+        .observations_for(seat, "harness.timeline")
+        .unwrap()
+        .pop()
+        .unwrap();
+    let captured = std::env::var("ST3_ACCOUNT")
+        .ok()
+        .filter(|account| !account.is_empty());
+    let account = captured
+        .as_ref()
+        .map(|account| {
+            fractal_drivers::account::account_label("omp", &format!("declared:{account}"))
+        })
+        .unwrap_or_else(|| "omp/provider-account".into());
+    assert_eq!(
+        limits
+            .body
+            .pointer("/fields/account")
+            .and_then(Value::as_str),
+        Some(account.as_str())
+    );
+    assert_eq!(
+        limits
+            .body
+            .pointer("/fields/account_ref")
+            .and_then(Value::as_str),
+        captured.as_deref()
+    );
+    assert_eq!(
+        limits
+            .body
+            .pointer("/fields/five_hour_percent")
+            .and_then(Value::as_f64),
+        Some(37.0)
+    );
+    assert_eq!(
+        limits
+            .body
+            .pointer("/fields/measured_at_unix_ms")
+            .and_then(Value::as_u64),
+        Some(now - 120_000)
+    );
+    assert_eq!(
+        cumulative
+            .body
+            .pointer("/fields/total_tokens")
+            .and_then(Value::as_u64),
+        Some(123)
+    );
+    assert_eq!(
+        cumulative
+            .body
+            .pointer("/fields/account")
+            .and_then(Value::as_str),
+        captured.as_ref().map(|_| account.as_str())
+    );
+    assert_eq!(
+        timeline
+            .body
+            .pointer("/fields/body/account")
+            .and_then(Value::as_str),
+        Some(account.as_str())
+    );
+    assert_eq!(
+        timeline
+            .body
+            .pointer("/fields/body/total_tokens")
+            .and_then(Value::as_u64),
+        Some(12)
+    );
     assert_alive(&mut channel, "the attribution channel");
     assert!(stop(channel).is_empty());
 }
@@ -1431,33 +1723,61 @@ version 2
 agent "human-omp" { workspace "/tmp"; harness "omp" {} }
 "#;
     let intent = fractal_daemon::parse_intent(source, "restart-node").unwrap();
-    let plan = daemon.store.mission(&intent, fractal_daemon::model::IntentInput {
-        kdl: source.into(),
-        source_name: None,
-    }).unwrap();
-    daemon.store.apply(&intent, &plan.subject_tokens, "human-omp-source").unwrap();
+    let plan = daemon
+        .store
+        .mission(
+            &intent,
+            fractal_daemon::model::IntentInput {
+                kdl: source.into(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    daemon
+        .store
+        .apply(&intent, &plan.subject_tokens, "human-omp-source")
+        .unwrap();
     daemon.observe_running(seat, incarnation);
     daemon.start().await;
     let client = fractal_daemon::client::Client::unix(&daemon.socket);
     let mut channel = seat_command(root, &daemon.socket)
-        .arg("--catalog").arg(root.join("catalog"))
+        .arg("--catalog")
+        .arg(root.join("catalog"))
         .args(["driver", "omp-channel", "--identity", "human-omp"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().unwrap();
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut input = channel.stdin.take().unwrap();
 
-    writeln!(input, "{}", json!({
-        "type": "state", "state": "active", "blockedOn": "human",
-        "ask": "question", "reason": "Which deployment target?",
-    })).unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({
+            "type": "state", "state": "active", "blockedOn": "human",
+            "ask": "question", "reason": "Which deployment target?",
+        })
+    )
+    .unwrap();
     input.flush().unwrap();
-    wait_until("the channel publishes the ask", Duration::from_secs(10), || {
-        daemon.harness_states(seat, incarnation) == ["working"]
-    }).await;
-    let status: fractal_daemon::model::StatusResponse =
-        client.get(&format!("/v1/status?subject={seat}")).await.unwrap();
-    let blocked = status.subjects.into_iter().find(|status| status.subject == seat)
-        .unwrap().harness.unwrap();
+    wait_until(
+        "the channel publishes the ask",
+        Duration::from_secs(10),
+        || daemon.harness_states(seat, incarnation) == ["working"],
+    )
+    .await;
+    let status: fractal_daemon::model::StatusResponse = client
+        .get(&format!("/v1/status?subject={seat}"))
+        .await
+        .unwrap();
+    let blocked = status
+        .subjects
+        .into_iter()
+        .find(|status| status.subject == seat)
+        .unwrap()
+        .harness
+        .unwrap();
     assert_eq!(blocked.state, "working");
     assert_eq!(blocked.blocked_on.as_deref(), Some("human"));
     assert_eq!(blocked.ask.as_deref(), Some("question"));
@@ -1465,18 +1785,33 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
 
     // These are the producer's frames after the matching ask result. The producer's smoke
     // scenario proves that an unrelated result emits only timeline data, never this state.
-    writeln!(input, "{}", json!({
-        "type": "timeline", "event": "tool_result", "payload": {"toolCallId": "ask-1"},
-    })).unwrap();
+    writeln!(
+        input,
+        "{}",
+        json!({
+            "type": "timeline", "event": "tool_result", "payload": {"toolCallId": "ask-1"},
+        })
+    )
+    .unwrap();
     writeln!(input, "{}", json!({"type": "state", "state": "active"})).unwrap();
     input.flush().unwrap();
-    wait_until("the channel publishes the answered state", Duration::from_secs(10), || {
-        daemon.harness_states(seat, incarnation) == ["working", "working"]
-    }).await;
-    let status: fractal_daemon::model::StatusResponse =
-        client.get(&format!("/v1/status?subject={seat}")).await.unwrap();
-    let answered = status.subjects.into_iter().find(|status| status.subject == seat)
-        .unwrap().harness.unwrap();
+    wait_until(
+        "the channel publishes the answered state",
+        Duration::from_secs(10),
+        || daemon.harness_states(seat, incarnation) == ["working", "working"],
+    )
+    .await;
+    let status: fractal_daemon::model::StatusResponse = client
+        .get(&format!("/v1/status?subject={seat}"))
+        .await
+        .unwrap();
+    let answered = status
+        .subjects
+        .into_iter()
+        .find(|status| status.subject == seat)
+        .unwrap()
+        .harness
+        .unwrap();
     assert_eq!(answered.state, "working");
     assert!(answered.blocked_on.is_none());
     assert!(answered.ask.is_none());
@@ -1485,18 +1820,33 @@ agent "human-omp" { workspace "/tmp"; harness "omp" {} }
 
     // A delayed ask from the old channel must not block a resumed runtime's fresh idle proof.
     daemon.observe_running(seat, "human-2");
-    daemon.append(seat, "harness.observed", json!({
-        "state": "idle", "driver": "omp", "incarnation_id": "human-2",
-        "blocked_on": null, "ask": null, "reason": null, "input_buffer": null, "exit": null,
-    }));
-    daemon.append(seat, "harness.observed", json!({
-        "state": "working", "driver": "omp", "incarnation_id": incarnation,
-        "blocked_on": "human", "ask": "question", "reason": "An obsolete question",
-    }));
-    let status: fractal_daemon::model::StatusResponse =
-        client.get(&format!("/v1/status?subject={seat}")).await.unwrap();
-    let resumed = status.subjects.into_iter().find(|status| status.subject == seat)
-        .unwrap().harness.unwrap();
+    daemon.append(
+        seat,
+        "harness.observed",
+        json!({
+            "state": "idle", "driver": "omp", "incarnation_id": "human-2",
+            "blocked_on": null, "ask": null, "reason": null, "input_buffer": null, "exit": null,
+        }),
+    );
+    daemon.append(
+        seat,
+        "harness.observed",
+        json!({
+            "state": "working", "driver": "omp", "incarnation_id": incarnation,
+            "blocked_on": "human", "ask": "question", "reason": "An obsolete question",
+        }),
+    );
+    let status: fractal_daemon::model::StatusResponse = client
+        .get(&format!("/v1/status?subject={seat}"))
+        .await
+        .unwrap();
+    let resumed = status
+        .subjects
+        .into_iter()
+        .find(|status| status.subject == seat)
+        .unwrap()
+        .harness
+        .unwrap();
     assert_eq!(resumed.state, "idle");
     assert_eq!(resumed.incarnation_id, "human-2");
     assert!(resumed.blocked_on.is_none());
@@ -1529,7 +1879,10 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     );
     assert!(stderr.contains("was not reachable for 1s"), "{stderr}");
     assert!(stderr.contains("Nothing was sent"), "{stderr}");
-    assert!(!stderr.contains("st3 up") && !stderr.contains("fractal up"), "{stderr}");
+    assert!(
+        !stderr.contains("st3 up") && !stderr.contains("fractal up"),
+        "{stderr}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1602,7 +1955,9 @@ async fn a_cli_command_tries_a_bound_listener_before_refusing_startup() {
     );
     let _: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        fractal_daemon::startup::read(&daemon.socket).unwrap().status,
+        fractal_daemon::startup::read(&daemon.socket)
+            .unwrap()
+            .status,
         "starting"
     );
 }
@@ -1704,11 +2059,18 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
             let socket = daemon.socket.clone();
             daemon.send("message/ready-probe", seat, "READINESS PROBE");
             for lifecycle in ["delivered", "read", "closed"] {
-                daemon.store.append_claim(&ClaimInput {
-                    subject: "message/ready-probe".into(), kind: format!("message.{lifecycle}"),
-                    actor: Some(seat.into()), fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
-                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-                }).unwrap();
+                daemon
+                    .store
+                    .append_claim(&ClaimInput {
+                        subject: "message/ready-probe".into(),
+                        kind: format!("message.{lifecycle}"),
+                        actor: Some(seat.into()),
+                        fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             let open_channel = || async {
                 let mut channel = seat_command(root, &socket)
@@ -1744,16 +2106,31 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
                 );
                 writeln!(input, "{}", json!({"type":"state", "state":"idle"})).unwrap();
                 input.flush().unwrap();
-                let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(socket.clone()));
+                let client = fractal_daemon::client::Client::new(
+                    fractal_daemon::client::Endpoint::Unix(socket.clone()),
+                );
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
-                    let status: Value = client.get("/v1/messages/delivery/ready-probe").await.unwrap();
+                    let status: Value = client
+                        .get("/v1/messages/delivery/ready-probe")
+                        .await
+                        .unwrap();
                     let delivery = &status["delivery"]["recipient_delivery"];
-                    let ready = matches!(delivery["state"].as_str(), Some("current" | "outdated" | "legacy"));
-                    let own_pid = delivery["state"] == "current" || delivery["reason"].as_str()
-                        .is_some_and(|reason| reason.contains(&format!("pid {}", channel.id())));
-                    if ready && own_pid { break; }
-                    assert!(Instant::now() < deadline, "{driver}/{transport}: channel not ready: {status}");
+                    let ready = matches!(
+                        delivery["state"].as_str(),
+                        Some("current" | "outdated" | "legacy")
+                    );
+                    let own_pid = delivery["state"] == "current"
+                        || delivery["reason"].as_str().is_some_and(|reason| {
+                            reason.contains(&format!("pid {}", channel.id()))
+                        });
+                    if ready && own_pid {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{driver}/{transport}: channel not ready: {status}"
+                    );
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 (channel, input, received)
@@ -1833,11 +2210,21 @@ async fn native_read_mail_is_settled_before_and_after_reopening_the_daemon() {
             );
             daemon.store.replay_replication_graph().unwrap();
             assert_eq!(
-                daemon.store.message("message/consumed").unwrap().unwrap().status,
+                daemon
+                    .store
+                    .message("message/consumed")
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 "read"
             );
             assert_eq!(
-                daemon.store.message("message/unread").unwrap().unwrap().status,
+                daemon
+                    .store
+                    .message("message/unread")
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 "staged"
             );
             daemon.stop().await;
@@ -1867,33 +2254,57 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
                 let subject = format!("message/{id}");
                 daemon.send(&subject, seat, &format!("BRIEF {id}"));
                 for status in ["delivered", "read", "closed"] {
-                    daemon.store.append_claim(&ClaimInput {
-                        subject: subject.clone(),
-                        kind: format!("message.{status}"),
-                        actor: Some(seat.into()),
-                        fields: BTreeMap::from([("status".into(), json!(status))]),
-                        evidence: Vec::new(),
-                        expected_subject: None,
-                        idempotency_key: None,
-                    }).unwrap();
-                    if status == lifecycle { break; }
+                    daemon
+                        .store
+                        .append_claim(&ClaimInput {
+                            subject: subject.clone(),
+                            kind: format!("message.{status}"),
+                            actor: Some(seat.into()),
+                            fields: BTreeMap::from([("status".into(), json!(status))]),
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: None,
+                        })
+                        .unwrap();
+                    if status == lifecycle {
+                        break;
+                    }
                 }
             }
             // Keep the native parent session, replacing only the seat incarnation.
-            daemon.append(seat, "runtime.observed", json!({
-                "runtime_id": "replay-worker", "incarnation_id": "previous", "status": "exited",
-            }));
+            daemon.append(
+                seat,
+                "runtime.observed",
+                json!({
+                    "runtime_id": "replay-worker", "incarnation_id": "previous", "status": "exited",
+                }),
+            );
             daemon.observe_running(seat, "replacement");
             daemon.start_admitted_protocol().await;
             let mut channel = seat_command(root, &daemon.socket)
                 .env("ST_AGENT", seat)
                 .env("ST3_MAILBOX_TRANSPORT", transport)
-                .env(fractal_drivers::omp_session::CHANNEL_SESSION, "same-native-parent")
-                .env(fractal_drivers::pi_session::CHANNEL_SESSION, "same-native-parent")
-                .arg("--catalog").arg(root.join("catalog"))
-                .args(["driver", &format!("{driver}-channel"), "--identity", "replay-worker"])
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-                .spawn().unwrap();
+                .env(
+                    fractal_drivers::omp_session::CHANNEL_SESSION,
+                    "same-native-parent",
+                )
+                .env(
+                    fractal_drivers::pi_session::CHANNEL_SESSION,
+                    "same-native-parent",
+                )
+                .arg("--catalog")
+                .arg(root.join("catalog"))
+                .args([
+                    "driver",
+                    &format!("{driver}-channel"),
+                    "--identity",
+                    "replay-worker",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
             let mut input = channel.stdin.take().unwrap();
             let (frames, received) = std::sync::mpsc::channel::<Value>();
             let output = channel.stdout.take().unwrap();
@@ -1905,18 +2316,57 @@ async fn delivered_unread_mail_stays_in_the_mailbox_after_seat_restart() {
                     }
                 }
             });
-            assert_eq!(received.recv_timeout(Duration::from_secs(10)).unwrap()["type"], "hello");
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(10)).unwrap()["type"],
+                "hello"
+            );
             writeln!(input, "{}", json!({"type":"state", "state":"idle"})).unwrap();
             input.flush().unwrap();
             // Several mailbox ticks must not reoffer old mail, regardless of native receipts.
             let deadline = Instant::now() + Duration::from_millis(2_200);
-            while let Ok(frame) = received.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                assert_ne!(frame["type"], "message", "{driver}/{transport}: duplicate or settled mail: {frame}");
+            while let Ok(frame) =
+                received.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                assert_ne!(
+                    frame["type"], "message",
+                    "{driver}/{transport}: duplicate or settled mail: {frame}"
+                );
             }
-            assert_eq!(daemon.store.message("message/unread-one").unwrap().unwrap().status, "delivered");
-            assert_eq!(daemon.store.message("message/read").unwrap().unwrap().status, "read");
-            assert_eq!(daemon.store.message("message/closed").unwrap().unwrap().status, "closed");
-            assert_eq!(daemon.store.claims_for("message/unread-one", Some("message.delivered")).unwrap().len(), 1);
+            assert_eq!(
+                daemon
+                    .store
+                    .message("message/unread-one")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "delivered"
+            );
+            assert_eq!(
+                daemon
+                    .store
+                    .message("message/read")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "read"
+            );
+            assert_eq!(
+                daemon
+                    .store
+                    .message("message/closed")
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "closed"
+            );
+            assert_eq!(
+                daemon
+                    .store
+                    .claims_for("message/unread-one", Some("message.delivered"))
+                    .unwrap()
+                    .len(),
+                1
+            );
             let stderr = stop(channel);
             assert!(stderr.is_empty(), "{driver}/{transport}: {stderr}");
             daemon.stop().await;
@@ -1964,11 +2414,18 @@ impl ClaudeChannelFixture {
         );
         daemon.send("message/quartz-ready", "agent/quartz", "READINESS PROBE");
         for lifecycle in ["delivered", "read", "closed"] {
-            daemon.store.append_claim(&ClaimInput {
-                subject: "message/quartz-ready".into(), kind: format!("message.{lifecycle}"),
-                actor: Some("agent/quartz".into()), fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
-                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-            }).unwrap();
+            daemon
+                .store
+                .append_claim(&ClaimInput {
+                    subject: "message/quartz-ready".into(),
+                    kind: format!("message.{lifecycle}"),
+                    actor: Some("agent/quartz".into()),
+                    fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
         }
         fixture
     }
@@ -2058,16 +2515,31 @@ impl ClaudeChannelFixture {
         std::sync::mpsc::Receiver<Value>,
     ) {
         let (channel, input, received) = self.open_protocol(root, daemon, wrapper);
-        let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(daemon.socket.clone()));
+        let client = fractal_daemon::client::Client::new(fractal_daemon::client::Endpoint::Unix(
+            daemon.socket.clone(),
+        ));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let view: Value = client.get("/v1/messages/delivery/quartz-ready").await.unwrap();
+            let view: Value = client
+                .get("/v1/messages/delivery/quartz-ready")
+                .await
+                .unwrap();
             let delivery = &view["delivery"]["recipient_delivery"];
-            let ready = matches!(delivery["state"].as_str(), Some("current" | "outdated" | "legacy"));
-            let own_pid = delivery["state"] == "current" || delivery["reason"].as_str()
-                .is_some_and(|reason| reason.contains(&format!("pid {}", channel.id())));
-            if ready && own_pid { break; }
-            assert!(Instant::now() < deadline, "Claude channel not ready: {view}");
+            let ready = matches!(
+                delivery["state"].as_str(),
+                Some("current" | "outdated" | "legacy")
+            );
+            let own_pid = delivery["state"] == "current"
+                || delivery["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(&format!("pid {}", channel.id())));
+            if ready && own_pid {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Claude channel not ready: {view}"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         (channel, input, received)
@@ -2099,49 +2571,51 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
     let captured = requests.clone();
     let release_request = release.clone();
     let recorded = committed.clone();
-    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            let captured = captured.clone();
-            let release = release_request.clone();
-            let recorded = recorded.clone();
-            async move {
-                if request.method() != axum::http::Method::POST
-                    || request.uri().path() != "/v1/claims"
-                {
-                    return next.run(request).await;
-                }
-                let (parts, body) = request.into_parts();
-                let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
-                let input: Value = serde_json::from_slice(&bytes).unwrap();
-                let startup = input["idempotency_key"].as_str().is_some_and(|key| {
-                    key.starts_with("channel-ready:") || key.starts_with("channel-initialized:")
-                });
-                if startup {
-                    let count = {
-                        let mut requests = captured.lock().unwrap();
-                        requests.push(input);
-                        requests.len()
-                    };
-                    if count == 1 {
-                        release.notified().await;
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let captured = captured.clone();
+                let release = release_request.clone();
+                let recorded = recorded.clone();
+                async move {
+                    if request.method() != axum::http::Method::POST
+                        || request.uri().path() != "/v1/claims"
+                    {
+                        return next.run(request).await;
                     }
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                    let input: Value = serde_json::from_slice(&bytes).unwrap();
+                    let startup = input["idempotency_key"].as_str().is_some_and(|key| {
+                        key.starts_with("channel-ready:") || key.starts_with("channel-initialized:")
+                    });
+                    if startup {
+                        let count = {
+                            let mut requests = captured.lock().unwrap();
+                            requests.push(input);
+                            requests.len()
+                        };
+                        if count == 1 {
+                            release.notified().await;
+                        }
+                    }
+                    let response = next
+                        .run(axum::extract::Request::from_parts(
+                            parts,
+                            axum::body::Body::from(bytes),
+                        ))
+                        .await;
+                    if startup {
+                        recorded.store(
+                            response.status().is_success(),
+                            std::sync::atomic::Ordering::Release,
+                        );
+                    }
+                    response
                 }
-                let response = next
-                    .run(axum::extract::Request::from_parts(
-                        parts,
-                        axum::body::Body::from(bytes),
-                    ))
-                    .await;
-                if startup {
-                    recorded.store(
-                        response.status().is_success(),
-                        std::sync::atomic::Ordering::Release,
-                    );
-                }
-                response
-            }
-        },
-    ));
+            },
+        ),
+    );
     daemon.start_isolated_app(app).await;
     let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-activity");
     let (mut channel, mut input, received) =
@@ -2235,7 +2709,11 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
     })
     .await;
     assert!(channel.try_wait().unwrap().unwrap().success());
-    assert_eq!(requests.lock().unwrap().len(), 1, "only the initialization transition may POST");
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "only the initialization transition may POST"
+    );
     let selected = daemon
         .store
         .current_harness("agent/quartz")
@@ -2289,8 +2767,8 @@ async fn delayed_channel_initialization_preserves_activity(activity: &str, legac
 const HOOKLESS_GRACE_MS: u64 = 5_000;
 
 async fn channel_readiness_without_start_hook(native_activity: Option<bool>, late: bool) {
-    use sha2::{Digest as _, Sha256};
     use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    use sha2::{Digest as _, Sha256};
     let root = fractal_daemon::test_support::evidence_tempdir();
     let root = root.path();
     let seat = "agent/grove/hookless-cedar";
@@ -2314,7 +2792,10 @@ time.sleep(300)
         seat_command(root, &daemon.socket)
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
-            .env("ST3_CLAUDE_READINESS_GRACE_MS", HOOKLESS_GRACE_MS.to_string())
+            .env(
+                "ST3_CLAUDE_READINESS_GRACE_MS",
+                HOOKLESS_GRACE_MS.to_string(),
+            )
             .args([
                 "driver",
                 "claude",
@@ -2342,9 +2823,11 @@ time.sleep(300)
         .join("drivers")
         .join(&hex::encode(Sha256::digest(seat.as_bytes()))[..24])
         .join("observations");
-    let owned =
-        fractal_drivers::harness_state::read(&fractal_drivers::harness_state::harness_state_path(&dir), None)
-            .unwrap();
+    let owned = fractal_drivers::harness_state::read(
+        &fractal_drivers::harness_state::harness_state_path(&dir),
+        None,
+    )
+    .unwrap();
     let mut writer = Writer::new(
         &dir,
         "grove/hookless-cedar",
@@ -2410,7 +2893,12 @@ time.sleep(300)
         .await;
         // Cross the entire fallback grace for an early hook; late hooks only need
         // subsequent driver ticks to demonstrate there is no recurring readiness POST.
-        tokio::time::sleep(Duration::from_millis(if late { 3_000 } else { HOOKLESS_GRACE_MS + 1_000 })).await;
+        tokio::time::sleep(Duration::from_millis(if late {
+            3_000
+        } else {
+            HOOKLESS_GRACE_MS + 1_000
+        }))
+        .await;
         assert_eq!(
             daemon.store.current_harness(seat).unwrap().unwrap().state,
             state
@@ -2514,9 +3002,12 @@ async fn initialized_channel_still_rejects_a_foreign_binding(replace_token: bool
     drop(input);
     if let Some((mut replacement, input)) = replacement {
         drop(input);
-        wait_until("the admitted replacement accepts EOF", Duration::from_secs(5), || {
-            replacement.try_wait().unwrap().is_some()
-        }).await;
+        wait_until(
+            "the admitted replacement accepts EOF",
+            Duration::from_secs(5),
+            || replacement.try_wait().unwrap().is_some(),
+        )
+        .await;
         assert!(replacement.try_wait().unwrap().unwrap().success());
     }
     daemon.stop().await;
@@ -2628,7 +3119,8 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
     declare_claude(&daemon, "agent/quartz");
     daemon.observe_running("agent/quartz", "wrapper-offline");
     let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-offline");
-    let (mut channel, mut input, received) = fixture.spawn_protocol(root, &daemon, "wrapper-offline");
+    let (mut channel, mut input, received) =
+        fixture.spawn_protocol(root, &daemon, "wrapper-offline");
     writeln!(
         input,
         "{}",
@@ -2658,7 +3150,13 @@ async fn claude_mcp_initializes_offline_then_attaches_and_reconnects_without_res
             .unwrap()
             .is_empty()
     );
-    assert!(daemon.store.claims_for("agent/quartz", Some("harness.diagnostic")).unwrap().is_empty());
+    assert!(
+        daemon
+            .store
+            .claims_for("agent/quartz", Some("harness.diagnostic"))
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         received.try_recv().is_err(),
         "offline initialization offered mail"
@@ -2780,24 +3278,27 @@ async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() 
     daemon.observe_running("agent/quartz", "wrapper-binding");
     let binding_seen = Arc::new(AtomicBool::new(false));
     let seen = binding_seen.clone();
-    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            let seen = seen.clone();
-            async move {
-                if request.uri().path() == "/v1/mailbox/bind" {
-                    seen.store(true, Ordering::SeqCst);
-                    return axum::response::IntoResponse::into_response((
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        "runtime ownership is not available yet",
-                    ));
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let seen = seen.clone();
+                async move {
+                    if request.uri().path() == "/v1/mailbox/bind" {
+                        seen.store(true, Ordering::SeqCst);
+                        return axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "runtime ownership is not available yet",
+                        ));
+                    }
+                    next.run(request).await
                 }
-                next.run(request).await
-            }
-        },
-    ));
+            },
+        ),
+    );
     daemon.start_isolated_app(app).await;
     let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-binding");
-    let (mut channel, mut input, received) = fixture.spawn_protocol(root, &daemon, "wrapper-binding");
+    let (mut channel, mut input, received) =
+        fixture.spawn_protocol(root, &daemon, "wrapper-binding");
     writeln!(
         input,
         "{}",
@@ -2845,7 +3346,13 @@ async fn claude_mcp_answers_during_binding_retries_and_eof_cancels_attachment() 
             .is_empty(),
         "unbound MCP initialization reported readiness"
     );
-    assert!(daemon.store.claims_for("agent/quartz", Some("harness.diagnostic")).unwrap().is_empty());
+    assert!(
+        daemon
+            .store
+            .claims_for("agent/quartz", Some("harness.diagnostic"))
+            .unwrap()
+            .is_empty()
+    );
     drop(input);
     wait_until(
         "EOF cancels the unbound channel",
@@ -2872,44 +3379,45 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
         daemon.observe_running("agent/quartz", "wrapper-initialization");
         let attempts = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let captured = attempts.clone();
-        let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let captured = captured.clone();
-                async move {
-                    if request.method() != axum::http::Method::POST
-                        || request.uri().path() != "/v1/claims"
-                    {
-                        return next.run(request).await;
-                    }
-                    let (parts, body) = request.into_parts();
-                    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
-                    let input: Value = serde_json::from_slice(&bytes).unwrap();
-                    if input["kind"] == "harness.diagnostic"
-                        && input["fields"]["code"] == "claude-channel-initialized"
-                    {
-                        let count = {
-                            let mut attempts = captured.lock().unwrap();
-                            attempts.push(input);
-                            attempts.len()
-                        };
-                        if count == 1 {
-                            return axum::response::IntoResponse::into_response((
-                                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                                "initialization publication temporarily unavailable",
-                            ));
+        let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state())
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let captured = captured.clone();
+                    async move {
+                        if request.method() != axum::http::Method::POST
+                            || request.uri().path() != "/v1/claims"
+                        {
+                            return next.run(request).await;
                         }
-                        if !recover {
-                            std::future::pending::<()>().await;
+                        let (parts, body) = request.into_parts();
+                        let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                        let input: Value = serde_json::from_slice(&bytes).unwrap();
+                        if input["kind"] == "harness.diagnostic"
+                            && input["fields"]["code"] == "claude-channel-initialized"
+                        {
+                            let count = {
+                                let mut attempts = captured.lock().unwrap();
+                                attempts.push(input);
+                                attempts.len()
+                            };
+                            if count == 1 {
+                                return axum::response::IntoResponse::into_response((
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                    "initialization publication temporarily unavailable",
+                                ));
+                            }
+                            if !recover {
+                                std::future::pending::<()>().await;
+                            }
                         }
+                        next.run(axum::extract::Request::from_parts(
+                            parts,
+                            axum::body::Body::from(bytes),
+                        ))
+                        .await
                     }
-                    next.run(axum::extract::Request::from_parts(
-                        parts,
-                        axum::body::Body::from(bytes),
-                    ))
-                    .await
-                }
-            },
-        ));
+                },
+            ));
         daemon.start_isolated_app(app).await;
         let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-initialization");
         let (mut channel, mut input, received) =
@@ -2953,7 +3461,10 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
                 .claims_for("agent/quartz", Some("harness.diagnostic"))
                 .unwrap();
             assert_eq!(claims.len(), 1);
-            assert_eq!(claims[0].body["fields"]["code"], "claude-channel-initialized");
+            assert_eq!(
+                claims[0].body["fields"]["code"],
+                "claude-channel-initialized"
+            );
             assert!(claims[0].body["fields"].get("state").is_none());
         } else {
             assert!(
@@ -2965,7 +3476,11 @@ async fn claude_mcp_retries_initialization_without_blocking_requests_or_eof() {
             );
         }
         assert!(
-            daemon.store.claims_for("agent/quartz", Some("harness.observed")).unwrap().is_empty(),
+            daemon
+                .store
+                .claims_for("agent/quartz", Some("harness.observed"))
+                .unwrap()
+                .is_empty(),
             "component initialization must not publish native activity"
         );
         {
@@ -3186,7 +3701,15 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
     let fixture = ClaudeChannelFixture::new(root, &daemon, "wrapper-replacement");
     let (mut channel, _input, received) = fixture.open(root, &daemon, "wrapper-replacement").await;
     assert!(received.recv_timeout(Duration::from_millis(1200)).is_err());
-    assert_eq!(daemon.store.message("message/startup").unwrap().unwrap().status, "staged");
+    assert_eq!(
+        daemon
+            .store
+            .message("message/startup")
+            .unwrap()
+            .unwrap()
+            .status,
+        "staged"
+    );
     daemon.send("message/live", "agent/quartz", "QUARTZ LIVE SIGNAL");
     let frame = received.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(frame["params"]["meta"]["messageId"], "message/live");
@@ -3233,9 +3756,29 @@ async fn claude_preboot_mail_is_held_while_live_receipts_survive_outage() {
             1
         );
     }
-    assert_eq!(daemon.store.message("message/startup").unwrap().unwrap().status, "staged");
-    assert!(daemon.store.claims_for("message/startup", Some("message.delivered")).unwrap().is_empty());
-    assert!(daemon.store.claims_for("message/startup", Some("message.read")).unwrap().is_empty());
+    assert_eq!(
+        daemon
+            .store
+            .message("message/startup")
+            .unwrap()
+            .unwrap()
+            .status,
+        "staged"
+    );
+    assert!(
+        daemon
+            .store
+            .claims_for("message/startup", Some("message.delivered"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        daemon
+            .store
+            .claims_for("message/startup", Some("message.read"))
+            .unwrap()
+            .is_empty()
+    );
     daemon.stop().await;
 }
 
@@ -3276,8 +3819,22 @@ async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_sess
     .unwrap();
     let (channel, _input, received) = fixture.open(root, &daemon, "wrapper-replacement").await;
     assert!(received.recv_timeout(Duration::from_millis(1200)).is_err());
-    assert_eq!(daemon.store.message("message/unread").unwrap().unwrap().status, "delivered");
-    assert!(daemon.store.claims_for("message/unread", Some("message.read")).unwrap().is_empty());
+    assert_eq!(
+        daemon
+            .store
+            .message("message/unread")
+            .unwrap()
+            .unwrap()
+            .status,
+        "delivered"
+    );
+    assert!(
+        daemon
+            .store
+            .claims_for("message/unread", Some("message.read"))
+            .unwrap()
+            .is_empty()
+    );
     daemon.send("message/fresh", "agent/quartz", "QUARTZ FRESH SIGNAL");
     let frame = received.recv_timeout(Duration::from_secs(10)).unwrap();
     assert_eq!(frame["params"]["meta"]["messageId"], "message/fresh");
@@ -3312,8 +3869,22 @@ async fn claude_delivered_unread_mail_from_an_old_ledger_is_held_in_a_fresh_sess
     }
     assert!(received.recv_timeout(Duration::from_millis(1200)).is_err());
     assert!(stop(channel).is_empty());
-    assert_eq!(daemon.store.message("message/unread").unwrap().unwrap().status, "delivered");
-    assert!(daemon.store.claims_for("message/unread", Some("message.read")).unwrap().is_empty());
+    assert_eq!(
+        daemon
+            .store
+            .message("message/unread")
+            .unwrap()
+            .unwrap()
+            .status,
+        "delivered"
+    );
+    assert!(
+        daemon
+            .store
+            .claims_for("message/unread", Some("message.read"))
+            .unwrap()
+            .is_empty()
+    );
     daemon.stop().await;
 }
 mod stop_escalation;

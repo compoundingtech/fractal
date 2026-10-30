@@ -41,7 +41,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{Map, Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::Client;
 use fractal_daemon::model::{
@@ -49,6 +48,7 @@ use fractal_daemon::model::{
 };
 use fractal_daemon::store::Store;
 use fractal_schema::ValueType;
+use serde_json::{Map, Value, json};
 use tokio::sync::{Notify, watch};
 
 pub(crate) const FLEET: &str = "7c1e2d3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f";
@@ -131,7 +131,9 @@ async fn person_facing_reads_answer_within_their_budget() {
     };
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
+        .unwrap_or_else(|| {
+            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench")
+        });
     std::fs::create_dir_all(&keep).unwrap();
 
     let mut runs = Vec::new();
@@ -427,27 +429,30 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
     let pty = stub_pty(root);
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: notify.clone(),
-    event_notify: event_notify.clone(),
-    node: NODE.into(),
-    state_dir: root.join("state"),
-    pty_root: root.join("pty"),
-    pty_binary: pty.clone(),
-    fleet_id: Some(FLEET.into()),
-    configured_peers: vec![PEER.into()],
-    client_relay: None,
-    native_session_home: Some(root.join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: notify.clone(),
+        event_notify: event_notify.clone(),
+        node: NODE.into(),
+        state_dir: root.join("state"),
+        pty_root: root.join("pty"),
+        pty_binary: pty.clone(),
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![PEER.into()],
+        client_relay: None,
+        native_session_home: Some(root.join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     // As the daemon does when it starts.
     fractal_daemon::api::start_operation_report(&state);
     fractal_daemon::api::start_published_lists(&state);
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -459,9 +464,13 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
             .unwrap()
     };
     let seeded_cut = store.index().unwrap();
-    tokio::time::timeout(Duration::from_secs(120),
-        fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut))
-        .await.expect("benchmark lists publish the seeded fleet cut").unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        fractal_daemon::api::wait_published_lists_at_least(&store, seeded_cut),
+    )
+    .await
+    .expect("benchmark lists publish the seeded fleet cut")
+    .unwrap();
     // The fleet takes its steps before the reconciler starts, which could otherwise block a step
     // between its turning ready and its claim.
     let reconciler = settings.reconciler.then(|| {
@@ -1566,11 +1575,22 @@ pub(crate) fn generate(store: &Store, prefix: &str, scale: f64) {
                     fields.remove("owner_step");
                     let sample = *index / *subjects;
                     let at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
                     fields.extend(BTreeMap::from([
                         ("semantics".into(), json!("response_rollup")),
-                        ("incarnation_id".into(), json!(format!("bench-{prefix}-usage"))),
-                        ("observed_at_unix_ms".into(), json!(at.saturating_sub(86_400_000).saturating_add(sample as u64 * 600_000))),
+                        (
+                            "incarnation_id".into(),
+                            json!(format!("bench-{prefix}-usage")),
+                        ),
+                        (
+                            "observed_at_unix_ms".into(),
+                            json!(
+                                at.saturating_sub(86_400_000)
+                                    .saturating_add(sample as u64 * 600_000)
+                            ),
+                        ),
                         ("total_tokens".into(), json!(sample as u64 * 1000)),
                         ("input_tokens".into(), json!(sample as u64 * 800)),
                         ("output_tokens".into(), json!(sample as u64 * 200)),
@@ -1688,8 +1708,14 @@ fn synthetic_fields(spec: &fractal_schema::ClaimSpec, index: usize) -> BTreeMap<
                 ("gate_subject".into(), json!("gate-operation/reviewer")),
                 ("generation".into(), json!("run-generation/tester")),
                 ("episode".into(), json!(index as u64)),
-                ("change".into(), json!({"kind":"github.pull-request","subject":"resource/tester/change"})),
-                ("head".into(), json!({"kind":"git.commit","sha":"a".repeat(40)})),
+                (
+                    "change".into(),
+                    json!({"kind":"github.pull-request","subject":"resource/tester/change"}),
+                ),
+                (
+                    "head".into(),
+                    json!({"kind":"git.commit","sha":"a".repeat(40)}),
+                ),
                 ("scope".into(), json!({"coverage":["implementation"]})),
                 ("author".into(), json!("agent/alex")),
                 ("binding_claim".into(), json!("binding")),
@@ -1752,24 +1778,27 @@ pub(crate) fn claim_input(kind: &str, key: &str, index: usize, run: &str) -> Cla
 async fn send_messages(scratch: &Path, main: &Path, count: usize) {
     let store = Arc::new(Store::open(main, NODE).unwrap());
     let socket = scratch.join("generate.sock");
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: NODE.into(),
-    state_dir: scratch.join("state"),
-    pty_root: scratch.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: Some(FLEET.into()),
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: scratch.join("state"),
+        pty_root: scratch.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: Some(FLEET.into()),
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     while UnixStream::connect(&socket).is_err() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

@@ -85,7 +85,11 @@ impl Fixture {
                 .find(|p| p.is_file())
                 .unwrap_or_else(|| panic!("test needs {name}"))
         };
-        fs::copy(test_env!("CARGO_BIN_EXE_fractal-fixture"), self.path("archive/st3")).unwrap();
+        fs::copy(
+            test_env!("CARGO_BIN_EXE_fractal-fixture"),
+            self.path("archive/st3"),
+        )
+        .unwrap();
         fs::set_permissions(self.path("archive/st3"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink(search("pty"), self.path("archive/pty")).unwrap();
         symlink("st3", self.path("archive/st")).unwrap();
@@ -150,7 +154,9 @@ fn conflicting_services(fixture: &Fixture) {
         fs::write(units.join(name), name).unwrap();
     }
     let manager = fixture.path("bin/systemctl");
-    fs::write(&manager, r#"#!/bin/sh
+    fs::write(
+        &manager,
+        r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/manager.log"
 if [ "$2" != show ]; then
     echo 'unexpected service mutation' >&2
@@ -161,7 +167,9 @@ if [ -f "$HOME/.config/systemd/user/$3" ]; then
 else
     printf 'LoadState=not-found\nActiveState=inactive\nSubState=dead\n'
 fi
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     fs::set_permissions(manager, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -186,25 +194,53 @@ fn setup_service_conflict_is_hard_error_without_install_or_unmanaged_fallback() 
         fs::write(binaries.join(name), format!("existing {name}")).unwrap();
     }
     symlink("st3", binaries.join("st")).unwrap();
-    let output = fixture.cli().args([
-        "setup", "--person", "robin", "--node", "studio", "--yes",
-        "--install", "true", "--service", "true", "--start", "true",
-        "--harness", "none",
-    ]).output().unwrap();
+    let output = fixture
+        .cli()
+        .args([
+            "setup",
+            "--person",
+            "robin",
+            "--node",
+            "studio",
+            "--yes",
+            "--install",
+            "true",
+            "--service",
+            "true",
+            "--start",
+            "true",
+            "--harness",
+            "none",
+        ])
+        .output()
+        .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("conflicting service units"), "{stderr}");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("user service is unavailable"));
-    assert!(!fixture.path("home/.local/state/st3/logs/setup-daemon.log").exists());
+    assert!(
+        !fixture
+            .path("home/.local/state/st3/logs/setup-daemon.log")
+            .exists()
+    );
     assert!(!fixture.path("run/st3.sock").exists());
     assert_eq!(fs::read_to_string(&config).unwrap(), original_config);
     for name in ["st3", "pty"] {
-        assert_eq!(fs::read_to_string(binaries.join(name)).unwrap(), format!("existing {name}"));
+        assert_eq!(
+            fs::read_to_string(binaries.join(name)).unwrap(),
+            format!("existing {name}")
+        );
     }
-    assert_eq!(fs::read_link(binaries.join("st")).unwrap(), Path::new("st3"));
+    assert_eq!(
+        fs::read_link(binaries.join("st")).unwrap(),
+        Path::new("st3")
+    );
     assert!(!work.exists());
     let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
-    assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
+    assert!(
+        calls.lines().all(|line| line.starts_with("--user show ")),
+        "{calls}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -243,17 +279,27 @@ fn uninstall_and_fleet_conflicts_precede_settings_mutations() {
         let output = fixture.cli().args(&args).output().unwrap();
         assert!(!output.status.success(), "{args:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("conflicting service units"), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("conflicting service units"),
+            "{args:?}: {stderr}"
+        );
         assert_eq!(fs::read(&config).unwrap(), config_before);
         assert_eq!(fs::read(&membership).unwrap(), state_before);
         assert_eq!(fs::read(&identity).unwrap(), identity_before);
         assert!(!state.join("left-fleet.json").exists());
         assert!(!state.join("fleet-settings.lock").exists());
     }
-    let output = fixture.cli().args(["uninstall", "--dry-run", "--no-service"]).output().unwrap();
+    let output = fixture
+        .cli()
+        .args(["uninstall", "--dry-run", "--no-service"])
+        .output()
+        .unwrap();
     success(&output);
     let calls = fs::read_to_string(fixture.path("home/manager.log")).unwrap();
-    assert!(calls.lines().all(|line| line.starts_with("--user show ")), "{calls}");
+    assert!(
+        calls.lines().all(|line| line.starts_with("--user show ")),
+        "{calls}"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -302,8 +348,16 @@ fn instance_command(fixture: &Fixture, name: Option<&str>) -> Command {
 fn setup_without_service(fixture: &Fixture, name: Option<&str>) -> Output {
     instance_command(fixture, name)
         .args([
-            "setup", "--person", "ada", "--yes", "--install", "false", "--service", "false",
-            "--harness", "none",
+            "setup",
+            "--person",
+            "ada",
+            "--yes",
+            "--install",
+            "false",
+            "--service",
+            "false",
+            "--harness",
+            "none",
         ])
         .output()
         .unwrap()
@@ -584,7 +638,10 @@ fn flags_merge_config_without_prompting_and_invalid_names_do_not_write() {
     .unwrap();
     let text = success(&fixture.setup_config_only(&[]));
     // A config that existed without an access mode keeps reading as bypass, and says so.
-    assert!(text.contains("Access mode: bypass. Agents run without permission prompts."), "{text}");
+    assert!(
+        text.contains("Access mode: bypass. Agents run without permission prompts."),
+        "{text}"
+    );
     let bytes = fs::read_to_string(&config).unwrap();
     assert!(!bytes.contains("access_mode"), "{bytes}");
     let table: toml::Table = toml::from_str(&bytes).unwrap();
@@ -609,7 +666,10 @@ fn a_config_setup_creates_records_auto_and_an_existing_one_is_not_given_a_mode()
     let fixture = Fixture::new();
     let config = fixture.path("home/.config/st3/config.toml");
     let text = success(&fixture.setup_config_only(&[]));
-    assert!(text.contains("Access mode: auto. Agents use their provider's managed permission checks."), "{text}");
+    assert!(
+        text.contains("Access mode: auto. Agents use their provider's managed permission checks."),
+        "{text}"
+    );
     assert!(!text.contains("without permission prompts"), "{text}");
     let table: toml::Table = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
     assert_eq!(table["access_mode"].as_str(), Some("auto"));
@@ -631,26 +691,43 @@ fn harness_probe_uses_login_path_order_and_flags_without_starting_a_seat() {
     let selected = success(&fixture.setup_config_only(&[]));
     assert_eq!(selected.matches("Selected harness: codex").count(), 1);
     assert!(!selected.contains("Which harness"));
-    assert!(success(&fixture.setup_config_only(&["--harness", "omp"])).contains("Selected harness: omp"));
-    assert!(success(&fixture.setup_config_only(&["--harness", "none"])).contains("Harness setup skipped"));
+    assert!(
+        success(&fixture.setup_config_only(&["--harness", "omp"]))
+            .contains("Selected harness: omp")
+    );
+    assert!(
+        success(&fixture.setup_config_only(&["--harness", "none"]))
+            .contains("Harness setup skipped")
+    );
     let missing = fixture.setup_config_only(&["--harness", "claude"]);
     assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("not installed on the daemon's login PATH"));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("not installed on the daemon's login PATH")
+    );
     let claude = fixture.path("bin/claude");
     fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
     fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
-    let inline = success(&fixture.setup_config_only(&["--harness", "claude", "--claude-channel", "false"]));
+    let inline =
+        success(&fixture.setup_config_only(&["--harness", "claude", "--claude-channel", "false"]));
     assert_eq!(inline.matches("Selected harness: claude").count(), 1);
     assert!(inline.contains("inline server:st3 development channel"));
     assert!(!fixture.path("home/.claude/plugins").exists());
-    assert!(!fixture.path("home/.local/state/st3/claims.sqlite3").exists());
+    assert!(
+        !fixture
+            .path("home/.local/state/st3/claims.sqlite3")
+            .exists()
+    );
 }
 
 #[test]
 fn an_explicit_claude_choice_never_falls_back_after_channel_install_failure() {
     let fixture = Fixture::new();
     for (harness, script) in [
-        ("claude", "#!/bin/sh\nif [ \"$*\" = 'plugin disable --help' ]; then echo 'Usage: claude plugin disable'; exit 0; fi\necho 'Claude Code is older than the minimum version required by your organization' >&2\nexit 1\n"),
+        (
+            "claude",
+            "#!/bin/sh\nif [ \"$*\" = 'plugin disable --help' ]; then echo 'Usage: claude plugin disable'; exit 0; fi\necho 'Claude Code is older than the minimum version required by your organization' >&2\nexit 1\n",
+        ),
         ("codex", "#!/bin/sh\nexit 0\n"),
     ] {
         let path = fixture.path(&format!("bin/{harness}"));
@@ -660,10 +737,20 @@ fn an_explicit_claude_choice_never_falls_back_after_channel_install_failure() {
     let output = fixture.setup_config_only(&["--harness", "claude", "--assistant", "false"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Claude channel installation failed"), "{stderr}");
-    assert!(stderr.contains("minimum version required by your organization"), "{stderr}");
+    assert!(
+        stderr.contains("Claude channel installation failed"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("minimum version required by your organization"),
+        "{stderr}"
+    );
     assert!(!String::from_utf8_lossy(&output.stdout).contains("Selected harness: codex"));
-    assert!(!fixture.path("home/.local/state/st3/claims.sqlite3").exists());
+    assert!(
+        !fixture
+            .path("home/.local/state/st3/claims.sqlite3")
+            .exists()
+    );
 
     // An automatic selection still permits the existing fallback.
     let automatic = success(&fixture.setup_config_only(&["--assistant", "false"]));
@@ -730,7 +817,10 @@ fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_
             .unwrap(),
     );
     let instance = fixture.path("home/.st-instance/demo");
-    assert_eq!(fs::read_link(instance.join("bin/st")).unwrap(), Path::new("st3"));
+    assert_eq!(
+        fs::read_link(instance.join("bin/st")).unwrap(),
+        Path::new("st3")
+    );
     assert!(instance.join("bin/st3").is_file() && instance.join("bin/pty").is_file());
     assert!(instance.join("config/st3/config.toml").is_file());
     assert!(text.contains("This instance's commands are in"), "{text}");
@@ -785,19 +875,39 @@ fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harnes
             .unwrap();
     assert_eq!(config["node"].as_str(), Some("studio"));
     let before = Instant::now();
-    let missing = fixture.cli().args(["agents", "new", "fixture-missing", "--harness", "claude"]).output().unwrap();
+    let missing = fixture
+        .cli()
+        .args(["agents", "new", "fixture-missing", "--harness", "claude"])
+        .output()
+        .unwrap();
     assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("not installed on the daemon's login PATH"));
-    assert!(before.elapsed() < Duration::from_secs(5), "missing harness must fail before waiting for a seat");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("not installed on the daemon's login PATH")
+    );
+    assert!(
+        before.elapsed() < Duration::from_secs(5),
+        "missing harness must fail before waiting for a seat"
+    );
     // Socket readiness is not a roster publication; this fixture explicitly needs one.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(fractal_client::Client::unix(fixture.path("run/st3.sock")).agents_list_after(None, None, false, 0))
+        .block_on(
+            fractal_client::Client::unix(fixture.path("run/st3.sock"))
+                .agents_list_after(None, None, false, 0),
+        )
         .expect("the fixture must publish its initial roster");
-    let agents = fixture.cli().args(["agents", "ls", "--json"]).output().unwrap();
-    assert!(!success(&agents).contains("fixture-missing"), "missing binary must not publish a restarting seat");
+    let agents = fixture
+        .cli()
+        .args(["agents", "ls", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        !success(&agents).contains("fixture-missing"),
+        "missing binary must not publish a restarting seat"
+    );
     let output = fixture
         .command(&fixture.path("home/.local/bin/st"))
         .args(["setup", "--yes", "--service", "false"])
@@ -928,19 +1038,23 @@ async fn onboarding_api(
     let store = std::sync::Arc::new(
         fractal_daemon::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
-    let state = fractal_daemon::api::AppState { owning_person: None,
-    store: store.clone(),
-    notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-    event_notify: tokio::sync::watch::channel(0_u64).0,
-    node: "studio".into(),
-    state_dir: state_dir.clone(),
-    pty_root: state_dir.join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = fractal_daemon::api::AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "studio".into(),
+        state_dir: state_dir.clone(),
+        pty_root: state_dir.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     // These declarations use a simulated provider; no host provider or daemon is touched.
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         |request: axum::extract::Request, next: axum::middleware::Next| async move {
@@ -1026,8 +1140,14 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant
     // Permissions come from the install access mode when the driver starts the harness, so
     // the declaration pins no permission flag of its own.
     let declared = serde_json::to_string(assistant).unwrap();
-    assert!(!declared.contains("--dangerously-bypass-approvals-and-sandbox"), "{declared}");
-    assert!(!declared.contains("--dangerously-skip-permissions"), "{declared}");
+    assert!(
+        !declared.contains("--dangerously-bypass-approvals-and-sandbox"),
+        "{declared}"
+    );
+    assert!(
+        !declared.contains("--dangerously-skip-permissions"),
+        "{declared}"
+    );
     let guides: fractal_daemon::model::DocumentListResponse = client
         .get("/v1/documents?name=doc%2Fst%2Fguide")
         .await
@@ -1102,7 +1222,13 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
 
     // One authored declaration and one typed oracle cover every republication entrypoint.
     // Relocation is `agents start --host`, not a separate CLI verb.
-    for path in ["onboarding", "start", "relocate", "print-kdl", "mission-apply"] {
+    for path in [
+        "onboarding",
+        "start",
+        "relocate",
+        "print-kdl",
+        "mission-apply",
+    ] {
         let fixture = Fixture::new();
         let (store, client, server) = onboarding_api(&fixture).await;
         let uri = "https://github.com/acme/garden/issues/42";
@@ -1143,7 +1269,10 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
         let source = format!("version 2\n{agent}\n");
         let intent = fractal_daemon::parse_intent(&source, "studio").unwrap();
         let expected = intent.subjects["agent/st/assistant"].desired.clone();
-        assert_eq!(fractal_daemon::graph::declared_resources(&expected), references);
+        assert_eq!(
+            fractal_daemon::graph::declared_resources(&expected),
+            references
+        );
         if path != "mission-apply" {
             let preview = store
                 .mission(
@@ -1168,8 +1297,18 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
         match path {
             "onboarding" => {
                 command.args([
-                    "setup", "--person", "ada", "--node", "studio", "--yes",
-                    "--install", "false", "--service", "false", "--start", "false",
+                    "setup",
+                    "--person",
+                    "ada",
+                    "--node",
+                    "studio",
+                    "--yes",
+                    "--install",
+                    "false",
+                    "--service",
+                    "false",
+                    "--start",
+                    "false",
                 ]);
             }
             "mission-apply" => {
@@ -1186,7 +1325,13 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
                 command.args(["--as", "person/ada", "--no-gate-check"]);
             }
             _ => {
-                command.args(["agents", "start", "agent/st/assistant", "--as", "person/ada"]);
+                command.args([
+                    "agents",
+                    "start",
+                    "agent/st/assistant",
+                    "--as",
+                    "person/ada",
+                ]);
                 if path == "relocate" {
                     command.args(["--host", "elsewhere"]);
                 } else if path == "print-kdl" {
@@ -1210,17 +1355,28 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
                 parsed.subjects["agent/st/assistant"].desired.clone()
             }
             "mission-apply" => {
-                let spec = store.mission_spec("example/resources", None).unwrap().unwrap();
+                let spec = store
+                    .mission_spec("example/resources", None)
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(spec.resources, references[..1], "{path}");
-                let extracted = spec.declarations_kdl.expect("mission retains its agent declaration");
+                let extracted = spec
+                    .declarations_kdl
+                    .expect("mission retains its agent declaration");
                 let parsed = fractal_daemon::parse_intent(&extracted, "studio").unwrap();
-                let agents = parsed.subjects.values().filter(|subject| subject.kind == "agent")
+                let agents = parsed
+                    .subjects
+                    .values()
+                    .filter(|subject| subject.kind == "agent")
                     .collect::<Vec<_>>();
                 assert_eq!(agents.len(), 1, "{path}");
                 agents[0].desired.clone()
             }
             _ => {
-                let token = store.selected_desired_token("agent/st/assistant").unwrap().unwrap();
+                let token = store
+                    .selected_desired_token("agent/st/assistant")
+                    .unwrap()
+                    .unwrap();
                 let claim: fractal_daemon::model::ClaimRecord = client
                     .get(&format!("/v1/claims/by-id/{token}"))
                     .await
@@ -1235,10 +1391,17 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
         };
         // Typed equality covers target, authored edge kind, name, reason and authored order.
         // In particular an explicit edge to a known URI must not become a URI edge.
-        assert_eq!(fractal_daemon::graph::declared_resources(&actual), references, "{path}");
+        assert_eq!(
+            fractal_daemon::graph::declared_resources(&actual),
+            references,
+            "{path}"
+        );
         let uris = store.declared_resource_uris(&references).unwrap();
         assert_eq!(uris.get(&resource).map(String::as_str), Some(uri), "{path}");
-        assert!(!uris.contains_key("resource/example/not-yet-published"), "{path}");
+        assert!(
+            !uris.contains_key("resource/example/not-yet-published"),
+            "{path}"
+        );
         if path == "onboarding" {
             assert!(text.contains("Started mission/st/onboarding"));
             assert_eq!(actual, expected);
@@ -1282,21 +1445,39 @@ async fn the_assistant_asks_first_and_an_existing_setup_never_starts_it_on_its_o
     // The first run asks, naming the account it uses; declining publishes nothing.
     let declined = success(&run(setup(&["--assistant", "false"])).await);
     assert!(
-        declined.contains("agent that runs on your own codex account, so it uses your codex usage and quota"),
+        declined.contains(
+            "agent that runs on your own codex account, so it uses your codex usage and quota"
+        ),
         "{declined}"
     );
-    assert!(declined.contains("Not started. Run fractal setup --onboarding"), "{declined}");
+    assert!(
+        declined.contains("Not started. Run fractal setup --onboarding"),
+        "{declined}"
+    );
     assert!(store.mission_run("st/onboarding").unwrap().is_none());
-    assert!(store.selected_desired_token("agent/st/assistant").unwrap().is_none());
+    assert!(
+        store
+            .selected_desired_token("agent/st/assistant")
+            .unwrap()
+            .is_none()
+    );
     // The configuration exists now: ordinary setup, with the daemon answering and no history,
     // still does not start it.
     let existing = success(&run(setup(&[])).await);
     assert!(existing.contains("not started on its own"), "{existing}");
     assert!(store.mission_run("st/onboarding").unwrap().is_none());
-    assert!(store.selected_desired_token("agent/st/assistant").unwrap().is_none());
+    assert!(
+        store
+            .selected_desired_token("agent/st/assistant")
+            .unwrap()
+            .is_none()
+    );
     // Asking for it by name starts it and says what was created and how to stop it.
     let explicit = success(&run(setup(&["--onboarding"])).await);
-    assert!(explicit.contains("Created: the agent agent/st/assistant (codex"), "{explicit}");
+    assert!(
+        explicit.contains("Created: the agent agent/st/assistant (codex"),
+        "{explicit}"
+    );
     assert!(
         explicit.contains("Stop it with: fractal agents stop agent/st/assistant --as person/ada"),
         "{explicit}"
@@ -1391,7 +1572,10 @@ fn play(
     while let Ok(bytes) = receiver.try_recv() {
         output.extend(bytes);
     }
-    (status.success(), String::from_utf8_lossy(&output).into_owned())
+    (
+        status.success(),
+        String::from_utf8_lossy(&output).into_owned(),
+    )
 }
 
 fn fake(fixture: &Fixture, name: &str, script: &str) {
@@ -1417,11 +1601,24 @@ fn the_setup_screen_sets_up_each_agent_on_its_own_and_stores_an_unticked_codex_b
         "case \"$1\" in --version) echo codex-cli 0.0.0-test;; login) echo '{\"tokens\":{}}' > \"$HOME/.codex/auth.json\";; esac",
     );
     fake(&fixture, "pi", "echo pi 0.0.0-test");
-    fake(&fixture, "omp", "echo 'cannot load libomp.so.1' >&2; exit 3");
+    fake(
+        &fixture,
+        "omp",
+        "echo 'cannot load libomp.so.1' >&2; exit 3",
+    );
     let mut command = portable_pty::CommandBuilder::new(fixture.path("archive/st"));
     command.args([
-        "setup", "--person", "ada", "--node", "studio", "--install", "false", "--start", "false",
-        "--service", "false",
+        "setup",
+        "--person",
+        "ada",
+        "--node",
+        "studio",
+        "--install",
+        "false",
+        "--start",
+        "false",
+        "--service",
+        "false",
     ]);
     // Name, machine, start-at-login, the three found agents, then the Codex box (ticked by
     // default): Space unticks it, Tab moves to the action and Enter presses it.
@@ -1438,8 +1635,15 @@ fn the_setup_screen_sets_up_each_agent_on_its_own_and_stores_an_unticked_codex_b
     assert!(text.contains("Let Codex work without asking"), "{text}");
     // The terminal went to Codex for its sign-in and came back to the same screen.
     assert!(text.contains("Codex is asking you to sign in"), "{text}");
-    assert!(text.contains("Ready. codex-cli 0.0.0-test") || text.contains("codex starts (codex-cli 0.0.0-test)"), "{text}");
-    assert!(text.contains("Sign-in is checked when the first agent starts"), "{text}");
+    assert!(
+        text.contains("Ready. codex-cli 0.0.0-test")
+            || text.contains("codex starts (codex-cli 0.0.0-test)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Sign-in is checked when the first agent starts"),
+        "{text}"
+    );
     // A broken agent is told whole, and does not stop the others.
     assert!(text.contains("cannot load libomp.so.1"), "{text}");
     assert!(text.contains("Codex: ready."), "{text}");
@@ -1462,12 +1666,26 @@ fn leaving_the_setup_screen_before_the_button_changes_nothing() {
     let mut fixture = Fixture::new();
     fixture.unpack_archive();
     let mut command = portable_pty::CommandBuilder::new(fixture.path("archive/st"));
-    command.args(["setup", "--install", "false", "--start", "false", "--service", "false"]);
+    command.args([
+        "setup",
+        "--install",
+        "false",
+        "--start",
+        "false",
+        "--service",
+        "false",
+    ]);
     let (success, output) = play(command, &[("Fractal setup", "\x1b")], &mut fixture);
     assert!(!success, "{output}");
-    assert!(output.contains("setup was cancelled; nothing was changed"), "{output}");
+    assert!(
+        output.contains("setup was cancelled; nothing was changed"),
+        "{output}"
+    );
     assert!(!fixture.path("home/.config/st3/config.toml").exists());
-    assert!(!fixture.path("home/.local").exists(), "no state was created");
+    assert!(
+        !fixture.path("home/.local").exists(),
+        "no state was created"
+    );
 }
 
 #[test]
@@ -1480,22 +1698,40 @@ fn skipping_sets_up_st_and_no_agent() {
     fake(&fixture, "pi", "echo pi 0.0.0-test");
     let mut command = portable_pty::CommandBuilder::new(fixture.path("archive/st"));
     command.args([
-        "setup", "--person", "ada", "--node", "studio", "--install", "false", "--start", "false",
-        "--service", "false",
+        "setup",
+        "--person",
+        "ada",
+        "--node",
+        "studio",
+        "--install",
+        "false",
+        "--start",
+        "false",
+        "--service",
+        "false",
     ]);
     // Name, machine, login box, the Pi row, then the two buttons: Tab to Skip for now.
     let (success, output) = play(
         command,
-        &[("Fractal setup", "\t\t\t\t\t\r"), ("Fractal is set up", "\r")],
+        &[
+            ("Fractal setup", "\t\t\t\t\t\r"),
+            ("Fractal is set up", "\r"),
+        ],
         &mut fixture,
     );
     assert!(success, "{output}");
-    assert!(!output.contains("Pi: ready"), "no agent was set up:\n{output}");
+    assert!(
+        !output.contains("Pi: ready"),
+        "no agent was set up:\n{output}"
+    );
     let table: toml::Table =
         toml::from_str(&fs::read_to_string(fixture.path("home/.config/st3/config.toml")).unwrap())
             .unwrap();
     assert_eq!(table["person"].as_str(), Some("person/ada"));
-    assert!(table.get("codex_work_without_asking").is_none(), "no Codex, so no setting");
+    assert!(
+        table.get("codex_work_without_asking").is_none(),
+        "no Codex, so no setting"
+    );
 }
 
 #[test]
@@ -1503,6 +1739,11 @@ fn setup_advice_preserves_json_stdout_without_changing_human_commands() {
     for (flags, program) in [(&["--json"][..], "st"), (&[][..], "fractal")] {
         let fixture = Fixture::new();
         let output = success(&fixture.setup_config_only(flags));
-        assert!(output.contains(&format!("then run {program} setup. No onboarding seat was created.")), "{output}");
+        assert!(
+            output.contains(&format!(
+                "then run {program} setup. No onboarding seat was created."
+            )),
+            "{output}"
+        );
     }
 }

@@ -18,9 +18,15 @@ pub const ASSISTANT_SUBJECT: &str = "agent/st/assistant";
 /// The seat's subject is durable; people see this name.
 const ASSISTANT_NAME: &str = "Fractal Assistant";
 const MISSION: &str = "st/onboarding";
-const ASSISTANT: &str = /* sqlite-large-value: allow-for-now lv-h600fa9139184 owner=fractal::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/assistant.kdl");
-const ONBOARDING: &str = /* sqlite-large-value: allow-for-now lv-he44bc85b76e1 owner=fractal::onboarding TODO=trace-statement-and-value-representation */ include_str!("builtins/onboarding.kdl");
-const GUIDE: &str = /* sqlite-large-value: allow-for-now lv-h7a6c6da8c836 owner=fractal::onboarding TODO=trace-statement-and-value-representation */ include_str!("../../../docs/st3/onboarding-guide.md");
+const ASSISTANT: &str =
+    /* sqlite-large-value: allow-for-now lv-h600fa9139184 owner=fractal::onboarding TODO=trace-statement-and-value-representation */
+    include_str!("builtins/assistant.kdl");
+const ONBOARDING: &str =
+    /* sqlite-large-value: allow-for-now lv-he44bc85b76e1 owner=fractal::onboarding TODO=trace-statement-and-value-representation */
+    include_str!("builtins/onboarding.kdl");
+const GUIDE: &str =
+    /* sqlite-large-value: allow-for-now lv-h7a6c6da8c836 owner=fractal::onboarding TODO=trace-statement-and-value-representation */
+    include_str!("../../../docs/st3/onboarding-guide.md");
 
 type Sink = Box<dyn FnMut(String)>;
 
@@ -253,7 +259,8 @@ pub async fn start(
     let token = current
         .desired_token
         .context("the built-in Fractal Assistant has no declaration")?;
-    let claim: fractal_daemon::model::ClaimRecord = client.get(&format!("/v1/claims/by-id/{token}")).await?;
+    let claim: fractal_daemon::model::ClaimRecord =
+        client.get(&format!("/v1/claims/by-id/{token}")).await?;
     let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
     let mut uris = std::collections::BTreeMap::new();
     for reference in fractal_daemon::graph::declared_resources(&desired.desired) {
@@ -300,7 +307,7 @@ pub async fn start(
         return Err(error);
     }
     said(
-        "Started mission/st/onboarding with agent/st/assistant. The Assistant stays available after onboarding."
+        "Started mission/st/onboarding with agent/st/assistant. The Assistant stays available after onboarding.",
     );
     Ok(Some(ASSISTANT_SUBJECT.into()))
 }
@@ -317,7 +324,9 @@ fn declaration_changed(rerun: bool, program: &str) -> Result<Option<String>> {
 }
 
 async fn assistant_status(client: &Client) -> Result<Option<fractal_daemon::model::SubjectStatus>> {
-    let status: StatusResponse = client.get("/v1/status?subject=agent%2Fst%2Fassistant").await?;
+    let status: StatusResponse = client
+        .get("/v1/status?subject=agent%2Fst%2Fassistant")
+        .await?;
     Ok(status
         .subjects
         .into_iter()
@@ -361,7 +370,9 @@ fn declarations(
         fractal_daemon::creation::agent_document(&args, &workspace.to_string_lossy(), false, None)
             .parse()?;
     let mut display_name = KdlNode::new("name");
-    display_name.entries_mut().push(KdlEntry::new(ASSISTANT_NAME));
+    display_name
+        .entries_mut()
+        .push(KdlEntry::new(ASSISTANT_NAME));
     document
         .nodes_mut()
         .iter_mut()
@@ -440,8 +451,11 @@ mod tests {
         );
         let guide = hex::encode(sha2::Sha256::digest(super::GUIDE.as_bytes()));
         let ready = ["claude".to_string(), "codex".to_string()];
-        let mission = fractal_daemon::parse_intent(&super::mission_source(&guide, "claude", &ready), "studio")
-            .unwrap();
+        let mission = fractal_daemon::parse_intent(
+            &super::mission_source(&guide, "claude", &ready),
+            "studio",
+        )
+        .unwrap();
         assert!(
             mission
                 .document_refs
@@ -469,8 +483,14 @@ mod tests {
                     .any(|text| text.contains(&guide))
             );
             // The install access mode, not the declaration, decides the permission flags.
-            assert!(!source.contains("--dangerously-skip-permissions"), "{source}");
-            assert!(!source.contains("--dangerously-bypass-approvals-and-sandbox"), "{source}");
+            assert!(
+                !source.contains("--dangerously-skip-permissions"),
+                "{source}"
+            );
+            assert!(
+                !source.contains("--dangerously-bypass-approvals-and-sandbox"),
+                "{source}"
+            );
         }
     }
     #[test]
@@ -507,7 +527,8 @@ mod tests {
     fn the_play_is_three_acts_spoken_to_you_with_an_alert_in_act_three() {
         let guide = hex::encode(sha2::Sha256::digest(super::GUIDE.as_bytes()));
         let mission =
-            fractal_daemon::parse_intent(&super::mission_source(&guide, "claude", &[]), "studio").unwrap();
+            fractal_daemon::parse_intent(&super::mission_source(&guide, "claude", &[]), "studio")
+                .unwrap();
         assert!(mission.missions.contains_key(super::MISSION));
         for act in ["hello", "act-one", "act-two", "act-three"] {
             assert!(
@@ -516,14 +537,22 @@ mod tests {
             );
         }
         // Act three raises the alert before the interview, and the interview ends onboarding.
-        let alert = super::GUIDE.find("Raise one alert").expect("act three raises an alert");
+        let alert = super::GUIDE
+            .find("Raise one alert")
+            .expect("act three raises an alert");
         let interview = super::GUIDE
             .find("What do you want to accomplish in Fractal today?")
             .expect("act three ends in the interview");
         assert!(alert < interview, "the alert comes before the interview");
         assert!(super::GUIDE.contains("above the message input"));
-        assert!(super::GUIDE.contains("conversations wait"), "the guide must pace with wait");
-        assert!(super::GUIDE.contains("setup --onboarding"), "skip must say how to return");
+        assert!(
+            super::GUIDE.contains("conversations wait"),
+            "the guide must pace with wait"
+        );
+        assert!(
+            super::GUIDE.contains("setup --onboarding"),
+            "skip must say how to return"
+        );
         // The play has none of what Nathan dropped.
         for dropped in ["canonical", "permission mode", "macOS permission"] {
             assert!(
@@ -577,11 +606,17 @@ mod tests {
         ] {
             assert!(seat.contains(required), "the seat text lost: {required}");
         }
-        assert!(!seat.contains("the person"), "the seat text speaks of them in the third person");
+        assert!(
+            !seat.contains("the person"),
+            "the seat text speaks of them in the third person"
+        );
         // The guide carries the same rule and names no sample person.
         let guide = super::GUIDE.to_lowercase();
         assert!(guide.contains("write nothing between tool calls that is not addressed to them"));
-        assert!(!guide.contains("hi avery"), "the guide greets nobody by an example name");
+        assert!(
+            !guide.contains("hi avery"),
+            "the guide greets nobody by an example name"
+        );
     }
     use sha2::Digest as _;
 }

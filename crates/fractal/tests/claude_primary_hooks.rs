@@ -79,9 +79,11 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
                 helper("nested").status().unwrap().success(),
                 "nested before primary SessionStart"
             );
-            assert!(matches!(listener.accept(), Err(error)
+            assert!(
+                matches!(listener.accept(), Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock),
-                "secondary before primary must not contact a daemon");
+                "secondary before primary must not contact a daemon"
+            );
             let out = hook("SessionStart", PRIMARY, None);
             assert!(
                 out.status.success(),
@@ -95,8 +97,9 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
                 .unwrap()["native_session_id"],
                 PRIMARY
             );
-            let session_dir =
-                PathBuf::from(std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV).unwrap());
+            let session_dir = PathBuf::from(
+                std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV).unwrap(),
+            );
             let binding: Value =
                 serde_json::from_slice(&fs::read(session_dir.join("binding.json")).unwrap())
                     .unwrap();
@@ -116,28 +119,39 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
             // The admitted primary SessionStart legitimately submits hook telemetry.
             // Inspect that request, then establish a clean cut before the next secondary.
             let (telemetry, _) = listener.accept().expect("primary hook telemetry");
-            telemetry.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            telemetry
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
             let mut request = Vec::new();
             telemetry.take(16_385).read_to_end(&mut request).unwrap();
             assert!(request.len() <= 16_384, "bounded fixture telemetry request");
             assert!(request.starts_with(b"POST /v1/claims "));
-            let body = request.windows(4).position(|part| part == b"\r\n\r\n")
-                .expect("telemetry HTTP headers") + 4;
+            let body = request
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .expect("telemetry HTTP headers")
+                + 4;
             let claim: Value = serde_json::from_slice(&request[body..]).unwrap();
             assert_eq!(claim["kind"], "harness.telemetry");
-            let invocations = claim["fields"]["signals"]["hook_invocations"].as_array().unwrap();
+            let invocations = claim["fields"]["signals"]["hook_invocations"]
+                .as_array()
+                .unwrap();
             assert_eq!(invocations.len(), 1);
             assert_eq!(invocations[0]["event"], "SessionStart");
-            assert!(matches!(listener.accept(), Err(error)
+            assert!(
+                matches!(listener.accept(), Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock),
-                "primary emitted only its admitted telemetry request");
+                "primary emitted only its admitted telemetry request"
+            );
             assert!(
                 helper("nested").status().unwrap().success(),
                 "nested after primary SessionStart"
             );
-            assert!(matches!(listener.accept(), Err(error)
+            assert!(
+                matches!(listener.accept(), Err(error)
                 if error.kind() == std::io::ErrorKind::WouldBlock),
-                "secondary after primary must not contact a daemon");
+                "secondary after primary must not contact a daemon"
+            );
         } else {
             assert_eq!(role, "nested");
             let before = records(&dir);
@@ -247,5 +261,4 @@ fn inherited_hook_processes_cannot_bind_record_context_or_request_permission() {
     .unwrap();
     child.stdin.take().unwrap().write_all(b"g").unwrap();
     assert!(child.wait().unwrap().success());
-
 }

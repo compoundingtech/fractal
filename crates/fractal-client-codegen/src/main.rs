@@ -172,10 +172,16 @@ fn assistant_read(read: &Value) -> Result<Option<(&str, &str, &str)>> {
         return Ok(None);
     };
     let id = read["id"].as_str().context("read id")?;
-    if id != format!("assistant.{projection}") || read["proof_header"] != "x-st3-scg-read-authorization" {
-        bail!("assistant read `{id}` must be `assistant.<projection>` and carry the SCG read proof header");
+    if id != format!("assistant.{projection}")
+        || read["proof_header"] != "x-st3-scg-read-authorization"
+    {
+        bail!(
+            "assistant read `{id}` must be `assistant.<projection>` and carry the SCG read proof header"
+        );
     }
-    let request = read["query_model"].as_str().with_context(|| format!("assistant read `{id}` has no query_model"))?;
+    let request = read["query_model"]
+        .as_str()
+        .with_context(|| format!("assistant read `{id}` has no query_model"))?;
     let response = read["response"].as_str().context("read response")?;
     Ok(Some((projection, request, response)))
 }
@@ -218,16 +224,29 @@ fn rust_operation_methods(
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
         if id == "arrangements.list" {
-            writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}"
+            )?;
             continue;
         }
         if id == "arrangements.get" {
-            writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}"
+            )?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
-            let response = if response == "Value" { "serde_json::Value" } else { response };
-            writeln!(out, "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}")?;
+            let response = if response == "Value" {
+                "serde_json::Value"
+            } else {
+                response
+            };
+            writeln!(
+                out,
+                "    pub async fn {method}(&self, params: &{request}, proof: &ScgReadAuthorization) -> Result<Envelope<{response}>, ClientError> {{ self.assistant_read(\"{projection}\", params, proof).await }}"
+            )?;
         } else if id == "capabilities.get" {
             writeln!(
                 out,
@@ -239,28 +258,40 @@ fn rust_operation_methods(
                 "    pub async fn host_repositories(&self, host: &str) -> Result<Envelope<HostRepositories>, ClientError> {{ self.get(&format!(\"/v1/client/hosts/{{}}/repositories\", percent_encode(host))).await }}"
             )?;
         } else if id == "publication.definition" {
-            writeln!(out, "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn publication_definition(&self, subject: &str) -> Result<Envelope<PublicationDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/publication-definition?subject={{}}\", percent_encode(subject))).await }}"
+            )?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
                 "    pub async fn subject_definition(&self, subject: &str, show_env_values: bool) -> Result<Envelope<SubjectDefinition>, ClientError> {{ self.get(&format!(\"/v1/client/subject-definition?subject={{}}&show_env_values={{show_env_values}}\", percent_encode(subject))).await }}"
             )?;
         } else if id == "notes.list" {
-            writeln!(out, "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}")?;
+            writeln!(
+                out,
+                "    pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {{ self.get(\"/v1/client/notes\").await }}"
+            )?;
         } else if id == "clients.list" {
             writeln!(
                 out,
                 "    pub async fn clients_list(&self) -> Result<Envelope<ClientConnections>, ClientError> {{ self.get(\"/v1/client/clients\").await }}"
             )?;
         } else if id == "slo.list" {
-            writeln!(out, "    pub async fn slo_list(&self) -> Result<Envelope<SloList>, ClientError> {{ self.get(\"/v1/client/slo\").await }}")?;
+            writeln!(
+                out,
+                "    pub async fn slo_list(&self) -> Result<Envelope<SloList>, ClientError> {{ self.get(\"/v1/client/slo\").await }}"
+            )?;
         } else if id == "slo.history" {
             writeln!(
                 out,
                 "    pub async fn slo_history(&self, id: &str, since_ms: Option<u64>, until_ms: Option<u64>, steps: Option<usize>) -> Result<Envelope<SloHistory>, ClientError> {{ let mut path = format!(\"/v1/client/slo/history?id={{}}\", percent_encode(id)); if let Some(since_ms) = since_ms {{ path.push_str(&format!(\"&since_ms={{since_ms}}\")); }} if let Some(until_ms) = until_ms {{ path.push_str(&format!(\"&until_ms={{until_ms}}\")); }} if let Some(steps) = steps {{ path.push_str(&format!(\"&steps={{steps}}\")); }} self.get(&path).await }}"
             )?;
         } else if id == "mail-backlog.summary" {
-            writeln!(out, "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}")?;
+            writeln!(
+                out,
+                "    pub async fn mail_backlog_summary(&self) -> Result<Envelope<MailBacklog>, ClientError> {{ self.get(\"/v1/client/mail-backlog\").await }}"
+            )?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -277,7 +308,10 @@ fn rust_operation_methods(
                 "    pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {{ self.get(&format!(\"/v1/client/documents/content?name={{}}\", percent_encode(name))).await }}"
             )?;
         } else if id == "schedules.list" {
-            writeln!(out, "    pub async fn schedules_list(&self, cursor: Option<&str>, limit: Option<usize>, unheard_after_ms: Option<u64>) -> Result<Envelope<SchedulesPage>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} if let Some(age) = unheard_after_ms {{ query.push(format!(\"unheard_after_ms={{age}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/schedules{{suffix}}\")).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn schedules_list(&self, cursor: Option<&str>, limit: Option<usize>, unheard_after_ms: Option<u64>) -> Result<Envelope<SchedulesPage>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} if let Some(age) = unheard_after_ms {{ query.push(format!(\"unheard_after_ms={{age}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/schedules{{suffix}}\")).await }}"
+            )?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -319,11 +353,20 @@ fn rust_operation_methods(
                 "    pub async fn terminal_screen(&self, terminal_id: &str) -> Result<Envelope<TerminalScreen>, ClientError> {{ self.terminal_screen_internal(terminal_id).await }}"
             )?;
         } else if id == "message-body.get" {
-            writeln!(out, "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn message_body_get(&self, id: &str) -> Result<Envelope<MessageBody>, ClientError> {{ self.get(&format!(\"/v1/client/message-bodies/{{}}\", percent_encode(id))).await }}"
+            )?;
         } else if id == "status-history.get" {
-            writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}"
+            )?;
         } else if id == "harness-inventory.get" {
-            writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
+            writeln!(
+                out,
+                "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}"
+            )?;
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -407,16 +450,29 @@ fn swift_operation_methods(
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
         if id == "arrangements.list" {
-            writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
+            writeln!(
+                out,
+                "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}"
+            )?;
             continue;
         }
         if id == "arrangements.get" {
-            writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            writeln!(
+                out,
+                "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}"
+            )?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
-            let response = if response == "Value" { "JSONValue" } else { response };
-            writeln!(out, "    public func {method}(_ params: {request}, proof: ScgReadAuthorization) async throws -> Envelope<{response}> {{ try await assistantRead(\"{projection}\", params, proof: proof) }}")?;
+            let response = if response == "Value" {
+                "JSONValue"
+            } else {
+                response
+            };
+            writeln!(
+                out,
+                "    public func {method}(_ params: {request}, proof: ScgReadAuthorization) async throws -> Envelope<{response}> {{ try await assistantRead(\"{projection}\", params, proof: proof) }}"
+            )?;
         } else if matches!(
             id,
             "capabilities.get"
@@ -438,21 +494,30 @@ fn swift_operation_methods(
                 "    public func conversationSearch(text: String, agent: String? = nil, since: String? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ConversationSearch> {{ var query: [URLQueryItem] = [.init(name: \"text\", value: text)]; for (name, value) in [(\"agent\", agent), (\"since\", since), (\"cursor\", cursor)] {{ if let value {{ query.append(.init(name: name, value: value)) }} }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/conversations/search\", query: query) }}"
             )?;
         } else if id == "notes.list" {
-            writeln!(out, "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}")?;
+            writeln!(
+                out,
+                "    public func notesList() async throws -> Envelope<DirectiveNotes> {{ try await get(\"v1/client/notes\") }}"
+            )?;
         } else if id == "clients.list" {
             writeln!(
                 out,
                 "    public func clientsList() async throws -> Envelope<ClientConnections> {{ try await get(\"v1/client/clients\") }}"
             )?;
         } else if id == "slo.list" {
-            writeln!(out, "    public func sloList() async throws -> Envelope<SloList> {{ try await get(\"v1/client/slo\") }}")?;
+            writeln!(
+                out,
+                "    public func sloList() async throws -> Envelope<SloList> {{ try await get(\"v1/client/slo\") }}"
+            )?;
         } else if id == "slo.history" {
             writeln!(
                 out,
                 "    public func sloHistory(id: String, sinceMS: UInt64? = nil, untilMS: UInt64? = nil, steps: Int? = nil) async throws -> Envelope<SloHistory> {{ var query: [URLQueryItem] = [.init(name: \"id\", value: id)]; if let sinceMS {{ query.append(.init(name: \"since_ms\", value: String(sinceMS))) }}; if let untilMS {{ query.append(.init(name: \"until_ms\", value: String(untilMS))) }}; if let steps {{ query.append(.init(name: \"steps\", value: String(steps))) }}; return try await get(\"v1/client/slo/history\", query: query) }}"
             )?;
         } else if id == "mail-backlog.summary" {
-            writeln!(out, "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}")?;
+            writeln!(
+                out,
+                "    public func mailBacklogSummary() async throws -> Envelope<MailBacklog> {{ try await get(\"v1/client/mail-backlog\") }}"
+            )?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -469,7 +534,10 @@ fn swift_operation_methods(
                 "    public func documentGet(name: String) async throws -> Envelope<DocumentContent> {{ try await get(\"v1/client/documents/content\", query: [.init(name: \"name\", value: name)]) }}"
             )?;
         } else if id == "schedules.list" {
-            writeln!(out, "    public func schedulesList(cursor: String? = nil, limit: Int? = nil, unheardAfterMS: UInt64? = nil) async throws -> Envelope<SchedulesPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let unheardAfterMS {{ query.append(.init(name: \"unheard_after_ms\", value: String(unheardAfterMS))) }}; return try await get(\"v1/client/schedules\", query: query) }}")?;
+            writeln!(
+                out,
+                "    public func schedulesList(cursor: String? = nil, limit: Int? = nil, unheardAfterMS: UInt64? = nil) async throws -> Envelope<SchedulesPage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let unheardAfterMS {{ query.append(.init(name: \"unheard_after_ms\", value: String(unheardAfterMS))) }}; return try await get(\"v1/client/schedules\", query: query) }}"
+            )?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -486,9 +554,15 @@ fn swift_operation_methods(
                 "    public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> {{ try await get(\"v1/client/agent-workspaces/\\(id)\") }}"
             )?;
         } else if id == "message-body.get" {
-            writeln!(out, "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}")?;
+            writeln!(
+                out,
+                "    public func messageBodyGet(id: String) async throws -> Envelope<MessageBody> {{ try await get(\"v1/client/message-bodies/\\(id)\") }}"
+            )?;
         } else if id == "status-history.get" {
-            writeln!(out, "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}")?;
+            writeln!(
+                out,
+                "    public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> {{ try await get(\"v1/client/status-history/\\(id)\") }}"
+            )?;
         } else if id == "agent-declaration.get" {
             writeln!(
                 out,
@@ -500,7 +574,10 @@ fn swift_operation_methods(
                 "    public func hostRepositories(id: String) async throws -> Envelope<HostRepositories> {{ try await get(\"v1/client/hosts/\\(id)/repositories\") }}"
             )?;
         } else if id == "publication.definition" {
-            writeln!(out, "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}")?;
+            writeln!(
+                out,
+                "    public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> {{ try await get(\"v1/client/publication-definition\", query: [.init(name: \"subject\", value: subject)]) }}"
+            )?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -512,7 +589,10 @@ fn swift_operation_methods(
                 "    public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let version {{ query.append(.init(name: \"version\", value: String(version))) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/custom-subjects\", query: query) }}"
             )?;
         } else if id == "harness-inventory.get" {
-            writeln!(out, "    public func harnessInventoryGet(id: String, options: HarnessInventoryQuery) async throws -> Envelope<HarnessInventory> {{ var query: [URLQueryItem] = [.init(name: \"owner_host_id\", value: options.ownerHostID), .init(name: \"session_id\", value: options.sessionID), .init(name: \"native_session_id\", value: options.nativeSessionID), .init(name: \"runtime_incarnation\", value: options.runtimeIncarnation), .init(name: \"collection\", value: options.collection)]; if let directory = options.directory {{ query.append(.init(name: \"directory\", value: directory)) }}; if let prefix = options.prefix {{ query.append(.init(name: \"prefix\", value: prefix)) }}; if let limit = options.limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let cursor = options.cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; return try await get(\"v1/client/harness-inventory/\\(id)\", query: query) }}")?;
+            writeln!(
+                out,
+                "    public func harnessInventoryGet(id: String, options: HarnessInventoryQuery) async throws -> Envelope<HarnessInventory> {{ var query: [URLQueryItem] = [.init(name: \"owner_host_id\", value: options.ownerHostID), .init(name: \"session_id\", value: options.sessionID), .init(name: \"native_session_id\", value: options.nativeSessionID), .init(name: \"runtime_incarnation\", value: options.runtimeIncarnation), .init(name: \"collection\", value: options.collection)]; if let directory = options.directory {{ query.append(.init(name: \"directory\", value: directory)) }}; if let prefix = options.prefix {{ query.append(.init(name: \"prefix\", value: prefix)) }}; if let limit = options.limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; if let cursor = options.cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; return try await get(\"v1/client/harness-inventory/\\(id)\", query: query) }}"
+            )?;
         } else if id == "resources.list" {
             writeln!(
                 out,
@@ -572,12 +652,18 @@ fn struct_block<'a>(source: &'a str, declaration: &str) -> Result<&'a str> {
 }
 
 fn schema_properties(definition: &Value) -> impl Iterator<Item = &serde_json::Map<String, Value>> {
-    definition.get("properties").and_then(Value::as_object).into_iter().chain(
-        ["allOf", "oneOf"].into_iter().flat_map(move |key| {
-            definition.get(key).and_then(Value::as_array).into_iter().flatten()
+    definition
+        .get("properties")
+        .and_then(Value::as_object)
+        .into_iter()
+        .chain(["allOf", "oneOf"].into_iter().flat_map(move |key| {
+            definition
+                .get(key)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
                 .filter_map(|part| part.get("properties").and_then(Value::as_object))
-        }),
-    )
+        }))
 }
 
 fn rust_field(name: &str) -> String {
@@ -629,7 +715,9 @@ fn validate_model(
             let member = branch["$ref"]
                 .as_str()
                 .and_then(|reference| reference.rsplit('/').next())
-                .with_context(|| format!("union `{definition}` requires named reference branches"))?;
+                .with_context(|| {
+                    format!("union `{definition}` requires named reference branches")
+                })?;
             // Large Rust members are boxed to keep the enum small.
             let rust_member = rust_block.contains(&format!("({member})"))
                 || rust_block.contains(&format!("(Box<{member}>)"));
@@ -654,9 +742,12 @@ fn validate_model(
             .any(|branch| branch["$ref"] == "#/$defs/ResourceHeader")
     }) && rust_block.contains("pub header: ResourceHeader,");
     let header = &schema["$defs"]["ResourceHeader"]["properties"];
-    for property in properties.flat_map(|properties| properties.keys()).filter(|name| {
-        name.as_str() != "kind" && !(header_backed && header.get(name.as_str()).is_some())
-    }) {
+    for property in properties
+        .flat_map(|properties| properties.keys())
+        .filter(|name| {
+            name.as_str() != "kind" && !(header_backed && header.get(name.as_str()).is_some())
+        })
+    {
         let rust_field = rust_field(property);
         let rust_discriminated_timeline = definition == "TimelineEntry"
             && property == "type"
@@ -736,7 +827,10 @@ fn validate_surfaces(
         .count()
         / 2;
     if listed != known.len() {
-        bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
+        bail!(
+            "KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}",
+            known.len()
+        );
     }
     for definition in [
         "DirectiveNote",
@@ -1103,9 +1197,8 @@ fn swift_contract<'a>(
     constants: &[Constant],
 ) -> Result<String> {
     let actions = actions.collect::<Vec<_>>();
-    let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n\nimport Foundation\n\n"
-    );
+    let mut out =
+        "// @generated by st3-client-codegen; do not edit.\n\nimport Foundation\n\n".to_owned();
     writeln!(
         out,
         "public enum ActionType: String, Codable, CaseIterable, Sendable {{"
@@ -1184,7 +1277,14 @@ fn ts_type(value: &Value) -> Result<String> {
     }
     for union in ["oneOf", "anyOf"] {
         if let Some(items) = value.get(union).and_then(Value::as_array) {
-            let members = format!("({})", items.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(" | "));
+            let members = format!(
+                "({})",
+                items
+                    .iter()
+                    .map(ts_type)
+                    .collect::<Result<Vec<_>>>()?
+                    .join(" | ")
+            );
             if value.get("properties").is_some() || value.get("allOf").is_some() {
                 let mut base = value.clone();
                 base.as_object_mut().context("union schema")?.remove(union);
@@ -1202,18 +1302,30 @@ fn ts_type(value: &Value) -> Result<String> {
     if let Some(parts) = value.get("allOf").and_then(Value::as_array)
         && parts.len() == 2
         && let Some(reference) = parts.iter().find(|part| part.get("$ref").is_some())
-        && let Some(required) = parts.iter()
-            .find(|part| part.as_object().is_some_and(|object| object.len() == 1 && object.contains_key("required")))
+        && let Some(required) = parts
+            .iter()
+            .find(|part| {
+                part.as_object()
+                    .is_some_and(|object| object.len() == 1 && object.contains_key("required"))
+            })
             .and_then(|part| part["required"].as_array())
     {
-        let keys = required.iter()
-            .map(|key| key.as_str().map(|key| format!("'{key}'")).context("required property"))
+        let keys = required
+            .iter()
+            .map(|key| {
+                key.as_str()
+                    .map(|key| format!("'{key}'"))
+                    .context("required property")
+            })
             .collect::<Result<Vec<_>>>()?;
         let base = ts_type(reference)?;
         if keys.is_empty() {
             return Ok(base);
         }
-        return Ok(format!("{base} & Required<Pick<{base}, {}>>", keys.join(" | ")));
+        return Ok(format!(
+            "{base} & Required<Pick<{base}, {}>>",
+            keys.join(" | ")
+        ));
     }
     if let Some(types) = value.get("type").and_then(Value::as_array) {
         return Ok(types
@@ -1227,7 +1339,16 @@ fn ts_type(value: &Value) -> Result<String> {
         Some("integer" | "number") => "number".into(),
         Some("boolean") => "boolean".into(),
         Some("null") => "null".into(),
-        Some("array") if value.get("prefixItems").is_some() => format!("[{}]", value["prefixItems"].as_array().context("tuple items")?.iter().map(ts_type).collect::<Result<Vec<_>>>()?.join(", ")),
+        Some("array") if value.get("prefixItems").is_some() => format!(
+            "[{}]",
+            value["prefixItems"]
+                .as_array()
+                .context("tuple items")?
+                .iter()
+                .map(ts_type)
+                .collect::<Result<Vec<_>>>()?
+                .join(", ")
+        ),
         Some("array") => format!("Array<{}>", ts_type(&value["items"])?),
         Some("object") => ts_object(value)?,
         Some(other) => bail!("unsupported TypeScript schema type `{other}`"),
@@ -1333,9 +1454,7 @@ fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
 fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
-    let mut out = format!(
-        "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n"
-    );
+    let mut out = "// @generated by st3-client-codegen; do not edit.\n// Source: docs/st3/client-v0/schemas/client-v0.schema.json\n// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): receive both names; keep old sender defaults; sunset 60 days after first shipping release.\n\nexport const API_VERSION = 'st3.client.v0' as const;\n\n".to_owned();
     for constant in constants {
         writeln!(
             out,
@@ -1439,8 +1558,15 @@ fn typescript_operation_methods(
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
-            let response = if response == "Value" { "unknown" } else { response };
-            writeln!(out, "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}")?;
+            let response = if response == "Value" {
+                "unknown"
+            } else {
+                response
+            };
+            writeln!(
+                out,
+                "    async {method}(params: {request}, proof: ScgReadAuthorization, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.assistantRead<{response}>('{projection}', params, proof, requestOptions); }}"
+            )?;
             continue;
         }
         let route = if path.contains("{id}") {
@@ -1449,11 +1575,17 @@ fn typescript_operation_methods(
             path.to_owned()
         };
         if id == "arrangements.list" {
-            writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}"
+            )?;
             continue;
         }
         if id == "arrangements.get" {
-            writeln!(out, "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}"
+            )?;
             continue;
         }
         if id == "conversation.search" {
@@ -1467,21 +1599,30 @@ fn typescript_operation_methods(
                 "    async {method}(options: EventOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), 'events', requestOptions); }}"
             )?;
         } else if id == "notes.list" {
-            writeln!(out, "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async notesList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<DirectiveNotes>> {{ return this.get('/v1/client/notes', undefined, requestOptions); }}"
+            )?;
         } else if id == "clients.list" {
             writeln!(
                 out,
                 "    async {method}(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}', undefined, requestOptions); }}"
             )?;
         } else if id == "slo.list" {
-            writeln!(out, "    async sloList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloList>> {{ return this.get('/v1/client/slo', undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async sloList(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloList>> {{ return this.get('/v1/client/slo', undefined, requestOptions); }}"
+            )?;
         } else if id == "slo.history" {
             writeln!(
                 out,
                 "    async sloHistory(id: string, options: {{ since_ms?: number; until_ms?: number; steps?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SloHistory>> {{ return this.get('/v1/client/slo/history' + query({{ id, ...options }}), undefined, requestOptions); }}"
             )?;
         } else if id == "mail-backlog.summary" {
-            writeln!(out, "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async mailBacklogSummary(requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<MailBacklog>> {{ return this.get('/v1/client/mail-backlog', undefined, requestOptions); }}"
+            )?;
         } else if id == "usage.period" {
             writeln!(
                 out,
@@ -1498,7 +1639,10 @@ fn typescript_operation_methods(
                 "    async {method}(name: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query({{ name }}), undefined, requestOptions); }}"
             )?;
         } else if id == "schedules.list" {
-            writeln!(out, "    async schedulesList(options: {{ cursor?: string; limit?: number; unheard_after_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SchedulesPage>> {{ return this.get('/v1/client/schedules' + query(options), undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async schedulesList(options: {{ cursor?: string; limit?: number; unheard_after_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<SchedulesPage>> {{ return this.get('/v1/client/schedules' + query(options), undefined, requestOptions); }}"
+            )?;
         } else if id == "documents.list" {
             writeln!(
                 out,
@@ -1515,7 +1659,10 @@ fn typescript_operation_methods(
                 "    async customSubjectsList(options: PageOptions & {{ kind?: string; version?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
         } else if id == "harness-inventory.get" {
-            writeln!(out, "    async {method}(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessInventory>> {{ return this.get(`{route}` + query({{ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }}), undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async {method}(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessInventory>> {{ return this.get(`{route}` + query({{ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }}), undefined, requestOptions); }}"
+            )?;
         } else if id == "resources.list" {
             writeln!(
                 out,
@@ -1532,7 +1679,10 @@ fn typescript_operation_methods(
                 "    async hostRepositories(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HostRepositories>> {{ return this.get(`{route}`, undefined, requestOptions); }}"
             )?;
         } else if id == "publication.definition" {
-            writeln!(out, "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}")?;
+            writeln!(
+                out,
+                "    async publicationDefinition(subject: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PublicationDefinition>> {{ return this.get('{route}' + query({{ subject }}), undefined, requestOptions); }}"
+            )?;
         } else if id == "subject.definition" {
             writeln!(
                 out,
@@ -1600,7 +1750,9 @@ mod tests {
         ))?;
         let models = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
         assert!(models.contains("export const API_VERSION = 'st3.client.v0' as const;"));
-        assert!(models.contains("// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both):"));
+        assert!(models.contains(
+            "// TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both):"
+        ));
         for field in [
             "api_version: \"st3.client.v0\" | \"fractal.client.v0\";",
             "error_version: \"st3.client.error.v0\" | \"fractal.client.error.v0\";",
@@ -1613,17 +1765,49 @@ mod tests {
 
     #[test]
     fn websocket_senders_use_fractal_without_changing_http_versions() {
-        assert!(RUST_MODELS_TEMPLATE.contains("TERMINAL_SUBPROTOCOL: &str = \"fractal.client.terminal.v0\""));
+        assert!(
+            RUST_MODELS_TEMPLATE
+                .contains("TERMINAL_SUBPROTOCOL: &str = \"fractal.client.terminal.v0\"")
+        );
         assert!(RUST_MODELS_TEMPLATE.contains("API_VERSION: &str = \"st3.client.v0\""));
-        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientTerminalSubprotocol = \"fractal.client.terminal.v0\""));
+        assert!(
+            SWIFT_MODELS_TEMPLATE
+                .contains("fractalClientTerminalSubprotocol = \"fractal.client.terminal.v0\"")
+        );
         assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientAPIVersion = \"st3.client.v0\""));
         for (template, protocols) in [
-            (RUST_CLIENT_TEMPLATE, &["fractal.client.pty.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
-            (TYPESCRIPT_CLIENT_TEMPLATE, &["fractal.client.terminal.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
-            (SWIFT_CLIENT_TEMPLATE, &["fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (
+                RUST_CLIENT_TEMPLATE,
+                &[
+                    "fractal.client.pty.v0",
+                    "fractal.client.conversation.v0",
+                    "fractal.client.collections.v0",
+                    "fractal.cap.",
+                ][..],
+            ),
+            (
+                TYPESCRIPT_CLIENT_TEMPLATE,
+                &[
+                    "fractal.client.terminal.v0",
+                    "fractal.client.conversation.v0",
+                    "fractal.client.collections.v0",
+                    "fractal.cap.",
+                ][..],
+            ),
+            (
+                SWIFT_CLIENT_TEMPLATE,
+                &[
+                    "fractal.client.conversation.v0",
+                    "fractal.client.collections.v0",
+                    "fractal.cap.",
+                ][..],
+            ),
         ] {
             for protocol in protocols {
-                assert!(template.contains(protocol), "missing sender spelling: {protocol}");
+                assert!(
+                    template.contains(protocol),
+                    "missing sender spelling: {protocol}"
+                );
             }
             assert!(template.contains("x-st3-features"));
         }
@@ -1639,16 +1823,36 @@ mod tests {
         let rust = "pub enum Pair { Person(Person), Assistant(Assistant) }\npub struct Person { pub person_id: String }\npub struct Assistant { pub principal: String }";
         let swift = "public enum Pair: Codable { case person(Person), assistant(Assistant) }\npublic struct Person: Codable { let personID: String }\npublic struct Assistant: Codable { let principal: String }";
         validate_model(&schema, "Pair", "Pair", "Pair", rust, swift).unwrap();
-        assert!(validate_model(&schema, "Pair", "Pair", "Pair", &rust.replace("pub principal:", "pub wrong:"), swift).is_err());
+        assert!(
+            validate_model(
+                &schema,
+                "Pair",
+                "Pair",
+                "Pair",
+                &rust.replace("pub principal:", "pub wrong:"),
+                swift
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn assistant_conversation_typescript_methods_use_imported_requests_and_loose_json() -> Result<()> {
+    fn assistant_conversation_typescript_methods_use_imported_requests_and_loose_json() -> Result<()>
+    {
         let reads = [
             ("assistant.conversations", "AssistantPageRequest"),
-            ("assistant.conversation-detail", "AssistantAgentDetailRequest"),
-            ("assistant.conversation-timeline", "AssistantConversationTimelineRequest"),
-            ("assistant.conversation-search", "AssistantConversationSearchRequest"),
+            (
+                "assistant.conversation-detail",
+                "AssistantAgentDetailRequest",
+            ),
+            (
+                "assistant.conversation-timeline",
+                "AssistantConversationTimelineRequest",
+            ),
+            (
+                "assistant.conversation-search",
+                "AssistantConversationSearchRequest",
+            ),
         ];
         let operations = reads.iter().map(|(id, request)| serde_json::json!({
             "id": id, "path": format!("/v1/client/assistant/{}", id.strip_prefix("assistant.").unwrap()),
@@ -1658,7 +1862,13 @@ mod tests {
         let template = include_str!("../templates/Client.ts.in");
         for (id, request) in reads {
             let method = lower_camel(&pascal(id));
-            assert!(template.lines().take_while(|line| !line.starts_with("} from './Models.generated.ts'")).any(|line| line.contains(request)), "{request} must be imported");
+            assert!(
+                template
+                    .lines()
+                    .take_while(|line| !line.starts_with("} from './Models.generated.ts'"))
+                    .any(|line| line.contains(request)),
+                "{request} must be imported"
+            );
             assert!(methods.contains(&format!("async {method}(params: {request},")));
         }
         assert_eq!(methods.matches("Promise<EnvelopeOf<unknown>>").count(), 4);
@@ -1697,7 +1907,8 @@ mod tests {
     /// Two changes adding different cases to one enum conflict if the enum is one line, in the
     /// schema and in every generated file; from `ONE_PER_LINE_FROM` cases each has its own line.
     #[test]
-    fn large_enums_are_one_case_per_line_in_the_schema_and_the_generated_typescript() -> Result<()> {
+    fn large_enums_are_one_case_per_line_in_the_schema_and_the_generated_typescript() -> Result<()>
+    {
         let many = rich::ONE_PER_LINE_FROM;
         let schema_text = include_str!("../../../docs/st3/client-v0/schemas/client-v0.schema.json");
         for line in schema_text.lines() {
@@ -1844,8 +2055,13 @@ mod tests {
             {"properties": {"registered": {"const": false}}},
             {"properties": {"registered": {"const": true}, "environment": {"type": "string"}}}
         ]});
-        let fields = schema_properties(&model).flat_map(|properties| properties.keys())
-            .map(String::as_str).collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
+        let fields = schema_properties(&model)
+            .flat_map(|properties| properties.keys())
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            std::collections::BTreeSet::from(["registered", "environment"])
+        );
     }
 }

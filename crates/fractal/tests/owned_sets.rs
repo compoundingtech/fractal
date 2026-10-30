@@ -1,9 +1,8 @@
 //! Each fixture serves an isolated daemon over its own Unix socket and durable graph.
-use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::OwnedSetsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::{path::Path, sync::Arc, time::Duration};
 
-use serde_json::{Value, json};
 use fractal_daemon::{
     api::AppState,
     client::Client,
@@ -14,6 +13,7 @@ use fractal_daemon::{
         owned_sets::{Options, Preview, Request, Source},
     },
 };
+use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
@@ -44,19 +44,23 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         json!({"status":"running","features":{"owned_sets":1}}),
     );
     let socket = root.join("st3.sock");
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: name.into(),
-    state_dir: root.clone(),
-    pty_root: root.join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: Some(FLEET.into()),
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: name.into(),
+        state_dir: root.clone(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
@@ -327,9 +331,10 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
         let socket = amber.client.socket_path().unwrap().to_path_buf();
         let previous = previous.clone();
         tokio::task::spawn_blocking(move || {
-            let mut command =
-                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
-            command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+            command
+                .env_remove("ST_AGENT")
+                .env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
                 .arg(socket)
@@ -501,7 +506,9 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
     ] {
         let socket = root.path().join("amber/st3.sock");
         let output = tokio::task::spawn_blocking(move || {
-            fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+                .env_remove("ST_AGENT")
+                .env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
                 .arg(socket)
@@ -528,8 +535,9 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
 /// PTY process identities and exits are controlled independently of the isolated HTTP daemon.
 #[derive(Default)]
 struct RolloutRuntime {
-    observations:
-        std::sync::Mutex<std::collections::BTreeMap<String, fractal_daemon::reconcile::RuntimeObservation>>,
+    observations: std::sync::Mutex<
+        std::collections::BTreeMap<String, fractal_daemon::reconcile::RuntimeObservation>,
+    >,
     starts: std::sync::Mutex<Vec<fractal_daemon::model::MemberSpec>>,
     stops: std::sync::Mutex<Vec<String>>,
 }
@@ -543,7 +551,10 @@ impl fractal_daemon::reconcile::RuntimeControl for RolloutRuntime {
             .cloned()
             .collect())
     }
-    fn observe_exec(&self, id: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
+    fn observe_exec(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(self.observations.lock().unwrap().get(id).cloned())
     }
     fn start(&self, member: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
@@ -620,9 +631,13 @@ impl fractal_daemon::reconcile::RuntimeControl for RolloutRuntime {
 fn native_observation(store: &Store, subject: &str, incarnation: &str) {
     // The fixture producer retries on each reconciliation pass, just as the native
     // report waits for the graph to acknowledge the newly started runtime.
-    if !store.latest_claim(subject, Some("runtime.observed")).unwrap()
-        .is_some_and(|runtime| runtime.body["fields"]["status"] == "running"
-            && runtime.body["fields"]["incarnation_id"].as_str() == Some(incarnation))
+    if !store
+        .latest_claim(subject, Some("runtime.observed"))
+        .unwrap()
+        .is_some_and(|runtime| {
+            runtime.body["fields"]["status"] == "running"
+                && runtime.body["fields"]["incarnation_id"].as_str() == Some(incarnation)
+        })
     {
         return;
     }
@@ -746,7 +761,8 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         if let Some(operation) = d.store.rollout(automatic).unwrap()
             && operation.drain_ack.is_none()
         {
-            fractal_daemon::rollout::phase(&d.store, automatic, &operation, "drain-ack", None, &[]).unwrap();
+            fractal_daemon::rollout::phase(&d.store, automatic, &operation, "drain-ack", None, &[])
+                .unwrap();
         }
         for observation in runtime.snapshot_ptys().unwrap() {
             if observation.status == "running"
@@ -842,9 +858,10 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let (shown, output) = tokio::task::spawn_blocking(move || {
         let command = || {
-            let mut command =
-                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
-            command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+            command
+                .env_remove("ST_AGENT")
+                .env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--endpoint"])
                 .arg(&socket);
@@ -881,7 +898,8 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
         reconciler.reconcile_once().unwrap();
         let operation = d.store.rollout(manual).unwrap().unwrap();
         if operation.drain_ack.is_none() {
-            fractal_daemon::rollout::phase(&d.store, manual, &operation, "drain-ack", None, &[]).unwrap();
+            fractal_daemon::rollout::phase(&d.store, manual, &operation, "drain-ack", None, &[])
+                .unwrap();
         }
         if let Some(incarnation) = operation.replacement_incarnation {
             native_observation(&d.store, manual, &incarnation);
@@ -939,10 +957,15 @@ async fn manual_authored_selection_metadata_only_publish_preserves_the_incumbent
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manual_authored_selection_launch_change_is_pending_and_cli_rollout_refuses_before_cutover() {
+async fn manual_authored_selection_launch_change_is_pending_and_cli_rollout_refuses_before_cutover()
+{
     for (selector, argument) in [("--resume", "\"authored-session\""), ("--continue", "")] {
-        manual_authored_selection_publication(selector, argument, ManualPublicationCase::LaunchChange)
-            .await;
+        manual_authored_selection_publication(
+            selector,
+            argument,
+            ManualPublicationCase::LaunchChange,
+        )
+        .await;
     }
 }
 
@@ -1037,13 +1060,14 @@ async fn manual_authored_selection_publication(
     adoption.options.adopt.insert(subject.into());
     let adoption_preview = preview(&d, &mut adoption).await;
     assert_eq!(adoption_preview.changes[subject], "added");
-    let applied: Value = d
-        .client
-        .post("/v1/sets/apply", &adoption)
-        .await
-        .unwrap();
+    let applied: Value = d.client.post("/v1/sets/apply", &adoption).await.unwrap();
     assert_eq!(applied["publication"]["changed"], true);
-    assert!(d.store.owned_sets().unwrap()[0].receipt.adoptions.contains_key(subject));
+    assert!(
+        d.store.owned_sets().unwrap()[0]
+            .receipt
+            .adoptions
+            .contains_key(subject)
+    );
     reconciler.reconcile_once().unwrap();
     let adopted = d
         .store
@@ -1180,7 +1204,9 @@ async fn manual_authored_selection_publication(
 
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint"])
             .arg(socket)
@@ -1210,8 +1236,14 @@ async fn manual_authored_selection_publication(
         )
         .await
         .unwrap_err();
-    assert!(api_error.to_string().contains("authored-session-selection"), "{api_error}");
-    assert!(api_error.to_string().contains("cannot resume"), "{api_error}");
+    assert!(
+        api_error.to_string().contains("authored-session-selection"),
+        "{api_error}"
+    );
+    assert!(
+        api_error.to_string().contains("cannot resume"),
+        "{api_error}"
+    );
     assert!(api_error.to_string().contains(selector), "{api_error}");
 
     // A refused request must not leave a durable drain or action for reconciliation.
@@ -1241,7 +1273,10 @@ async fn manual_authored_selection_publication(
         .await
         .unwrap();
     assert_eq!(agent["state"], "running");
-    assert_eq!(agent["rollout"]["status"], "published, rollout pending (manual)");
+    assert_eq!(
+        agent["rollout"]["status"],
+        "published, rollout pending (manual)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1259,34 +1294,71 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
     let workspace = root.path().join("orchard");
     std::fs::create_dir_all(&workspace).unwrap();
     let bundle = |model: &str| {
-        format!("version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; rollout \"manual\"; harness \"claude\" {{ model {model:?}; }} }}\n",
-            workspace.display().to_string())
+        format!(
+            "version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; rollout \"manual\"; harness \"claude\" {{ model {model:?}; }} }}\n",
+            workspace.display().to_string()
+        )
     };
     let mut initial = request(&d, 1, bundle("first")).await;
     preview(&d, &mut initial).await;
-    d.client.post::<_, Value>("/v1/sets/apply", &initial).await.unwrap();
+    d.client
+        .post::<_, Value>("/v1/sets/apply", &initial)
+        .await
+        .unwrap();
     let incumbent = d.store.selected_desired_token(subject).unwrap().unwrap();
-    let member = d.store.desired_subject_with_writer(subject).unwrap().unwrap().0.member.unwrap();
-    append(&d.store, subject, "runtime.action.succeeded",
-        json!({"action":"start","desired_token":incumbent,"incarnation_id":"original"}));
-    append(&d.store, subject, "runtime.observed",
-        json!({"status":"running","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"original"}));
+    let member = d
+        .store
+        .desired_subject_with_writer(subject)
+        .unwrap()
+        .unwrap()
+        .0
+        .member
+        .unwrap();
+    append(
+        &d.store,
+        subject,
+        "runtime.action.succeeded",
+        json!({"action":"start","desired_token":incumbent,"incarnation_id":"original"}),
+    );
+    append(
+        &d.store,
+        subject,
+        "runtime.observed",
+        json!({"status":"running","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"original"}),
+    );
     native_observation(&d.store, subject, "original");
     d.client.post::<_, Value>("/v1/agents/suspend",
         &json!({"subject":subject,"actor":"person/operator","idempotency_key":"suspend-before-publication"}))
         .await.unwrap();
-    let operation = fractal_daemon::suspension::current(&d.store, subject).unwrap().unwrap();
+    let operation = fractal_daemon::suspension::current(&d.store, subject)
+        .unwrap()
+        .unwrap();
     assert_eq!(operation.phase, "quiescing");
 
     // Publish while suspend is in flight. Owner acknowledgements model the stopped
     // runtime boundary; native process continuity is covered by the lifecycle tests.
     let mut changed = request(&d, 2, bundle("second")).await;
     preview(&d, &mut changed).await;
-    d.client.post::<_, Value>("/v1/sets/apply", &changed).await.unwrap();
-    assert_eq!(fractal_daemon::suspension::current(&d.store, subject).unwrap().unwrap().operation_id, operation.operation_id);
+    d.client
+        .post::<_, Value>("/v1/sets/apply", &changed)
+        .await
+        .unwrap();
+    assert_eq!(
+        fractal_daemon::suspension::current(&d.store, subject)
+            .unwrap()
+            .unwrap()
+            .operation_id,
+        operation.operation_id
+    );
     for (key, phase) in [
-        (fractal_daemon::suspension::suspend_snapshot_key(&operation.operation_id), "snapshotting"),
-        (fractal_daemon::suspension::suspend_completed_key(&operation.operation_id), "suspended"),
+        (
+            fractal_daemon::suspension::suspend_snapshot_key(&operation.operation_id),
+            "snapshotting",
+        ),
+        (
+            fractal_daemon::suspension::suspend_completed_key(&operation.operation_id),
+            "suspended",
+        ),
     ] {
         d.store.append_claim(&ClaimInput {
             subject: subject.into(),
@@ -1298,29 +1370,55 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
             idempotency_key: Some(key),
         }).unwrap();
     }
-    append(&d.store, subject, "runtime.observed",
-        json!({"status":"exited","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"original","exit_code":0}));
+    append(
+        &d.store,
+        subject,
+        "runtime.observed",
+        json!({"status":"exited","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"original","exit_code":0}),
+    );
     let runtime = Arc::new(RolloutRuntime::default());
     let reconciler = fractal_daemon::reconcile::Reconciler::new(
-        d.store.clone(), runtime.clone(), "amber".into(), Arc::new(Notify::new()));
+        d.store.clone(),
+        runtime.clone(),
+        "amber".into(),
+        Arc::new(Notify::new()),
+    );
     reconciler.reconcile_once().unwrap();
     assert!(runtime.starts.lock().unwrap().is_empty());
-    let shown: Value = d.client.get(&format!("/v1/client/agents/{subject}")).await.unwrap();
+    let shown: Value = d
+        .client
+        .get(&format!("/v1/client/agents/{subject}"))
+        .await
+        .unwrap();
     assert_eq!(shown["state"], "suspended");
     assert_eq!(shown["rollout"]["mode"], "manual");
-    assert_eq!(shown["rollout"]["status"], "published, rollout pending (manual)");
+    assert_eq!(
+        shown["rollout"]["status"],
+        "published, rollout pending (manual)"
+    );
     let refused = d.client.post::<_, Value>("/v1/agents/rollout",
         &json!({"subject":subject,"actor":"person/operator","expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),"expected_incarnation":"original","policy":fractal_daemon::rollout::Policy::when_idle(1_800_000, false),"idempotency_key":"rollout-while-suspended"}))
         .await.unwrap_err();
-    assert!(refused.to_string().contains("rollout-suspended"), "{refused}");
+    assert!(
+        refused.to_string().contains("rollout-suspended"),
+        "{refused}"
+    );
     assert!(d.store.rollout(subject).unwrap().is_none());
     d.client.post::<_, Value>("/v1/agents/resume",
         &json!({"subject":subject,"actor":"person/operator","idempotency_key":"resume-incumbent"}))
         .await.unwrap();
-    let resumed = fractal_daemon::suspension::current(&d.store, subject).unwrap().unwrap();
+    let resumed = fractal_daemon::suspension::current(&d.store, subject)
+        .unwrap()
+        .unwrap();
     assert_eq!(resumed.phase, "restoring");
-    assert_eq!(resumed.native_session_id.as_deref(), Some("native-agent-garden-orchard"));
-    assert_ne!(d.store.selected_desired_token(subject).unwrap().unwrap(), incumbent);
+    assert_eq!(
+        resumed.native_session_id.as_deref(),
+        Some("native-agent-garden-orchard")
+    );
+    assert_ne!(
+        d.store.selected_desired_token(subject).unwrap().unwrap(),
+        incumbent
+    );
     assert!(d.store.rollout(subject).unwrap().is_none());
     d.store.append_claim(&ClaimInput {
         subject: subject.into(),
@@ -1331,14 +1429,29 @@ async fn manual_publication_preserves_suspension_and_requires_resume_before_roll
         expected_subject: None,
         idempotency_key: Some(fractal_daemon::suspension::resume_completed_key(&resumed.operation_id)),
     }).unwrap();
-    append(&d.store, subject, "runtime.action.succeeded",
-        json!({"action":"start","desired_token":incumbent,"incarnation_id":"resumed-incumbent"}));
-    append(&d.store, subject, "runtime.observed",
-        json!({"status":"running","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"resumed-incumbent"}));
+    append(
+        &d.store,
+        subject,
+        "runtime.action.succeeded",
+        json!({"action":"start","desired_token":incumbent,"incarnation_id":"resumed-incumbent"}),
+    );
+    append(
+        &d.store,
+        subject,
+        "runtime.observed",
+        json!({"status":"running","host":"amber","runtime_id":member.runtime_id,"terminal":true,"incarnation_id":"resumed-incumbent"}),
+    );
     native_observation(&d.store, subject, "resumed-incumbent");
-    let shown: Value = d.client.get(&format!("/v1/client/agents/{subject}")).await.unwrap();
+    let shown: Value = d
+        .client
+        .get(&format!("/v1/client/agents/{subject}"))
+        .await
+        .unwrap();
     assert_eq!(shown["state"], "running");
-    assert_eq!(shown["rollout"]["status"], "published, rollout pending (manual)");
+    assert_eq!(
+        shown["rollout"]["status"],
+        "published, rollout pending (manual)"
+    );
     d.client.post::<_, Value>("/v1/agents/rollout",
         &json!({"subject":subject,"actor":"person/operator","expected_desired":d.store.selected_desired_token(subject).unwrap().unwrap(),"expected_incarnation":"resumed-incumbent","policy":fractal_daemon::rollout::Policy::when_idle(1_800_000, false),"idempotency_key":"rollout-after-resume"}))
         .await.unwrap();
@@ -1533,7 +1646,8 @@ async fn adoption_diff_reads_existing_unmanaged_definition_and_invalid_actors_ar
     let root = tempfile::tempdir().unwrap();
     let key = Arc::new(MemberKey::generate().unwrap().0);
     let d = daemon(root.path(), "amber", key.clone(), &key).await;
-    let initial = fractal_daemon::graph::parse_intent(&bundle("unmanaged", false), "amber").unwrap();
+    let initial =
+        fractal_daemon::graph::parse_intent(&bundle("unmanaged", false), "amber").unwrap();
     d.store
         .apply_internal(&initial, "unmanaged-fixture")
         .unwrap();
@@ -1565,93 +1679,183 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
     let subject = "agent/garden/orchard";
     let native = "00000000-0000-4000-8000-000000000024";
     let transcript = root.path().join(format!("2026-10-24_{native}.jsonl"));
-    std::fs::write(&transcript, format!("{{\"type\":\"session\",\"id\":\"{native}\"}}\n")).unwrap();
+    std::fs::write(
+        &transcript,
+        format!("{{\"type\":\"session\",\"id\":\"{native}\"}}\n"),
+    )
+    .unwrap();
     let source = format!(
         "version 2\nagent \"garden/orchard\" {{ host \"amber\"; workspace {:?}; harness \"omp\" {{ args \"--resume\" {:?}; }} }}",
-        root.path().display().to_string(), transcript.display().to_string(),
+        root.path().display().to_string(),
+        transcript.display().to_string(),
     );
     let intent = fractal_daemon::parse_intent(&source, "amber").unwrap();
-    d.store.apply_internal(&intent, "suspended-authored-fixture").unwrap();
+    d.store
+        .apply_internal(&intent, "suspended-authored-fixture")
+        .unwrap();
     let token = d.store.selected_desired_token(subject).unwrap().unwrap();
     // Reproduce a historical suspension: current suspend preflight prevents creating a new one
     // with an authored selector, but old durable suspensions still have to be resumable.
-    let suspend = d.store.append_claim(&ClaimInput {
-        subject: subject.into(), kind: "runtime.action.requested".into(),
-        actor: Some("person/operator".into()),
-        fields: serde_json::from_value(json!({"action":"suspend","incarnation_id":"original"})).unwrap(),
-        evidence: vec![token.clone()], expected_subject: None, idempotency_key: None,
-    }).unwrap();
+    let suspend = d
+        .store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/operator".into()),
+            fields: serde_json::from_value(json!({"action":"suspend","incarnation_id":"original"}))
+                .unwrap(),
+            evidence: vec![token.clone()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
     for (key, phase) in [
-        (suspension::suspend_snapshot_key(&suspend.id), "snapshotting"),
+        (
+            suspension::suspend_snapshot_key(&suspend.id),
+            "snapshotting",
+        ),
         (suspension::suspend_completed_key(&suspend.id), "suspended"),
     ] {
-        d.store.append_claim(&ClaimInput {
-            subject: subject.into(), kind: "runtime.action.succeeded".into(),
-            actor: Some("person/operator".into()),
-            fields: serde_json::from_value(json!({"action":"suspend","operation_status":phase,
-                "harness":"omp","native_session_id":native})).unwrap(),
-            evidence: vec![suspend.id.clone()], expected_subject: None, idempotency_key: Some(key),
-        }).unwrap();
+        d.store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "runtime.action.succeeded".into(),
+                actor: Some("person/operator".into()),
+                fields: serde_json::from_value(json!({"action":"suspend","operation_status":phase,
+                "harness":"omp","native_session_id":native}))
+                .unwrap(),
+                evidence: vec![suspend.id.clone()],
+                expected_subject: None,
+                idempotency_key: Some(key),
+            })
+            .unwrap();
     }
-    assert_eq!(suspension::current(&d.store, subject).unwrap().unwrap().phase, "suspended");
+    assert_eq!(
+        suspension::current(&d.store, subject)
+            .unwrap()
+            .unwrap()
+            .phase,
+        "suspended"
+    );
     let refused: fractal_daemon::model::ClaimRecord = d.client.post("/v1/agents/resume", &json!({
         "subject":subject,"actor":"person/operator","idempotency_key":"historical-refused-resume",
     })).await.unwrap();
-    d.store.append_claim(&ClaimInput {
-        subject: subject.into(), kind: "runtime.action.failed".into(),
-        actor: Some("person/operator".into()),
-        fields: serde_json::from_value(json!({"action":"resume","code":"authored-session-selection",
-            "reason":"historical blanket authored selector refusal"})).unwrap(),
-        evidence: vec![refused.id.clone()], expected_subject: None,
-        idempotency_key: Some(suspension::resume_failed_key(&refused.id)),
-    }).unwrap();
+    d.store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.action.failed".into(),
+            actor: Some("person/operator".into()),
+            fields: serde_json::from_value(
+                json!({"action":"resume","code":"authored-session-selection",
+            "reason":"historical blanket authored selector refusal"}),
+            )
+            .unwrap(),
+            evidence: vec![refused.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(suspension::resume_failed_key(&refused.id)),
+        })
+        .unwrap();
     let held = suspension::current(&d.store, subject).unwrap().unwrap();
     assert_eq!(held.phase, "suspended");
     assert_eq!(held.code.as_deref(), Some("authored-session-selection"));
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
         fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
-            .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
-            .args(["--endpoint"]).arg(socket)
-            .args(["agents", "start", "garden/orchard", "--as", "person/operator"])
-            .output().unwrap()
-    }).await.unwrap();
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
+            .env_remove("ST_MISSION_RUN")
+            .args(["--endpoint"])
+            .arg(socket)
+            .args([
+                "agents",
+                "start",
+                "garden/orchard",
+                "--as",
+                "person/operator",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("start-suspended"), "{error}");
     assert!(error.contains("st agents resume"), "{error}");
-    assert_eq!(d.store.selected_desired_token(subject).unwrap().unwrap(), token);
+    assert_eq!(
+        d.store.selected_desired_token(subject).unwrap().unwrap(),
+        token
+    );
 
     let runtime = Arc::new(RolloutRuntime::default());
-    let reconciler = Reconciler::new(d.store.clone(), runtime.clone(), "amber".into(), Arc::new(Notify::new()));
-    d.client.post::<_, Value>("/v1/agents/resume", &json!({
-        "subject":subject,"actor":"person/operator","idempotency_key":"resume-authored",
-    })).await.unwrap();
-    for _ in 0..4 { reconciler.reconcile_once().unwrap(); }
+    let reconciler = Reconciler::new(
+        d.store.clone(),
+        runtime.clone(),
+        "amber".into(),
+        Arc::new(Notify::new()),
+    );
+    d.client
+        .post::<_, Value>(
+            "/v1/agents/resume",
+            &json!({
+                "subject":subject,"actor":"person/operator","idempotency_key":"resume-authored",
+            }),
+        )
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        reconciler.reconcile_once().unwrap();
+    }
     let launch = runtime.starts.lock().unwrap().last().unwrap().clone();
     assert_eq!(launch.environment[suspension::RESUME_ENV], native);
     // Exercise the same argv check used by the driver, including the pinned-path branch.
     // The native_resume unit fixture separately runs the resulting argv through a stub harness.
-    let argv = vec!["omp".into(), "--resume".into(), transcript.display().to_string()];
+    let argv = vec![
+        "omp".into(),
+        "--resume".into(),
+        transcript.display().to_string(),
+    ];
     let selected = fractal_daemon::native_resume::pi_family_argv(
-        "omp", argv.clone(), &root.path().join("sessions"), native, Some(&transcript),
-    ).unwrap();
+        "omp",
+        argv.clone(),
+        &root.path().join("sessions"),
+        native,
+        Some(&transcript),
+    )
+    .unwrap();
     assert_eq!(selected, argv);
     let observation = runtime.snapshot_ptys().unwrap().pop().unwrap();
-    append(&d.store, subject, "harness.session-file", json!({
-        "harness":"omp","session_id":native,"incarnation_id":observation.incarnation_id,
-        "path":transcript,"status":"active",
-    }));
-    for _ in 0..3 { reconciler.reconcile_once().unwrap(); }
+    append(
+        &d.store,
+        subject,
+        "harness.session-file",
+        json!({
+            "harness":"omp","session_id":native,"incarnation_id":observation.incarnation_id,
+            "path":transcript,"status":"active",
+        }),
+    );
+    for _ in 0..3 {
+        reconciler.reconcile_once().unwrap();
+    }
     let resumed = suspension::current(&d.store, subject).unwrap().unwrap();
     assert_eq!(resumed.phase, "resumed");
     assert_eq!(resumed.native_session_id.as_deref(), Some(native));
 
-    std::fs::write(&transcript, "{\"type\":\"session\",\"id\":\"other-native\"}\n").unwrap();
+    std::fs::write(
+        &transcript,
+        "{\"type\":\"session\",\"id\":\"other-native\"}\n",
+    )
+    .unwrap();
     assert_eq!(
         fractal_daemon::native_resume::pi_family_argv(
-            "omp", argv, &root.path().join("sessions"), native, Some(&transcript),
-        ).unwrap_err().code,
+            "omp",
+            argv,
+            &root.path().join("sessions"),
+            native,
+            Some(&transcript),
+        )
+        .unwrap_err()
+        .code,
         "authored-session-mismatch",
     );
 }

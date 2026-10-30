@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use fractal_daemon::api::AppState;
 use fractal_daemon::store::Store;
+use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{Barrier, Notify, watch};
 use tower::ServiceExt as _;
 
@@ -125,13 +125,19 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 fn agents_publication_contract_is_complete_and_unbounded() {
     let validator = contract_validator("AgentsPublication");
     let resources = fixture("resources.json");
-    let agent = resources.as_array().unwrap().iter()
-        .find(|row| row["kind"] == "agent").unwrap();
-    let rows = (0..401).map(|index| {
-        let mut row = agent.clone();
-        row["id"] = serde_json::json!(format!("agent/publication-{index}"));
-        row
-    }).collect::<Vec<_>>();
+    let agent = resources
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["kind"] == "agent")
+        .unwrap();
+    let rows = (0..401)
+        .map(|index| {
+            let mut row = agent.clone();
+            row["id"] = serde_json::json!(format!("agent/publication-{index}"));
+            row
+        })
+        .collect::<Vec<_>>();
     let order = rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
     let mut publication = serde_json::json!({
         "publication": {
@@ -144,12 +150,17 @@ fn agents_publication_contract_is_complete_and_unbounded() {
     });
     assert_conforms(&validator, "401 complete current agents", &publication);
     publication["has_more"] = serde_json::json!(true);
-    assert!(!validator.is_valid(&publication), "a partial head cannot be complete");
+    assert!(
+        !validator.is_valid(&publication),
+        "a partial head cannot be complete"
+    );
     publication["has_more"] = serde_json::json!(false);
     publication["publication"]["revision"] = serde_json::json!(9_007_199_254_740_992_u64);
-    assert!(!validator.is_valid(&publication), "revision exhaustion requires another epoch");
+    assert!(
+        !validator.is_valid(&publication),
+        "revision exhaustion requires another epoch"
+    );
 }
-
 
 #[test]
 fn consumers_accept_future_enum_cases_but_producers_reject_them() {
@@ -173,7 +184,10 @@ fn consumers_accept_future_enum_cases_but_producers_reject_them() {
             !producer.is_valid(&future),
             "{definition} producer accepted a future case"
         );
-        assert!(!consumer.is_valid(&Value::Null), "{definition} accepted null");
+        assert!(
+            !consumer.is_valid(&Value::Null),
+            "{definition} accepted null"
+        );
         assert!(
             !consumer.is_valid(&Value::from(1)),
             "{definition} accepted a number"
@@ -262,7 +276,10 @@ fn family_references_reject_cross_family_and_malformed_ids() {
         ("RequestId", "request"),
         ("TimelineEntryId", "timeline-entry"),
     ] {
-        for validator in [consumer_validator(definition), contract_validator(definition)] {
+        for validator in [
+            consumer_validator(definition),
+            contract_validator(definition),
+        ] {
             assert_conforms(
                 &validator,
                 definition,
@@ -292,7 +309,10 @@ fn family_references_reject_cross_family_and_malformed_ids() {
             "daemon/example",
         ),
     ] {
-        for validator in [consumer_validator(definition), contract_validator(definition)] {
+        for validator in [
+            consumer_validator(definition),
+            contract_validator(definition),
+        ] {
             for valid in &allowed {
                 assert_conforms(&validator, definition, &Value::String((*valid).into()));
             }
@@ -311,7 +331,10 @@ fn resource_fields_and_generation_map_keys_enforce_family_references() {
             .iter()
             .find(|value| value["kind"] == kind)
             .unwrap();
-        for validator in [consumer_validator("Resource"), contract_validator("Resource")] {
+        for validator in [
+            consumer_validator("Resource"),
+            contract_validator("Resource"),
+        ] {
             assert_conforms(&validator, kind, original);
             let mut wrong_id = original.clone();
             wrong_id["id"] = Value::String("wrong-family/example".into());
@@ -327,7 +350,10 @@ fn resource_fields_and_generation_map_keys_enforce_family_references() {
         .iter()
         .find(|value| value["kind"] == "mission")
         .unwrap();
-    for validator in [consumer_validator("Resource"), contract_validator("Resource")] {
+    for validator in [
+        consumer_validator("Resource"),
+        contract_validator("Resource"),
+    ] {
         for generations in [
             serde_json::json!({"agent/example": "run-generation/example"}),
             serde_json::json!({"mission-run/": "run-generation/example"}),
@@ -365,7 +391,12 @@ fn mission_step_actor_references_conform_without_accepting_other_id_families() {
                 *row.pointer_mut(path).unwrap() = serde_json::json!(actor);
                 assert_conforms(&validator, path, &row);
             }
-            for invalid in ["mission/not-an-actor", "person/", "daemon/white space", "agent/"] {
+            for invalid in [
+                "mission/not-an-actor",
+                "person/",
+                "daemon/white space",
+                "agent/",
+            ] {
                 let mut row = mission.clone();
                 *row.pointer_mut(path).unwrap() = serde_json::json!(invalid);
                 assert!(!validator.is_valid(&row), "{path} accepted {invalid}");
@@ -383,41 +414,71 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
         state.store.origin(),
     )
     .unwrap();
-    state.store.apply_internal(&intent, "contract-person-asker").unwrap();
-    let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
-        deadline_ms: None,
-        default_answer: None,
-        legacy_request: None,
-        person: "person/avery".into(),
-        title: "Choose a release date".into(),
-        reason: "Release needs a date".into(),
-        actor: format!("agent/{}.asker", state.store.origin()),
-        step: None,
-        new_run: Some("choose-date".into()),
-        incarnation: None,
-        idempotency_key: "contract-person-ask".into(),
-        request: None,
-    }).unwrap();
+    state
+        .store
+        .apply_internal(&intent, "contract-person-asker")
+        .unwrap();
+    let ask = state
+        .store
+        .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
+            legacy_request: None,
+            person: "person/avery".into(),
+            title: "Choose a release date".into(),
+            reason: "Release needs a date".into(),
+            actor: format!("agent/{}.asker", state.store.origin()),
+            step: None,
+            new_run: Some("choose-date".into()),
+            incarnation: None,
+            idempotency_key: "contract-person-ask".into(),
+            request: None,
+        })
+        .unwrap();
     let app = fractal_daemon::api::router(state);
     let (status, list) = client_json(app.clone(), "/v1/client/missions").await;
     assert_eq!(status, StatusCode::OK, "{list}");
-    let mission = list["value"]["items"].as_array().unwrap().iter()
-        .find(|row| row["runs"].as_array().unwrap().contains(&serde_json::json!(ask.run)))
+    let mission = list["value"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["runs"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(ask.run))
+        })
         .expect("person ask must remain in the mission collection");
     let detail_uri = format!("/v1/client/missions/{}", mission["id"].as_str().unwrap());
     let (status, detail) = client_json(app, &detail_uri).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
     for row in [mission, &detail["value"]] {
-        assert_conforms(&contract_validator("Mission"), "emitted person-ask mission", row);
+        assert_conforms(
+            &contract_validator("Mission"),
+            "emitted person-ask mission",
+            row,
+        );
         let decoded: fractal_client::Mission = serde_json::from_value(row.clone()).unwrap();
-        let run = decoded.run_details.iter()
-            .find(|run| run.id == ask.run).unwrap();
+        let run = decoded
+            .run_details
+            .iter()
+            .find(|run| run.id == ask.run)
+            .unwrap();
         assert_eq!(run.current_steps[0]["assignee"], "person/avery");
-        let step = run.steps.as_ref().unwrap().iter().find(|step| step.id == ask.subject).unwrap();
+        let step = run
+            .steps
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|step| step.id == ask.subject)
+            .unwrap();
         assert_eq!(step.assignee.as_deref(), Some("person/avery"));
         assert!(step.claimant.is_none());
     }
-    assert_eq!(detail["value"]["run_details"][0]["steps"][0]["wake"]["assignee"], "person/avery");
+    assert_eq!(
+        detail["value"]["run_details"][0]["steps"][0]["wake"]["assignee"],
+        "person/avery"
+    );
 }
 
 #[tokio::test]
@@ -487,7 +548,9 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         .await
         .unwrap_err();
     assert!(
-        refused.to_string().contains(fractal_client::EXACT_AGENT_SELECTOR_CAPABILITY),
+        refused
+            .to_string()
+            .contains(fractal_client::EXACT_AGENT_SELECTOR_CAPABILITY),
         "{refused}"
     );
     advertise.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -553,7 +616,10 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         }] = serde_json::json!(false);
         assert!(!validator.is_valid(&bad_type));
     }
-    assert!(receiver.try_recv().is_err(), "the refused subscription sent nothing");
+    assert!(
+        receiver.try_recv().is_err(),
+        "the refused subscription sent nothing"
+    );
     stream.close().await;
     server.abort();
 }
@@ -659,10 +725,7 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     }
     let client = fractal_client::Client::unix_as(&socket, "person/alex");
     let mut stream = client.collection_stream().await.unwrap();
-    stream
-        .subscribe_conversation("talk", agent)
-        .await
-        .unwrap();
+    stream.subscribe_conversation("talk", agent).await.unwrap();
     let conversation = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
         .await
         .unwrap()
@@ -670,7 +733,11 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
         .unwrap();
     assert_eq!(conversation["kind"], "conversation");
     assert_eq!(conversation["replace"], true);
-    assert_conforms(&frame_validator, "initial conversation frame", &conversation);
+    assert_conforms(
+        &frame_validator,
+        "initial conversation frame",
+        &conversation,
+    );
     let message = conversation["items"]
         .as_array()
         .unwrap()
@@ -681,11 +748,18 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     assert_eq!(message["body"].get("reply_to"), Some(&Value::Null));
     let (status, changes) = client_json(
         app.clone(),
-        &format!("/v1/client/conversations/{}/changes", urlencoding::encode(agent)),
+        &format!(
+            "/v1/client/conversations/{}/changes",
+            urlencoding::encode(agent)
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{changes}");
-    assert_conforms(&envelope_validator, "conversation changes envelope", &changes);
+    assert_conforms(
+        &envelope_validator,
+        "conversation changes envelope",
+        &changes,
+    );
 
     state
         .store
@@ -705,7 +779,10 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
             idempotency_key: None,
         })
         .unwrap();
-    state.event_notify.send(state.store.index().unwrap()).unwrap();
+    state
+        .event_notify
+        .send(state.store.index().unwrap())
+        .unwrap();
     let delta = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
         .await
         .unwrap()
@@ -732,9 +809,12 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
         loop {
             let count = connection.read(&mut bytes).await.unwrap();
             assert_ne!(count, 0, "terminal viewer disconnected before PEEK");
-            if reader.feed(&bytes[..count]).unwrap().iter().any(|packet| {
-                packet.type_ == pty_core::protocol::MessageType::Peek
-            }) {
+            if reader
+                .feed(&bytes[..count])
+                .unwrap()
+                .iter()
+                .any(|packet| packet.type_ == pty_core::protocol::MessageType::Peek)
+            {
                 break;
             }
         }
@@ -749,7 +829,10 @@ async fn daemon_conversation_and_terminal_frames_conform_to_client_v0() {
     let terminal = format!("terminal/{agent}");
     let (status, screen) = client_json(
         app.clone(),
-        &format!("/v1/client/terminals/{}/screen", urlencoding::encode(&terminal)),
+        &format!(
+            "/v1/client/terminals/{}/screen",
+            urlencoding::encode(&terminal)
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{screen}");
@@ -1177,29 +1260,35 @@ fn event_feeds_are_contiguous_and_terminal_streams_replace_whole_screens() {
 async fn publish_fixture_lists(state: &AppState) -> u64 {
     let seeded_cut = state.store.index().unwrap();
     fractal_daemon::api::start_published_lists(state);
-    tokio::time::timeout(std::time::Duration::from_secs(10),
-        fractal_daemon::api::wait_published_lists_at_least(&state.store, seeded_cut))
-        .await.expect("contract lists publish the complete seeded graph cut").unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fractal_daemon::api::wait_published_lists_at_least(&state.store, seeded_cut),
+    )
+    .await
+    .expect("contract lists publish the complete seeded graph cut")
+    .unwrap();
     seeded_cut
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
-    // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
-    store: Arc::new(
-        Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
-    ),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "client-v0-baseline".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
+        store: Arc::new(Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "client-v0-baseline".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 #[test]
@@ -1213,11 +1302,17 @@ fn old_shape_subscribe_and_proposed_trace_preserve_collection_contract() {
     proposed.as_object_mut().unwrap().remove("trace");
     assert_eq!(proposed, old, "trace does not change subscription fields");
     for malformed in [
-        Value::Null, serde_json::json!(42), serde_json::json!([]),
+        Value::Null,
+        serde_json::json!(42),
+        serde_json::json!([]),
         serde_json::json!({"traceparent":"not-a-traceparent"}),
     ] {
         proposed["trace"] = malformed;
-        assert_conforms(&validator, "malformed telemetry preserves frame contract", &proposed);
+        assert_conforms(
+            &validator,
+            "malformed telemetry preserves frame contract",
+            &proposed,
+        );
     }
 }
 
@@ -1230,21 +1325,39 @@ async fn collection_socket_accepts_out_of_range_ignored_trace() {
     let state = test_state(root.path());
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
+            .await
+            .unwrap();
     });
     for _ in 0..100 {
-        if socket.exists() { break; }
+        if socket.exists() {
+            break;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let mut request = "ws://localhost/v1/client/collections/stream".into_client_request().unwrap();
-    request.headers_mut().insert("sec-websocket-protocol", "st3.client.collections.v0".parse().unwrap());
-    request.headers_mut().insert("x-st3-person", "person/ada".parse().unwrap());
+    let mut request = "ws://localhost/v1/client/collections/stream"
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "sec-websocket-protocol",
+        "st3.client.collections.v0".parse().unwrap(),
+    );
+    request
+        .headers_mut()
+        .insert("x-st3-person", "person/ada".parse().unwrap());
     let (mut stream, _) = tokio_tungstenite::client_async(
-        request, tokio::net::UnixStream::connect(&socket).await.unwrap(),
-    ).await.unwrap();
-    stream.send(Message::Text(
-        r#"{"kind":"subscribe","id":"ignored-trace","collection":"missions","trace":1e999}"#.into()
-    )).await.unwrap();
+        request,
+        tokio::net::UnixStream::connect(&socket).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    stream
+        .send(Message::Text(
+            r#"{"kind":"subscribe","id":"ignored-trace","collection":"missions","trace":1e999}"#
+                .into(),
+        ))
+        .await
+        .unwrap();
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let message = stream.next().await.unwrap().unwrap();
@@ -1252,10 +1365,16 @@ async fn collection_socket_accepts_out_of_range_ignored_trace() {
                 break serde_json::from_str::<Value>(&text).unwrap();
             }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert_eq!(frame["kind"], "snapshot", "{frame}");
     assert_eq!(frame["id"], "ignored-trace");
-    assert_conforms(&contract_validator("CollectionFrame"), "ignored out-of-range trace", &frame);
+    assert_conforms(
+        &contract_validator("CollectionFrame"),
+        "ignored out-of-range trace",
+        &frame,
+    );
     stream.close(None).await.unwrap();
     server.abort();
 }
@@ -1304,7 +1423,10 @@ async fn collection_socket_multiplexes_snapshot_then_changes_and_resubscribes() 
     // Different windows complete independently; only each window's snapshot-before-changes
     // ordering is part of the collection contract.
     assert_eq!(
-        BTreeSet::from([first["id"].as_str().unwrap(), second["id"].as_str().unwrap()]),
+        BTreeSet::from([
+            first["id"].as_str().unwrap(),
+            second["id"].as_str().unwrap()
+        ]),
         BTreeSet::from(["missions", "agents"])
     );
     assert_conforms(&validator, "collection snapshot", &first);
@@ -1504,7 +1626,9 @@ async fn missions_first_page_returns_fifty_cards_and_a_cursor() {
     let source = format!(
         "version 2\n{}",
         (0..51)
-            .map(|index| format!("mission \"page-{index:02}\" state=\"ready\" {{ goal \"Read a page\" }}\n"))
+            .map(|index| format!(
+                "mission \"page-{index:02}\" state=\"ready\" {{ goal \"Read a page\" }}\n"
+            ))
             .collect::<String>()
     );
     let intent = fractal_daemon::graph::parse_intent(&source, "client-v0-baseline").unwrap();
@@ -1522,7 +1646,11 @@ async fn missions_first_page_returns_fifty_cards_and_a_cursor() {
         .store
         .apply(&intent, &planned.subject_tokens, "mission-page-smoke")
         .unwrap();
-    let (status, page) = client_json(fractal_daemon::api::router(state), "/v1/client/missions?limit=50").await;
+    let (status, page) = client_json(
+        fractal_daemon::api::router(state),
+        "/v1/client/missions?limit=50",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["value"]["items"].as_array().unwrap().len(), 50);
     assert_eq!(page["value"]["page"]["has_more"], true);
@@ -1840,9 +1968,15 @@ async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
     };
     let first = append(0);
     let second = append(1);
-    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    state
+        .store
+        .committed_index
+        .store(first, std::sync::atomic::Ordering::Release);
     let app = fractal_daemon::api::router(state.clone());
-    let path = format!("/v1/client/events?after=event-cursor/{}/{first}", state.node);
+    let path = format!(
+        "/v1/client/events?after=event-cursor/{}/{first}",
+        state.node
+    );
     let (status, page) = client_json(app.clone(), &path).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let sequences = |page: &Value| {
@@ -1853,18 +1987,31 @@ async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
             .map(|item| item["sequence"].as_u64().unwrap())
             .collect::<Vec<_>>()
     };
-    assert!(sequences(&page).iter().all(|sequence| *sequence <= first), "an event past the published index: {page}");
     assert!(
-        !page["value"]["resume_cursor"].as_str().unwrap().contains(&format!("/{second}")),
+        sequences(&page).iter().all(|sequence| *sequence <= first),
+        "an event past the published index: {page}"
+    );
+    assert!(
+        !page["value"]["resume_cursor"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("/{second}")),
         "a resume cursor past the published index: {page}"
     );
     // A tail read (no cursor) bounds its query before its limit: the unpublished event must
     // not take the only place and leave the newest published one out.
     let (status, tail) = client_json(app.clone(), "/v1/client/events?limit=1").await;
     assert_eq!(status, StatusCode::OK, "{tail}");
-    assert_eq!(sequences(&tail), vec![first], "the newest published event: {tail}");
+    assert_eq!(
+        sequences(&tail),
+        vec![first],
+        "the newest published event: {tail}"
+    );
 
-    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    state
+        .store
+        .committed_index
+        .store(second, std::sync::atomic::Ordering::Release);
     let (status, page) = client_json(app, &path).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert!(sequences(&page).contains(&second), "{page}");
@@ -2126,7 +2273,11 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
     let mut receiver = test_state(receiver_root.path());
     receiver.node = "client-v0-receiver".into();
     receiver.store = Arc::new(
-        Store::open(&receiver_root.path().join("receiver.sqlite3"), &receiver.node).unwrap(),
+        Store::open(
+            &receiver_root.path().join("receiver.sqlite3"),
+            &receiver.node,
+        )
+        .unwrap(),
     );
     let fleet = "issuer-envelope-proof";
     issuer.store.bind_fleet(fleet).unwrap();
@@ -2459,8 +2610,7 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let (status, attention) =
         client_json_auth(fabric.clone(), "/v1/client/attention", credential).await;
     assert_eq!(status, StatusCode::OK, "{attention}");
-    let (status, alerts) =
-        client_json_auth(fabric.clone(), "/v1/client/alerts", credential).await;
+    let (status, alerts) = client_json_auth(fabric.clone(), "/v1/client/alerts", credential).await;
     assert_eq!(status, StatusCode::OK, "{alerts}");
     assert_eq!(alerts["value"]["items"], attention["value"]["items"]);
     let item = |id: &str| {
@@ -2807,7 +2957,10 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
             "scope beyond the limited grant",
         ),
         (begin(serde_json::json!([])), "empty scope list"),
-        (full_control_with_scopes, "full control combined with scopes"),
+        (
+            full_control_with_scopes,
+            "full control combined with scopes",
+        ),
     ] {
         let (status, body) =
             client_post_json_person(local.clone(), "/v1/client/pairings", "person/ada", rejected)
@@ -2819,7 +2972,11 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
         local.clone(),
         "/v1/client/pairings",
         "person/ada",
-        begin(serde_json::json!(["terminal.read", "read.projections", "read.glasses"])),
+        begin(serde_json::json!([
+            "terminal.read",
+            "read.projections",
+            "read.glasses"
+        ])),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
@@ -3228,7 +3385,10 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
         .collect::<Vec<_>>();
     assert!(!receipts.is_empty());
     for receipt in receipts {
-        assert!(receipt.actor.is_none(), "action receipts are server-written");
+        assert!(
+            receipt.actor.is_none(),
+            "action receipts are server-written"
+        );
         let actor = receipt.body["fields"]["authority_actor"].as_str().unwrap();
         assert!(actor.starts_with("agent/example/"), "{actor}");
     }
@@ -3757,8 +3917,14 @@ mission "release-proof" state="ready" {
     };
     // The ask a mission step made: its mission, its run, and the step that waits with its goal.
     let mission_card = card(&from_step.subject);
-    assert_eq!(mission_card["mission_id"], "mission/release-proof", "{mission_card}");
-    assert_eq!(mission_card["mission_run_id"], run.subject, "{mission_card}");
+    assert_eq!(
+        mission_card["mission_id"], "mission/release-proof",
+        "{mission_card}"
+    );
+    assert_eq!(
+        mission_card["mission_run_id"], run.subject,
+        "{mission_card}"
+    );
     assert_eq!(
         mission_card["blocked"],
         serde_json::json!({
@@ -4008,7 +4174,10 @@ impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
+    fn observe_exec(
+        &self,
+        _: &str,
+    ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
     fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
@@ -4210,7 +4379,10 @@ mission "example/merge-train" state="ready" {
     assert_eq!(detail["recent"][1]["anchor_id"], entry("42"));
     assert_ne!(detail["revision"], "empty");
     let typed: fractal_client::Resource = serde_json::from_value(detail.clone()).unwrap();
-    assert!(matches!(typed, fractal_client::Resource::Lane(_)), "{detail}");
+    assert!(
+        matches!(typed, fractal_client::Resource::Lane(_)),
+        "{detail}"
+    );
 
     let (status, absent) = client_json(app, "/v1/client/lanes/lane/absent/app").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{absent}");
@@ -4411,23 +4583,47 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     for (kind, fields) in [
-        ("runtime.observed", serde_json::json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"})),
-        ("harness.observed", serde_json::json!({"state":"idle", "incarnation_id":"one"})),
-        ("runtime.observed", serde_json::json!({"status":"running", "runtime_id":"native", "incarnation_id":"two"})),
+        (
+            "runtime.observed",
+            serde_json::json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}),
+        ),
+        (
+            "harness.observed",
+            serde_json::json!({"state":"idle", "incarnation_id":"one"}),
+        ),
+        (
+            "runtime.observed",
+            serde_json::json!({"status":"running", "runtime_id":"native", "incarnation_id":"two"}),
+        ),
     ] {
-        state.store.append_claim(&fractal_daemon::model::ClaimInput {
-            subject: "agent/cedar".into(), kind: kind.into(), actor: Some("agent/cedar".into()),
-            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
-            expected_subject: None, idempotency_key: None,
-        }).unwrap();
+        state
+            .store
+            .append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "agent/cedar".into(),
+                kind: kind.into(),
+                actor: Some("agent/cedar".into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
     }
     let app = fractal_daemon::api::router(state.clone());
     let fabric = fractal_daemon::api::fabric_router(state.clone());
-    let (status, challenge) = client_post_json(app.clone(), "/v1/client/pairings", serde_json::json!({
-        "api_version":"st3.client.v0", "device_name":"Cedar client", "person_id":"person/alex"
-    })).await;
+    let (status, challenge) = client_post_json(
+        app.clone(),
+        "/v1/client/pairings",
+        serde_json::json!({
+            "api_version":"st3.client.v0", "device_name":"Cedar client", "person_id":"person/alex"
+        }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{challenge}");
-    let pairing = challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let pairing = challenge["value"]["pairing_id"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("pairing/");
     let (status, paired) = client_post_json(app.clone(), &format!("/v1/client/pairings/{pairing}/complete"), serde_json::json!({
         "api_version":"st3.client.v0", "code":challenge["value"]["code"], "device_public_key":"cedar-public-key-0000000000000000000000000000"
     })).await;
@@ -4435,11 +4631,21 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
     let credential = paired["value"]["credential"].as_str().unwrap();
     let (status, local) = client_json(app, "/v1/client/status-history/agent%2Fcedar").await;
     assert_eq!(status, StatusCode::OK, "{local}");
-    let (status, remote) = client_json_auth(fabric.clone(), "/v1/client/status-history/agent%2Fcedar", credential).await;
+    let (status, remote) = client_json_auth(
+        fabric.clone(),
+        "/v1/client/status-history/agent%2Fcedar",
+        credential,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{remote}");
     assert_eq!(local["value"], remote["value"]);
-    assert_conforms(&contract_validator("StatusHistory"), "paired history", &remote["value"]);
-    let typed: fractal_client::StatusHistory = serde_json::from_value(remote["value"].clone()).unwrap();
+    assert_conforms(
+        &contract_validator("StatusHistory"),
+        "paired history",
+        &remote["value"],
+    );
+    let typed: fractal_client::StatusHistory =
+        serde_json::from_value(remote["value"].clone()).unwrap();
     assert!(typed.complete);
     assert_eq!(typed.items.last().unwrap().runtime_incarnation, "two");
     assert!(typed.items.last().unwrap().reset);
@@ -4452,15 +4658,18 @@ async fn status_history_is_typed_and_readable_through_the_paired_gateway() {
 async fn custom_subject_contract_pagination_and_paired_person_reply() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
-    let mut manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
-        "../../../examples/fractal/custom-review.json"
-    )).unwrap();
+    let mut manifest: fractal_schema::custom::Manifest =
+        serde_json::from_str(include_str!("../../../examples/fractal/custom-review.json")).unwrap();
     manifest.attention.as_mut().unwrap().episode = fractal_schema::custom::Expr::Constant {
         value: serde_json::json!("garden question; keep"),
     };
-    state.store.register_custom_kind(&fractal_daemon::store::custom::RegistrationRequest {
-        manifest, actor: "agent/garden/seed".into(),
-    }).unwrap();
+    state
+        .store
+        .register_custom_kind(&fractal_daemon::store::custom::RegistrationRequest {
+            manifest,
+            actor: "agent/garden/seed".into(),
+        })
+        .unwrap();
     for name in ["one", "two"] {
         state.store.append_claim(&fractal_daemon::model::ClaimInput{subject:format!("custom/garden/review/v1/{name}"),kind:"custom.garden.review.v1.requested".into(),actor:Some("agent/garden/seed".into()),fields:serde_json::from_value(serde_json::json!({"title":"Retain the seed history?","detail":"Choose Keep or Discard.","recipient":"person/lichen"})).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
     }
@@ -4506,8 +4715,18 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     for card in legacy["value"]["items"].as_array().unwrap() {
         assert_eq!(card["attention_kind"], "agent-request");
         assert_eq!(card["actions"], serde_json::json!([]));
-        assert!(card["detail"].as_str().unwrap().contains("st subject reply"));
-        assert!(card["detail"].as_str().unwrap().contains("--episode 'garden question; keep'"));
+        assert!(
+            card["detail"]
+                .as_str()
+                .unwrap()
+                .contains("st subject reply")
+        );
+        assert!(
+            card["detail"]
+                .as_str()
+                .unwrap()
+                .contains("--episode 'garden question; keep'")
+        );
     }
     // Model the pre-extension closed enums: the entire page remains readable.
     let mut old_schema = json(asset_root().join("schemas/client-v0.schema.json"));
@@ -4517,13 +4736,25 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     old_schema["$ref"] = serde_json::json!("#/$defs/Envelope");
     let old_validator = jsonschema::options().build(&old_schema).unwrap();
     assert_conforms(&old_validator, "older custom attention fallback", &legacy);
-    let response = fabric.clone().oneshot(Request::builder()
-        .uri("/v1/client/attention")
-        .header("authorization", format!("Bearer {token}"))
-        .header("x-st3-features", "custom-subjects.v1")
-        .body(Body::empty()).unwrap()).await.unwrap();
+    let response = fabric
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/client/attention")
+                .header("authorization", format!("Bearer {token}"))
+                .header("x-st3-features", "custom-subjects.v1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     let status = response.status();
-    let cards: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let cards: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(status, StatusCode::OK, "{cards}");
     assert_conforms(&consumer_validator("Envelope"), "custom attention", &cards);
     let card = &cards["value"]["items"][0];
@@ -4576,50 +4807,99 @@ mission "timing/run" state="ready" {
 }
 "#;
     let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
-    let planned = state.store.mission(&intent, fractal_daemon::model::IntentInput {
-        kdl: source.into(),
-        source_name: None,
-    }).unwrap();
-    state.store.apply(&intent, &planned.subject_tokens, "timing-definition").unwrap();
-    let run = state.store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
-        mission: "timing/run".into(),
-        revision: None,
-        workspace: root.path().display().to_string(),
-        requester: Some("person/avery".into()),
-        mode: Some("run".into()),
-        inputs: Default::default(),
-        idempotency_key: "timing-run".into(),
-    }).unwrap();
-    let held = &run.steps.iter().find(|step| step.step == "held").unwrap().subject;
-    let retry = &run.steps.iter().find(|step| step.step == "retry").unwrap().subject;
-    let ready = &run.steps.iter().find(|step| step.step == "wake").unwrap().subject;
+    let planned = state
+        .store
+        .mission(
+            &intent,
+            fractal_daemon::model::IntentInput {
+                kdl: source.into(),
+                source_name: None,
+            },
+        )
+        .unwrap();
+    state
+        .store
+        .apply(&intent, &planned.subject_tokens, "timing-definition")
+        .unwrap();
+    let run = state
+        .store
+        .create_mission_run(&fractal_daemon::model::MissionRunRequest {
+            mission: "timing/run".into(),
+            revision: None,
+            workspace: root.path().display().to_string(),
+            requester: Some("person/avery".into()),
+            mode: Some("run".into()),
+            inputs: Default::default(),
+            idempotency_key: "timing-run".into(),
+        })
+        .unwrap();
+    let held = &run
+        .steps
+        .iter()
+        .find(|step| step.step == "held")
+        .unwrap()
+        .subject;
+    let retry = &run
+        .steps
+        .iter()
+        .find(|step| step.step == "retry")
+        .unwrap()
+        .subject;
+    let ready = &run
+        .steps
+        .iter()
+        .find(|step| step.step == "wake")
+        .unwrap()
+        .subject;
     state.store.set_step_state(ready, "ready", None).unwrap();
     state.store.set_step_state(held, "ready", None).unwrap();
-    state.store.work_action(held, "claim", &fractal_daemon::model::WorkRequest {
-        wait_ms: None,
-        actor: Some("agent/timing/worker".into()),
-        incarnation: Some("timing-worker-one".into()),
-        summary: None,
-        reason: None,
-        evidence: Vec::new(),
-        idempotency_key: "timing-claim".into(),
-    }).unwrap();
-    state.store.set_step_state(retry, "failed", Some("rate limited")).unwrap();
-    assert!(state.store.retry_step(retry, "rate limited", 60_000).unwrap());
-    let improve = run.loops.iter().find(|loop_run| loop_run.path == "improve").unwrap();
-    state.store.append_claim(&fractal_daemon::model::ClaimInput {
-        subject: improve.subject.clone(),
-        kind: "loop.state".into(),
-        actor: None,
-        fields: std::collections::BTreeMap::from([
-            ("round".into(), Value::from(2)),
-            ("status".into(), Value::from("running")),
-            ("reason".into(), Value::from("waiting for the next round")),
-        ]),
-        evidence: Vec::new(),
-        expected_subject: None,
-        idempotency_key: None,
-    }).unwrap();
+    state
+        .store
+        .work_action(
+            held,
+            "claim",
+            &fractal_daemon::model::WorkRequest {
+                wait_ms: None,
+                actor: Some("agent/timing/worker".into()),
+                incarnation: Some("timing-worker-one".into()),
+                summary: None,
+                reason: None,
+                evidence: Vec::new(),
+                idempotency_key: "timing-claim".into(),
+            },
+        )
+        .unwrap();
+    state
+        .store
+        .set_step_state(retry, "failed", Some("rate limited"))
+        .unwrap();
+    assert!(
+        state
+            .store
+            .retry_step(retry, "rate limited", 60_000)
+            .unwrap()
+    );
+    let improve = run
+        .loops
+        .iter()
+        .find(|loop_run| loop_run.path == "improve")
+        .unwrap();
+    state
+        .store
+        .append_claim(&fractal_daemon::model::ClaimInput {
+            subject: improve.subject.clone(),
+            kind: "loop.state".into(),
+            actor: None,
+            fields: std::collections::BTreeMap::from([
+                ("round".into(), Value::from(2)),
+                ("status".into(), Value::from("running")),
+                ("reason".into(), Value::from("waiting for the next round")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
 
     let app = fractal_daemon::api::router(state.clone());
     let path = "/v1/client/missions/mission%2Ftiming%2Frun";
@@ -4637,20 +4917,22 @@ mission "timing/run" state="ready" {
     let step = |name: &str| steps.iter().find(|step| step.path == name).unwrap();
     assert_eq!(step("improve").loop_round, Some(2));
     assert_eq!(step("improve").loop_max_rounds, Some(5));
-    assert_eq!(step("improve").loop_reason.as_deref(), Some("waiting for the next round"));
+    assert_eq!(
+        step("improve").loop_reason.as_deref(),
+        Some("waiting for the next round")
+    );
     assert_eq!(step("other").loop_round, Some(0));
     assert_eq!(step("other").loop_max_rounds, Some(3));
     assert_eq!(step("held").loop_round, None);
     assert_eq!(step("held").state, "claimed");
-    let expiry = chrono::DateTime::parse_from_rfc3339(
-        step("held").claim_expires_at.as_ref().unwrap(),
-    ).unwrap();
+    let expiry =
+        chrono::DateTime::parse_from_rfc3339(step("held").claim_expires_at.as_ref().unwrap())
+            .unwrap();
     assert!(expiry > chrono::DateTime::parse_from_rfc3339(&step("held").since).unwrap());
     assert_eq!(step("retry").claim_expires_at, None);
     assert_eq!(step("retry").state, "waiting");
-    let next = chrono::DateTime::parse_from_rfc3339(
-        step("retry").next_wake_at.as_ref().unwrap(),
-    ).unwrap();
+    let next =
+        chrono::DateTime::parse_from_rfc3339(step("retry").next_wake_at.as_ref().unwrap()).unwrap();
     assert!(next > chrono::DateTime::parse_from_rfc3339(&step("retry").since).unwrap());
     assert_eq!(step("retry").wake_reason.as_deref(), Some("rate limited"));
     assert_eq!(step("retry").wake, None);
@@ -4661,33 +4943,53 @@ mission "timing/run" state="ready" {
     assert_eq!(wake.attempts, 0);
     assert_eq!(wake.last_attempt_at, None);
     assert_eq!(step("improve").wake, None);
-    state.store.set_step_state(ready, "completed", None).unwrap();
+    state
+        .store
+        .set_step_state(ready, "completed", None)
+        .unwrap();
     let (status, finished_step) = client_json(app.clone(), path).await;
     assert_eq!(status, StatusCode::OK, "{finished_step}");
     let finished_step = finished_step["value"]["run_details"][0]["steps"]
-        .as_array().unwrap().iter().find(|step| step["path"] == "wake").unwrap();
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["path"] == "wake")
+        .unwrap();
     assert_eq!(finished_step["state"], "completed");
     assert!(finished_step["wake"].is_null());
 
     let (status, missing) = client_json(app, "/v1/client/missions/timing/missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     let credential = "timing-no-projection-scope";
-    state.store.append_claim(&fractal_daemon::model::ClaimInput {
-        subject: "custom/client/pairing-timing".into(),
-        kind: "custom.client.pairing-completed".into(),
-        actor: Some("person/avery".into()),
-        fields: std::collections::BTreeMap::from([
-            ("credential_hash".into(), Value::from(hex::encode(Sha256::digest(credential.as_bytes())))),
-            ("person_id".into(), Value::from("person/avery")),
-            ("session_actor".into(), Value::from("person/avery/session/timing")),
-            ("scopes".into(), serde_json::json!([])),
-            ("expires_at_unix_ms".into(), Value::from(4_102_444_800_000_u64)),
-        ]),
-        evidence: Vec::new(),
-        expected_subject: None,
-        idempotency_key: None,
-    }).unwrap();
-    let (status, denied) = client_json_auth(fractal_daemon::api::fabric_router(state), path, credential).await;
+    state
+        .store
+        .append_claim(&fractal_daemon::model::ClaimInput {
+            subject: "custom/client/pairing-timing".into(),
+            kind: "custom.client.pairing-completed".into(),
+            actor: Some("person/avery".into()),
+            fields: std::collections::BTreeMap::from([
+                (
+                    "credential_hash".into(),
+                    Value::from(hex::encode(Sha256::digest(credential.as_bytes()))),
+                ),
+                ("person_id".into(), Value::from("person/avery")),
+                (
+                    "session_actor".into(),
+                    Value::from("person/avery/session/timing"),
+                ),
+                ("scopes".into(), serde_json::json!([])),
+                (
+                    "expires_at_unix_ms".into(),
+                    Value::from(4_102_444_800_000_u64),
+                ),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let (status, denied) =
+        client_json_auth(fractal_daemon::api::fabric_router(state), path, credential).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
 }
 
@@ -4875,12 +5177,19 @@ fn assistant_read_fixtures_conform_and_malformed_proofs_and_pins_do_not() {
     assert!(!contract_validator("AssistantSummary").is_valid(&summary["value"]));
 
     let proof = contract_validator("ScgReadAuthorization");
-    assert_conforms(&proof, "SCG read authorization", &fixture("assistant-read-authorization.json"));
+    assert_conforms(
+        &proof,
+        "SCG read authorization",
+        &fixture("assistant-read-authorization.json"),
+    );
     for (pointer, value) in [
         ("/signature", serde_json::json!("too-short")),
         ("/payload/identity", serde_json::json!("claude")),
         ("/payload/projection", serde_json::json!("status")),
-        ("/payload/request_digest", serde_json::json!("8AF8FF220CA571D9BB06E960970592116147A5BB0AD3D3C330306496B1B3DAA3")),
+        (
+            "/payload/request_digest",
+            serde_json::json!("8AF8FF220CA571D9BB06E960970592116147A5BB0AD3D3C330306496B1B3DAA3"),
+        ),
         ("/payload/max_response_bytes", serde_json::json!(16385)),
         ("/payload/parameters/start", serde_json::json!(0)),
         ("/payload/issuer", serde_json::json!("assistant/chatgpt")),
@@ -4894,10 +5203,17 @@ fn assistant_read_fixtures_conform_and_malformed_proofs_and_pins_do_not() {
     assert!(!proof.is_valid(&extra));
 
     let trust = contract_validator("AssistantReadTrustRequest");
-    assert_conforms(&trust, "read trust request", &fixture("assistant-read-trust.json"));
+    assert_conforms(
+        &trust,
+        "read trust request",
+        &fixture("assistant-read-trust.json"),
+    );
     for (field, value) in [
         ("shim_public_key", serde_json::json!("c2hvcnQ")),
-        ("attestor_public_key", serde_json::json!("placeholder+attestor/pin=not-a-real-key-00")),
+        (
+            "attestor_public_key",
+            serde_json::json!("placeholder+attestor/pin=not-a-real-key-00"),
+        ),
         ("default_response_bytes", serde_json::json!(4097)),
         ("max_response_bytes", serde_json::json!(16385)),
         ("api_version", serde_json::json!("st3.client.v1")),
@@ -4911,18 +5227,44 @@ fn assistant_read_fixtures_conform_and_malformed_proofs_and_pins_do_not() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|read| read["path"].as_str().unwrap().starts_with("/v1/client/assistant/"))
+        .filter(|read| {
+            read["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/v1/client/assistant/")
+        })
         .collect::<Vec<_>>();
-    assert_eq!(assistant_reads.iter().map(|read| read["id"].as_str().unwrap()).collect::<Vec<_>>(), [
-        "assistant.summary", "assistant.attention", "assistant.missions", "assistant.agents",
-        "assistant.conversations", "assistant.conversation-detail",
-        "assistant.conversation-timeline", "assistant.conversation-search",
-        "assistant.conversation-content", "assistant.terminal-content",
-    ]);
+    assert_eq!(
+        assistant_reads
+            .iter()
+            .map(|read| read["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "assistant.summary",
+            "assistant.attention",
+            "assistant.missions",
+            "assistant.agents",
+            "assistant.conversations",
+            "assistant.conversation-detail",
+            "assistant.conversation-timeline",
+            "assistant.conversation-search",
+            "assistant.conversation-content",
+            "assistant.terminal-content",
+        ]
+    );
     for read in assistant_reads {
-        assert_eq!(read["proof_header"], "x-st3-scg-read-authorization", "{read}");
+        assert_eq!(
+            read["proof_header"], "x-st3-scg-read-authorization",
+            "{read}"
+        );
         assert_eq!(read["minimal_read_mode"], "approval-once", "{read}");
         assert_eq!(read["max_response_bytes"], 16384, "{read}");
-        assert!(read["scope"].as_str().unwrap().starts_with("read.assistant."), "{read}");
+        assert!(
+            read["scope"]
+                .as_str()
+                .unwrap()
+                .starts_with("read.assistant."),
+            "{read}"
+        );
     }
 }

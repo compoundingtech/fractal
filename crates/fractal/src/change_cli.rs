@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde_json::Value;
 use fractal_daemon::client::Client;
+use serde_json::Value;
 
 #[derive(Args)]
 pub struct ChangesArgs {

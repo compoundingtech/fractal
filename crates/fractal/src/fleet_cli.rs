@@ -72,8 +72,12 @@ fn migration_restart_hint(legacy_toggle: bool, json_output: bool) -> &'static st
     match (legacy_toggle, json_output) {
         (true, true) => "Restart st3 replication-worker for this to take effect.",
         (true, false) => "Restart fractal replication-worker for this to take effect.",
-        (false, true) => "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.",
-        (false, false) => "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.",
+        (false, true) => {
+            "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish."
+        }
+        (false, false) => {
+            "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish."
+        }
     }
 }
 
@@ -145,12 +149,18 @@ fn fabric_adapter() -> Option<PathBuf> {
 /// cannot carry a new machine in, so `auto` uses this member's other endpoints, and an
 /// invitation that only Fabric could carry fails here, before any invite exists.
 fn invite_via(requested: &str, endpoints: &[Value], pairing: bool) -> Result<String> {
-    let advertises = |transport: &str| endpoints.iter().any(|endpoint| endpoint["transport"] == transport);
+    let advertises = |transport: &str| {
+        endpoints
+            .iter()
+            .any(|endpoint| endpoint["transport"] == transport)
+    };
     if pairing || !matches!(requested, "auto" | "fabric") || !advertises("fabric") {
         return Ok(requested.to_owned());
     }
     if requested == "auto"
-        && let Some(other) = ["tailscale", "loopback"].into_iter().find(|transport| advertises(transport))
+        && let Some(other) = ["tailscale", "loopback"]
+            .into_iter()
+            .find(|transport| advertises(transport))
     {
         return Ok(other.to_owned());
     }
@@ -231,7 +241,10 @@ async fn revoke_undelivered(
         )
         .await;
     match revoked {
-        Ok(_) => (error.context(format!("revoked {invite}, which was not delivered")), true),
+        Ok(_) => (
+            error.context(format!("revoked {invite}, which was not delivered")),
+            true,
+        ),
         Err(_) => (
             error.context(format!(
                 "{invite} was not delivered and stays open until it expires; revoke it with \
@@ -413,7 +426,8 @@ fn fabric_inbox_code(home: &std::path::Path) -> Result<Option<PathBuf>> {
         // Fabric makes the inbox when the first file arrives.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error).with_context(|| format!("read the Fabric inbox {}", inbox.display()))
+            return Err(error)
+                .with_context(|| format!("read the Fabric inbox {}", inbox.display()));
         }
     };
     let mut found = Vec::new();
@@ -471,7 +485,10 @@ async fn bootstrap_fabric_invite(
     let code = fractal_daemon::fleet::code::JoinCode::decode(&created.code)?;
     if code.migrate
         || !code.endpoints.iter().any(|endpoint| {
-            matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+            matches!(
+                endpoint,
+                fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. }
+            )
         })
     {
         return Ok(());
@@ -521,7 +538,11 @@ async fn bootstrap_fabric_invite(
     Ok(())
 }
 
-pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_output: bool) -> Result<()> {
+pub(super) async fn run_fleet(
+    endpoint: &Endpoint,
+    command: FleetCommand,
+    json_output: bool,
+) -> Result<()> {
     let manages_services = match &command {
         FleetCommand::Create(args) => !args.no_service,
         FleetCommand::Join(args) => !args.no_service,
@@ -563,8 +584,11 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, services, "founds a fleet").await?;
-            let founded =
-                fractal_daemon::fleet::join::found(&config.state_dir, &node, &args.member.settings())?;
+            let founded = fractal_daemon::fleet::join::found(
+                &config.state_dir,
+                &node,
+                &args.member.settings(),
+            )?;
             state_identity.record_fleet_found(&founded)?;
             drop(state_identity);
             if json_output {
@@ -623,9 +647,12 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 }
             };
             let mut created = create(via).await?;
-            if let Err(error) = bootstrap_fabric_invite(endpoint, adapter.as_deref(), &mut created).await {
+            if let Err(error) =
+                bootstrap_fabric_invite(endpoint, adapter.as_deref(), &mut created).await
+            {
                 // Revoke first, so nothing that fails below leaves the undelivered invite open.
-                let (error, revoked) = revoke_undelivered(&client, &created.invite, &person, error).await;
+                let (error, revoked) =
+                    revoke_undelivered(&client, &created.invite, &person, error).await;
                 if !revoked || args.via != "auto" || args.migrate {
                     return Err(error);
                 }
@@ -649,7 +676,9 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 Ok(())
             };
             if let Err(error) = delivered {
-                return Err(revoke_undelivered(&client, &created.invite, &person, error).await.0);
+                return Err(revoke_undelivered(&client, &created.invite, &person, error)
+                    .await
+                    .0);
             }
             if let Some(path) = &args.code_file {
                 println!("{}\t{}", created.invite, path.display());
@@ -673,7 +702,10 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                     "Invite {} for {target} expires in about {expires_in} minutes.",
                     created.invite
                 );
-                println!("On {target}, run:\n  fractal fleet {command} {}", created.code);
+                println!(
+                    "On {target}, run:\n  fractal fleet {command} {}",
+                    created.code
+                );
                 println!(
                     "The code is a one-use credential. To avoid shell history, run \
                      `fractal fleet {command}` and paste it at the hidden prompt instead."
@@ -733,7 +765,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         },
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
-                let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
+                let path =
+                    wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
                 (fs::read_to_string(&path)?, Some(path))
             } else if let Some(path) = &args.code_file {
                 (fs::read_to_string(path)?, Some(path.clone()))
@@ -751,19 +784,20 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             let use_services = !args.no_service && services_installed()?;
             let state_identity =
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
-            let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
-                state_dir: config.state_dir.clone(),
-                configured_node: config.node.clone(),
-                code: code.trim().to_owned(),
-                name: args.name.clone(),
-                via: args.via.clone(),
-                settings: args.member.settings(),
-                legacy_secret_file: None,
-                fabric_protocol: None,
-                runtime: fractal_daemon::store::runtime(),
-                version: env!("CARGO_PKG_VERSION").into(),
-            })
-            .await?;
+            let joined =
+                fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
+                    state_dir: config.state_dir.clone(),
+                    configured_node: config.node.clone(),
+                    code: code.trim().to_owned(),
+                    name: args.name.clone(),
+                    via: args.via.clone(),
+                    settings: args.member.settings(),
+                    legacy_secret_file: None,
+                    fabric_protocol: None,
+                    runtime: fractal_daemon::store::runtime(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                })
+                .await?;
             state_identity.record_fleet_join(&joined)?;
             drop(state_identity);
             if let Some(path) = code_path {
@@ -891,10 +925,14 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             };
             file.port = match file.mode {
                 fractal_daemon::config::FleetMode::DialOut => None,
-                fractal_daemon::config::FleetMode::Listening => Some(match args.port.or(file.port) {
-                    Some(port) => port,
-                    None => fractal_daemon::fleet::join::free_port(fractal_daemon::fleet::join::DEFAULT_PORT)?,
-                }),
+                fractal_daemon::config::FleetMode::Listening => {
+                    Some(match args.port.or(file.port) {
+                        Some(port) => port,
+                        None => fractal_daemon::fleet::join::free_port(
+                            fractal_daemon::fleet::join::DEFAULT_PORT,
+                        )?,
+                    })
+                }
             };
             file.save(&config.state_dir)?;
             drop(lock);
@@ -940,7 +978,8 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             Ok(())
         }
         FleetCommand::Status => {
-            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus =
+                client.get("/v1/internal/fleet/status").await?;
             if json_output {
                 return print_value(&status, true);
             }
@@ -1001,7 +1040,12 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     }
 }
 
-async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArgs, json_output: bool) -> Result<()> {
+async fn run_fleet_remove(
+    client: &Client,
+    config: &Config,
+    args: FleetRemoveArgs,
+    json_output: bool,
+) -> Result<()> {
     let person = fleet_person(args.actor, config)?;
     let removal: fractal_daemon::store::FleetRemoval = client
         .post(
@@ -1021,7 +1065,9 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
         println!("revoked\t{invite}");
     }
     render_removed_member_hint(&mut cli_output::stdout(), &removal.name, json_output)?;
-    if fractal_daemon::config::FleetFile::load(&config.state_dir)?.is_some_and(|file| file.legacy_peers) {
+    if fractal_daemon::config::FleetFile::load(&config.state_dir)?
+        .is_some_and(|file| file.legacy_peers)
+    {
         println!("{}", legacy_removal_hint(json_output));
     }
     Ok(())
@@ -1029,11 +1075,15 @@ async fn run_fleet_remove(client: &Client, config: &Config, args: FleetRemoveArg
 
 async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::File> {
     let state_dir = state_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || fractal_daemon::config::FleetFile::lock_settings(&state_dir)).await?
+    tokio::task::spawn_blocking(move || {
+        fractal_daemon::config::FleetFile::lock_settings(&state_dir)
+    })
+    .await?
 }
 
 async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
-    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView =
+        client.get("/v1/internal/fleet/membership").await?;
     let member = view
         .members
         .iter()
@@ -1234,7 +1284,9 @@ async fn run_fleet_transports(
                         .any(|transport| match transport.as_str() {
                             "loopback" => local.iter().any(std::net::IpAddr::is_loopback),
                             "tailscale" =>
-                                local.iter().any(fractal_daemon::fleet::transport::is_tailnet_address)
+                                local
+                                    .iter()
+                                    .any(fractal_daemon::fleet::transport::is_tailnet_address)
                                     && resolve_tool(file.tailscale.as_deref(), "tailscale")
                                         .is_some(),
                             _ => false,
@@ -1282,7 +1334,10 @@ async fn run_fleet_transports(
 }
 
 /// Settings for a migrating node: its existing replication port unless one is given.
-fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon::fleet::join::MemberSettings {
+fn migration_settings(
+    args: &FleetMemberArgs,
+    config: &Config,
+) -> fractal_daemon::fleet::join::MemberSettings {
     let mut settings = args.settings();
     if settings.port.is_none() {
         settings.port = config
@@ -1294,12 +1349,18 @@ fn migration_settings(args: &FleetMemberArgs, config: &Config) -> fractal_daemon
     settings
 }
 
-async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateArgs, json_output: bool) -> Result<()> {
+async fn run_fleet_migrate(
+    client: &Client,
+    config: &Config,
+    args: FleetMigrateArgs,
+    json_output: bool,
+) -> Result<()> {
     if args.finish || args.unfinish {
         let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
         if args.finish {
-            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus =
+                client.get("/v1/internal/fleet/status").await?;
             let waiting = config
                 .peers
                 .iter()
@@ -1374,7 +1435,9 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
                 bound == fleet_id,
                 "this store belongs to fleet {bound}, not the configured {fleet_id}"
             ),
-            None => anyhow::bail!("this store is not bound to a fleet yet; run fractal up once first"),
+            None => {
+                anyhow::bail!("this store is not bound to a fleet yet; run fractal up once first")
+            }
         }
     }
     // fleet.toml resolves a relative path under STATE/fleet, and --finish removes the
@@ -1565,7 +1628,10 @@ async fn wait_for_caught_up(
 }
 
 /// Print how a first sync ended, and fail when an earlier build recorded it as failed.
-fn report_first_sync(first: &fractal_daemon::model::ReplicationFirstSync, json_output: bool) -> Result<()> {
+fn report_first_sync(
+    first: &fractal_daemon::model::ReplicationFirstSync,
+    json_output: bool,
+) -> Result<()> {
     if json_output {
         print_value(first, true)?;
         anyhow::ensure!(first.state == "verified", "the first sync failed");
@@ -1591,11 +1657,18 @@ mod output_tests {
             for (json_output, program) in [(true, "st"), (false, "fractal")] {
                 let mut output = Vec::new();
                 render_fabric_invite_sent(
-                    &mut output, "fleet-invite/example", "other", command, json_output,
-                ).unwrap();
+                    &mut output,
+                    "fleet-invite/example",
+                    "other",
+                    command,
+                    json_output,
+                )
+                .unwrap();
                 assert_eq!(
                     String::from_utf8(output).unwrap(),
-                    format!("Sent invite fleet-invite/example to other's Fabric inbox. On other, run:\n  {program} fleet {command} --fabric-inbox\n")
+                    format!(
+                        "Sent invite fleet-invite/example to other's Fabric inbox. On other, run:\n  {program} fleet {command} --fabric-inbox\n"
+                    )
                 );
             }
         }
@@ -1608,15 +1681,23 @@ mod output_tests {
             render_offline_leave(&mut output, "local", json_output).unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
-                format!("Left without reaching a member. On another member run: {program} fleet remove local --reason \"left offline\"\n")
+                format!(
+                    "Left without reaching a member. On another member run: {program} fleet remove local --reason \"left offline\"\n"
+                )
             );
         }
     }
 
     #[test]
     fn leave_without_services_preserves_json_stdout() {
-        assert_eq!(leave_restart_hint(true), "Stop st3 replication-worker; st3 up now runs local-only after a restart.");
-        assert_eq!(leave_restart_hint(false), "Stop fractal replication-worker; fractal up now runs local-only after a restart.");
+        assert_eq!(
+            leave_restart_hint(true),
+            "Stop st3 replication-worker; st3 up now runs local-only after a restart."
+        );
+        assert_eq!(
+            leave_restart_hint(false),
+            "Stop fractal replication-worker; fractal up now runs local-only after a restart."
+        );
     }
 
     #[test]
@@ -1626,15 +1707,23 @@ mod output_tests {
             render_removed_member_hint(&mut output, "other", json_output).unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
-                format!("Writes other made after this node's last exchange with it are not accepted. On other, if it still runs: {program} uninstall\n")
+                format!(
+                    "Writes other made after this node's last exchange with it are not accepted. On other, if it still runs: {program} uninstall\n"
+                )
             );
         }
     }
 
     #[test]
     fn remove_with_legacy_peers_preserves_json_stdout() {
-        assert_eq!(legacy_removal_hint(true), "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until st fleet migrate --finish.");
-        assert_eq!(legacy_removal_hint(false), "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until fractal fleet migrate --finish.");
+        assert_eq!(
+            legacy_removal_hint(true),
+            "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until st fleet migrate --finish."
+        );
+        assert_eq!(
+            legacy_removal_hint(false),
+            "This member still accepts legacy exchanges from config peers, so a machine that keeps the fleet secret can pose as one of them until fractal fleet migrate --finish."
+        );
     }
 
     #[test]
@@ -1651,14 +1740,26 @@ mod output_tests {
 
     #[test]
     fn migrate_finish_and_unfinish_without_services_preserve_json_stdout() {
-        assert_eq!(migration_restart_hint(true, true), "Restart st3 replication-worker for this to take effect.");
-        assert_eq!(migration_restart_hint(true, false), "Restart fractal replication-worker for this to take effect.");
+        assert_eq!(
+            migration_restart_hint(true, true),
+            "Restart st3 replication-worker for this to take effect."
+        );
+        assert_eq!(
+            migration_restart_hint(true, false),
+            "Restart fractal replication-worker for this to take effect."
+        );
     }
 
     #[test]
     fn migrate_anchor_and_join_without_services_preserve_json_stdout() {
-        assert_eq!(migration_restart_hint(false, true), "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.");
-        assert_eq!(migration_restart_hint(false, false), "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.");
+        assert_eq!(
+            migration_restart_hint(false, true),
+            "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish."
+        );
+        assert_eq!(
+            migration_restart_hint(false, false),
+            "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish."
+        );
     }
 }
 
@@ -1667,7 +1768,10 @@ mod invite_route_tests {
     use super::*;
 
     fn endpoints(transports: &[&str]) -> Vec<Value> {
-        transports.iter().map(|transport| json!({ "transport": transport })).collect()
+        transports
+            .iter()
+            .map(|transport| json!({ "transport": transport }))
+            .collect()
     }
 
     #[test]
@@ -1679,17 +1783,26 @@ mod invite_route_tests {
             invite_via("auto", &endpoints(&["fabric", "loopback"]), false).unwrap(),
             "loopback"
         );
-        assert_eq!(invite_via("auto", &endpoints(&["tailscale"]), false).unwrap(), "auto");
+        assert_eq!(
+            invite_via("auto", &endpoints(&["tailscale"]), false).unwrap(),
+            "auto"
+        );
         assert_eq!(invite_via("tailscale", &both, false).unwrap(), "tailscale");
     }
 
     #[test]
     fn an_invitation_only_fabric_could_carry_needs_pairing() {
-        for (via, advertised) in [("auto", &["fabric"][..]), ("fabric", &["fabric", "tailscale"])] {
+        for (via, advertised) in [
+            ("auto", &["fabric"][..]),
+            ("fabric", &["fabric", "tailscale"]),
+        ] {
             let error = invite_via(via, &endpoints(advertised), false).unwrap_err();
             assert_eq!(error.to_string(), FABRIC_PAIRING_UNAVAILABLE);
         }
-        assert_eq!(invite_via("fabric", &endpoints(&["fabric"]), true).unwrap(), "fabric");
+        assert_eq!(
+            invite_via("fabric", &endpoints(&["fabric"]), true).unwrap(),
+            "fabric"
+        );
     }
 
     #[test]
@@ -1701,9 +1814,19 @@ mod invite_route_tests {
         fs::write(&path, "stale").unwrap();
         write_code_file(&path, b"code").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"code");
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        assert_eq!(fs::metadata(root.path()).unwrap().permissions().mode() & 0o777, 0o755);
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "no temporary file remains");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(root.path()).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "no temporary file remains"
+        );
         let missing = root.path().join("missing").join("invite.code");
         assert!(write_code_file(&missing, b"code").is_err());
     }
@@ -1728,18 +1851,25 @@ mod invite_route_tests {
         let found = wait_for_fabric_inbox_code(home.path(), Duration::from_secs(60), true).unwrap();
         delivery.join().unwrap();
         assert_eq!(found, code);
-        assert!(began.elapsed() < Duration::from_secs(30), "woken by the deadline, not the watch");
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "woken by the deadline, not the watch"
+        );
     }
 
     #[test]
     fn fabric_inbox_wait_ends_at_its_deadline() {
         let home = tempfile::tempdir().unwrap();
-        let error = wait_for_fabric_inbox_code(home.path(), Duration::from_millis(100), true)
-            .unwrap_err();
-        assert!(error.to_string().contains("no join code arrived"), "{error:#}");
+        let error =
+            wait_for_fabric_inbox_code(home.path(), Duration::from_millis(100), true).unwrap_err();
+        assert!(
+            error.to_string().contains("no join code arrived"),
+            "{error:#}"
+        );
 
         let missing = home.path().join("missing");
-        let error = wait_for_fabric_inbox_code(&missing, Duration::from_secs(60), true).unwrap_err();
+        let error =
+            wait_for_fabric_inbox_code(&missing, Duration::from_secs(60), true).unwrap_err();
         assert!(error.to_string().contains("no Fabric home"), "{error:#}");
     }
 
@@ -1747,11 +1877,16 @@ mod invite_route_tests {
     fn a_watch_error_ends_the_fabric_inbox_wait() {
         let (events, woken) = std::sync::mpsc::channel();
         events.send(Ok(notify::Event::default())).unwrap();
-        events.send(Err(notify::Error::generic("inotify watch limit reached"))).unwrap();
+        events
+            .send(Err(notify::Error::generic("inotify watch limit reached")))
+            .unwrap();
         let began = std::time::Instant::now();
         let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
         assert!(began.elapsed() < Duration::from_secs(30));
-        assert!(format!("{error:#}").contains("inotify watch limit reached"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("inotify watch limit reached"),
+            "{error:#}"
+        );
 
         events.send(Ok(notify::Event::default())).unwrap();
         await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap();

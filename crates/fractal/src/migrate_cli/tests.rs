@@ -15,18 +15,27 @@ struct FakeManager {
 
 impl FakeManager {
     fn unit_mut(&mut self, name: &str) -> Result<&mut Unit> {
-        self.services.legacy.iter_mut().chain(&mut self.services.target)
-            .find(|unit| unit.name == name).context("unknown test service")
+        self.services
+            .legacy
+            .iter_mut()
+            .chain(&mut self.services.target)
+            .find(|unit| unit.name == name)
+            .context("unknown test service")
     }
 
     fn changed_services(&self) -> bool {
-        self.events.iter().any(|event| ["stop:", "start:", "enable:", "reload"]
-            .iter().any(|prefix| event.starts_with(prefix)))
+        self.events.iter().any(|event| {
+            ["stop:", "start:", "enable:", "reload"]
+                .iter()
+                .any(|prefix| event.starts_with(prefix))
+        })
     }
 }
 
 impl Manager for FakeManager {
-    fn kind(&self) -> &'static str { "fake" }
+    fn kind(&self) -> &'static str {
+        "fake"
+    }
 
     fn inspect(&mut self) -> Result<Services> {
         self.events.push("inspect".into());
@@ -46,7 +55,9 @@ impl Manager for FakeManager {
 
     fn start(&mut self, unit: &Unit) -> Result<()> {
         self.events.push(format!("start:{}", unit.name));
-        if self.fail_legacy_start_once && self.services.legacy.iter().any(|old| old.name == unit.name) {
+        if self.fail_legacy_start_once
+            && self.services.legacy.iter().any(|old| old.name == unit.name)
+        {
             self.fail_legacy_start_once = false;
             bail!("injected legacy restart interruption");
         }
@@ -71,8 +82,13 @@ impl Manager for FakeManager {
 
     fn protection(&mut self, unit: &Unit) -> Result<Protection> {
         self.events.push(format!("protection:{}", unit.name));
-        if self.services.target.iter().any(|target| target.name == unit.name)
-            && let Some(protection) = &self.target_protection {
+        if self
+            .services
+            .target
+            .iter()
+            .any(|target| target.name == unit.name)
+            && let Some(protection) = &self.target_protection
+        {
             return Ok(protection.clone());
         }
         Ok(memory_protection())
@@ -81,7 +97,10 @@ impl Manager for FakeManager {
     async fn idle(&mut self) -> Result<()> {
         self.idle_calls += 1;
         self.events.push("idle".into());
-        ensure!(self.idle_failure != Some(self.idle_calls), "checkpoint/sync is not idle");
+        ensure!(
+            self.idle_failure != Some(self.idle_calls),
+            "checkpoint/sync is not idle"
+        );
         Ok(())
     }
 
@@ -93,7 +112,10 @@ impl Manager for FakeManager {
 }
 
 fn memory_protection() -> Protection {
-    Protection { memory_swap_max: Some("0".into()), memory_low: Some("8589934592".into()) }
+    Protection {
+        memory_swap_max: Some("0".into()),
+        memory_low: Some("8589934592".into()),
+    }
 }
 
 struct Fixture {
@@ -112,15 +134,24 @@ impl Fixture {
         fs::create_dir_all(&state)?;
         let layout = Layout {
             home: root.path().to_owned(),
-            profiles: Some(vec![root.path().join("profiles"), root.path().join("legacy-profiles")]),
-            directories: [(config.join("st3"), config.join("fractal")), (state.join("st3"), state.join("fractal"))],
+            profiles: Some(vec![
+                root.path().join("profiles"),
+                root.path().join("legacy-profiles"),
+            ]),
+            directories: [
+                (config.join("st3"), config.join("fractal")),
+                (state.join("st3"), state.join("fractal")),
+            ],
             daemon_state: state.join("st3"),
             journal: config.join(".fractal-host-cutover.json"),
             lock: config.join(".fractal-host-cutover.lock"),
         };
         for (old, _) in &layout.directories {
             fs::create_dir_all(old.join("nested"))?;
-            fs::write(old.join("nested/authority"), b"preserve these exact bytes\0\xff")?;
+            fs::write(
+                old.join("nested/authority"),
+                b"preserve these exact bytes\0\xff",
+            )?;
             fs::write(old.join(".hidden"), b"hidden state")?;
         }
         // A running daemon already owns this lock file and has its log parent.
@@ -131,7 +162,10 @@ impl Fixture {
         let names: &[(&str, &str)] = if cfg!(target_os = "macos") {
             &[
                 ("com.compoundingtech.st3", "com.compoundingtech.fractal"),
-                ("com.compoundingtech.st3.replication", "com.compoundingtech.fractal.replication"),
+                (
+                    "com.compoundingtech.st3.replication",
+                    "com.compoundingtech.fractal.replication",
+                ),
             ]
         } else {
             &[
@@ -141,32 +175,76 @@ impl Fixture {
             ]
         };
         for &(old_name, new_name) in names {
-            let filename = |name: &str| if cfg!(target_os = "macos") { format!("{name}.plist") } else { name.into() };
-            let old = Unit { name: old_name.into(), file: units.join(filename(old_name)), installed: true, running: true, enabled: true };
-            let new = Unit { name: new_name.into(), file: units.join(filename(new_name)), installed: true, running: false, enabled: false };
+            let filename = |name: &str| {
+                if cfg!(target_os = "macos") {
+                    format!("{name}.plist")
+                } else {
+                    name.into()
+                }
+            };
+            let old = Unit {
+                name: old_name.into(),
+                file: units.join(filename(old_name)),
+                installed: true,
+                running: true,
+                enabled: true,
+            };
+            let new = Unit {
+                name: new_name.into(),
+                file: units.join(filename(new_name)),
+                installed: true,
+                running: false,
+                enabled: false,
+            };
             fs::write(&old.file, format!("legacy {old_name}\n"))?;
             fs::write(&new.file, format!("staged {new_name}\n"))?;
             let directory = dropins(&old.file);
             fs::create_dir_all(directory.join("nested"))?;
-            fs::write(directory.join("10-memory.conf"), b"[Service]\nMemorySwapMax=0\nMemoryLow=8G\n")?;
-            fs::write(directory.join(".operator-setting"), b"preserve hidden drop-in")?;
-            fs::write(directory.join("nested/evidence"), b"preserve whole directory")?;
+            fs::write(
+                directory.join("10-memory.conf"),
+                b"[Service]\nMemorySwapMax=0\nMemoryLow=8G\n",
+            )?;
+            fs::write(
+                directory.join(".operator-setting"),
+                b"preserve hidden drop-in",
+            )?;
+            fs::write(
+                directory.join("nested/evidence"),
+                b"preserve whole directory",
+            )?;
             legacy.push(old);
             target.push(new);
         }
         let services = Services { legacy, target };
         Ok(Self {
-            root, layout,
-            manager: FakeManager { services, events: Vec::new(), idle_calls: 0,
-                idle_failure: None, probe_failure: false, target_protection: None,
-                fail_target_enable_once: false, omit_missing: false, fail_legacy_start_once: false },
+            root,
+            layout,
+            manager: FakeManager {
+                services,
+                events: Vec::new(),
+                idle_calls: 0,
+                idle_failure: None,
+                probe_failure: false,
+                target_protection: None,
+                fail_target_enable_once: false,
+                omit_missing: false,
+                fail_legacy_start_once: false,
+            },
         })
     }
 
     fn use_home_manager(&mut self) -> Result<()> {
         let old = &mut self.manager.services.legacy[0];
-        let name = if cfg!(target_os = "macos") { "org.nix-community.home.smalltalk" } else { "smalltalk.service" };
-        let filename = if cfg!(target_os = "macos") { format!("{name}.plist") } else { name.into() };
+        let name = if cfg!(target_os = "macos") {
+            "org.nix-community.home.smalltalk"
+        } else {
+            "smalltalk.service"
+        };
+        let filename = if cfg!(target_os = "macos") {
+            format!("{name}.plist")
+        } else {
+            name.into()
+        };
         let file = old.file.parent().unwrap().join(filename);
         fs::rename(&old.file, &file)?;
         fs::rename(dropins(&old.file), dropins(&file))?;
@@ -176,7 +254,13 @@ impl Fixture {
     }
 
     async fn run(&mut self, dry_run: bool, rollback: bool) -> Result<Receipt> {
-        cutover(&self.layout, &mut self.manager, "test-host", &HostArgs { dry_run, rollback }).await
+        cutover(
+            &self.layout,
+            &mut self.manager,
+            "test-host",
+            &HostArgs { dry_run, rollback },
+        )
+        .await
     }
 
     fn snapshot(&self) -> Result<Snapshot> {
@@ -188,10 +272,25 @@ impl Fixture {
             assert!(fs::symlink_metadata(old)?.is_dir());
             assert!(!new.exists());
             assert!(!old.join(RECEIPT_FILE).exists());
-            assert_eq!(fs::read(old.join("nested/authority"))?, b"preserve these exact bytes\0\xff");
+            assert_eq!(
+                fs::read(old.join("nested/authority"))?,
+                b"preserve these exact bytes\0\xff"
+            );
         }
-        assert!(self.manager.services.legacy.iter().all(|unit| unit.running && unit.file.exists()));
-        assert!(self.manager.services.target.iter().all(|unit| !unit.running && !unit.enabled));
+        assert!(
+            self.manager
+                .services
+                .legacy
+                .iter()
+                .all(|unit| unit.running && unit.file.exists())
+        );
+        assert!(
+            self.manager
+                .services
+                .target
+                .iter()
+                .all(|unit| !unit.running && !unit.enabled)
+        );
         assert!(!self.layout.journal.exists());
         Ok(())
     }
@@ -201,14 +300,25 @@ type Snapshot = BTreeMap<PathBuf, (u64, u32, Vec<u8>)>;
 
 fn snapshot(root: &Path, ignored: &Path) -> Result<Snapshot> {
     fn walk(path: &Path, ignored: &Path, result: &mut Snapshot) -> Result<()> {
-        if path == ignored { return Ok(()); }
+        if path == ignored {
+            return Ok(());
+        }
         let metadata = fs::symlink_metadata(path)?;
         let contents = if metadata.file_type().is_symlink() {
             fs::read_link(path)?.as_os_str().as_encoded_bytes().to_vec()
-        } else if metadata.is_file() { fs::read(path)? } else { Vec::new() };
-        result.insert(path.to_owned(), (metadata.ino(), metadata.permissions().mode(), contents));
+        } else if metadata.is_file() {
+            fs::read(path)?
+        } else {
+            Vec::new()
+        };
+        result.insert(
+            path.to_owned(),
+            (metadata.ino(), metadata.permissions().mode(), contents),
+        );
         if metadata.is_dir() {
-            for entry in fs::read_dir(path)? { walk(&entry?.path(), ignored, result)?; }
+            for entry in fs::read_dir(path)? {
+                walk(&entry?.path(), ignored, result)?;
+            }
         }
         Ok(())
     }
@@ -221,7 +331,9 @@ fn snapshot(root: &Path, ignored: &Path) -> Result<Snapshot> {
 async fn swaps_authority_by_rename_preserving_all_dropins_and_receipting_memory() -> Result<()> {
     let mut fixture = Fixture::new()?;
     let pairs = fixture.layout.pairs(&fixture.manager.services);
-    let before = pairs.iter().map(|(old, _)| fs::metadata(old).map(|metadata| metadata.ino()))
+    let before = pairs
+        .iter()
+        .map(|(old, _)| fs::metadata(old).map(|metadata| metadata.ino()))
         .collect::<std::io::Result<Vec<_>>>()?;
     let receipt = fixture.run(false, false).await?;
     assert_eq!(receipt.status, "completed");
@@ -236,22 +348,61 @@ async fn swaps_authority_by_rename_preserving_all_dropins_and_receipting_memory(
         assert_eq!(fs::metadata(new)?.ino(), before[index]);
         if index < 2 {
             assert_eq!(fs::read_link(old)?, *new);
-            assert_eq!(fs::read(new.join(RECEIPT_FILE))?, format!("{MIGRATION_ID}\n").as_bytes());
+            assert_eq!(
+                fs::read(new.join(RECEIPT_FILE))?,
+                format!("{MIGRATION_ID}\n").as_bytes()
+            );
             assert_eq!(fs::read(new.join(".hidden"))?, b"hidden state");
-            assert_eq!(fs::read(old.join("nested/authority"))?, b"preserve these exact bytes\0\xff");
+            assert_eq!(
+                fs::read(old.join("nested/authority"))?,
+                b"preserve these exact bytes\0\xff"
+            );
         } else {
             assert!(!old.exists());
-            assert_eq!(fs::read(new.join("10-memory.conf"))?, b"[Service]\nMemorySwapMax=0\nMemoryLow=8G\n");
-            assert_eq!(fs::read(new.join(".operator-setting"))?, b"preserve hidden drop-in");
-            assert_eq!(fs::read(new.join("nested/evidence"))?, b"preserve whole directory");
+            assert_eq!(
+                fs::read(new.join("10-memory.conf"))?,
+                b"[Service]\nMemorySwapMax=0\nMemoryLow=8G\n"
+            );
+            assert_eq!(
+                fs::read(new.join(".operator-setting"))?,
+                b"preserve hidden drop-in"
+            );
+            assert_eq!(
+                fs::read(new.join("nested/evidence"))?,
+                b"preserve whole directory"
+            );
         }
     }
-    assert!(fixture.manager.services.legacy.iter().all(|unit| !unit.running && !unit.enabled && !unit.file.exists()));
-    assert!(fixture.manager.services.target.iter().all(|unit| unit.running && unit.enabled));
+    assert!(
+        fixture
+            .manager
+            .services
+            .legacy
+            .iter()
+            .all(|unit| !unit.running && !unit.enabled && !unit.file.exists())
+    );
+    assert!(
+        fixture
+            .manager
+            .services
+            .target
+            .iter()
+            .all(|unit| unit.running && unit.enabled)
+    );
     assert_eq!(fixture.manager.idle_calls, 2);
-    let probe = fixture.manager.events.iter().position(|event| event == "probe").unwrap();
+    let probe = fixture
+        .manager
+        .events
+        .iter()
+        .position(|event| event == "probe")
+        .unwrap();
     let enable_event = format!("enable:{}:true", fixture.manager.services.target[0].name);
-    let enable = fixture.manager.events.iter().position(|event| *event == enable_event).unwrap();
+    let enable = fixture
+        .manager
+        .events
+        .iter()
+        .position(|event| *event == enable_event)
+        .unwrap();
     let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
     assert_eq!(journal.before, memory_protection());
     assert_eq!(journal.after, Some(memory_protection()));
@@ -281,7 +432,10 @@ async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pt
     let (old, new) = fixture.layout.directories[1].clone();
     let store = old.join("store");
     fs::create_dir_all(store.join("run"))?;
-    fs::rename(old.join("node-identity.lock"), store.join("node-identity.lock"))?;
+    fs::rename(
+        old.join("node-identity.lock"),
+        store.join("node-identity.lock"),
+    )?;
     fs::rename(old.join("logs"), store.join("logs"))?;
     fs::write(store.join("claims.sqlite3"), b"nested authority")?;
     fs::create_dir(old.join("pty"))?;
@@ -289,10 +443,13 @@ async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pt
     let store_inode = fs::metadata(&store)?.ino();
     let pty_inode = fs::metadata(old.join("pty"))?.ino();
     fixture.layout.configure_state(&store)?;
-    fs::write(fixture.layout.directories[0].0.join("config.toml"), format!(
-        "node = \"test-host\"\nstate_dir = {}\n",
-        serde_json::to_string(&store)?
-    ))?;
+    fs::write(
+        fixture.layout.directories[0].0.join("config.toml"),
+        format!(
+            "node = \"test-host\"\nstate_dir = {}\n",
+            serde_json::to_string(&store)?
+        ),
+    )?;
     assert_eq!(fixture.layout.target_daemon_state(), new.join("store"));
 
     let config = Config {
@@ -306,7 +463,10 @@ async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pt
             let (mut stream, _) = listener.accept().await?;
             let mut request = [0; 4096];
             let count = stream.read(&mut request).await?;
-            ensure!(request[..count].starts_with(b"GET /v1/health "), "unexpected API probe");
+            ensure!(
+                request[..count].starts_with(b"GET /v1/health "),
+                "unexpected API probe"
+            );
             let body = br#"{"api_version":"st3.v1","value":{"node":"test-host"}}"#;
             stream.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -329,7 +489,10 @@ async fn nested_store_cutover_moves_the_whole_root_and_preserves_endpoint_and_pt
     assert_eq!(fs::read_link(&old)?, new);
     assert_eq!(fs::metadata(new.join("store"))?.ino(), store_inode);
     assert_eq!(fs::metadata(new.join("pty"))?.ino(), pty_inode);
-    assert_eq!(fs::read(new.join("store/claims.sqlite3"))?, b"nested authority");
+    assert_eq!(
+        fs::read(new.join("store/claims.sqlite3"))?,
+        b"nested authority"
+    );
     assert_eq!(fs::read(old.join("pty/session"))?, b"live PTY registry");
     assert!(new.join("store/logs").is_dir());
     assert!(!new.join("node-identity.lock").exists());
@@ -361,8 +524,13 @@ async fn nonempty_fractal_dotfiles_are_rejected_before_stop_even_with_a_receipt(
         let mut fixture = Fixture::new()?;
         let destination = &fixture.layout.directories[0].1;
         fs::create_dir(destination)?;
-        fs::write(destination.join(".tui-state"), b"unrelated dotfiles fractal state")?;
-        if with_receipt { fs::write(destination.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?; }
+        fs::write(
+            destination.join(".tui-state"),
+            b"unrelated dotfiles fractal state",
+        )?;
+        if with_receipt {
+            fs::write(destination.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?;
+        }
         let before = fixture.snapshot()?;
         let error = fixture.run(false, false).await.unwrap_err();
         assert!(format!("{error:#}").contains("non-empty"));
@@ -381,10 +549,28 @@ async fn checkpoint_or_sync_activity_refuses_before_any_stop() -> Result<()> {
         let error = fixture.run(false, false).await.unwrap_err();
         assert!(format!("{error:#}").contains("checkpoint/sync"));
         assert_eq!(fixture.snapshot()?, before);
-        let legacy_stops: Vec<_> = fixture.manager.services.legacy.iter()
-            .map(|unit| format!("stop:{}", unit.name)).collect();
-        assert!(!fixture.manager.events.iter().any(|event| legacy_stops.contains(event)));
-        assert!(fixture.manager.services.legacy.iter().all(|unit| unit.running));
+        let legacy_stops: Vec<_> = fixture
+            .manager
+            .services
+            .legacy
+            .iter()
+            .map(|unit| format!("stop:{}", unit.name))
+            .collect();
+        assert!(
+            !fixture
+                .manager
+                .events
+                .iter()
+                .any(|event| legacy_stops.contains(event))
+        );
+        assert!(
+            fixture
+                .manager
+                .services
+                .legacy
+                .iter()
+                .all(|unit| unit.running)
+        );
     }
     Ok(())
 }
@@ -423,11 +609,19 @@ async fn missing_daemon_families_and_stopped_legacy_are_not_cutovers() -> Result
     for missing in ["both", "legacy", "target", "legacy-file", "stopped"] {
         let mut fixture = Fixture::new()?;
         match missing {
-            "both" => { fixture.manager.services.legacy.clear(); fixture.manager.services.target.clear(); }
+            "both" => {
+                fixture.manager.services.legacy.clear();
+                fixture.manager.services.target.clear();
+            }
             "legacy" => fixture.manager.services.legacy.clear(),
             "target" => fixture.manager.services.target.clear(),
             "legacy-file" => fs::remove_file(&fixture.manager.services.legacy[0].file)?,
-            "stopped" => fixture.manager.services.legacy.iter_mut().for_each(|unit| unit.running = false),
+            "stopped" => fixture
+                .manager
+                .services
+                .legacy
+                .iter_mut()
+                .for_each(|unit| unit.running = false),
             _ => unreachable!(),
         }
         let before = fixture.snapshot()?;
@@ -453,8 +647,14 @@ async fn failed_api_probe_rolls_back_every_path_receipt_symlink_and_service() ->
 #[tokio::test]
 async fn changed_effective_memory_protection_rolls_back_before_api_probe() -> Result<()> {
     for protection in [
-        Protection { memory_swap_max: Some("max".into()), ..memory_protection() },
-        Protection { memory_low: Some("0".into()), ..memory_protection() },
+        Protection {
+            memory_swap_max: Some("max".into()),
+            ..memory_protection()
+        },
+        Protection {
+            memory_low: Some("0".into()),
+            ..memory_protection()
+        },
     ] {
         let mut fixture = Fixture::new()?;
         fixture.manager.target_protection = Some(protection);
@@ -474,16 +674,34 @@ async fn explicit_rollback_recovers_an_interrupted_uncommitted_swap() -> Result<
     let before = fixture.snapshot()?;
     let services = fixture.manager.services.clone();
     let pairs = fixture.layout.pairs(&services);
-    for (old, new) in &pairs { fs::rename(old, new)?; }
+    for (old, new) in &pairs {
+        fs::rename(old, new)?;
+    }
     for (old, new) in pairs.iter().take(2) {
         fs::write(new.join(RECEIPT_FILE), format!("{MIGRATION_ID}\n"))?;
         symlink(new, old)?;
     }
-    let journal = Journal { migration: MIGRATION_ID.into(), services, moves: (0..pairs.len()).collect(),
-        pairs, emptied: Vec::new(), receipts: vec![0, 1], links: vec![0, 1], config_fence: false, committed: false,
-        before: memory_protection(), after: None, gap_ms: 0 };
+    let journal = Journal {
+        migration: MIGRATION_ID.into(),
+        services,
+        moves: (0..pairs.len()).collect(),
+        pairs,
+        emptied: Vec::new(),
+        receipts: vec![0, 1],
+        links: vec![0, 1],
+        config_fence: false,
+        committed: false,
+        before: memory_protection(),
+        after: None,
+        gap_ms: 0,
+    };
     save(&fixture.layout, &journal)?;
-    fixture.manager.services.legacy.iter_mut().for_each(|unit| unit.running = false);
+    fixture
+        .manager
+        .services
+        .legacy
+        .iter_mut()
+        .for_each(|unit| unit.running = false);
     fixture.manager.services.target[0].running = true;
     let error = fixture.run(false, false).await.unwrap_err();
     assert!(format!("{error:#}").contains("interrupted host swap"));
@@ -503,15 +721,35 @@ async fn committed_journal_rerun_finishes_retirement_without_reswapping_state() 
     assert!(format!("{error:#}").contains("migration committed"));
     let journal: Journal = serde_json::from_slice(&fs::read(&fixture.layout.journal)?)?;
     assert!(journal.committed);
-    assert!(fixture.manager.services.legacy.iter().all(|unit| !unit.file.exists()));
+    assert!(
+        fixture
+            .manager
+            .services
+            .legacy
+            .iter()
+            .all(|unit| !unit.file.exists())
+    );
     fixture.manager.omit_missing = true;
     fixture.manager.events.clear();
     let before = fixture.snapshot()?;
     let receipt = fixture.run(false, false).await?;
     assert_eq!(receipt.status, "completed");
     assert_eq!(fixture.snapshot()?, before);
-    assert!(fixture.manager.services.target.iter().all(|unit| unit.enabled && unit.running));
-    assert!(!fixture.manager.events.iter().any(|event| event.starts_with("stop:")));
+    assert!(
+        fixture
+            .manager
+            .services
+            .target
+            .iter()
+            .all(|unit| unit.enabled && unit.running)
+    );
+    assert!(
+        !fixture
+            .manager
+            .events
+            .iter()
+            .any(|event| event.starts_with("stop:"))
+    );
     assert!(fixture.run(false, true).await.is_err());
     Ok(())
 }
@@ -521,12 +759,21 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
     let fixture = Fixture::new()?;
     let base = fixture.root.path().join("LaunchAgents");
     let unit = |name: &str| Unit {
-        name: name.into(), file: base.join(format!("{name}.plist")),
-        installed: true, running: false, enabled: false,
+        name: name.into(),
+        file: base.join(format!("{name}.plist")),
+        installed: true,
+        running: false,
+        enabled: false,
     };
     let services = Services {
-        legacy: vec![unit("org.nix-community.home.smalltalk"), unit("org.nix-community.home.smalltalk-apply")],
-        target: vec![unit("com.compoundingtech.fractal"), unit("com.compoundingtech.fractal-apply")],
+        legacy: vec![
+            unit("org.nix-community.home.smalltalk"),
+            unit("org.nix-community.home.smalltalk-apply"),
+        ],
+        target: vec![
+            unit("com.compoundingtech.fractal"),
+            unit("com.compoundingtech.fractal-apply"),
+        ],
     };
     let pairs = fixture.layout.pairs(&services);
     assert_eq!(pairs.len(), 4);
@@ -539,10 +786,18 @@ fn home_manager_launchd_labels_map_to_target_dropin_directories() -> Result<()> 
 
 fn interrupted_journal(fixture: &Fixture) -> Journal {
     Journal {
-        migration: MIGRATION_ID.into(), services: fixture.manager.services.clone(),
-        pairs: fixture.layout.pairs(&fixture.manager.services), moves: Vec::new(),
-        emptied: Vec::new(), receipts: Vec::new(), links: Vec::new(), config_fence: false,
-        committed: false, before: memory_protection(), after: None, gap_ms: 0,
+        migration: MIGRATION_ID.into(),
+        services: fixture.manager.services.clone(),
+        pairs: fixture.layout.pairs(&fixture.manager.services),
+        moves: Vec::new(),
+        emptied: Vec::new(),
+        receipts: Vec::new(),
+        links: Vec::new(),
+        config_fence: false,
+        committed: false,
+        before: memory_protection(),
+        after: None,
+        gap_ms: 0,
     }
 }
 
@@ -553,8 +808,20 @@ async fn reboot_after_root_exchange_cannot_start_legacy_or_fork_state() -> Resul
     let mut journal = interrupted_journal(&fixture);
     save(&fixture.layout, &journal)?;
     stop_legacy(&mut fixture.manager, &journal)?;
-    assert!(fixture.manager.services.legacy.iter().all(|unit| !unit.enabled && !unit.running));
-    let first_stop = fixture.manager.events.iter().position(|event| event.starts_with("stop:")).unwrap();
+    assert!(
+        fixture
+            .manager
+            .services
+            .legacy
+            .iter()
+            .all(|unit| !unit.enabled && !unit.running)
+    );
+    let first_stop = fixture
+        .manager
+        .events
+        .iter()
+        .position(|event| event.starts_with("stop:"))
+        .unwrap();
     assert_eq!(first_stop, journal.services.legacy.len());
     journal.moves.push(1);
     journal.links.push(1);
@@ -564,12 +831,29 @@ async fn reboot_after_root_exchange_cannot_start_legacy_or_fork_state() -> Resul
     exchange(old, new)?;
     // Reboot starts enabled jobs only. No legacy job can recreate a root;
     // immutable generations still resolve the same authority through old.
-    assert!(!fixture.manager.services.legacy.iter().any(|unit| unit.enabled));
+    assert!(
+        !fixture
+            .manager
+            .services
+            .legacy
+            .iter()
+            .any(|unit| unit.enabled)
+    );
     assert_eq!(fs::metadata(old)?.ino(), fs::metadata(new)?.ino());
     fixture.run(false, true).await?;
-    assert!(fixture.manager.services.legacy.iter().all(|unit| unit.enabled));
+    assert!(
+        fixture
+            .manager
+            .services
+            .legacy
+            .iter()
+            .all(|unit| unit.enabled)
+    );
     assert!(!fixture.manager.services.legacy[1].running);
-    assert_eq!(fs::read(old.join("nested/authority"))?, b"preserve these exact bytes\0\xff");
+    assert_eq!(
+        fs::read(old.join("nested/authority"))?,
+        b"preserve these exact bytes\0\xff"
+    );
     Ok(())
 }
 
@@ -588,7 +872,10 @@ async fn rollback_replay_after_empty_destination_recreation_and_restart_failure(
     assert!(journal.moves.is_empty());
     fixture.run(false, true).await?;
     for (old, new) in &fixture.layout.directories {
-        assert_eq!(fs::read(old.join("nested/authority"))?, b"preserve these exact bytes\0\xff");
+        assert_eq!(
+            fs::read(old.join("nested/authority"))?,
+            b"preserve these exact bytes\0\xff"
+        );
         assert!(fs::read_dir(new)?.next().is_none());
         assert_eq!(fs::metadata(new)?.permissions().mode() & 0o777, 0o750);
     }
@@ -636,7 +923,9 @@ fn atomic_bridge_recovery_handles_both_exchange_crash_boundaries() -> Result<()>
         let (old, new) = &fixture.layout.directories[0];
         let inode = fs::metadata(old)?.ino();
         symlink(new, new)?;
-        if exchanged { exchange(old, new)?; }
+        if exchanged {
+            exchange(old, new)?;
+        }
         assert_eq!(fs::metadata(old)?.ino(), inode);
         reverse_root(old, new)?;
         reverse_root(old, new)?;
@@ -647,8 +936,16 @@ fn atomic_bridge_recovery_handles_both_exchange_crash_boundaries() -> Result<()>
 }
 
 #[test]
-fn home_manager_config_fence_restores_original_symlink_at_every_publication_boundary() -> Result<()> {
-    for boundary in ["intent", "partial", "backing", "staged", "published", "reversed"] {
+fn home_manager_config_fence_restores_original_symlink_at_every_publication_boundary() -> Result<()>
+{
+    for boundary in [
+        "intent",
+        "partial",
+        "backing",
+        "staged",
+        "published",
+        "reversed",
+    ] {
         let fixture = Fixture::new()?;
         let directory = &fixture.layout.directories[0].0;
         let original = fixture.root.path().join("immutable-config");
@@ -657,22 +954,33 @@ fn home_manager_config_fence_restores_original_symlink_at_every_publication_boun
         let inode = fs::symlink_metadata(directory.join("config.toml"))?.ino();
         if matches!(boundary, "published" | "reversed") {
             install_config_fence(directory)?;
-            assert_eq!(fs::read_link(directory.join("config.toml"))?, Path::new(CONFIG_BACKING));
+            assert_eq!(
+                fs::read_link(directory.join("config.toml"))?,
+                Path::new(CONFIG_BACKING)
+            );
             assert!(fs::read_to_string(directory.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
             if boundary == "reversed" {
-                exchange(&directory.join("config.toml"), &directory.join(CONFIG_BACKUP))?;
+                exchange(
+                    &directory.join("config.toml"),
+                    &directory.join(CONFIG_BACKUP),
+                )?;
             }
         } else if boundary == "partial" {
             fs::write(directory.join(CONFIG_PENDING), b"partial")?;
         } else if matches!(boundary, "backing" | "staged") {
             fs::write(directory.join(CONFIG_BACKING), b"completed backing")?;
-            if boundary == "staged" { symlink(CONFIG_BACKING, directory.join(CONFIG_BACKUP))?; }
+            if boundary == "staged" {
+                symlink(CONFIG_BACKING, directory.join(CONFIG_BACKUP))?;
+            }
         }
         assert!(fs::read(directory.join("config.toml")).is_ok());
         restore_config_fence(directory)?;
         restore_config_fence(directory)?;
         assert_eq!(fs::read_link(directory.join("config.toml"))?, original);
-        assert_eq!(fs::symlink_metadata(directory.join("config.toml"))?.ino(), inode);
+        assert_eq!(
+            fs::symlink_metadata(directory.join("config.toml"))?.ino(),
+            inode
+        );
         assert!(!directory.join(CONFIG_PENDING).exists());
         assert!(!directory.join(CONFIG_BACKING).exists());
     }
@@ -686,7 +994,10 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
         fixture.use_home_manager()?;
         let immutable = fixture.root.path().join("immutable-config");
         fs::write(&immutable, b"node = \"test\"\n")?;
-        symlink(&immutable, fixture.layout.directories[0].0.join("config.toml"))?;
+        symlink(
+            &immutable,
+            fixture.layout.directories[0].0.join("config.toml"),
+        )?;
         let before = fixture.snapshot()?;
         fixture.manager.probe_failure = failed;
         let result = fixture.run(false, false).await;
@@ -696,8 +1007,14 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
         } else {
             result?;
             let (legacy, target) = &fixture.layout.directories[0];
-            assert_eq!(fs::read_link(target.join("config.toml"))?, Path::new(CONFIG_BACKING));
-            assert_eq!(fs::read(legacy.join("config.toml"))?, fs::read(target.join(CONFIG_BACKING))?);
+            assert_eq!(
+                fs::read_link(target.join("config.toml"))?,
+                Path::new(CONFIG_BACKING)
+            );
+            assert_eq!(
+                fs::read(legacy.join("config.toml"))?,
+                fs::read(target.join(CONFIG_BACKING))?
+            );
             assert!(fs::read_to_string(target.join(CONFIG_BACKING))?.ends_with(CONFIG_MARKER));
             assert!(!target.join(PENDING_RECEIPT).exists());
         }
@@ -705,16 +1022,31 @@ async fn home_manager_cutover_retains_fence_and_failure_restores_original_config
     Ok(())
 }
 
-fn retain_generation(fixture: &Fixture, profile: usize, number: u64, forced: &str, wrapped: bool) -> Result<PathBuf> {
+fn retain_generation(
+    fixture: &Fixture,
+    profile: usize,
+    number: u64,
+    forced: &str,
+    wrapped: bool,
+) -> Result<PathBuf> {
     let profile = &fixture.layout.profiles.as_ref().unwrap()[profile];
     fs::create_dir_all(profile)?;
     let generation = fixture.root.path().join(format!("generation-{number}"));
     fs::create_dir(&generation)?;
     let checker = generation.join("fixture-check-link-targets.sh");
-    fs::write(&checker, format!("forcedPaths=({forced})\nfor forcedPath in \"${{forcedPaths[@]}}\"; do\n:\ndone\n"))?;
-    let activation = format!("find \"$newGenFiles\" -exec bash {} \"$newGenFiles\" {{}} +\n", checker.display());
+    fs::write(
+        &checker,
+        format!("forcedPaths=({forced})\nfor forcedPath in \"${{forcedPaths[@]}}\"; do\n:\ndone\n"),
+    )?;
+    let activation = format!(
+        "find \"$newGenFiles\" -exec bash {} \"$newGenFiles\" {{}} +\n",
+        checker.display()
+    );
     if wrapped {
-        fs::write(generation.join("activate"), "exec \"$activation_dir/activate-uninstrumented\" \"$@\"\n")?;
+        fs::write(
+            generation.join("activate"),
+            "exec \"$activation_dir/activate-uninstrumented\" \"$@\"\n",
+        )?;
         fs::write(generation.join("activate-uninstrumented"), activation)?;
     } else {
         fs::write(generation.join("activate"), activation)?;
@@ -729,11 +1061,17 @@ async fn retained_forced_generations_refuse_cutover_with_sorted_prune_numbers() 
     for dry_run in [true, false] {
         let mut fixture = Fixture::new()?;
         fixture.use_home_manager()?;
-        fs::write(fixture.layout.directories[0].0.join("config.toml"), b"node = \"test\"\n")?;
+        fs::write(
+            fixture.layout.directories[0].0.join("config.toml"),
+            b"node = \"test\"\n",
+        )?;
         let config = retain_generation(&fixture, 0, 9, "\"$HOME\"/'config/st3/config'", true)?;
         let state = retain_generation(&fixture, 1, 2, "\"$HOME\"/'state/st'", false)?;
         let safe = retain_generation(&fixture, 0, 20, "\"$HOME\"/'unrelated'", false)?;
-        symlink(safe.file_name().unwrap(), fixture.layout.profiles.as_ref().unwrap()[0].join("home-manager"))?;
+        symlink(
+            safe.file_name().unwrap(),
+            fixture.layout.profiles.as_ref().unwrap()[0].join("home-manager"),
+        )?;
         let before = fixture.snapshot()?;
         let error = fixture.run(dry_run, false).await.unwrap_err();
         assert!(format!("{error:#}").contains("prune generation numbers [2, 9]"));
@@ -753,7 +1091,10 @@ fn retained_generation_scan_accepts_empty_and_unrelated_literal_force_arrays() -
     let fixture = Fixture::new()?;
     for (number, forced) in [
         (1, ""),
-        (2, "\"$HOME\"/'config/st3/config.toml.backup' \"$HOME\"/'state/st30'"),
+        (
+            2,
+            "\"$HOME\"/'config/st3/config.toml.backup' \"$HOME\"/'state/st30'",
+        ),
         (3, "\"$HOME\"/'other path/with '\\''quotes'"),
     ] {
         retain_generation(&fixture, 0, number, forced, number == 3)?;
@@ -767,7 +1108,13 @@ fn unreadable_or_dynamic_retained_generations_fail_closed_without_execution() ->
     for bad in ["dynamic", "unknown", "missing"] {
         let fixture = Fixture::new()?;
         let sentinel = fixture.root.path().join("must-not-run");
-        let link = retain_generation(&fixture, 0, 7, &format!("$(touch {})", sentinel.display()), false)?;
+        let link = retain_generation(
+            &fixture,
+            0,
+            7,
+            &format!("$(touch {})", sentinel.display()),
+            false,
+        )?;
         let generation = fs::read_link(&link)?;
         if bad == "unknown" {
             fs::write(generation.join("activate"), "exec unknown-wrapper\n")?;
@@ -783,7 +1130,10 @@ fn unreadable_or_dynamic_retained_generations_fail_closed_without_execution() ->
 
 #[test]
 fn retained_generation_array_mutations_refuse_with_generation_number() -> Result<()> {
-    for mutation in ["forcedPaths+=(\"$HOME\"/config/st3/config)", "forcedPaths[0]=\"$HOME/config/st3/config\""] {
+    for mutation in [
+        "forcedPaths+=(\"$HOME\"/config/st3/config)",
+        "forcedPaths[0]=\"$HOME/config/st3/config\"",
+    ] {
         let fixture = Fixture::new()?;
         let link = retain_generation(&fixture, 0, 17, "", false)?;
         let checker = fs::read_link(link)?.join("fixture-check-link-targets.sh");
@@ -792,8 +1142,14 @@ fn retained_generation_array_mutations_refuse_with_generation_number() -> Result
         fs::write(checker, source)?;
         let error = home_manager::preflight(&fixture.layout).unwrap_err();
         let message = format!("{error:#}");
-        assert!(message.contains("retained Home Manager generation 17"), "{message}");
-        assert!(message.contains("unsupported forcedPaths references"), "{message}");
+        assert!(
+            message.contains("retained Home Manager generation 17"),
+            "{message}"
+        );
+        assert!(
+            message.contains("unsupported forcedPaths references"),
+            "{message}"
+        );
         assert!(!fixture.manager.changed_services());
     }
     Ok(())

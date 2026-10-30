@@ -35,19 +35,23 @@ impl Host {
         std::fs::create_dir_all(root).unwrap();
         let socket = root.join("st3.sock");
         let store = Arc::new(Store::open(&root.join("store.db"), name).unwrap());
-        let state = AppState { owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: name.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: name.into(),
+            state_dir: root.to_path_buf(),
+            pty_root: root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
@@ -61,7 +65,11 @@ impl Host {
         })
         .await
         .expect("isolated daemon did not bind its socket");
-        Self { store, socket, server }
+        Self {
+            store,
+            socket,
+            server,
+        }
     }
 
     fn client(&self) -> Client {
@@ -104,7 +112,8 @@ async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
             continue;
         };
         let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
-        let length = head.lines()
+        let length = head
+            .lines()
             .find_map(|line| line.strip_prefix("content-length:"))
             .map_or(0, |value| value.trim().parse::<usize>().unwrap());
         if request.len() >= end + 4 + length {
@@ -116,13 +125,16 @@ async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
 /// Deterministic delivery of real replication envelopes: no fleet services or live sockets.
 fn replicate(from: &Host, peer: &str, to: &Host) {
     for _ in 0..100 {
-        let exchange = from.store
+        let exchange = from
+            .store
             .export_replication_exchange(FLEET, &to.store.replication_inventory().unwrap())
             .unwrap();
         if exchange.envelopes.is_empty() {
             return;
         }
-        to.store.receive_replication_exchange(peer, FLEET, &exchange).unwrap();
+        to.store
+            .receive_replication_exchange(peer, FLEET, &exchange)
+            .unwrap();
         let admission = to.store.validate_replication_backlog().unwrap();
         assert_eq!((admission.invalid, admission.unknown), (0, 0));
         to.store.apply_replication_repairs().unwrap();

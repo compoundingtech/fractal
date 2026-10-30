@@ -8,9 +8,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
+use serde_json::{Value, json};
 
 struct Daemon(Child);
 impl Drop for Daemon {
@@ -21,7 +21,8 @@ impl Drop for Daemon {
 }
 
 fn command(root: &Path) -> Command {
-    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+    let mut command =
+        fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -69,7 +70,7 @@ fn private_runtime_socket_refuses_shared_gateway_before_creating_state() {
 
 #[test]
 fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_missing_runtime_directory()
-{
+ {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -101,7 +102,7 @@ fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_miss
 
 #[test]
 fn private_runtime_socket_refuses_shared_gateway_before_creating_state_with_missing_parent_traversal()
-{
+ {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -241,8 +242,14 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["startup"]["phase"], "full-replay/base-claims");
     assert_eq!(report["startup"]["status"], "starting");
-    assert!(!String::from_utf8_lossy(&doctor.stderr).contains("fractal setup"), "{doctor:?}");
-    assert!(!String::from_utf8_lossy(&doctor.stderr).contains("st setup"), "{doctor:?}");
+    assert!(
+        !String::from_utf8_lossy(&doctor.stderr).contains("fractal setup"),
+        "{doctor:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&doctor.stderr).contains("st setup"),
+        "{doctor:?}"
+    );
     let started = Instant::now();
     let ordinary = command(root).args(["agents", "ls"]).output().unwrap();
     assert!(
@@ -269,14 +276,18 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
         let directory = root.join("status-bin");
         std::fs::create_dir_all(&directory).unwrap();
         let systemctl = directory.join("systemctl");
-        std::fs::write(&systemctl, r#"#!/bin/sh
+        std::fs::write(
+            &systemctl,
+            r#"#!/bin/sh
 if [ "$2" != show ]; then exit 9; fi
 if [ "$3" = st3.service ]; then
     printf '%s\n' 'LoadState=loaded' 'ActiveState=active' 'SubState=running'
 else
     printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead'
 fi
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         std::fs::set_permissions(systemctl, std::fs::Permissions::from_mode(0o700)).unwrap();
         let service = command(root)
             .env(
@@ -338,18 +349,32 @@ fi
     assert_eq!(timing_lines.len(), 1, "{log}");
     let timings: Value = serde_json::from_str(timing_lines[0]).unwrap();
     let keys = [
-        "configuration_ms", "install_hooks_ms", "open_store_ms", "judge_claims_ms",
-        "validate_replication_backlog_ms", "apply_replication_repairs_ms",
-        "settlement_projection_ms", "runtime_prelude_ms", "login_environment_ms",
-        "isolation_pty_ms", "recorder_ms", "app_state_ms", "reconciler_ms",
-        "background_tasks_ms", "bind_ms", "total_ms",
+        "configuration_ms",
+        "install_hooks_ms",
+        "open_store_ms",
+        "judge_claims_ms",
+        "validate_replication_backlog_ms",
+        "apply_replication_repairs_ms",
+        "settlement_projection_ms",
+        "runtime_prelude_ms",
+        "login_environment_ms",
+        "isolation_pty_ms",
+        "recorder_ms",
+        "app_state_ms",
+        "reconciler_ms",
+        "background_tasks_ms",
+        "bind_ms",
+        "total_ms",
     ];
     assert_eq!(timings.as_object().unwrap().len(), keys.len());
     let total_ms = timings["total_ms"].as_f64().unwrap();
     let mut phase_sum_ms = 0.0;
     for key in keys {
         let milliseconds = timings[key].as_f64().unwrap();
-        assert!(milliseconds.is_finite() && milliseconds >= 0.0, "{key}: {timings}");
+        assert!(
+            milliseconds.is_finite() && milliseconds >= 0.0,
+            "{key}: {timings}"
+        );
         assert!(milliseconds <= total_ms, "{key}: {timings}");
         if key != "total_ms" {
             phase_sum_ms += milliseconds;

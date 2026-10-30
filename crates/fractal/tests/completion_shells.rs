@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
+use serde_json::{Value, json};
 
 use crate::terminal_attach::{SilentDaemon, serve_unix, state};
 
@@ -62,7 +62,9 @@ fn st3() -> PathBuf {
 
 /// An operator environment: no seat identity, config and state under `root`, daemon at `socket`.
 fn environment(command: &mut Command, root: &Path, socket: &Path) {
-    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    command
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("COMPLETE")
@@ -447,7 +449,14 @@ async fn exact_non_running_last_segment_still_resolves() {
     let (output, _) = command(
         root.path(),
         &socket,
-        &["agents", "stop", "worker", "--as", "person/avery", "--print-kdl"],
+        &[
+            "agents",
+            "stop",
+            "worker",
+            "--as",
+            "person/avery",
+            "--print-kdl",
+        ],
     )
     .await;
     assert!(
@@ -456,7 +465,10 @@ async fn exact_non_running_last_segment_still_resolves() {
         String::from_utf8_lossy(&output.stderr)
     );
     let printed = String::from_utf8(output.stdout).unwrap();
-    assert!(printed.contains("stop \"agent/example/worker\""), "{printed}");
+    assert!(
+        printed.contains("stop \"agent/example/worker\""),
+        "{printed}"
+    );
     assert!(!printed.contains("worker-2"), "{printed}");
     server.abort();
 }
@@ -506,7 +518,10 @@ async fn bare_attach_fails_within_its_one_second_budget_on_a_silent_daemon() {
         "{stderr}"
     );
     // Account for process startup without allowing the old extra 2 s plus request timeout.
-    assert!(elapsed < Duration::from_millis(1500), "attach took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "attach took {elapsed:?}"
+    );
     assert!(silent.stop() > 0);
 }
 
@@ -562,7 +577,9 @@ async fn attach_consultation_only_gets_the_budget_left_after_resolution() {
     ));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app)
+            .await
+            .unwrap();
     });
     let ready = Instant::now() + Duration::from_secs(5);
     while std::os::unix::net::UnixStream::connect(&socket).is_err() {
@@ -576,6 +593,9 @@ async fn attach_consultation_only_gets_the_budget_left_after_resolution() {
         stderr.contains("no local PTY session matches `agent/example/worker`"),
         "{stderr}"
     );
-    assert!(elapsed < Duration::from_millis(1500), "attach took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "attach took {elapsed:?}"
+    );
     server.abort();
 }

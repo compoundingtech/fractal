@@ -129,11 +129,7 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
     // Fish uses XDG_CONFIG_HOME, which --instance redirects below the instance root.
     let fish = home.join(".st-instance/demo-test/config/fish");
     std::fs::create_dir_all(&fish).unwrap();
-    std::fs::write(
-        fish.join("config.fish"),
-        format!("set -gx PATH '{path}'\n"),
-    )
-    .unwrap();
+    std::fs::write(fish.join("config.fish"), format!("set -gx PATH '{path}'\n")).unwrap();
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -198,7 +194,8 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
                 Instant::now() < deadline,
                 "{label} did not appear:\n{now}\n--- printed ---\n{}\n--- play log ---\n{}\n--- daemon log tail ---\n{}",
                 printed.lock().unwrap(),
-                std::fs::read_to_string(instance.join("state/st3-demo/play.log")).unwrap_or_default(),
+                std::fs::read_to_string(instance.join("state/st3-demo/play.log"))
+                    .unwrap_or_default(),
                 std::fs::read_to_string(instance.join("state/st3-demo/daemon.log"))
                     .unwrap_or_default()
                     .lines()
@@ -213,8 +210,7 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
 
     wait("the live interface", 90, &|screen| screen.contains("live"));
     // The instance holds the demo's person and machine, and nothing outside it was written.
-    let config =
-        std::fs::read_to_string(instance.join("config/st3/config.toml")).unwrap();
+    let config = std::fs::read_to_string(instance.join("config/st3/config.toml")).unwrap();
     assert!(config.contains("person = \"person/avery\""), "{config}");
     assert!(config.contains("node = \"greenhouse\""), "{config}");
     assert!(!home.join(".config/st3").exists());
@@ -230,7 +226,9 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
     writer.write_all(ADVANCE.as_bytes()).unwrap();
     writer.flush().unwrap();
     // The seeded history, then the timed beat streaming in after it.
-    wait("the seeded message", 30, &|screen| screen.contains("thirsty"));
+    wait("the seeded message", 30, &|screen| {
+        screen.contains("thirsty")
+    });
     wait("the timed beat", 30, &|screen| {
         screen.contains("Watering bed three of the invented greenhouse now.")
     });
@@ -242,7 +240,9 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
         screen.contains("Water bed three twice a week in summer.")
             && screen.contains("Watering bed three of the invented greenhouse now.")
     });
-    wait("the typed draft", 30, &|screen| screen.contains("Thanks, gardener"));
+    wait("the typed draft", 30, &|screen| {
+        screen.contains("Thanks, gardener")
+    });
     let log = std::fs::read_to_string(instance.join("state/st3-demo/play.log")).unwrap();
     assert!(log.contains("beat 3 (line 21)"), "{log}");
     assert!(log.contains("work claim step-run/"), "{log}");

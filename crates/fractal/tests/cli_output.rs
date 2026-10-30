@@ -7,9 +7,9 @@ use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use serde_json::json;
 use fractal_daemon::api::AppState;
 use fractal_daemon::store::Store;
+use serde_json::json;
 use tokio::sync::{Notify, oneshot, watch};
 
 fn closed_pipe() -> Stdio {
@@ -216,7 +216,11 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
                 !output.status.success(),
                 "a closed receipt must not hide a later cleanup failure"
             );
-            assert!(fractal_daemon::config::FleetFile::load(&state_dir).unwrap().is_some());
+            assert!(
+                fractal_daemon::config::FleetFile::load(&state_dir)
+                    .unwrap()
+                    .is_some()
+            );
             assert!(!cancelled.load(Ordering::Relaxed));
         } else {
             assert_clean(&output);
@@ -225,7 +229,9 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
                 "the leave record must be written after the truncated receipt"
             );
             assert!(
-                fractal_daemon::config::FleetFile::load(&state_dir).unwrap().is_none(),
+                fractal_daemon::config::FleetFile::load(&state_dir)
+                    .unwrap()
+                    .is_none(),
                 "membership cleanup must finish after the truncated receipt"
             );
             assert!(!fractal_daemon::fleet::join::key_directory(&state_dir).exists());
@@ -254,26 +260,34 @@ mission "orchid" state="ready" {
     )
     .unwrap();
     store.apply_internal(&intent, "cli-output-fixture").unwrap();
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "cli-output".into(),
-    state_dir: root.path().to_path_buf(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "cli-output".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
     let (ready, started) = oneshot::channel();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix_with_ready(&served, fractal_daemon::api::router(state), || {
-            ready.send(()).unwrap();
-        })
+        fractal_daemon::api::serve_unix_with_ready(
+            &served,
+            fractal_daemon::api::router(state),
+            || {
+                ready.send(()).unwrap();
+            },
+        )
         .await
     });
     started.await.unwrap();

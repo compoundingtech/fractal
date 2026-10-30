@@ -83,9 +83,10 @@ test('mission states, empty goals and steps, and ordered goals and steps are pre
 
 test('all catch-up policies serialize a bare mission ID with its explicit revision', () => {
     for (const catchUp of ['all', 'latest', 'skip']) {
-        assert.equal(encodeKdl({ schedules: [{ ...schedule, catchUp, work: {
+        const maxCatchUp = catchUp === 'all' ? 3 : undefined;
+        assert.equal(encodeKdl({ schedules: [{ ...schedule, catchUp, maxCatchUp, work: {
             mission: 'docs/daily-review', revision, workspace: '.',
-        } }] }), `version 2\n\nschedule "docs/daily-review" {\n  host "local"\n  every "1d"\n  anchor "2026-01-01T09:00:00Z"\n  catch-up "${catchUp}"\n  work {\n    mission "mission/docs/daily-review@${revision}"\n    workspace "."\n  }\n}\n`);
+        } }] }), `version 2\n\nschedule "docs/daily-review" {\n  host "local"\n  every "1d"\n  anchor "2026-01-01T09:00:00Z"\n  catch-up "${catchUp}"\n${maxCatchUp === undefined ? '' : '  max-catch-up 3\n'}  work {\n    mission "mission/docs/daily-review@${revision}"\n    workspace "."\n  }\n}\n`);
     }
 });
 

@@ -4,13 +4,13 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
 
-use serde_json::Value;
 #[cfg(test)]
 use fractal_daemon::model::SubjectStatus;
 use fractal_daemon::model::{
     AttentionItemView, MissionInputKind, MissionRunView, RevisionCutover, RevisionProposalView,
     RunGenerationView, StepRunView,
 };
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OutputStyle {
@@ -204,7 +204,12 @@ pub(crate) fn render_mission_run_page(
         "TREE SCOPE  Each PROGRESS line counts its named run only; this page omits other descendants.\n\n",
     );
     output.push_str(&render_mission_run(selected, &[], style, now_unix_ms));
-    let _ = writeln!(output, "\nTREE PAGE  {} · {} runs", selected.root_mission_run, runs.len());
+    let _ = writeln!(
+        output,
+        "\nTREE PAGE  {} · {} runs",
+        selected.root_mission_run,
+        runs.len()
+    );
     for run in runs {
         if run.subject == selected.subject {
             continue;
@@ -625,7 +630,12 @@ pub(crate) fn render_attention_show(
     if let Some(step) = &item.step {
         let _ = writeln!(output, "STEP      {step}");
     }
-    let _ = writeln!(output, "\n{}\n{}", style.heading("DETAIL"), human_command_hints(&item.detail));
+    let _ = writeln!(
+        output,
+        "\n{}\n{}",
+        style.heading("DETAIL"),
+        human_command_hints(&item.detail)
+    );
     if let Some(request) = &item.request {
         output.push_str(&render_structured_request(request, style));
     }
@@ -756,8 +766,10 @@ pub(crate) fn human_command_hints(text: &str) -> std::borrow::Cow<'_, str> {
     let mut output = None::<String>;
     let mut copied = 0;
     for (start, _) in text.match_indices("st") {
-        if start > 0 && (text.as_bytes()[start - 1].is_ascii_alphanumeric()
-            || matches!(text.as_bytes()[start - 1], b'_' | b'/' | b'-' | b'.')) {
+        if start > 0
+            && (text.as_bytes()[start - 1].is_ascii_alphanumeric()
+                || matches!(text.as_bytes()[start - 1], b'_' | b'/' | b'-' | b'.'))
+        {
             continue;
         }
         let tail = &text[start..];
@@ -769,13 +781,37 @@ pub(crate) fn human_command_hints(text: &str) -> std::borrow::Cow<'_, str> {
             continue;
         };
         let command = tail[length..].split_whitespace().next().unwrap_or_default();
-        if !matches!(command.trim_end_matches(['`', '.', ',', ';', ')']),
-            "admission" | "agents" | "alerts" | "blobs" | "claude-channel" |
-            "conversations" | "devices" | "doctor" | "documents" | "fleet" |
-            "gh" | "lanes" | "launch" | "missions" | "repair" | "replication" |
-            "replication-worker" | "sekrets" | "service" | "setup" | "slo" |
-            "subject" | "terminals" | "tiles" | "uninstall" | "up" | "usage" | "work")
-        {
+        if !matches!(
+            command.trim_end_matches(['`', '.', ',', ';', ')']),
+            "admission"
+                | "agents"
+                | "alerts"
+                | "blobs"
+                | "claude-channel"
+                | "conversations"
+                | "devices"
+                | "doctor"
+                | "documents"
+                | "fleet"
+                | "gh"
+                | "lanes"
+                | "launch"
+                | "missions"
+                | "repair"
+                | "replication"
+                | "replication-worker"
+                | "sekrets"
+                | "service"
+                | "setup"
+                | "slo"
+                | "subject"
+                | "terminals"
+                | "tiles"
+                | "uninstall"
+                | "up"
+                | "usage"
+                | "work"
+        ) {
             continue;
         }
         let output = output.get_or_insert_with(|| String::with_capacity(text.len()));
@@ -934,7 +970,10 @@ pub(crate) fn render_step_run(
             .map(|started| format!(" · active {}", relative_time(started, now_unix_ms)))
             .or_else(|| {
                 step.execution_paused_until_unix_ms.map(|until| {
-                    format!(" · clock stopped for a wait until {}", relative_time(until, now_unix_ms))
+                    format!(
+                        " · clock stopped for a wait until {}",
+                        relative_time(until, now_unix_ms)
+                    )
                 })
             })
             .unwrap_or_default();
@@ -951,7 +990,9 @@ pub(crate) fn render_step_run(
             "  Wait budget  {} used of {} · {} left",
             fractal_daemon::store::format_wait_span(step.execution_waited_ms),
             fractal_daemon::store::format_wait_span(budget),
-            fractal_daemon::store::format_wait_span(budget.saturating_sub(step.execution_waited_ms)),
+            fractal_daemon::store::format_wait_span(
+                budget.saturating_sub(step.execution_waited_ms)
+            ),
         );
     }
     if let Some(wake) = &step.wake {
@@ -1624,21 +1665,22 @@ mod tests {
     #[test]
     fn work_detail_displays_assistant_answer_attribution() {
         let mut work = step("step-run/demo/build", "build", "ready");
-        work.person_answers.push(fractal_daemon::model::PersonAnswerView {
-            acted_for: None,
-            sender_class: Some("external-assistant".into()),
-            assistant_grant_id: Some("assistant-grant/test".into()),
-            assistant_owner: Some("person/avery".into()),
-            assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
-            ask: "step-run/demo/ask".into(),
-            status: "completed".into(),
-            summary: "Proceed".into(),
-            respondent: "assistant/chatgpt".into(),
-            answered_at_unix_ms: 2_000,
-            answer: None,
-            resolved_by: None,
-            evidence: vec![],
-        });
+        work.person_answers
+            .push(fractal_daemon::model::PersonAnswerView {
+                acted_for: None,
+                sender_class: Some("external-assistant".into()),
+                assistant_grant_id: Some("assistant-grant/test".into()),
+                assistant_owner: Some("person/avery".into()),
+                assistant_session_actor: Some("assistant/chatgpt/session/test".into()),
+                ask: "step-run/demo/ask".into(),
+                status: "completed".into(),
+                summary: "Proceed".into(),
+                respondent: "assistant/chatgpt".into(),
+                answered_at_unix_ms: 2_000,
+                answer: None,
+                resolved_by: None,
+                evidence: vec![],
+            });
         let rendered = render_step_run(&work, OutputStyle::plain(), 2_000, Some(false));
         assert!(rendered.contains("Sender class: external-assistant"));
         assert!(rendered.contains("Assistant grant: assistant-grant/test"));
@@ -1789,22 +1831,49 @@ mod tests {
 
     #[test]
     fn human_command_hints_preserve_wire_text_and_noncommands() {
-        let wire = "close them with `st conversations cleanup --all --older-than 1h`; use st fleet join";
-        assert_eq!(human_command_hints(wire),
-            "close them with `fractal conversations cleanup --all --older-than 1h`; use fractal fleet join");
+        let wire =
+            "close them with `st conversations cleanup --all --older-than 1h`; use st fleet join";
+        assert_eq!(
+            human_command_hints(wire),
+            "close them with `fractal conversations cleanup --all --older-than 1h`; use fractal fleet join"
+        );
         assert!(wire.contains("`st conversations cleanup"));
-        assert_eq!(human_command_hints("`st3 subject show daemon/node`"), "`fractal subject show daemon/node`");
-        for unchanged in ["first work", "st cannot retry", "ST_AGENT", "st3/fleet/id", "/usr/bin/st work"] {
-            assert!(matches!(human_command_hints(unchanged), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(
+            human_command_hints("`st3 subject show daemon/node`"),
+            "`fractal subject show daemon/node`"
+        );
+        for unchanged in [
+            "first work",
+            "st cannot retry",
+            "ST_AGENT",
+            "st3/fleet/id",
+            "/usr/bin/st work",
+        ] {
+            assert!(matches!(
+                human_command_hints(unchanged),
+                std::borrow::Cow::Borrowed(_)
+            ));
         }
     }
 
     #[test]
     fn action_commands_only_rename_the_displayed_executable() {
         for program in ["st", "st3", "fractal", "other"] {
-            let argv = vec![program.into(), "subject".into(), "st".into(), "two words".into()];
-            let expected = if program == "other" { "other" } else { "fractal" };
-            assert_eq!(shell_command(&argv), format!("{expected} subject st 'two words'"));
+            let argv = vec![
+                program.into(),
+                "subject".into(),
+                "st".into(),
+                "two words".into(),
+            ];
+            let expected = if program == "other" {
+                "other"
+            } else {
+                "fractal"
+            };
+            assert_eq!(
+                shell_command(&argv),
+                format!("{expected} subject st 'two words'")
+            );
             assert_eq!(argv[0], program);
         }
         assert_eq!(shell_command(&[]), "");
@@ -1822,7 +1891,9 @@ mod tests {
             requester_id: None,
             launch_id: None,
             variant_id: None,
-            message_id: None, answers: Vec::new(), conversation: None,
+            message_id: None,
+            answers: Vec::new(),
+            conversation: None,
             prompt_call: None,
             title: "Fabric needs review".into(),
             detail: "The queue did not recover. Inspect `st subject show daemon/node`.".into(),
@@ -1860,26 +1931,29 @@ mod tests {
         assert!(
             rendered.contains("inspect: fractal alerts show attention/fabric --as person/alex")
         );
-        assert!(rendered.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert!(rendered.contains(
+            "resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"
+        ));
         assert_eq!(item.actions[0].argv[0], "st3");
 
         let shown = render_attention_show(&item, OutputStyle::plain(), 180_000);
         assert!(shown.contains("ALERT  Fabric needs review"));
         assert!(shown.contains("The queue did not recover."));
         assert!(shown.contains("Inspect `fractal subject show daemon/node`."));
-        assert_eq!(serde_json::to_value(&item).unwrap()["detail"],
-            "The queue did not recover. Inspect `st subject show daemon/node`.");
+        assert_eq!(
+            serde_json::to_value(&item).unwrap()["detail"],
+            "The queue did not recover. Inspect `st subject show daemon/node`."
+        );
         assert!(shown.contains("TARGETS\n  doc/fabric/report@abc"));
-        assert!(shown.contains("resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"));
+        assert!(shown.contains(
+            "resolve: fractal attention resolve attention/fabric --reason 'It is fixed'"
+        ));
     }
 
     #[test]
     fn attention_list_has_a_clear_empty_state() {
         let rendered = render_attention_list(None, &[], OutputStyle::plain(), 180_000);
-        assert_eq!(
-            rendered,
-            "ALERTS\nNo alert is waiting.\n"
-        );
+        assert_eq!(rendered, "ALERTS\nNo alert is waiting.\n");
     }
 
     #[test]
@@ -1926,7 +2000,11 @@ mod tests {
         let child = run(
             "mission-run/demo/child",
             Some("step-run/demo-generation/release"),
-            vec![step("step-run/child-generation/publish", "publish", "ready")],
+            vec![step(
+                "step-run/child-generation/publish",
+                "publish",
+                "ready",
+            )],
         );
         let rendered = render_mission_run_page(
             &root,
@@ -2287,7 +2365,9 @@ mod tests {
         ];
         let mut at = 0;
         for line in order {
-            at += text[at..].find(line).unwrap_or_else(|| panic!("{line} in {text}"));
+            at += text[at..]
+                .find(line)
+                .unwrap_or_else(|| panic!("{line} in {text}"));
         }
     }
 }

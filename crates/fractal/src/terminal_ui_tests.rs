@@ -41,7 +41,9 @@ fn terminal_ui_arguments_and_help_match_the_documented_surface() {
     // `--classic` is gone: it still parses, so Fractal TUI can say what to run instead, and help
     // no longer names it.
     assert!(matches!(
-        Cli::try_parse_from(["st", "ui", "--classic"]).unwrap().command,
+        Cli::try_parse_from(["st", "ui", "--classic"])
+            .unwrap()
+            .command,
         Command::Ui(_)
     ));
     assert!(Cli::try_parse_from(["st", "ui", "pair"]).is_err());
@@ -54,7 +56,8 @@ fn terminal_ui_arguments_and_help_match_the_documented_surface() {
     );
     for flag in ["--version", "-V"] {
         let error = match Cli::try_parse_from(["st", "ui", flag]) {
-            Err(error) => error, Ok(_) => panic!("version exits"),
+            Err(error) => error,
+            Ok(_) => panic!("version exits"),
         };
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
     }

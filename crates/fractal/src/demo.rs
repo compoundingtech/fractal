@@ -219,7 +219,14 @@ const DECLARATIONS: &[(&str, &[&str], &[&str])] = &[
     (
         "step",
         &["timeout"],
-        &["title", "goal", "constraint", "assigned-to", "available-to", "depends-on"],
+        &[
+            "title",
+            "goal",
+            "constraint",
+            "assigned-to",
+            "available-to",
+            "depends-on",
+        ],
     ),
 ];
 
@@ -282,9 +289,9 @@ fn beside(base: &Path, file: &str) -> Result<PathBuf> {
 }
 
 pub fn parse(source: &str, base: &Path) -> Result<Demo> {
-    let document: KdlDocument = source.parse().map_err(|error: kdl::KdlError| {
-        anyhow::anyhow!("{}", kdl_error(&error))
-    })?;
+    let document: KdlDocument = source
+        .parse()
+        .map_err(|error: kdl::KdlError| anyhow::anyhow!("{}", kdl_error(&error)))?;
     let line_of = |node: &KdlNode| line(source, node.span().offset());
     let mut header = None;
     let mut seed_nodes = None;
@@ -308,8 +315,9 @@ pub fn parse(source: &str, base: &Path) -> Result<Demo> {
         .context("`demo` needs `me \"NAME\"`: the invented person whose screen this is")?;
     let me = qualified("person", &me);
     let machine = child_value(header_children, "machine")?.unwrap_or_else(|| "studio".into());
-    fractal_daemon::instance::validate(&machine)
-        .map_err(|_| anyhow::anyhow!("`machine` is 1 to 24 lowercase letters, digits and hyphens"))?;
+    fractal_daemon::instance::validate(&machine).map_err(|_| {
+        anyhow::anyhow!("`machine` is 1 to 24 lowercase letters, digits and hyphens")
+    })?;
     let advance = child_value(header_children, "advance")?.unwrap_or_else(|| "f8".into());
     fractal_tui::playback::Advance::parse(&advance).map_err(anyhow::Error::msg)?;
     let title = child_value(header_children, "title")?;
@@ -343,7 +351,10 @@ pub fn parse(source: &str, base: &Path) -> Result<Demo> {
         }
         let action = action(node, base).with_context(|| format!("line {at}"))?;
         ensure!(
-            !matches!(action, Action::Open { .. } | Action::Type { .. } | Action::Pause),
+            !matches!(
+                action,
+                Action::Open { .. } | Action::Type { .. } | Action::Pause
+            ),
             "line {at}: `{}` is a beat; the seed is what is there before the demo starts",
             node.name().value()
         );
@@ -360,9 +371,9 @@ pub fn parse(source: &str, base: &Path) -> Result<Demo> {
         let wait = match node.get("after") {
             None => Wait::Key,
             Some(value) => {
-                let value = value
-                    .as_string()
-                    .with_context(|| format!("line {at}: `after` is \"key\" or a time such as \"1.5s\""))?;
+                let value = value.as_string().with_context(|| {
+                    format!("line {at}: `after` is \"key\" or a time such as \"1.5s\"")
+                })?;
                 if value == "key" {
                     Wait::Key
                 } else {
@@ -550,7 +561,8 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
         }
         "send" => {
             positional(1, "send from=\"agent/A\" to=\"agent/B\" \"the message\"")?;
-            let from = string("from")?.context("`send` needs from=\"agent/NAME\" or from=\"person/NAME\"")?;
+            let from = string("from")?
+                .context("`send` needs from=\"agent/NAME\" or from=\"person/NAME\"")?;
             let to = string("to")?.context("`send` needs to=\"agent/NAME\"")?;
             ensure!(
                 to.starts_with("agent/"),
@@ -604,7 +616,10 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
             }
         }
         "ask" => {
-            positional(2, "ask \"agent/NAME\" title=\"…\" \"the question\" { answer … }")?;
+            positional(
+                2,
+                "ask \"agent/NAME\" title=\"…\" \"the question\" { answer … }",
+            )?;
             let mut answers = Vec::new();
             for answer in node.children().map(KdlDocument::nodes).unwrap_or_default() {
                 ensure!(
@@ -623,7 +638,11 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
                 let outcome = answer
                     .get("outcome")
                     .and_then(KdlValue::as_string)
-                    .unwrap_or(if answers.is_empty() { "accept" } else { "decline" })
+                    .unwrap_or(if answers.is_empty() {
+                        "accept"
+                    } else {
+                        "decline"
+                    })
                     .to_owned();
                 ensure!(
                     ["accept", "decline", "defer"].contains(&outcome.as_str()),
@@ -653,8 +672,7 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
             Action::Ask {
                 agent: qualified("agent", &arguments[0]),
                 title: string("title")?.unwrap_or_else(|| question.clone()),
-                why: string("why")?
-                    .unwrap_or_else(|| "Only you can decide this.".into()),
+                why: string("why")?.unwrap_or_else(|| "Only you can decide this.".into()),
                 question,
                 answers,
                 step,
@@ -662,7 +680,10 @@ fn action(node: &KdlNode, base: &Path) -> Result<Action> {
         }
         "document" => {
             positional(1, "document \"NAME\" file=\"notes.md\"")?;
-            let file = beside(base, &string("file")?.context("`document` needs file=\"PATH\"")?)?;
+            let file = beside(
+                base,
+                &string("file")?.context("`document` needs file=\"PATH\"")?,
+            )?;
             Action::Document {
                 name: qualified("doc", &arguments[0]),
                 file,
@@ -772,7 +793,10 @@ fn duration(value: &str) -> Result<Duration> {
         "h" => number * 3600.0,
         _ => bail!("`{value}` needs a unit: ms, s, m or h"),
     };
-    ensure!(seconds.is_finite() && seconds >= 0.0, "`{value}` is not a time");
+    ensure!(
+        seconds.is_finite() && seconds >= 0.0,
+        "`{value}` is not a time"
+    );
     Ok(Duration::from_secs_f64(seconds))
 }
 
@@ -819,7 +843,10 @@ pub fn play(
     let dir = instance.state_home().join("st3-demo");
     // The last play's daemon, if it is still running.
     stop_daemon(&dir)?;
-    let work = config.work_root.clone().unwrap_or_else(|| instance.work_dir());
+    let work = config
+        .work_root
+        .clone()
+        .unwrap_or_else(|| instance.work_dir());
     // A daemon this player did not start (the instance's service) owns the graph: leave it be.
     ensure!(
         std::os::unix::net::UnixStream::connect(&config.socket).is_err(),
@@ -843,7 +870,8 @@ pub fn play(
             "Playing. Press {} for each beat that waits for a key; Ctrl+Q ends the demo.",
             demo.advance.to_uppercase()
         );
-        let advance = fractal_tui::playback::Advance::parse(&demo.advance).map_err(anyhow::Error::msg)?;
+        let advance =
+            fractal_tui::playback::Advance::parse(&demo.advance).map_err(anyhow::Error::msg)?;
         let (playback, player) = fractal_tui::playback::link(advance);
         let beats = demo.beats.clone();
         let playing = std::thread::spawn(move || runner.play(&beats, player));
@@ -859,7 +887,10 @@ pub fn play(
     if failures.is_empty() {
         println!("The demo ended. Run the same command to play it again from the start.");
     } else {
-        eprintln!("Some beats failed; the log is {}:", dir.join("play.log").display());
+        eprintln!(
+            "Some beats failed; the log is {}:",
+            dir.join("play.log").display()
+        );
         for failure in failures {
             eprintln!("  {failure}");
         }
@@ -896,7 +927,10 @@ fn claim_instance(
              Play in a new instance, or pass --reset to erase these.",
             instance.name()
         );
-        println!("Erasing what the {} instance held:\n{listed}", instance.name());
+        println!(
+            "Erasing what the {} instance held:\n{listed}",
+            instance.name()
+        );
     }
     fs::create_dir_all(instance.root())?;
     fs::write(
@@ -968,12 +1002,18 @@ impl Daemon {
 /// either, `st up` looks on the login shell's PATH itself.
 fn pty_beside(exe: &Path) -> Option<PathBuf> {
     let beside = exe.parent().map(|dir| dir.join("pty"));
-    beside.into_iter().chain(
-        std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).map(|dir| dir.join("pty")).collect::<Vec<_>>())
-            .unwrap_or_default(),
-    )
-    .find(|candidate| candidate.is_file())
+    beside
+        .into_iter()
+        .chain(
+            std::env::var_os("PATH")
+                .map(|path| {
+                    std::env::split_paths(&path)
+                        .map(|dir| dir.join("pty"))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        )
+        .find(|candidate| candidate.is_file())
 }
 
 impl Drop for Daemon {
@@ -1009,7 +1049,10 @@ fn is_demo_daemon(pid: u32) -> bool {
     };
     let args = String::from_utf8_lossy(&output.stdout);
     args.split_whitespace().any(|word| word == "up")
-        && args.split_whitespace().next().is_some_and(|program| program.contains("st"))
+        && args
+            .split_whitespace()
+            .next()
+            .is_some_and(|program| program.contains("st"))
 }
 
 /// SIGTERM, and SIGKILL if it is still there after ten seconds.
@@ -1107,7 +1150,11 @@ impl Runner {
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             self.note(&format!("  failed: {}", error.trim()));
-            bail!("st {} failed: {}", args.first().unwrap_or(&""), error.trim());
+            bail!(
+                "st {} failed: {}",
+                args.first().unwrap_or(&""),
+                error.trim()
+            );
         }
         Ok(said)
     }
@@ -1133,7 +1180,9 @@ impl Runner {
             .block_on(client.get::<Value>("/v1/health"));
         self.note(&format!(
             "health → {}",
-            health.as_ref().map_or_else(|error| format!("{error:#}"), Value::to_string)
+            health
+                .as_ref()
+                .map_or_else(|error| format!("{error:#}"), Value::to_string)
         ));
         health.context(
             "the demo's daemon did not start; its log is in the instance's state/st3-demo/daemon.log",
@@ -1146,7 +1195,13 @@ impl Runner {
         fs::write(&graph, self.with_stand_ins(demo)?)?;
         self.st(
             None,
-            &["apply", graph.to_str().context("the state path is not UTF-8")?, "--as", &self.me, "--no-gate-check"],
+            &[
+                "apply",
+                graph.to_str().context("the state path is not UTF-8")?,
+                "--as",
+                &self.me,
+                "--no-gate-check",
+            ],
         )?;
         for agent in &demo.agents {
             self.incarnation(agent, Duration::from_secs(30)).with_context(|| {
@@ -1166,10 +1221,15 @@ impl Runner {
     /// The seed's agents with the process each runs in place of a harness: one that waits for
     /// the demo to end and does nothing else.
     fn with_stand_ins(&self, demo: &Demo) -> Result<String> {
-        let mut document: KdlDocument = demo.graph.parse().map_err(|error: kdl::KdlError| {
-            anyhow::anyhow!("{}", kdl_error(&error))
-        })?;
-        let exe = self.exe.to_str().context("the st path is not UTF-8")?.to_owned();
+        let mut document: KdlDocument = demo
+            .graph
+            .parse()
+            .map_err(|error: kdl::KdlError| anyhow::anyhow!("{}", kdl_error(&error)))?;
+        let exe = self
+            .exe
+            .to_str()
+            .context("the st path is not UTF-8")?
+            .to_owned();
         let player = std::process::id().to_string();
         for node in document.nodes_mut() {
             if node.name().value() != "agent" {
@@ -1208,7 +1268,9 @@ impl Runner {
         loop {
             if let Ok(value) = self.json(None, &["agents", "show", agent])
                 && let Some(incarnation) = value["value"]["incarnation_id"].as_str()
-                && value["value"]["state"].as_str().is_some_and(|state| state != "stopped")
+                && value["value"]["state"]
+                    .as_str()
+                    .is_some_and(|state| state != "stopped")
             {
                 return Ok(incarnation.to_owned());
             }
@@ -1227,8 +1289,19 @@ impl Runner {
         self.st(
             Some(agent),
             &[
-                "claim", agent, "harness.observed", "--actor", agent, "--field", &state, "--field",
-                "driver=demo", "--field", &incarnation, "--field", &at,
+                "claim",
+                agent,
+                "harness.observed",
+                "--actor",
+                agent,
+                "--field",
+                &state,
+                "--field",
+                "driver=demo",
+                "--field",
+                &incarnation,
+                "--field",
+                &at,
             ],
         )
         .map(drop)
@@ -1370,7 +1443,15 @@ impl Runner {
                 let body = |text: &str| json!({"media_type": "text/plain", "text": text});
                 let Some(pacing) = player.filter(|_| ago.is_none()) else {
                     return self.timeline(
-                        agent, &incarnation, &content, 1, "assistant", "content", true, body(text), at,
+                        agent,
+                        &incarnation,
+                        &content,
+                        1,
+                        "assistant",
+                        "content",
+                        true,
+                        body(text),
+                        at,
                     );
                 };
                 // Streams the way a harness does: a growing entry, a few words at a time.
@@ -1443,7 +1524,15 @@ impl Runner {
                 text,
                 attach,
             } => {
-                let mut args = vec!["conversations", "send", to.as_str(), "--from", from.as_str(), "--body", text.as_str()];
+                let mut args = vec![
+                    "conversations",
+                    "send",
+                    to.as_str(),
+                    "--from",
+                    from.as_str(),
+                    "--body",
+                    text.as_str(),
+                ];
                 if let Some(subject) = subject {
                     args.extend(["--subject", subject.as_str()]);
                 }
@@ -1461,8 +1550,15 @@ impl Runner {
                 self.st(
                     None,
                     &[
-                        "missions", "start", mission.as_str(), "--id", id,
-                        "--workspace", &workspace, "--as", &self.me,
+                        "missions",
+                        "start",
+                        mission.as_str(),
+                        "--id",
+                        id,
+                        "--workspace",
+                        &workspace,
+                        "--as",
+                        &self.me,
                     ],
                 )
                 .map(drop)
@@ -1486,11 +1582,24 @@ impl Runner {
                     // A step whose dependency just completed becomes ready a moment later.
                     self.st(
                         Some(agent),
-                        &["trace", "wait", subject.as_str(), "--for", "ready", "--timeout", "30s"],
+                        &[
+                            "trace",
+                            "wait",
+                            subject.as_str(),
+                            "--for",
+                            "ready",
+                            "--timeout",
+                            "30s",
+                        ],
                     )?;
                 }
                 let mut args = vec![
-                    "work", verb, subject.as_str(), "--as", agent.as_str(), "--incarnation",
+                    "work",
+                    verb,
+                    subject.as_str(),
+                    "--as",
+                    agent.as_str(),
+                    "--incarnation",
                     incarnation.as_str(),
                 ];
                 if let Some(summary) = summary {
@@ -1503,7 +1612,14 @@ impl Runner {
                     args.extend(["--evidence", "demo/scripted"]);
                 }
                 self.st(Some(agent), &args)?;
-                self.harness(agent, if matches!(verb, "claim" | "progress") { "working" } else { "idle" })
+                self.harness(
+                    agent,
+                    if matches!(verb, "claim" | "progress") {
+                        "working"
+                    } else {
+                        "idle"
+                    },
+                )
             }
             Action::Ask {
                 agent,
@@ -1540,9 +1656,20 @@ impl Runner {
                     None => vec!["--new-run".to_owned(), format!("demo-ask-{n}")],
                 };
                 let mut args = vec![
-                    "work", "ask", "--for", self.me.as_str(), "--title", title.as_str(), "--reason",
-                    why.as_str(), "--request", file.as_str(), "--idempotency-key", key.as_str(),
-                    "--as", agent.as_str(),
+                    "work",
+                    "ask",
+                    "--for",
+                    self.me.as_str(),
+                    "--title",
+                    title.as_str(),
+                    "--reason",
+                    why.as_str(),
+                    "--request",
+                    file.as_str(),
+                    "--idempotency-key",
+                    key.as_str(),
+                    "--as",
+                    agent.as_str(),
                 ];
                 args.extend(from.iter().map(String::as_str));
                 self.st(Some(agent), &args).map(drop)
@@ -1673,7 +1800,11 @@ struct Jitter(u64);
 
 impl Jitter {
     fn new(seed: u64) -> Self {
-        Self(seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407) | 1)
+        Self(
+            seed.wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407)
+                | 1,
+        )
     }
 
     fn next(&mut self) -> f64 {
@@ -1804,7 +1935,10 @@ beats {
         assert_eq!(demo.me, "person/robin");
         assert_eq!(demo.machine, "studio");
         assert_eq!(demo.advance, "f8");
-        assert_eq!(demo.agents, ["agent/harbor/builder", "agent/harbor/reviewer"]);
+        assert_eq!(
+            demo.agents,
+            ["agent/harbor/builder", "agent/harbor/reviewer"]
+        );
         assert!(demo.graph.starts_with("version 2\n"));
         assert!(demo.graph.contains("mission \"harbor/release\""));
         assert!(!demo.graph.contains("say"), "{}", demo.graph);
@@ -1842,8 +1976,11 @@ beats {
         assert_eq!(answers[1].outcome, "decline");
         // What st apply reads is the publication with each agent's stand-in.
         let root = tempfile::tempdir().unwrap();
-        fractal_daemon::graph::parse_intent(&test_runner(root.path()).with_stand_ins(&demo).unwrap(), "studio")
-            .unwrap();
+        fractal_daemon::graph::parse_intent(
+            &test_runner(root.path()).with_stand_ins(&demo).unwrap(),
+            "studio",
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1853,19 +1990,43 @@ beats {
             "say \"agent/harbor/ghost\" \"Boo\"",
         );
         let error = format!("{:#}", parse(&wrong, Path::new(".")).unwrap_err());
-        assert!(error.contains("agent/harbor/ghost is not an agent"), "{error}");
+        assert!(
+            error.contains("agent/harbor/ghost is not an agent"),
+            "{error}"
+        );
     }
 
     #[test]
     fn mistakes_are_named_with_their_line() {
         for (change, expected) in [
-            (("pause after=\"2s\"", "pause after=\"soon\""), "is not a time"),
+            (
+                ("pause after=\"2s\"", "pause after=\"soon\""),
+                "is not a time",
+            ),
             (("pause after=\"2s\"", "pause after=\"2\""), "needs a unit"),
             (("pause after=\"2s\"", "dance"), "not a demo action"),
-            (("pause after=\"2s\"", "open \"attention/x\""), "open shows agent/"),
-            (("pause after=\"2s\"", "say \"agent/harbor/builder\" when=\"now\" \"x\""), "takes after, ago, speed"),
-            (("me \"robin\"", "me \"robin\"\n  advance \"space\""), "advance key"),
-            (("  run \"harbor/release\"", "  open \"agent/harbor/builder\"\n  run \"harbor/release\""), "is a beat"),
+            (
+                ("pause after=\"2s\"", "open \"attention/x\""),
+                "open shows agent/",
+            ),
+            (
+                (
+                    "pause after=\"2s\"",
+                    "say \"agent/harbor/builder\" when=\"now\" \"x\"",
+                ),
+                "takes after, ago, speed",
+            ),
+            (
+                ("me \"robin\"", "me \"robin\"\n  advance \"space\""),
+                "advance key",
+            ),
+            (
+                (
+                    "  run \"harbor/release\"",
+                    "  open \"agent/harbor/builder\"\n  run \"harbor/release\"",
+                ),
+                "is a beat",
+            ),
         ] {
             let source = SMALL.replacen(change.0, change.1, 1);
             let error = format!("{:#}", parse(&source, Path::new(".")).unwrap_err());
@@ -1873,7 +2034,11 @@ beats {
         }
         let error = format!(
             "{:#}",
-            parse(&SMALL.replace("pause after=\"2s\"", "dance"), Path::new(".")).unwrap_err()
+            parse(
+                &SMALL.replace("pause after=\"2s\"", "dance"),
+                Path::new(".")
+            )
+            .unwrap_err()
         );
         assert!(error.contains("line 31"), "{error}");
     }
@@ -1898,7 +2063,10 @@ beats {
             .map(|entry| entry.value().as_string().unwrap().to_owned())
             .collect::<Vec<_>>();
         let player = std::process::id().to_string();
-        assert_eq!(argv, ["/opt/st/st3", "demo", "seat", "--player", player.as_str()]);
+        assert_eq!(
+            argv,
+            ["/opt/st/st3", "demo", "seat", "--player", player.as_str()]
+        );
         let workspace = children(builder)
             .iter()
             .filter(|child| child.name().value() == "workspace")
@@ -1911,14 +2079,62 @@ beats {
     #[test]
     fn a_seed_declares_nothing_that_runs() {
         for (change, refused) in [
-            (("{ name \"Builder\"; }", "{ name \"Builder\"; command \"rm -rf ~\"; }"), "`command`"),
-            (("{ name \"Builder\"; }", "{ name \"Builder\"; argv \"sh\" \"-c\" \"x\"; }"), "`argv`"),
-            (("{ name \"Builder\"; }", "{ name \"Builder\"; claude { model \"x\"; }; }"), "`claude`"),
-            (("{ name \"Builder\"; }", "{ name \"Builder\"; env { HOME \"/\"; }; }"), "`env`"),
-            (("{ name \"Builder\"; }", "{ name \"Builder\"; workspace \"/\"; }"), "`workspace`"),
-            (("agent \"harbor/builder\" {", "agent \"harbor/builder\" host=\"x\" {"), "`host`"),
-            (("goal \"Ship it.\"", "goal \"Ship it.\"\n    gate \"x\" exec=\"touch /tmp/x\""), "`gate`"),
-            (("goal \"Build it.\";", "goal \"Build it.\"; gate \"x\" exec=\"touch /tmp/x\";"), "`gate`"),
+            (
+                (
+                    "{ name \"Builder\"; }",
+                    "{ name \"Builder\"; command \"rm -rf ~\"; }",
+                ),
+                "`command`",
+            ),
+            (
+                (
+                    "{ name \"Builder\"; }",
+                    "{ name \"Builder\"; argv \"sh\" \"-c\" \"x\"; }",
+                ),
+                "`argv`",
+            ),
+            (
+                (
+                    "{ name \"Builder\"; }",
+                    "{ name \"Builder\"; claude { model \"x\"; }; }",
+                ),
+                "`claude`",
+            ),
+            (
+                (
+                    "{ name \"Builder\"; }",
+                    "{ name \"Builder\"; env { HOME \"/\"; }; }",
+                ),
+                "`env`",
+            ),
+            (
+                (
+                    "{ name \"Builder\"; }",
+                    "{ name \"Builder\"; workspace \"/\"; }",
+                ),
+                "`workspace`",
+            ),
+            (
+                (
+                    "agent \"harbor/builder\" {",
+                    "agent \"harbor/builder\" host=\"x\" {",
+                ),
+                "`host`",
+            ),
+            (
+                (
+                    "goal \"Ship it.\"",
+                    "goal \"Ship it.\"\n    gate \"x\" exec=\"touch /tmp/x\"",
+                ),
+                "`gate`",
+            ),
+            (
+                (
+                    "goal \"Build it.\";",
+                    "goal \"Build it.\"; gate \"x\" exec=\"touch /tmp/x\";",
+                ),
+                "`gate`",
+            ),
         ] {
             let source = SMALL.replacen(change.0, change.1, 1);
             assert_ne!(source, SMALL, "{change:?}");
@@ -1933,9 +2149,14 @@ beats {
         for file in ["../secret.md", "/etc/passwd", "notes/../../secret.md", ""] {
             for line in [
                 format!("document \"x\" file={file:?}"),
-                format!("send from=\"person/robin\" to=\"agent/harbor/builder\" attach={file:?} \"x\""),
+                format!(
+                    "send from=\"person/robin\" to=\"agent/harbor/builder\" attach={file:?} \"x\""
+                ),
             ] {
-                let source = SMALL.replace("  run \"harbor/release\"", &format!("  {line}\n  run \"harbor/release\""));
+                let source = SMALL.replace(
+                    "  run \"harbor/release\"",
+                    &format!("  {line}\n  run \"harbor/release\""),
+                );
                 let error = format!("{:#}", parse(&source, Path::new("/demos")).unwrap_err());
                 assert!(error.contains("is not beside the demo"), "{line}: {error}");
             }
@@ -1980,7 +2201,10 @@ beats {
         assert!(error.contains(&state.display().to_string()), "{error}");
         assert!(error.contains(&config.display().to_string()), "{error}");
         // Refused untouched: nothing erased, nothing written.
-        assert_eq!(fs::read_to_string(state.join("graph.sqlite")).unwrap(), "the real graph");
+        assert_eq!(
+            fs::read_to_string(state.join("graph.sqlite")).unwrap(),
+            "the real graph"
+        );
         assert_eq!(fs::read_to_string(&config).unwrap(), "node = \"desk\"\n");
         assert!(!instance.root().join(MARKER).exists());
         // --reset takes it over, and from then on a play needs no flag.
@@ -2034,14 +2258,20 @@ beats {
                 let graph = test_runner(root.path()).with_stand_ins(&demo).unwrap();
                 fractal_daemon::graph::parse_intent(&graph, &demo.machine)
                     .unwrap_or_else(|error| panic!("{}: {error:?}", path.display()));
-                for action in demo.seed.iter().chain(demo.beats.iter().map(|beat| &beat.action)) {
+                for action in demo
+                    .seed
+                    .iter()
+                    .chain(demo.beats.iter().map(|beat| &beat.action))
+                {
                     match action {
                         Action::Send { attach, .. } => {
                             for file in attach {
                                 assert!(file.is_file(), "{}", file.display());
                             }
                         }
-                        Action::Document { file, .. } => assert!(file.is_file(), "{}", file.display()),
+                        Action::Document { file, .. } => {
+                            assert!(file.is_file(), "{}", file.display())
+                        }
                         _ => {}
                     }
                 }

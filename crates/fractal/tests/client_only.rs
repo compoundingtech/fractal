@@ -1,6 +1,4 @@
 //! The actual Fractal TUI binary on a daemon-less device, talking only to isolated members.
-use fractal_daemon::PersonWorkStore;
-use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -8,9 +6,11 @@ use alacritty_terminal::{
     term::{Config, Term},
     vte::ansi::Processor,
 };
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use fractal_daemon::{api::AppState, model::PersonAskRequest, store::Store};
 use fractal_client::{Client, PersonPairingBegin};
+use fractal_daemon::PersonWorkStore;
+use fractal_daemon::SeatsStoreCore;
+use fractal_daemon::{api::AppState, model::PersonAskRequest, store::Store};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -143,19 +143,23 @@ fn state(root: &Path, node: &str) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState { owning_person: None,
-    store: Arc::new(store),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: node.into(),
-    state_dir: root.into(),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("unused-pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(store),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let intent = fractal_daemon::graph::parse_intent(
@@ -236,11 +240,15 @@ fn carrier_with_loss(
 }
 
 async fn pair(root: &Path, local: &Client, url: &str) {
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
-    device_name: "Demo laptop".into(),
-    person_id: "person/avery".into(),
-    full_control: Some(true),
-    scopes: None, fabric_gateway: None, })
+    let challenge = local
+        .pairing_begin_person(&PersonPairingBegin {
+            api_version: fractal_client::API_VERSION.into(),
+            device_name: "Demo laptop".into(),
+            person_id: "person/avery".into(),
+            full_control: Some(true),
+            scopes: None,
+            fabric_gateway: None,
+        })
         .await
         .unwrap()
         .value;
@@ -300,7 +308,8 @@ async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_witho
     let trusted = member.path().join("trusted.sock");
     let app = fractal_daemon::api::router(state.clone());
     let served = trusted.clone();
-    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
+    let local_server =
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     let local = Client::unix_as(&trusted, "person/avery");
     for _ in 0..100 {
         if local.capabilities().await.is_ok() {
@@ -377,11 +386,15 @@ async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_witho
         state.store.claim_verdict(&claim.id).unwrap(),
         smallclaims::principal::Verdict::Verified
     );
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
-    device_name: "Display".into(),
-    person_id: "person/avery".into(),
-    full_control: None,
-    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
+    let challenge = local
+        .pairing_begin_person(&PersonPairingBegin {
+            api_version: fractal_client::API_VERSION.into(),
+            device_name: "Display".into(),
+            person_id: "person/avery".into(),
+            full_control: None,
+            scopes: Some(vec!["read.projections".into()]),
+            fabric_gateway: None,
+        })
         .await
         .unwrap()
         .value;
@@ -402,7 +415,11 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
         .flatten()
         .flat_map(|entry| {
             let path = entry.path();
-            if path.is_dir() { files_under(&path) } else { vec![path] }
+            if path.is_dir() {
+                files_under(&path)
+            } else {
+                vec![path]
+            }
         })
         .collect()
 }
@@ -542,7 +559,13 @@ async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member()
     tui.send("cConfirmed on the remote member\r");
     tui.wait("remote action after blackhole recovery", |screen| {
         !screen.contains("Blackhole proof")
-            && state.store.step_run(&blackhole_step).unwrap().unwrap().status == "completed"
+            && state
+                .store
+                .step_run(&blackhole_step)
+                .unwrap()
+                .unwrap()
+                .status
+                == "completed"
     })
     .await;
     drop(tui);
@@ -588,7 +611,13 @@ async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member()
     tui.send("cConfirmed on the remote member\r");
     tui.wait("action on alternate", |screen| {
         !screen.contains("Alternate proof")
-            && alternate.store.step_run(&alternate_step).unwrap().unwrap().status == "completed"
+            && alternate
+                .store
+                .step_run(&alternate_step)
+                .unwrap()
+                .unwrap()
+                .status
+                == "completed"
     })
     .await;
     assert_eq!(

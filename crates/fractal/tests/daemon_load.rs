@@ -47,11 +47,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::client::Client;
 use fractal_daemon::model::WorkRequest;
 use fractal_daemon::store::Store;
+use serde_json::{Value, json};
 use tokio::sync::{Barrier, Notify, mpsc, watch};
 
 use crate::daemon_bench::{
@@ -99,8 +99,14 @@ const ROSTER_CONNECT_SNAPSHOT: &str = "agents roster connect+snapshot";
 const ROSTER_BUDGET: Duration = Duration::from_millis(300);
 
 /// The windows besides the agents roster that each subscriber holds in the collections profile.
-const COLLECTION_WINDOWS: &[&str] =
-    &["missions", "work", "attention", "summary", "glasses", "arrangements"];
+const COLLECTION_WINDOWS: &[&str] = &[
+    "missions",
+    "work",
+    "attention",
+    "summary",
+    "glasses",
+    "arrangements",
+];
 /// The person whose collections the subscribers read.
 const OPERATOR: &str = "person/bench-operator";
 
@@ -135,7 +141,10 @@ impl LoadProfile {
 
 /// The names a collection window's first snapshot is timed under.
 fn snapshot_names(collection: &str) -> [String; 2] {
-    [format!("{collection} snapshot"), format!("{collection} connect+snapshot")]
+    [
+        format!("{collection} snapshot"),
+        format!("{collection} connect+snapshot"),
+    ]
 }
 
 /// The statements a cold full roster rebuild may run per agent card. Main ran about 23 per card
@@ -224,7 +233,11 @@ fn mix(conditions: Conditions, duration: Duration) -> Vec<Load> {
         // A sparse kind goes out just often enough for its p99, each person-read path apiece;
         // every other kind keeps the busy host's rate.
         for kind in &mut mix {
-            let paths = if kind.name == "person read" { PERSON_READS.len() } else { 1 };
+            let paths = if kind.name == "person read" {
+                PERSON_READS.len()
+            } else {
+                1
+            };
             let floor = (MIN_SAMPLES * paths) as f64 / duration.as_secs_f64();
             kind.per_second = kind.per_second.max(floor);
         }
@@ -370,12 +383,16 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
-    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _whole_process = WHOLE_PROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scale = env_number("ST_LOAD_SCALE", 1.0_f64);
     let seconds = env_number("ST_LOAD_SECONDS", GATE_SECONDS);
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
+        .unwrap_or_else(|| {
+            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench")
+        });
     std::fs::create_dir_all(&keep).unwrap();
 
     let make_daemon = || {
@@ -402,7 +419,10 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
             &peer_source,
             Duration::from_secs(seconds),
             regime,
-            Conditions { sampled: true, ..Conditions::default() },
+            Conditions {
+                sampled: true,
+                ..Conditions::default()
+            },
         );
         print(&report);
         if let Some(path) = std::env::var_os("ST_LOAD_REPORT") {
@@ -432,7 +452,12 @@ fn the_daemon_keeps_its_budgets_under_a_busy_hosts_load() {
 }
 
 /// The measures the hog run reports, in order: the request-latency targets and message send.
-const HOG_MEASURES: &[&str] = &["person-read", "person-read-fresh", "write-ack", "message-send"];
+const HOG_MEASURES: &[&str] = &[
+    "person-read",
+    "person-read-fresh",
+    "write-ack",
+    "message-send",
+];
 
 /// Runs the daemon twice on the same generated store, once alone and once beside a CPU and disk
 /// hog at the priority seats get by default, with the load average held above the core count.
@@ -463,12 +488,16 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
         println!("skipped: a debug build is too slow to measure; run with cargo test --release");
         return;
     }
-    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _whole_process = WHOLE_PROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scale = env_number("ST_LOAD_SCALE", 1.0_f64);
     let seconds = env_number("ST_LOAD_SECONDS", 120_u64);
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
+        .unwrap_or_else(|| {
+            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench")
+        });
     std::fs::create_dir_all(&keep).unwrap();
     let make_daemon = || {
         tokio::runtime::Builder::new_multi_thread()
@@ -491,7 +520,11 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
             &peer_source,
             Duration::from_secs(seconds),
             LoadRegime::Steady,
-            Conditions { measured: true, hog, sampled: false },
+            Conditions {
+                measured: true,
+                hog,
+                sampled: false,
+            },
         );
         print(&report);
         drop(daemon);
@@ -514,13 +547,21 @@ fn a_seat_priority_hog_leaves_the_request_latency_targets_reported() {
     let strict = std::env::var_os("ST_LOAD_HOG_STRICT").is_some();
     let mut failures = hog_failures(&reports[0], false, false);
     failures.extend(hog_failures(&reports[1], true, strict));
-    assert!(failures.is_empty(), "the hog run failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "the hog run failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 /// Why a run of the hog test is not valid, or with `strict`, missed a target. The p99 budgets of
 /// the unloaded gate do not apply: the targets are what this run reports.
 fn hog_failures(report: &Report, hogged: bool, strict: bool) -> Vec<String> {
-    let label = if hogged { "with the hog" } else { "without the hog" };
+    let label = if hogged {
+        "with the hog"
+    } else {
+        "without the hog"
+    };
     let mut failures = absolute_failures(report)
         .into_iter()
         .filter(|failure| !failure.contains("budget"))
@@ -576,23 +617,34 @@ fn hog_summary(without: &Report, with: &Report) -> String {
         "| measure | target p99 | without hog: n / p50 / p99 / max (ms) | with hog: n / p50 / p99 / max (ms) | with hog |\n|---|---|---|---|---|\n",
     );
     let cell = |target: Option<&TargetReport>| match target {
-        Some(t) => format!("{} / {:.1} / {:.1} / {:.1}", t.count, t.p50_ms, t.p99_ms, t.max_ms),
+        Some(t) => format!(
+            "{} / {:.1} / {:.1} / {:.1}",
+            t.count, t.p50_ms, t.p99_ms, t.max_ms
+        ),
         None => "-".into(),
     };
     for name in HOG_MEASURES {
         let (a, b) = (without.targets.get(*name), with.targets.get(*name));
-        let target = b.or(a).map_or("-".into(), |t| format!("{:.0} ms", t.target_ms));
+        let target = b
+            .or(a)
+            .map_or("-".into(), |t| format!("{:.0} ms", t.target_ms));
         let verdict = match b {
             Some(t) if t.over_target => "missed",
             Some(_) => "met",
             None => "-",
         };
-        out.push_str(&format!("| {name} | {target} | {} | {} | {verdict} |\n", cell(a), cell(b)));
+        out.push_str(&format!(
+            "| {name} | {target} | {} | {} | {verdict} |\n",
+            cell(a),
+            cell(b)
+        ));
     }
     for (label, report) in [("without the hog", without), ("with it", with)] {
         let failed = report.failed.values().sum::<usize>();
         let requests = report.paths.values().map(|path| path.count).sum::<usize>() + failed;
-        out.push_str(&format!("\nRequests that failed {label}: {failed} of {requests}"));
+        out.push_str(&format!(
+            "\nRequests that failed {label}: {failed} of {requests}"
+        ));
         if failed > 0 {
             out.push_str(&format!(" {:?}", report.failed));
         }
@@ -610,7 +662,10 @@ fn hog_summary(without: &Report, with: &Report) -> String {
 
 #[cfg(test)]
 fn ms(values: &[u64]) -> Vec<Duration> {
-    values.iter().map(|value| Duration::from_millis(*value)).collect()
+    values
+        .iter()
+        .map(|value| Duration::from_millis(*value))
+        .collect()
 }
 
 #[test]
@@ -628,11 +683,20 @@ fn target_rows_pool_each_targets_paths_and_keep_message_send_apart() {
     let rows = target_rows(&timings);
     assert_eq!(rows["person-read"].count, 3);
     assert_eq!(rows["person-read-fresh"].count, 2);
-    assert!(rows["person-read-fresh"].over_target, "400 ms is over the 300 ms target");
-    assert_eq!(rows["write-ack"].count, 3, "a harness event and both message sends");
+    assert!(
+        rows["person-read-fresh"].over_target,
+        "400 ms is over the 300 ms target"
+    );
+    assert_eq!(
+        rows["write-ack"].count, 3,
+        "a harness event and both message sends"
+    );
     assert_eq!(rows["message-send"].count, 2);
     assert_eq!(rows["message-send"].target_ms, rows["write-ack"].target_ms);
-    assert!(rows["message-send"].over_target, "400 ms is over the 300 ms write-ack target");
+    assert!(
+        rows["message-send"].over_target,
+        "400 ms is over the 300 ms write-ack target"
+    );
     assert!(!rows.contains_key("terminal-attach"));
 }
 
@@ -670,7 +734,10 @@ fn hogged_report(load: [f64; 3], hog_nice: i32) -> Report {
 #[test]
 fn a_hog_run_needs_the_load_average_past_the_cores_at_every_sample() {
     let held = hog_failures(&hogged_report([20.0, 17.0, 21.0], 10), true, false);
-    assert!(!held.iter().any(|failure| failure.contains("load average")), "{held:?}");
+    assert!(
+        !held.iter().any(|failure| failure.contains("load average")),
+        "{held:?}"
+    );
     for (load, when) in [
         ([12.0, 17.0, 21.0], "at the start"),
         ([20.0, 15.9, 21.0], "at its lowest sample"),
@@ -678,7 +745,9 @@ fn a_hog_run_needs_the_load_average_past_the_cores_at_every_sample() {
     ] {
         let failures = hog_failures(&hogged_report(load, 10), true, false);
         assert!(
-            failures.iter().any(|failure| failure.contains("load average") && failure.contains(when)),
+            failures
+                .iter()
+                .any(|failure| failure.contains("load average") && failure.contains(when)),
             "{when}: {failures:?}"
         );
     }
@@ -688,7 +757,10 @@ fn a_hog_run_needs_the_load_average_past_the_cores_at_every_sample() {
 fn a_missed_target_fails_the_hog_run_only_when_strict() {
     let report = hogged_report([20.0, 17.0, 21.0], 10);
     let loose = hog_failures(&report, true, false);
-    assert!(!loose.iter().any(|failure| failure.contains("target")), "{loose:?}");
+    assert!(
+        !loose.iter().any(|failure| failure.contains("target")),
+        "{loose:?}"
+    );
     let strict = hog_failures(&report, true, true);
     for name in HOG_MEASURES {
         assert!(
@@ -701,7 +773,12 @@ fn a_missed_target_fails_the_hog_run_only_when_strict() {
 #[test]
 fn the_hog_must_run_lower_than_the_test_process() {
     let failures = hog_failures(&hogged_report([20.0, 17.0, 21.0], 0), true, false);
-    assert!(failures.iter().any(|failure| failure.contains("no lower than the test's")), "{failures:?}");
+    assert!(
+        failures
+            .iter()
+            .any(|failure| failure.contains("no lower than the test's")),
+        "{failures:?}"
+    );
 }
 
 #[test]
@@ -714,21 +791,41 @@ fn the_summary_sets_each_measure_with_and_without_the_hog_side_by_side() {
     }
     let summary = hog_summary(&without, &hogged_report([20.0, 17.0, 21.0], 10));
     for name in HOG_MEASURES {
-        let row = summary.lines().find(|line| line.starts_with(&format!("| {name} |"))).unwrap();
-        assert!(row.contains("100 ms") && row.contains("40.0") && row.contains("500.0"), "{row}");
+        let row = summary
+            .lines()
+            .find(|line| line.starts_with(&format!("| {name} |")))
+            .unwrap();
+        assert!(
+            row.contains("100 ms") && row.contains("40.0") && row.contains("500.0"),
+            "{row}"
+        );
         assert!(row.ends_with("| missed |"), "{row}");
     }
-    assert!(summary.contains("32 CPU and 2 disk processes at nice 10"), "{summary}");
-    assert!(summary.contains("Requests that failed without the hog: 0 of 0"), "{summary}");
+    assert!(
+        summary.contains("32 CPU and 2 disk processes at nice 10"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("Requests that failed without the hog: 0 of 0"),
+        "{summary}"
+    );
     let mut failing = hogged_report([20.0, 17.0, 21.0], 10);
-    failing.failed.insert("replication exchange: timed out".into(), 3);
+    failing
+        .failed
+        .insert("replication exchange: timed out".into(), 3);
     let summary = hog_summary(&without, &failing);
-    assert!(summary.contains("Requests that failed with it: 3 of 3 {"), "{summary}");
+    assert!(
+        summary.contains("Requests that failed with it: 3 of 3 {"),
+        "{summary}"
+    );
 }
 
 /// CPU the daemon's request and task kinds were charged in its performance window, by kind.
 fn cpu_by_kind() -> BTreeMap<String, f64> {
-    smallclaims::performance::snapshot()["requests"].as_array().into_iter().flatten()
+    smallclaims::performance::snapshot()["requests"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|row| Some((row["kind"].as_str()?.to_owned(), row["cpu_ms"].as_f64()?)))
         .collect()
 }
@@ -752,11 +849,15 @@ fn a_cold_roster_rebuild_reads_the_fleet_in_few_statements() {
         return;
     }
     // The statement counter is the process's: the load test must not run meanwhile.
-    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _whole_process = WHOLE_PROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scale = env_number("ST_LOAD_SCALE", 1.0_f64);
     let keep = std::env::var_os("ST_BENCH_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench"));
+        .unwrap_or_else(|| {
+            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/st-bench")
+        });
     std::fs::create_dir_all(&keep).unwrap();
     let generation = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -853,7 +954,11 @@ fn absolute_failures(report: &Report) -> Vec<String> {
         }
     }
     for &collection in report.profile.windows() {
-        let correct = report.collection_subscribers.get(collection).copied().unwrap_or(0);
+        let correct = report
+            .collection_subscribers
+            .get(collection)
+            .copied()
+            .unwrap_or(0);
         if correct != ROSTER_SUBSCRIBERS {
             failures.push(format!(
                 "only {correct} of {ROSTER_SUBSCRIBERS} subscribers received a valid {collection} snapshot"
@@ -861,7 +966,9 @@ fn absolute_failures(report: &Report) -> Vec<String> {
         }
         for name in snapshot_names(collection) {
             if report.paths.get(&name).map_or(0, |path| path.count) != ROSTER_SUBSCRIBERS {
-                failures.push(format!("{name}: expected {ROSTER_SUBSCRIBERS} timed snapshots"));
+                failures.push(format!(
+                    "{name}: expected {ROSTER_SUBSCRIBERS} timed snapshots"
+                ));
             }
         }
     }
@@ -909,15 +1016,24 @@ const WITHDRAWN_LIST: &[&str] = &[
 /// that list's retryable 503, or a collection window's resync before its first snapshot.
 fn unavailable_read(error: &str) -> bool {
     (error.contains(" 503 ") && WITHDRAWN_LIST.iter().any(|marker| error.contains(marker)))
-        || (error.starts_with("collection ") && error.contains("expected initial snapshot, got Some(Resync"))
+        || (error.starts_with("collection ")
+            && error.contains("expected initial snapshot, got Some(Resync"))
 }
 
 fn unavailable_summary(report: &Report) -> String {
     let reads = report.unavailable.values().sum::<usize>();
-    let window = report.unavailable_window_s.map_or(String::new(), |[first, last]| {
-        format!(" from {first:.1} s to {last:.1} s into the load ({:.1} s)", last - first)
-    });
-    format!("{reads} reads found a published list withdrawn{window}: {:?}", report.unavailable)
+    let window = report
+        .unavailable_window_s
+        .map_or(String::new(), |[first, last]| {
+            format!(
+                " from {first:.1} s to {last:.1} s into the load ({:.1} s)",
+                last - first
+            )
+        });
+    format!(
+        "{reads} reads found a published list withdrawn{window}: {:?}",
+        report.unavailable
+    )
 }
 
 /// Main's reports at `path`, a report or a directory of them, combined into the worst of each:
@@ -1200,7 +1316,12 @@ fn latency_needs_five_main_runs_but_cpu_compares_during_bootstrap() {
             serde_json::to_vec(&baseline.report).unwrap(),
         )
         .unwrap();
-        assert_eq!(worst_of(directory.path(), LoadProfile::Agents).unwrap().runs, run + 1);
+        assert_eq!(
+            worst_of(directory.path(), LoadProfile::Agents)
+                .unwrap()
+                .runs,
+            run + 1
+        );
     }
 }
 
@@ -1251,7 +1372,10 @@ fn unchanged_work_tolerates_bounded_shared_runner_variation() {
 #[test]
 fn targets_come_from_the_targets_file_and_describe_without_gating() {
     // The CPU budget is the file's, not a copy of it here.
-    assert_eq!(cpu_budget(), fractal_daemon::slo::targets().cpu.load_max_cores);
+    assert_eq!(
+        cpu_budget(),
+        fractal_daemon::slo::targets().cpu.load_max_cores
+    );
     // Each request stands for the path in the file that serves it, and takes that target's
     // owner-side p99, so editing the file moves these without editing this test.
     let targets = fractal_daemon::slo::targets();
@@ -1272,7 +1396,11 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
         let target = targets
             .for_path(path)
             .unwrap_or_else(|| panic!("{path} has no target in slo/targets.toml"));
-        assert_eq!(descriptive_target(name), Some(target.target(false)), "{name}");
+        assert_eq!(
+            descriptive_target(name),
+            Some(target.target(false)),
+            "{name}"
+        );
     }
     for name in ["claim", "replication exchange", LONG_POLL] {
         assert_eq!(descriptive_target(name), None, "{name}");
@@ -1285,14 +1413,19 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
         roster_subscribers: ROSTER_SUBSCRIBERS,
         ..Report::default()
     };
-    for (name, budget, count) in mix(Conditions { measured: true, ..Conditions::default() }, Duration::from_secs(120))
-        .into_iter()
-        .map(|load| (load.name, load.budget, 100))
-        .chain([
-            (ROSTER_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
-            (ROSTER_CONNECT_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
-        ])
-    {
+    for (name, budget, count) in mix(
+        Conditions {
+            measured: true,
+            ..Conditions::default()
+        },
+        Duration::from_secs(120),
+    )
+    .into_iter()
+    .map(|load| (load.name, load.budget, 100))
+    .chain([
+        (ROSTER_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
+        (ROSTER_CONNECT_SNAPSHOT, ROSTER_BUDGET, ROSTER_SUBSCRIBERS),
+    ]) {
         let budget_ms = budget.as_secs_f64() * 1_000.0;
         let target = descriptive_target(name).map(|target| target.as_secs_f64() * 1_000.0);
         report.paths.insert(
@@ -1307,7 +1440,12 @@ fn targets_come_from_the_targets_file_and_describe_without_gating() {
             },
         );
     }
-    assert!(report.paths.values().any(|path| path.over_descriptive_target == Some(true)));
+    assert!(
+        report
+            .paths
+            .values()
+            .any(|path| path.over_descriptive_target == Some(true))
+    );
     assert_eq!(absolute_failures(&report), Vec::<String>::new());
 }
 
@@ -1383,17 +1521,31 @@ fn relative_tolerance_keeps_every_absolute_budget_and_correctness_check() {
     ] {
         assert!(unavailable_read(refused), "{refused}");
     }
-    assert!(!unavailable_read("claim: st API returned 500 internal: disk I/O error"));
+    assert!(!unavailable_read(
+        "claim: st API returned 500 internal: disk I/O error"
+    ));
     // Another not-ready 503, as at startup, is a failure, not a withdrawn list.
-    assert!(!unavailable_read("person read: /v1/client/messages: st API returned 503 message-selectors-not-ready: the"));
-    assert!(!unavailable_read("person read: /v1/client/agents: st API returned 503 agent-roster-cut-not-ready: the"));
-    report.unavailable.insert("person read: /v1/client/work: 503 still being prepared".into(), 3);
+    assert!(!unavailable_read(
+        "person read: /v1/client/messages: st API returned 503 message-selectors-not-ready: the"
+    ));
+    assert!(!unavailable_read(
+        "person read: /v1/client/agents: st API returned 503 agent-roster-cut-not-ready: the"
+    ));
+    report.unavailable.insert(
+        "person read: /v1/client/work: 503 still being prepared".into(),
+        3,
+    );
     report.unavailable_window_s = Some([313.1, 315.4]);
     assert_eq!(
-        absolute_failures(&report).iter().any(|failure| failure.contains("withdrawn")),
+        absolute_failures(&report)
+            .iter()
+            .any(|failure| failure.contains("withdrawn")),
         AVAILABILITY_GATED
     );
-    assert!(unavailable_summary(&report).contains("3 reads found a published list withdrawn from 313.1 s to 315.4 s"));
+    assert!(
+        unavailable_summary(&report)
+            .contains("3 reads found a published list withdrawn from 313.1 s to 315.4 s")
+    );
     report.unavailable.clear();
     report.unavailable_window_s = None;
     report.long_poll_seats = SEATS - 1;
@@ -1455,12 +1607,23 @@ fn print(report: &Report) {
     for &collection in report.profile.windows() {
         println!(
             "{collection}: {}/{ROSTER_SUBSCRIBERS} subscribers with valid snapshots; {} validated change frames",
-            report.collection_subscribers.get(collection).copied().unwrap_or(0),
-            report.collection_change_frames.get(collection).copied().unwrap_or(0),
+            report
+                .collection_subscribers
+                .get(collection)
+                .copied()
+                .unwrap_or(0),
+            report
+                .collection_change_frames
+                .get(collection)
+                .copied()
+                .unwrap_or(0),
         );
     }
     if !report.collection_resyncs.is_empty() {
-        println!("retryable resyncs waited through: {:?}", report.collection_resyncs);
+        println!(
+            "retryable resyncs waited through: {:?}",
+            report.collection_resyncs
+        );
     }
     println!(
         "{:<28} {:>7} {:>8} {:>8} {:>8} {:>8} {:>8}",
@@ -1479,11 +1642,19 @@ fn print(report: &Report) {
     }
     println!("target: slo/targets.toml's p99, described and never gated");
     if !report.targets.is_empty() {
-        println!("{:<20} {:>7} {:>8} {:>8} {:>8} {:>8}", "target", "n", "p50 ms", "p99 ms", "max ms", "target");
+        println!(
+            "{:<20} {:>7} {:>8} {:>8} {:>8} {:>8}",
+            "target", "n", "p50 ms", "p99 ms", "max ms", "target"
+        );
         for (name, target) in &report.targets {
             println!(
                 "{:<20} {:>7} {:>8.1} {:>8.1} {:>8.1} {:>8.0}{}",
-                name, target.count, target.p50_ms, target.p99_ms, target.max_ms, target.target_ms,
+                name,
+                target.count,
+                target.p50_ms,
+                target.p99_ms,
+                target.max_ms,
+                target.target_ms,
                 if target.over_target { " over" } else { "" }
             );
         }
@@ -1492,7 +1663,11 @@ fn print(report: &Report) {
         println!("failed requests: {:?}", report.failed);
     }
     if !report.unavailable.is_empty() {
-        let gate = if AVAILABILITY_GATED { "failing" } else { "report-only until #3553" };
+        let gate = if AVAILABILITY_GATED {
+            "failing"
+        } else {
+            "report-only until #3553"
+        };
         println!("unavailable ({gate}): {}", unavailable_summary(report));
     }
 }
@@ -1567,20 +1742,42 @@ fn every_held_window_needs_a_timed_snapshot_per_subscriber_within_the_roster_bud
         ..Report::default()
     };
     for name in [ROSTER_SNAPSHOT, ROSTER_CONNECT_SNAPSHOT] {
-        report.paths.insert(name.into(), PathReport { count: ROSTER_SUBSCRIBERS, ..PathReport::default() });
+        report.paths.insert(
+            name.into(),
+            PathReport {
+                count: ROSTER_SUBSCRIBERS,
+                ..PathReport::default()
+            },
+        );
     }
     for load in MIX {
-        report.paths.insert(load.name.into(), PathReport { count: 1, ..PathReport::default() });
+        report.paths.insert(
+            load.name.into(),
+            PathReport {
+                count: 1,
+                ..PathReport::default()
+            },
+        );
     }
     for &collection in COLLECTION_WINDOWS {
-        report.collection_subscribers.insert(collection.into(), ROSTER_SUBSCRIBERS);
+        report
+            .collection_subscribers
+            .insert(collection.into(), ROSTER_SUBSCRIBERS);
         for name in snapshot_names(collection) {
             assert_eq!(budget(&budgets, &name), ROSTER_BUDGET);
-            report.paths.insert(name, PathReport { count: ROSTER_SUBSCRIBERS, ..PathReport::default() });
+            report.paths.insert(
+                name,
+                PathReport {
+                    count: ROSTER_SUBSCRIBERS,
+                    ..PathReport::default()
+                },
+            );
         }
     }
     assert_eq!(absolute_failures(&report), Vec::<String>::new());
-    report.collection_subscribers.insert("work".into(), ROSTER_SUBSCRIBERS - 1);
+    report
+        .collection_subscribers
+        .insert("work".into(), ROSTER_SUBSCRIBERS - 1);
     report.paths.get_mut("missions snapshot").unwrap().count -= 1;
     assert_eq!(absolute_failures(&report).len(), 2);
     // The roster-only profile asks for no other window.
@@ -1628,7 +1825,9 @@ fn start_event_migration(
     Option<MigrationTask>,
     Option<fractal_daemon::maintenance::EventMigrationReport>,
 ) {
-    let migration = daemon.spawn(fractal_daemon::maintenance::migrate_event_payloads(store.clone()));
+    let migration = daemon.spawn(fractal_daemon::maintenance::migrate_event_payloads(
+        store.clone(),
+    ));
     if matches!(regime, LoadRegime::Steady) {
         let report = daemon.block_on(migration).unwrap().unwrap();
         assert!(report.pending_at_start && report.completed);
@@ -1642,24 +1841,47 @@ fn start_event_migration(
 #[test]
 fn every_budgeted_p99_rests_on_enough_samples_and_dense_kinds_keep_the_busy_hosts_rate() {
     let duration = Duration::from_secs(GATE_SECONDS);
-    let sampled = mix(Conditions { sampled: true, ..Conditions::default() }, duration);
+    let sampled = mix(
+        Conditions {
+            sampled: true,
+            ..Conditions::default()
+        },
+        duration,
+    );
     for (kind, busy) in sampled.iter().zip(MIX) {
         assert_eq!(kind.name, busy.name);
-        let paths = if kind.name == "person read" { PERSON_READS.len() } else { 1 };
+        let paths = if kind.name == "person read" {
+            PERSON_READS.len()
+        } else {
+            1
+        };
         let samples = kind.per_second * duration.as_secs_f64() / paths as f64;
-        assert!(samples >= MIN_SAMPLES as f64 - 1e-9, "{}: {samples:.0} samples", kind.name);
+        assert!(
+            samples >= MIN_SAMPLES as f64 - 1e-9,
+            "{}: {samples:.0} samples",
+            kind.name
+        );
         if busy.per_second * duration.as_secs_f64() / paths as f64 >= MIN_SAMPLES as f64 {
-            assert_eq!(kind.per_second, busy.per_second, "{} keeps its rate", kind.name);
+            assert_eq!(
+                kind.per_second, busy.per_second,
+                "{} keeps its rate",
+                kind.name
+            );
         }
     }
     // The replication exchange reaches it at the busy host's own rate.
-    let exchange = sampled.iter().find(|kind| kind.name == "replication exchange").unwrap();
+    let exchange = sampled
+        .iter()
+        .find(|kind| kind.name == "replication exchange")
+        .unwrap();
     assert_eq!(exchange.per_second, 0.8);
 }
 
 #[test]
 fn load_fixture_starts_the_shared_worker_and_steady_waits_for_completion() {
-    let _whole_process = WHOLE_PROCESS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _whole_process = WHOLE_PROCESS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let root = tempfile::tempdir().unwrap();
     let daemon = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1856,19 +2078,23 @@ fn run(
     let pty = stub_pty(root);
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: notify.clone(),
-    event_notify: event_notify.clone(),
-    node: NODE.into(),
-    state_dir: root.join("state"),
-    pty_root: root.join("pty"),
-    pty_binary: pty.clone(),
-    fleet_id: Some(FLEET.into()),
-    configured_peers: vec![PEER.into()],
-    client_relay: None,
-    native_session_home: Some(root.join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: notify.clone(),
+        event_notify: event_notify.clone(),
+        node: NODE.into(),
+        state_dir: root.join("state"),
+        pty_root: root.join("pty"),
+        pty_binary: pty.clone(),
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![PEER.into()],
+        client_relay: None,
+        native_session_home: Some(root.join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let subjects = {
         let _entered = daemon.enter();
         fractal_daemon::api::start_operation_report(&state);
@@ -1878,9 +2104,10 @@ fn run(
         fractal_daemon::api::start_attention_list(&state);
         fractal_daemon::api::start_published_lists(&state);
         let server_socket = socket.clone();
-        daemon.spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+        daemon.spawn(async move {
+            fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
+                .await
+        });
         let subjects = fleet_subjects(&store, SEATS);
         // Every seat runs, so its driver may publish harness events.
         for seat in &subjects.seats {
@@ -1961,7 +2188,10 @@ fn run(
         let load_at_start = started.ramp(ramp).unwrap_or_else(|error| panic!("{error}"));
         println!(
             "hog: {} CPU and {} disk processes at nice {} (test process nice {}); load average {load_at_start:.1} on {} cores",
-            started.shape.cpu, started.shape.disk, started.nice, load_hog::own_nice(),
+            started.shape.cpu,
+            started.shape.disk,
+            started.nice,
+            load_hog::own_nice(),
             load_hog::cores()
         );
         hog_report = Some(HogReport {
@@ -2257,16 +2487,36 @@ fn run(
     });
     let elapsed = started.elapsed().as_secs_f64();
     let cpu_after = (process_cpu(), load_cpu(&peer_threads));
-    let mut cpu_by_kind = cpu_by_kind().into_iter()
-        .map(|(kind, ms)| (ms - cpu_by_kind_before.get(&kind).copied().unwrap_or(0.0), kind))
+    let mut cpu_by_kind = cpu_by_kind()
+        .into_iter()
+        .map(|(kind, ms)| {
+            (
+                ms - cpu_by_kind_before.get(&kind).copied().unwrap_or(0.0),
+                kind,
+            )
+        })
         .filter(|(ms, _)| *ms > 0.0)
         .collect::<Vec<_>>();
     cpu_by_kind.sort_by(|a, b| b.0.total_cmp(&a.0));
-    println!("daemon CPU during the load by kind (ms, top 12 of the 20 slowest kinds): {}",
-        cpu_by_kind.iter().take(12).map(|(ms, kind)| format!("{kind} {ms:.0}"))
-            .collect::<Vec<_>>().join(", "));
-    let roster_full_folds = context.store.agent_roster_chunked_assemblies().into_iter()
-        .map(|(why, count)| (why.clone(), count - full_folds_before.get(&why).copied().unwrap_or(0)))
+    println!(
+        "daemon CPU during the load by kind (ms, top 12 of the 20 slowest kinds): {}",
+        cpu_by_kind
+            .iter()
+            .take(12)
+            .map(|(ms, kind)| format!("{kind} {ms:.0}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let roster_full_folds = context
+        .store
+        .agent_roster_chunked_assemblies()
+        .into_iter()
+        .map(|(why, count)| {
+            (
+                why.clone(),
+                count - full_folds_before.get(&why).copied().unwrap_or(0),
+            )
+        })
         .filter(|(_, count)| *count > 0)
         .collect::<BTreeMap<_, _>>();
     let daemon_cpu = (cpu_after.0 - cpu_before.0) - (cpu_after.1 - cpu_before.1);
@@ -2288,7 +2538,11 @@ fn run(
         .iter()
         .map(|load| (load.name, load.budget))
         .collect::<BTreeMap<_, _>>();
-    let targets = if conditions.measured { target_rows(&timings) } else { BTreeMap::new() };
+    let targets = if conditions.measured {
+        target_rows(&timings)
+    } else {
+        BTreeMap::new()
+    };
     if let Some(report) = &mut hog_report {
         let samples = load_samples.lock().unwrap();
         report.load_min = samples.iter().copied().fold(f64::INFINITY, f64::min);
@@ -2313,16 +2567,18 @@ fn run(
         })
         .collect();
     load.shutdown_timeout(Duration::from_secs(5));
-    let (unavailable, failed): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut *failed.lock().unwrap())
-        .into_iter()
-        .partition(|(failure, _)| unavailable_read(failure));
+    let (unavailable, failed): (BTreeMap<_, _>, BTreeMap<_, _>) =
+        std::mem::take(&mut *failed.lock().unwrap())
+            .into_iter()
+            .partition(|(failure, _)| unavailable_read(failure));
     let unavailable_at = std::mem::take(&mut *unavailable_at.lock().unwrap());
-    let unavailable_window_s = unavailable_at
-        .iter()
-        .copied()
-        .fold(None, |window: Option<[f64; 2]>, at| {
-            Some(window.map_or([at, at], |[first, last]| [first.min(at), last.max(at)]))
-        });
+    let unavailable_window_s =
+        unavailable_at
+            .iter()
+            .copied()
+            .fold(None, |window: Option<[f64; 2]>, at| {
+                Some(window.map_or([at, at], |[first, last]| [first.min(at), last.max(at)]))
+            });
     let collection_change_frames = std::mem::take(&mut *collection_change_frames.lock().unwrap());
     let collection_resyncs = std::mem::take(&mut *collection_resyncs.lock().unwrap());
     Report {
@@ -2503,7 +2759,10 @@ fn roster_row_ids(items: &Value) -> Result<BTreeSet<String>, String> {
     for item in items {
         let agent = <fractal_client::Agent as serde::Deserialize>::deserialize(item)
             .map_err(|error| format!("invalid agent card: {error}"))?;
-        if item["kind"] != "agent" || !agent.header.id.starts_with("agent/") || agent.name.is_empty() {
+        if item["kind"] != "agent"
+            || !agent.header.id.starts_with("agent/")
+            || agent.name.is_empty()
+        {
             return Err("roster row is not a named agent".into());
         }
         if !ids.insert(agent.header.id) {
@@ -2525,14 +2784,18 @@ fn window_row_ids(collection: &str, items: &Value) -> Result<BTreeSet<String>, S
     let mut ids = BTreeSet::new();
     for item in items {
         let id = match collection {
-            "missions" => <fractal_client::Mission as serde::Deserialize>::deserialize(item)
-                .map_err(|error| format!("invalid mission card: {error}"))?
-                .header
-                .id,
-            "work" => <fractal_client::Work as serde::Deserialize>::deserialize(item)
-                .map_err(|error| format!("invalid work card: {error}"))?
-                .header
-                .id,
+            "missions" => {
+                <fractal_client::Mission as serde::Deserialize>::deserialize(item)
+                    .map_err(|error| format!("invalid mission card: {error}"))?
+                    .header
+                    .id
+            }
+            "work" => {
+                <fractal_client::Work as serde::Deserialize>::deserialize(item)
+                    .map_err(|error| format!("invalid work card: {error}"))?
+                    .header
+                    .id
+            }
             _ => item["id"].as_str().unwrap_or_default().to_owned(),
         };
         if id.is_empty() {
@@ -2576,19 +2839,23 @@ fn apply_window_frame(
 ) -> Result<u64, String> {
     let kind = if initial { "snapshot" } else { "changes" };
     if frame["kind"] != kind || frame["id"] != id || frame["collection"] != collection {
-        return Err(format!("expected {collection} {kind} for {id}, received {frame}"));
+        return Err(format!(
+            "expected {collection} {kind} for {id}, received {frame}"
+        ));
     }
-    let snapshot = <fractal_client::Snapshot as serde::Deserialize>::deserialize(&frame["snapshot"])
-        .map_err(|error| format!("invalid {collection} snapshot fence: {error}"))?;
+    let snapshot =
+        <fractal_client::Snapshot as serde::Deserialize>::deserialize(&frame["snapshot"])
+            .map_err(|error| format!("invalid {collection} snapshot fence: {error}"))?;
     if frame["has_more"].as_bool().is_none() {
         return Err(format!("{collection} has no pagination flag"));
     }
-    let order: Vec<String> =
-        <Vec<String> as serde::Deserialize>::deserialize(&frame["order"])
-            .map_err(|error| format!("invalid {collection} order: {error}"))?;
+    let order: Vec<String> = <Vec<String> as serde::Deserialize>::deserialize(&frame["order"])
+        .map_err(|error| format!("invalid {collection} order: {error}"))?;
     let ordered = order.iter().cloned().collect::<BTreeSet<_>>();
     if order.len() > ROSTER_LIMIT || ordered.len() != order.len() {
-        return Err(format!("{collection} order exceeds its window or contains duplicates"));
+        return Err(format!(
+            "{collection} order exceeds its window or contains duplicates"
+        ));
     }
     if initial {
         *rows = window_row_ids(collection, &frame["items"])?;
@@ -2602,7 +2869,11 @@ fn apply_window_frame(
             .iter()
             .map(|item| item["id"].as_str().unwrap())
             .collect::<Vec<_>>();
-        if item_order.iter().copied().ne(order.iter().map(String::as_str)) {
+        if item_order
+            .iter()
+            .copied()
+            .ne(order.iter().map(String::as_str))
+        {
             return Err("snapshot rows disagree with their order".into());
         }
     } else {
@@ -2610,13 +2881,17 @@ fn apply_window_frame(
             .map_err(|error| format!("invalid {collection} removals: {error}"))?;
         for removed in removes {
             if !rows.remove(&removed) {
-                return Err(format!("{collection} removed a row outside its previous window"));
+                return Err(format!(
+                    "{collection} removed a row outside its previous window"
+                ));
             }
         }
         rows.extend(window_row_ids(collection, &frame["upserts"])?);
     }
     if *rows != ordered {
-        return Err(format!("{collection} rows disagree with their reconstructed window"));
+        return Err(format!(
+            "{collection} rows disagree with their reconstructed window"
+        ));
     }
     Ok(snapshot.store_index)
 }
@@ -2639,7 +2914,9 @@ fn roster_matches_oracle(frame: &Value, oracle: &Value) -> Result<(), String> {
     {
         for field in ["kind", "id", "name", "host_id", "workspace"] {
             if row[field] != reference[field] {
-                return Err(format!("snapshot {field}/order differs from the HTTP roster"));
+                return Err(format!(
+                    "snapshot {field}/order differs from the HTTP roster"
+                ));
             }
         }
     }
@@ -2664,7 +2941,10 @@ fn roster_frames_require_correct_cards_membership_and_snapshot_before_changes() 
     });
     let oracle = json!({"items": frame["items"], "page": {"has_more": false}});
     let mut rows = BTreeSet::new();
-    assert_eq!(apply_roster_frame(&frame, "load-roster-0", true, &mut rows).unwrap(), 1);
+    assert_eq!(
+        apply_roster_frame(&frame, "load-roster-0", true, &mut rows).unwrap(),
+        1
+    );
     assert!(roster_matches_oracle(&frame, &oracle).is_ok());
     assert!(apply_roster_frame(&frame, "load-roster-0", false, &mut rows).is_err());
     for (field, value) in [
@@ -2701,7 +2981,10 @@ fn a_window_waits_through_a_retryable_resync_and_fails_on_any_other() {
         "kind": "resync", "id": "load-summary-0", "code": "internal",
         "message": "the summary view is still being prepared; retry shortly", "retryable": true
     });
-    assert_eq!(retryable_resync("summary", &resync, "load-summary-0"), Ok(true));
+    assert_eq!(
+        retryable_resync("summary", &resync, "load-summary-0"),
+        Ok(true)
+    );
     let mut permanent = resync.clone();
     permanent["retryable"] = json!(false);
     assert!(retryable_resync("summary", &permanent, "load-summary-0").is_err());
@@ -2710,17 +2993,37 @@ fn a_window_waits_through_a_retryable_resync_and_fails_on_any_other() {
     assert!(retryable_resync("summary", &unmarked, "load-summary-0").is_err());
     assert!(retryable_resync("summary", &resync, "load-summary-1").is_err());
     let snapshot = json!({"kind": "snapshot", "id": "load-summary-0", "collection": "summary"});
-    assert_eq!(retryable_resync("summary", &snapshot, "load-summary-0"), Ok(false));
+    assert_eq!(
+        retryable_resync("summary", &snapshot, "load-summary-0"),
+        Ok(false)
+    );
     // An error frame is neither: the window's frame check refuses it.
     let error = json!({"kind": "error", "id": "load-summary-0", "retryable": false});
-    assert_eq!(retryable_resync("summary", &error, "load-summary-0"), Ok(false));
-    assert!(apply_window_frame("summary", &error, "load-summary-0", true, &mut BTreeSet::new()).is_err());
+    assert_eq!(
+        retryable_resync("summary", &error, "load-summary-0"),
+        Ok(false)
+    );
+    assert!(
+        apply_window_frame(
+            "summary",
+            &error,
+            "load-summary-0",
+            true,
+            &mut BTreeSet::new()
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn held_windows_require_typed_rows_and_their_own_collection() {
     let frame = |collection: &str, items: Value| {
-        let order = items.as_array().unwrap().iter().map(|item| item["id"].clone()).collect::<Vec<_>>();
+        let order = items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].clone())
+            .collect::<Vec<_>>();
         json!({
             "kind": "snapshot", "id": "load-x-0", "collection": collection,
             "snapshot": {
@@ -2731,15 +3034,53 @@ fn held_windows_require_typed_rows_and_their_own_collection() {
         })
     };
     // Optional windows may start empty; the generated store always has missions and work.
-    assert_eq!(apply_window_frame("glasses", &frame("glasses", json!([])), "load-x-0", true, &mut BTreeSet::new()), Ok(3));
-    assert!(apply_window_frame("missions", &frame("missions", json!([])), "load-x-0", true, &mut BTreeSet::new()).is_err());
-    assert!(apply_window_frame("work", &frame("missions", json!([])), "load-x-0", true, &mut BTreeSet::new()).is_err());
+    assert_eq!(
+        apply_window_frame(
+            "glasses",
+            &frame("glasses", json!([])),
+            "load-x-0",
+            true,
+            &mut BTreeSet::new()
+        ),
+        Ok(3)
+    );
+    assert!(
+        apply_window_frame(
+            "missions",
+            &frame("missions", json!([])),
+            "load-x-0",
+            true,
+            &mut BTreeSet::new()
+        )
+        .is_err()
+    );
+    assert!(
+        apply_window_frame(
+            "work",
+            &frame("missions", json!([])),
+            "load-x-0",
+            true,
+            &mut BTreeSet::new()
+        )
+        .is_err()
+    );
     // A row that is not a mission card is not a mission snapshot.
-    let untyped = frame("missions", json!([{"id": "mission/bench/one", "kind": "mission"}]));
-    assert!(apply_window_frame("missions", &untyped, "load-x-0", true, &mut BTreeSet::new()).is_err());
-    let summary = frame("summary", json!([{"id": "summary/current", "kind": "summary"}]));
+    let untyped = frame(
+        "missions",
+        json!([{"id": "mission/bench/one", "kind": "mission"}]),
+    );
+    assert!(
+        apply_window_frame("missions", &untyped, "load-x-0", true, &mut BTreeSet::new()).is_err()
+    );
+    let summary = frame(
+        "summary",
+        json!([{"id": "summary/current", "kind": "summary"}]),
+    );
     let mut rows = BTreeSet::new();
-    assert_eq!(apply_window_frame("summary", &summary, "load-x-0", true, &mut rows), Ok(3));
+    assert_eq!(
+        apply_window_frame("summary", &summary, "load-x-0", true, &mut rows),
+        Ok(3)
+    );
     assert_eq!(rows, BTreeSet::from(["summary/current".to_owned()]));
 }
 
@@ -2883,21 +3224,37 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             .await
         }
         "collection missions" | "collection attention" => {
-            let collection = if name == "collection missions" { "missions" } else { "attention" };
+            let collection = if name == "collection missions" {
+                "missions"
+            } else {
+                "attention"
+            };
             let mut readers = tokio::task::JoinSet::new();
             let barrier = Arc::new(tokio::sync::Barrier::new(20));
             for n in 0..20 {
                 let client = context.collections.clone();
                 let barrier = barrier.clone();
                 readers.spawn(async move {
-                    let mut stream = client.collection_stream().await.map_err(|e| e.to_string())?;
+                    let mut stream = client
+                        .collection_stream()
+                        .await
+                        .map_err(|e| e.to_string())?;
                     barrier.wait().await;
-                    stream.subscribe(&format!("load-{n}"), collection, 20, None, None)
-                        .await.map_err(|e| e.to_string())?;
+                    stream
+                        .subscribe(&format!("load-{n}"), collection, 20, None, None)
+                        .await
+                        .map_err(|e| e.to_string())?;
                     let event = tokio::time::timeout(Duration::from_secs(10), stream.next_event())
-                        .await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-                    if !matches!(event, Some(fractal_client::CollectionEvent::Snapshot { .. })) {
-                        return Err(format!("{collection}: expected initial snapshot, got {event:?}"));
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .map_err(|e| e.to_string())?;
+                    if !matches!(
+                        event,
+                        Some(fractal_client::CollectionEvent::Snapshot { .. })
+                    ) {
+                        return Err(format!(
+                            "{collection}: expected initial snapshot, got {event:?}"
+                        ));
                     }
                     Ok::<_, String>(stream)
                 });
@@ -2908,12 +3265,20 @@ async fn send_one(context: &Context, name: &str) -> Result<(), String> {
             while let Some(result) = readers.join_next().await {
                 streams.push(result.map_err(|e| e.to_string())??);
             }
-            for stream in streams { stream.close().await; }
+            for stream in streams {
+                stream.close().await;
+            }
             Ok(())
         }
         "person read fresh" => {
             // Explicit legacy freshness remains a separate load case; ordinary CLI lists no longer send it.
-            match context.person.get::<Value>(&format!("/v1/client/agents?fresh=true&limit={ROSTER_LIMIT}")).await {
+            match context
+                .person
+                .get::<Value>(&format!(
+                    "/v1/client/agents?fresh=true&limit={ROSTER_LIMIT}"
+                ))
+                .await
+            {
                 Ok(_) => Err("person read fresh".into()),
                 Err(error) => Err(format!("fresh agents: {error}")),
             }
@@ -2964,15 +3329,23 @@ fn target_path(name: &str) -> Option<String> {
 fn target_rows(timings: &BTreeMap<String, Vec<Duration>>) -> BTreeMap<String, TargetReport> {
     let mut pooled = BTreeMap::<String, (Duration, Vec<Duration>)>::new();
     for (name, samples) in timings {
-        let Some(path) = target_path(name) else { continue };
-        let Some(latency) = fractal_daemon::slo::targets().for_path(&path) else { continue };
+        let Some(path) = target_path(name) else {
+            continue;
+        };
+        let Some(latency) = fractal_daemon::slo::targets().for_path(&path) else {
+            continue;
+        };
         let target = latency.target(false);
         let mut keys = vec![latency.name.clone()];
         if name == "message send" {
             keys.push("message-send".into());
         }
         for key in keys {
-            pooled.entry(key).or_insert_with(|| (target, Vec::new())).1.extend(samples);
+            pooled
+                .entry(key)
+                .or_insert_with(|| (target, Vec::new()))
+                .1
+                .extend(samples);
         }
     }
     pooled
@@ -2996,7 +3369,11 @@ fn target_rows(timings: &BTreeMap<String, Vec<Duration>>) -> BTreeMap<String, Ta
 /// A request's descriptive p99 target from `slo/targets.toml`, served on its owner.
 fn descriptive_target(name: &str) -> Option<Duration> {
     let path = target_path(name)?;
-    Some(fractal_daemon::slo::targets().for_path(&path)?.target(false))
+    Some(
+        fractal_daemon::slo::targets()
+            .for_path(&path)?
+            .target(false),
+    )
 }
 
 /// A request's budget: its kind's, or for a person read, its route's.
@@ -3006,9 +3383,11 @@ fn budget(budgets: &BTreeMap<&str, Duration>, name: &str) -> Duration {
         return Duration::from_secs(31);
     }
     if matches!(name, ROSTER_SNAPSHOT | ROSTER_CONNECT_SNAPSHOT)
-        || COLLECTION_WINDOWS
-            .iter()
-            .any(|collection| snapshot_names(collection).iter().any(|snapshot| snapshot == name))
+        || COLLECTION_WINDOWS.iter().any(|collection| {
+            snapshot_names(collection)
+                .iter()
+                .any(|snapshot| snapshot == name)
+        })
     {
         return ROSTER_BUDGET;
     }

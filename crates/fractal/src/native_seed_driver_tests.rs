@@ -3,17 +3,37 @@ use super::*;
 #[test]
 fn seed_recovery_uses_agent_control_cli_and_requires_reason() {
     let cli = Cli::try_parse_from([
-        "st", "agents", "acknowledge-seed", "example",
-        "--reason", "accept fresh", "--as", "person/operator",
-    ]).unwrap();
-    let Command::Agents { command: AgentsCommand::AcknowledgeSeed(args) } = cli.command else {
+        "st",
+        "agents",
+        "acknowledge-seed",
+        "example",
+        "--reason",
+        "accept fresh",
+        "--as",
+        "person/operator",
+    ])
+    .unwrap();
+    let Command::Agents {
+        command: AgentsCommand::AcknowledgeSeed(args),
+    } = cli.command
+    else {
         panic!("agent seed acknowledgement expected");
     };
     assert_eq!(args.subject, "example");
     assert_eq!(args.reason, "accept fresh");
     assert_eq!(args.actor.as_deref(), Some("person/operator"));
     assert!(Cli::try_parse_from(["st", "agents", "acknowledge-seed", "example"]).is_err());
-    assert!(Cli::try_parse_from(["st", "agents", "acknowledge-seed", "example", "--reason", ""]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "st",
+            "agents",
+            "acknowledge-seed",
+            "example",
+            "--reason",
+            ""
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -32,16 +52,26 @@ fn rejects_effective_resume_environment_before_receipt() {
             argv: vec!["omp".into()],
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all().build().unwrap();
+            .enable_all()
+            .build()
+            .unwrap();
         let error = runtime.block_on(async {
             tokio::time::timeout(Duration::from_secs(1), run_driver(&client, args, None))
-                .await.expect("seed conflict must fail before daemon access")
+                .await
+                .expect("seed conflict must fail before daemon access")
                 .unwrap_err()
         });
-        assert_eq!(error.to_string(), format!(
-            "native seed cannot accompany resume environment ({})", variable.to_string_lossy()
-        ));
-        assert!(!root.join("drivers").exists(), "no inventory or first-launch setup may occur");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "native seed cannot accompany resume environment ({})",
+                variable.to_string_lossy()
+            )
+        );
+        assert!(
+            !root.join("drivers").exists(),
+            "no inventory or first-launch setup may occur"
+        );
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -61,13 +91,20 @@ fn rejects_effective_resume_environment_before_receipt() {
             for variable in variables {
                 child.env_remove(variable);
             }
-            let output = child.env(variable, value).env(CHILD, variable)
+            let output = child
+                .env(variable, value)
+                .env(CHILD, variable)
                 .env("ST3_TEST_NATIVE_SEED_ROOT", root.path())
                 .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
-                .env("HOME", root.path()).output().unwrap();
-            assert!(output.status.success(), "{variable}={value:?}: {}{}",
+                .env("HOME", root.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{variable}={value:?}: {}{}",
                 String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr));
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }

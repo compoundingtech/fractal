@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use serde_json::Value;
+use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::api::AppState;
 use fractal_daemon::store::Store;
-use fractal_daemon::SeatsStoreCore;
+use serde_json::Value;
 use tokio::sync::{Notify, watch};
 
 const WORKER: &str = "agent/example/worker";
@@ -37,8 +37,16 @@ impl Requests {
 }
 
 async fn record(State(requests): State<Arc<Requests>>, request: Request, next: Next) -> Response {
-    let target = request.uri().path_and_query().map(ToString::to_string).unwrap_or_default();
-    requests.0.lock().unwrap().push(format!("{} {target}", request.method()));
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    requests
+        .0
+        .lock()
+        .unwrap()
+        .push(format!("{} {target}", request.method()));
     next.run(request).await
 }
 
@@ -51,23 +59,32 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
 
 async fn counted_daemon(
     root: &Path,
-) -> (PathBuf, Arc<Store>, Arc<Requests>, tokio::task::JoinHandle<()>) {
+) -> (
+    PathBuf,
+    Arc<Store>,
+    Arc<Requests>,
+    tokio::task::JoinHandle<()>,
+) {
     let socket = root.join("st3.sock");
-    let state = AppState { owning_person: None,
-    // A file, like the daemon's own store: an in-memory store locks a table against a reader
-    // while another request writes, which the counting test below does constantly.
-    store: Arc::new(Store::open(&root.join("graph.sqlite3"), "message-wait").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "message-wait".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        // A file, like the daemon's own store: an in-memory store locks a table against a reader
+        // while another request writes, which the counting test below does constantly.
+        store: Arc::new(Store::open(&root.join("graph.sqlite3"), "message-wait").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "message-wait".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let store = state.store.clone();
     let intent = fractal_daemon::parse_intent(
         "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\" }",
@@ -75,11 +92,15 @@ async fn counted_daemon(
     ).unwrap();
     store.apply_internal(&intent, "fixture-recipients").unwrap();
     let requests = Arc::new(Requests::default());
-    let app = fractal_daemon::api::router(state)
-        .layer(axum::middleware::from_fn_with_state(requests.clone(), record));
+    let app = fractal_daemon::api::router(state).layer(axum::middleware::from_fn_with_state(
+        requests.clone(),
+        record,
+    ));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app)
+            .await
+            .unwrap();
     });
     wait_for(&socket).await;
     (socket, store, requests, server)
@@ -140,13 +161,21 @@ fn value(output: &Output) -> Value {
     })
 }
 
-
 async fn send(socket: &Path, from: &str, to: &str, body: &str) -> Value {
     value(
         &st(
             socket,
             &[],
-            &["--json", "conversations", "send", to, "--from", from, "--body", body],
+            &[
+                "--json",
+                "conversations",
+                "send",
+                to,
+                "--from",
+                from,
+                "--body",
+                body,
+            ],
         )
         .await,
     )
@@ -154,7 +183,15 @@ async fn send(socket: &Path, from: &str, to: &str, body: &str) -> Value {
 
 fn wait_args<'a>(timeout: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec![
-        "--json", "conversations", "wait", "--as", WORKER, "--from", PERSON, "--timeout", timeout,
+        "--json",
+        "conversations",
+        "wait",
+        "--as",
+        WORKER,
+        "--from",
+        PERSON,
+        "--timeout",
+        timeout,
     ];
     args.extend_from_slice(extra);
     args
@@ -192,7 +229,16 @@ async fn a_wait_with_no_reply_returns_no_reply_at_the_deadline() {
     let human = st(
         &socket,
         &[],
-        &["conversations", "wait", "--as", WORKER, "--from", PERSON, "--timeout", "0"],
+        &[
+            "conversations",
+            "wait",
+            "--as",
+            WORKER,
+            "--from",
+            PERSON,
+            "--timeout",
+            "0",
+        ],
     )
     .await;
     assert_eq!(String::from_utf8_lossy(&human.stdout).trim(), "no reply");
@@ -224,7 +270,14 @@ async fn a_reply_returns_the_wait_early_and_is_marked_read() {
     assert_eq!(stored[0].status, "read");
 
     // The reply is spent: a second wait does not return it again.
-    let again = value(&st(&socket, &[], &wait_args("0", &["--after", sent["subject"].as_str().unwrap()])).await);
+    let again = value(
+        &st(
+            &socket,
+            &[],
+            &wait_args("0", &["--after", sent["subject"].as_str().unwrap()]),
+        )
+        .await,
+    );
     assert_eq!(again["reply"], false, "{again}");
     server.abort();
 }
@@ -238,7 +291,12 @@ async fn after_counts_a_reply_that_beat_the_wait() {
     let question = send(&socket, WORKER, PEER, "Shall I start?").await;
     send(&socket, PERSON, WORKER, "Yes.").await;
     let answer = value(
-        &st(&socket, &[], &wait_args("0", &["--after", question["subject"].as_str().unwrap()])).await,
+        &st(
+            &socket,
+            &[],
+            &wait_args("0", &["--after", question["subject"].as_str().unwrap()]),
+        )
+        .await,
     );
     assert_eq!(answer["reply"], true, "{answer}");
     assert_eq!(answer["message"]["content"], "Yes.");
@@ -276,7 +334,10 @@ async fn unrelated_events_do_not_make_a_wait_read_the_mailbox() {
         requests.0.lock().unwrap()
     );
     let polls = requests.reads("/v1/events/page");
-    assert!(polls <= 10, "{polls} event reads in three seconds are not paced");
+    assert!(
+        polls <= 10,
+        "{polls} event reads in three seconds are not paced"
+    );
 
     // An early reply, amid the same traffic, still returns within the pace interval.
     let waiting = {
@@ -307,6 +368,10 @@ async fn a_wait_longer_than_ten_minutes_is_refused() {
     let error = String::from_utf8_lossy(&refused.stderr);
     assert!(error.contains("at most 10m"), "{error}");
     let allowed = st(&socket, &[], &wait_args("0", &[])).await;
-    assert!(allowed.status.success(), "{}", String::from_utf8_lossy(&allowed.stderr));
+    assert!(
+        allowed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
     server.abort();
 }

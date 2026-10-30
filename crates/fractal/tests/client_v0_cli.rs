@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
-use fractal_daemon::MissionsStore;
 use fractal_daemon::LimitsStore;
+use fractal_daemon::MissionsStore;
 use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use std::collections::BTreeMap;
@@ -9,37 +9,49 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::Arc;
 
-use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{AttentionRequest, ClaimInput, IntentInput, MissionRunRequest};
 use fractal_daemon::store::Store;
+use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "client-v0-cli".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: vec!["offline-peer".into()],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "client-v0-cli".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: vec!["offline-peer".into()],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 #[tokio::test]
 async fn ordinary_agent_list_and_tree_cli_send_no_freshness_barrier() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     for (args, path) in [
-        (vec!["agents", "ls", "--limit", "5"], "/v1/client/agents?limit=5"),
-        (vec!["agents", "tree", "--limit", "5"], "/v1/client/agents?limit=5"),
-        (vec!["agents", "ls", "--limit", "5", "--status", "running"],
-            "/v1/client/agents?limit=5&status=running"),
+        (
+            vec!["agents", "ls", "--limit", "5"],
+            "/v1/client/agents?limit=5",
+        ),
+        (
+            vec!["agents", "tree", "--limit", "5"],
+            "/v1/client/agents?limit=5",
+        ),
+        (
+            vec!["agents", "ls", "--limit", "5", "--status", "running"],
+            "/v1/client/agents?limit=5&status=running",
+        ),
     ] {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("roster.sock");
@@ -62,26 +74,48 @@ async fn ordinary_agent_list_and_tree_cli_send_no_freshness_barrier() {
             stream.write_all(format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 response.len(), response).as_bytes()).await.unwrap();
-            String::from_utf8(request).unwrap().lines().next().unwrap().to_owned()
+            String::from_utf8(request)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap()
+                .to_owned()
         });
         let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
-        command.kill_on_drop(true).env_remove("ST_AGENT").env_remove("ST_MISSION_RUN")
-            .args(["--endpoint", socket.to_str().unwrap(), "--daemon-wait", "0", "--json"])
+        command
+            .kill_on_drop(true)
+            .env_remove("ST_AGENT")
+            .env_remove("ST_MISSION_RUN")
+            .args([
+                "--endpoint",
+                socket.to_str().unwrap(),
+                "--daemon-wait",
+                "0",
+                "--json",
+            ])
             .args(args);
         let output = tokio::time::timeout(std::time::Duration::from_secs(10), command.output())
-            .await.expect("a plain listing must not wait for another publication").unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            .await
+            .expect("a plain listing must not wait for another publication")
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(server.await.unwrap(), format!("GET {path} HTTP/1.1"));
     }
 }
 
 #[tokio::test]
 async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secrets() {
+    use fractal_client::{
+        Client, Fence, MessageSendParameters, PersonPairingBegin, device::Profile,
+    };
     use ring::{
         rand::SystemRandom,
         signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair},
     };
-    use fractal_client::{Client, Fence, MessageSendParameters, PersonPairingBegin, device::Profile};
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::Stdio;
@@ -100,7 +134,8 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
     let app = fractal_daemon::api::router(state.clone());
-    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
+    let local_server =
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     for _ in 0..200 {
         if tokio::net::UnixStream::connect(&socket).await.is_ok() {
             break;
@@ -120,8 +155,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     let run = |args: Vec<String>, code: String| {
         let config = config.clone();
         tokio::task::spawn_blocking(move || {
-            let mut command =
-                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+            let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
             let mut child = command
                 .env("XDG_CONFIG_HOME", config)
                 .args(args)
@@ -136,11 +170,15 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     };
     for algorithm in ["ed25519", "p256"] {
         for import in [false, true] {
-            let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
-            device_name: "CLI device".into(),
-            person_id: "person/avery".into(),
-            full_control: Some(true),
-            scopes: None, fabric_gateway: None, })
+            let challenge = local
+                .pairing_begin_person(&PersonPairingBegin {
+                    api_version: fractal_client::API_VERSION.into(),
+                    device_name: "CLI device".into(),
+                    person_id: "person/avery".into(),
+                    full_control: Some(true),
+                    scopes: None,
+                    fabric_gateway: None,
+                })
                 .await
                 .unwrap()
                 .value;
@@ -178,7 +216,10 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             };
             let previous = std::fs::read(&profile).ok();
             let mut missing_pin = args.clone();
-            let pin_option = missing_pin.iter().position(|arg| arg == "--fingerprint").unwrap();
+            let pin_option = missing_pin
+                .iter()
+                .position(|arg| arg == "--fingerprint")
+                .unwrap();
             missing_pin.drain(pin_option..pin_option + 2);
             let missing = run(missing_pin, challenge.code.clone()).await.unwrap();
             assert!(!missing.status.success());
@@ -215,7 +256,10 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             );
             let loaded = Profile::load(&profile).unwrap().unwrap();
             assert_eq!(loaded.devices[0].allow_public_http, import);
-            assert!(String::from_utf8_lossy(&output.stderr).contains("must already be an encrypted path"));
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("must already be an encrypted path")
+            );
             assert_eq!(
                 receipt["signing_key"],
                 loaded.devices[0]
@@ -285,11 +329,15 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             );
         }
     }
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(),
-    device_name: "Display".into(),
-    person_id: "person/avery".into(),
-    full_control: None,
-    scopes: None, fabric_gateway: None, })
+    let challenge = local
+        .pairing_begin_person(&PersonPairingBegin {
+            api_version: fractal_client::API_VERSION.into(),
+            device_name: "Display".into(),
+            person_id: "person/avery".into(),
+            full_control: None,
+            scopes: None,
+            fabric_gateway: None,
+        })
         .await
         .unwrap()
         .value;
@@ -310,20 +358,64 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     // The default profile works beside non-secret configuration without chmod-ing its directory.
     let default_profile = config.join("st3/stui-devices.json");
     let loaded = Profile::load(&default_profile).unwrap().unwrap();
-    assert_eq!(std::fs::metadata(&default_profile).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::metadata(config.join("st3")).unwrap().permissions().mode() & 0o777, 0o755);
+    assert_eq!(
+        std::fs::metadata(&default_profile)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(config.join("st3"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
     assert!(loaded.devices[0].signing_key.is_none());
     assert!(!loaded.devices[0].allow_public_http);
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
-    let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
-    person_id: "person/avery".into(), full_control: Some(true), scopes: None, fabric_gateway: None, }).await.unwrap().value;
+    let challenge = local
+        .pairing_begin_person(&PersonPairingBegin {
+            api_version: fractal_client::API_VERSION.into(),
+            device_name: "Explicit unpinned CLI".into(),
+            person_id: "person/avery".into(),
+            full_control: Some(true),
+            scopes: None,
+            fabric_gateway: None,
+        })
+        .await
+        .unwrap()
+        .value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
-    let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
-        "--unpinned".into(), "--profile".into(), unpinned_profile.to_str().unwrap().into()], challenge.code).await.unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let output = run(
+        vec![
+            "devices".into(),
+            "complete".into(),
+            base.clone(),
+            challenge.pairing_id,
+            "--unpinned".into(),
+            "--profile".into(),
+            unpinned_profile.to_str().unwrap().into(),
+        ],
+        challenge.code,
+    )
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("UNPINNED PAIRING"));
-    assert!(Profile::load(&unpinned_profile).unwrap().unwrap().devices[0].person_root_fingerprint.is_none());
+    assert!(
+        Profile::load(&unpinned_profile).unwrap().unwrap().devices[0]
+            .person_root_fingerprint
+            .is_none()
+    );
     assert!(
         !String::from_utf8_lossy(&output.stdout).contains(&loaded.devices[0].session.credential)
     );
@@ -347,7 +439,9 @@ async fn run_cli_mode(socket: &Path, json: bool, args: &[&str]) -> Output {
         let mut command = fractal_daemon::test_support::command(binary);
         // These are operator commands. A harness running the suite must not lend its own seat
         // identity, which scopes `work ls` and fences agent actors.
-        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        command
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .arg("--endpoint")
             .arg(socket);
@@ -384,7 +478,13 @@ async fn run_cli_with_agent_env(socket: &Path, agent: &str, args: &[&str]) -> Ou
 fn without_ages(stdout: &[u8]) -> String {
     String::from_utf8_lossy(stdout)
         .lines()
-        .map(|line| if line.starts_with("UPDATED ") { "UPDATED" } else { line })
+        .map(|line| {
+            if line.starts_with("UPDATED ") {
+                "UPDATED"
+            } else {
+                line
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -409,15 +509,32 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     let root = tempfile::tempdir().unwrap();
     let producer = root.path().join("omp");
     let marker = root.path().join("producer-called");
-    std::fs::write(&producer, format!("#!/bin/sh\nprintf called > '{}'\nexit 1\n", marker.display())).unwrap();
+    std::fs::write(
+        &producer,
+        format!(
+            "#!/bin/sh\nprintf called > '{}'\nexit 1\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
         let mut command = std::process::Command::new(test_bin!("st3"));
-        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
-            .arg("--json").args(["admission", action, "omp", "--binary"])
-            .arg(&producer).arg("--state-dir").arg(root.path().join("state"));
-        if action == "override" { command.args(["--reason", "local offline probe exception"]); }
-        if agent { command.env("ST_AGENT", "agent/fixture/worker"); }
+        command
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
+            .env_remove("ST_MISSION_RUN")
+            .arg("--json")
+            .args(["admission", action, "omp", "--binary"])
+            .arg(&producer)
+            .arg("--state-dir")
+            .arg(root.path().join("state"));
+        if action == "override" {
+            command.args(["--reason", "local offline probe exception"]);
+        }
+        if agent {
+            command.env("ST_AGENT", "agent/fixture/worker");
+        }
         command.output().unwrap()
     };
     let refused = run("override", true);
@@ -431,13 +548,25 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     assert!(record.starts_with(root.path().join("state/drivers/sessions/harness-admission")));
     let bytes = std::fs::read(&record).unwrap();
     let exception: Value = serde_json::from_slice(&bytes).unwrap();
-    let (_, extension) = fractal_daemon::hooks::FILES.iter().find(|(name, _)| *name == "omp-channel.ts").unwrap();
-    assert_eq!(exception["identity"]["adapterDigest"], format!("{:x}", Sha256::digest(extension)));
+    let (_, extension) = fractal_daemon::hooks::FILES
+        .iter()
+        .find(|(name, _)| *name == "omp-channel.ts")
+        .unwrap();
+    assert_eq!(
+        exception["identity"]["adapterDigest"],
+        format!("{:x}", Sha256::digest(extension))
+    );
     assert!(exception.get("measurements").is_none());
-    assert_eq!(std::fs::metadata(&record).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&record).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
     assert_eq!(value(&run("revoke", false))["overridden"], false);
     assert!(!record.exists());
-    assert!(!marker.exists(), "the exception commands run neither --version nor the native probe");
+    assert!(
+        !marker.exists(),
+        "the exception commands run neither --version nor the native probe"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -952,10 +1081,9 @@ async fn a_seat_bootstraps_cancels_and_stops_with_its_own_cli_identity() {
     let state = test_state(root.path());
     let store = state.store.clone();
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -976,9 +1104,13 @@ agent "example/operations/coordinator" {
     value(
         &run_cli(
             &socket,
-            &["apply", "--no-gate-check", parent.to_str().unwrap(),
-            "--as",
-            "person/operator",],
+            &[
+                "apply",
+                "--no-gate-check",
+                parent.to_str().unwrap(),
+                "--as",
+                "person/operator",
+            ],
         )
         .await,
     );
@@ -1000,7 +1132,13 @@ agent "example/operations/deputy" {
     let applied = run_cli_with_agent_env(
         &socket,
         actor,
-        &["apply", "--no-gate-check", deputy.to_str().unwrap(), "--as", actor],
+        &[
+            "apply",
+            "--no-gate-check",
+            deputy.to_str().unwrap(),
+            "--as",
+            actor,
+        ],
     )
     .await;
     value(&applied);
@@ -1017,9 +1155,7 @@ agent "example/operations/deputy" {
         &run_cli_with_agent_env(
             &socket,
             actor,
-            &["apply", mission.to_str().unwrap(),
-            "--as",
-            actor,],
+            &["apply", mission.to_str().unwrap(), "--as", actor],
         )
         .await,
     );
@@ -1105,10 +1241,9 @@ async fn missions_show_missing_mission_fails_but_published_zero_run_mission_succ
         .apply_internal(&intent, "unstarted-mission")
         .unwrap();
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1151,47 +1286,77 @@ async fn conversation_stage_timings_appear_in_performance_report() {
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());
     let subject = "agent/conversation-timing";
-    state.store.append_claim(&ClaimInput {
-        subject: subject.into(),
-        kind: "runtime.observed".into(),
-        actor: Some(subject.into()),
-        fields: serde_json::from_value(serde_json::json!({
-            "status": "running", "incarnation_id": "timing-runtime"
-        })).unwrap(),
-        evidence: Vec::new(),
-        expected_subject: None,
-        idempotency_key: None,
-    }).unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(serde_json::json!({
+                "status": "running", "incarnation_id": "timing-runtime"
+            }))
+            .unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
     let index = state.store.index().unwrap();
     let served = socket.clone();
     let app = fractal_daemon::api::router(state.clone());
     let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     while !socket.exists() {
-        assert!(tokio::time::Instant::now() < deadline, "isolated API did not start");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "isolated API did not start"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     let client = fractal_client::Client::unix_as(&socket, "person/example");
     let mut stream = client.collection_stream().await.unwrap();
-    stream.subscribe_conversation("timing", subject).await.unwrap();
+    stream
+        .subscribe_conversation("timing", subject)
+        .await
+        .unwrap();
     let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
-        .await.unwrap().unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
     assert_eq!(frame["kind"], "conversation");
     assert_eq!(frame["id"], "timing");
     assert_eq!(frame["replace"], true);
 
-    let http = reqwest::Client::builder().unix_socket(socket).build().unwrap();
-    let response = http.get("http://localhost/v1/performance").send().await.unwrap();
+    let http = reqwest::Client::builder()
+        .unix_socket(socket)
+        .build()
+        .unwrap();
+    let response = http
+        .get("http://localhost/v1/performance")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let report: Value = response.json().await.unwrap();
     let requests = report["value"]["requests"].as_array().unwrap();
-    for label in ["conversation/admission", "conversation/owner", "conversation/first-page"] {
-        let row = requests.iter().find(|row| row["kind"] == label)
+    for label in [
+        "conversation/admission",
+        "conversation/owner",
+        "conversation/first-page",
+    ] {
+        let row = requests
+            .iter()
+            .find(|row| row["kind"] == label)
             .unwrap_or_else(|| panic!("missing stage {label}: {report}"));
         assert!(row["count"].as_u64().unwrap() > 0);
         assert!(row["total_ms"].as_f64().unwrap() >= 0.0);
     }
-    assert_eq!(state.store.index().unwrap(), index, "timings must not write graph claims");
+    assert_eq!(
+        state.store.index().unwrap(),
+        index,
+        "timings must not write graph claims"
+    );
     stream.close().await;
     server.abort();
     let _ = server.await;
@@ -1260,10 +1425,9 @@ async fn operational_cli_lists_outcomes_summarizes_runs_and_reports_performance(
         }
     }
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1343,10 +1507,11 @@ async fn operational_cli_lists_outcomes_summarizes_runs_and_reports_performance(
             .as_array()
             .unwrap()
             .iter()
-            .any(
-                |row| row["client"].as_str().unwrap().contains("fractal-fixture missions")
-                    && row["count"].as_u64().unwrap() > 0
-            ),
+            .any(|row| row["client"]
+                .as_str()
+                .unwrap()
+                .contains("fractal-fixture missions")
+                && row["count"].as_u64().unwrap() > 0),
         "{report:#}"
     );
     let shown = run_cli_human(&socket, &["doctor", "--performance"]).await;
@@ -1380,10 +1545,9 @@ async fn agent_declaration_cli_redacts_environment_unless_explicitly_requested()
         .apply(&intent, &planned.subject_tokens, source)
         .unwrap();
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1466,10 +1630,9 @@ async fn import_list_does_not_return_an_empty_page_with_more_managed_sessions() 
             .unwrap();
     }
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1517,10 +1680,9 @@ async fn conversations_cli_handles_multiple_message_pages_and_exact_reads() {
             .unwrap();
     }
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1645,7 +1807,8 @@ async fn a_conversation_thread_pages_through_the_history_once() {
         },
     ));
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, router).await });
+    let server =
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, router).await });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1692,10 +1855,9 @@ async fn legacy_attention_mutation_requires_source_migration() {
         )
         .unwrap();
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1737,10 +1899,9 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
     store.apply_internal(&intent, "cli-person-asker").unwrap();
     let actor = format!("agent/{}.asker", store.origin());
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1863,10 +2024,9 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     store.apply_internal(&intent, "cli-discuss-asker").unwrap();
     let actor = format!("agent/{}.asker", store.origin());
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -1924,7 +2084,9 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let body = read["content"].as_str().unwrap_or_default();
     assert!(body.starts_with("Why does it need a date?"), "{read}");
     assert!(
-        body.contains(&format!("This is about Choose release date ({attention_id}")),
+        body.contains(&format!(
+            "This is about Choose release date ({attention_id}"
+        )),
         "{body}"
     );
     let nobody = run_cli(
@@ -1961,10 +2123,9 @@ async fn cli_structured_choice_returns_the_selected_option_as_data() {
         .unwrap();
     let actor = format!("agent/{}.asker", store.origin());
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -2109,10 +2270,9 @@ mission "release-report" state="ready" {
         .unwrap();
     let actor = format!("agent/{}.reporter", store.origin());
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -2371,10 +2531,9 @@ mission "cli/child" state="ready" {
         .unwrap();
 
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -2601,7 +2760,9 @@ async fn run_queue_cli(socket: &Path, config_home: &Path, json: bool, args: &[&s
     tokio::task::spawn_blocking(move || {
         let mut command = fractal_daemon::test_support::command(binary);
         // Queue operator commands use the fixture's person, not the invoking harness seat.
-        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        command
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("XDG_CONFIG_HOME", config_home)
             .arg("--endpoint")
@@ -2678,10 +2839,9 @@ mission "queued-work" state="ready" {
     let step = |index: usize| runs[index].steps[0].subject.as_str();
 
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -3008,10 +3168,9 @@ mission "reported-work" state="ready" {
     }
 
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -3153,10 +3312,9 @@ mission "queued-alias-work" state="ready" {
     let seat = run.steps[0].assigned_to.clone().unwrap();
 
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -3193,7 +3351,10 @@ impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
+    fn observe_exec(
+        &self,
+        _: &str,
+    ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
     fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
@@ -3246,7 +3407,9 @@ async fn run_lane_cli(
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
         let mut command = fractal_daemon::test_support::command(binary);
-        command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        command
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("XDG_CONFIG_HOME", config_home)
             .arg("--endpoint")
@@ -3345,10 +3508,9 @@ mission "example/merge-train" state="ready" {
     let prefix = "resource/github/acme/app/ci/pull-request/";
 
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -3695,9 +3857,11 @@ async fn serve_creation_api(
             async move {
                 // This fixture supplies provider observations without launching a binary.
                 if request.uri().path() == "/v1/harnesses" {
-                    return axum::response::IntoResponse::into_response(axum::Json(serde_json::json!({
-                        "api_version": "st3.v1", "value": ["omp"]
-                    })));
+                    return axum::response::IntoResponse::into_response(axum::Json(
+                        serde_json::json!({
+                            "api_version": "st3.v1", "value": ["omp"]
+                        }),
+                    ));
                 }
                 let applied = matches!(
                     request.uri().path(),
@@ -3742,7 +3906,8 @@ async fn serve_creation_api(
         },
     ));
     let server_socket = socket.clone();
-    let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, router).await });
+    let server =
+        tokio::spawn(async move { fractal_daemon::api::serve_unix(&server_socket, router).await });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -3791,9 +3956,13 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
         value(
             &run_cli(
                 &socket,
-                &["apply", "--no-gate-check", source.to_str().unwrap(),
-                "--as",
-                "person/avery",],
+                &[
+                    "apply",
+                    "--no-gate-check",
+                    source.to_str().unwrap(),
+                    "--as",
+                    "person/avery",
+                ],
             )
             .await,
         );
@@ -3822,9 +3991,11 @@ async fn agents_start_preserves_command_declarations_and_refuses_harness_options
             )
             .await;
             assert!(preview.status.success(), "{preview:?}");
-            let intent =
-                fractal_daemon::parse_intent(&String::from_utf8(preview.stdout).unwrap(), "client-v0-cli")
-                    .unwrap();
+            let intent = fractal_daemon::parse_intent(
+                &String::from_utf8(preview.stdout).unwrap(),
+                "client-v0-cli",
+            )
+            .unwrap();
             assert_eq!(intent.subjects[&subject].member, original.member);
             value(
                 &run_cli(
@@ -3905,9 +4076,13 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     value(
         &run_cli(
             &socket,
-            &["apply", "--no-gate-check", source.to_str().unwrap(),
-            "--as",
-            "person/avery",],
+            &[
+                "apply",
+                "--no-gate-check",
+                source.to_str().unwrap(),
+                "--as",
+                "person/avery",
+            ],
         )
         .await,
     );
@@ -3915,7 +4090,13 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let original = agent_declaration(&socket, subject).await;
     for (option, model, effort, arguments, driver) in [
         (vec![], Some("old"), Some("low"), vec!["--old"], "omp"),
-        (vec!["--model", "new"], Some("new"), Some("low"), vec!["--old"], "omp"),
+        (
+            vec!["--model", "new"],
+            Some("new"),
+            Some("low"),
+            vec!["--old"],
+            "omp",
+        ),
         (
             vec!["--effort", "high"],
             Some("new"),
@@ -3958,14 +4139,29 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
         assert_eq!(member.environment, previous.environment);
         let nodes = current.desired["children"].as_array().unwrap();
         let harness = nodes.iter().find(|node| node["name"] == "harness").unwrap();
-        let children = harness["children"].as_array().map(Vec::as_slice).unwrap_or_default();
-        let field = |name: &str| children.iter()
-            .find(|node| node["name"] == name).map(|node| &node["arguments"]);
-        assert_eq!(field("model"), model.map(|model| serde_json::json!([model])).as_ref());
-        assert_eq!(field("effort"), effort.map(|effort| serde_json::json!([effort])).as_ref());
+        let children = harness["children"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let field = |name: &str| {
+            children
+                .iter()
+                .find(|node| node["name"] == name)
+                .map(|node| &node["arguments"])
+        };
+        assert_eq!(
+            field("model"),
+            model.map(|model| serde_json::json!([model])).as_ref()
+        );
+        assert_eq!(
+            field("effort"),
+            effort.map(|effort| serde_json::json!([effort])).as_ref()
+        );
         assert_eq!(
             field("args"),
-            (!arguments.is_empty()).then(|| serde_json::json!(arguments)).as_ref(),
+            (!arguments.is_empty())
+                .then(|| serde_json::json!(arguments))
+                .as_ref(),
         );
         assert_eq!(harness["arguments"][0], driver);
     }
@@ -4148,9 +4344,7 @@ async fn creation_commands_end_with_actions_and_json_remains_parseable() {
     value(
         &run_cli(
             &socket,
-            &["apply", mission.to_str().unwrap(),
-            "--as",
-            "person/avery",],
+            &["apply", mission.to_str().unwrap(), "--as", "person/avery"],
         )
         .await,
     );
@@ -4276,10 +4470,9 @@ async fn terminal_owner_lookup_finds_a_seat_beyond_the_default_page() {
             .unwrap();
     }
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -4417,10 +4610,9 @@ async fn provenance_is_visible_in_show_preview_and_revise() {
     let intent = fractal_daemon::parse_intent(&first, "client-v0-cli").unwrap();
     store.apply_internal(&intent, "first-provenance").unwrap();
     let server_socket = socket.clone();
-    let server =
-        tokio::spawn(
-            async move { fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await },
-        );
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
     for _ in 0..100 {
         if socket.exists() {
             break;
@@ -4574,25 +4766,33 @@ async fn note_cli_round_trip_uses_configured_person_and_preserves_metadata() {
     std::fs::write(
         config_home.join("st3/config.toml"),
         "person = \"person/avery\"\n",
-    ).unwrap();
+    )
+    .unwrap();
     let state = test_state(root.path());
     let fleet = "3c9a1f2e-8b7d-4e6c-a5f4-1d2e3c4b5a69";
     let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
     state.store.bind_fleet(fleet).unwrap();
     state.store.pin_fleet_anchor(key.public()).unwrap();
     state.store.set_member_key(Some(key.clone())).unwrap();
-    state.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
-    state.store.append_claim(&ClaimInput {
-        subject: format!("daemon/{}", state.node),
-        kind: "daemon.started".into(),
-        actor: None,
-        fields: serde_json::from_value(serde_json::json!({
-            "status": "running", "features": {"person_directive_note": 1}
-        })).unwrap(),
-        evidence: vec![],
-        expected_subject: None,
-        idempotency_key: None,
-    }).unwrap();
+    state
+        .store
+        .admit_fleet_anchor(fleet, key.public(), "listening")
+        .unwrap();
+    state
+        .store
+        .append_claim(&ClaimInput {
+            subject: format!("daemon/{}", state.node),
+            kind: "daemon.started".into(),
+            actor: None,
+            fields: serde_json::from_value(serde_json::json!({
+                "status": "running", "features": {"person_directive_note": 1}
+            }))
+            .unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
     let app = fractal_daemon::api::router(state.clone());
@@ -4603,36 +4803,86 @@ async fn note_cli_round_trip_uses_configured_person_and_preserves_metadata() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    let set = value(&run_lane_cli(&socket, &config_home, None, true, &[
-        "note", "set", "Approval-looking words do not approve a gate",
-        "--expires-at", "2099-01-01T00:00:00Z",
-    ]).await);
+    let set = value(
+        &run_lane_cli(
+            &socket,
+            &config_home,
+            None,
+            true,
+            &[
+                "note",
+                "set",
+                "Approval-looking words do not approve a gate",
+                "--expires-at",
+                "2099-01-01T00:00:00Z",
+            ],
+        )
+        .await,
+    );
     assert_eq!(set["note"]["person"], "person/avery");
     assert_eq!(set["note"]["author"], "person/avery");
-    assert_eq!(set["note"]["text"], "Approval-looking words do not approve a gate");
-    assert!(set["note"]["time"].as_str().is_some_and(|time| !time.is_empty()));
-    assert!(set["note"]["revision"].as_str().is_some_and(|revision| !revision.is_empty()));
+    assert_eq!(
+        set["note"]["text"],
+        "Approval-looking words do not approve a gate"
+    );
+    assert!(
+        set["note"]["time"]
+            .as_str()
+            .is_some_and(|time| !time.is_empty())
+    );
+    assert!(
+        set["note"]["revision"]
+            .as_str()
+            .is_some_and(|revision| !revision.is_empty())
+    );
     let read = value(&run_lane_cli(&socket, &config_home, None, true, &["note"]).await);
     assert_eq!(read["notes"][0], set["note"]);
     let human = run_lane_cli(&socket, &config_home, None, false, &["note"]).await;
     assert!(human.status.success());
     assert!(String::from_utf8_lossy(&human.stdout).contains("Approval-looking words"));
-    let unrelated = value(&run_lane_cli(&socket, &config_home, None, true, &[
-        "note", "--actor", "person/other",
-    ]).await);
+    let unrelated = value(
+        &run_lane_cli(
+            &socket,
+            &config_home,
+            None,
+            true,
+            &["note", "--actor", "person/other"],
+        )
+        .await,
+    );
     assert_eq!(unrelated["notes"], serde_json::json!([]));
-    let replaced = value(&run_lane_cli(&socket, &config_home, None, true, &[
-        "note", "set", "New context",
-    ]).await);
+    let replaced = value(
+        &run_lane_cli(
+            &socket,
+            &config_home,
+            None,
+            true,
+            &["note", "set", "New context"],
+        )
+        .await,
+    );
     assert_ne!(replaced["note"]["revision"], set["note"]["revision"]);
     assert!(replaced["note"]["expires_at"].is_null());
     let cleared = value(&run_lane_cli(&socket, &config_home, None, true, &["note", "clear"]).await);
     assert!(cleared["note"].is_null());
     let empty = value(&run_lane_cli(&socket, &config_home, None, true, &["note"]).await);
     assert_eq!(empty["notes"], serde_json::json!([]));
-    let _expired = value(&run_lane_cli(&socket, &config_home, None, true, &[
-        "note", "set", "Old context", "--expires-at", "2000-01-01T00:00:00Z",
-    ]).await);
+    let _expired = value(
+        &run_lane_cli(
+            &socket,
+            &config_home,
+            None,
+            true,
+            &[
+                "note",
+                "set",
+                "Old context",
+                "--expires-at",
+                "2000-01-01T00:00:00Z",
+            ],
+        )
+        .await,
+    );
     let expired_read = value(&run_lane_cli(&socket, &config_home, None, true, &["note"]).await);
     assert_eq!(expired_read["notes"], serde_json::json!([]));
     for args in [
@@ -4650,7 +4900,11 @@ async fn note_cli_harness_cannot_write_or_borrow_configured_person() {
     let root = tempfile::tempdir().unwrap();
     let config_home = root.path().join("config");
     std::fs::create_dir_all(config_home.join("st3")).unwrap();
-    std::fs::write(config_home.join("st3/config.toml"), "person = \"person/avery\"\n").unwrap();
+    std::fs::write(
+        config_home.join("st3/config.toml"),
+        "person = \"person/avery\"\n",
+    )
+    .unwrap();
     let socket = root.path().join("absent.sock");
     for args in [
         vec!["note", "set", "context"],
@@ -4695,9 +4949,13 @@ mission "orchid-actor" state="ready" {
     let served = socket.clone();
     let (ready, started) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix_with_ready(&served, fractal_daemon::api::router(state), || {
-            ready.send(()).unwrap();
-        })
+        fractal_daemon::api::serve_unix_with_ready(
+            &served,
+            fractal_daemon::api::router(state),
+            || {
+                ready.send(()).unwrap();
+            },
+        )
         .await
     });
     started.await.unwrap();
@@ -4740,7 +4998,10 @@ mission "orchid-actor" state="ready" {
                         assert_eq!(returned, plain_json);
                     }
                 } else {
-                    assert_eq!(without_ages(&output.stdout), without_ages(&plain_human.stdout));
+                    assert_eq!(
+                        without_ages(&output.stdout),
+                        without_ages(&plain_human.stdout)
+                    );
                 }
             }
         }
@@ -4804,7 +5065,9 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
     std::fs::create_dir_all(config_root.join("st3")).unwrap();
     std::fs::write(config_root.join("st3/config.toml"),
         "node = 'fixture'\nseat_priority = 'normal'\nfuture_root = 'never-print-this'\n[github]\nfuture_nested = 'also-private'\n").unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4845,7 +5108,9 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         assert!(!text.contains("never-print-this"));
         assert!(!text.contains("also-private"));
     }
-    let strict = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let strict = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4872,7 +5137,9 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         "node = 'fixture'\nseat_priority = 'normal'\n",
     )
     .unwrap();
-    let valid = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let valid = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4900,7 +5167,9 @@ fn setup_rejects_unknown_config_before_any_rewrite() {
     let path = root.path().join("config.toml");
     let original = b"# retain this text\nnode = 'fixture'\nfuture_root = 'fixture-secret'\n[github]\nfuture_nested = true\n";
     std::fs::write(&path, original).unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -4961,7 +5230,9 @@ fn local_state_commands_reject_unknown_config_before_using_default_state() {
         vec!["service", "status"],
     ];
     for args in cases {
-        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", &config_root)

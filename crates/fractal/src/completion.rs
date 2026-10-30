@@ -186,8 +186,11 @@ impl LocalTarget {
     /// `--endpoint` in `words` wins over `ST3_ENDPOINT`, which wins over the configured socket.
     /// A non-Unix endpoint yields `None`: client-v0 lists need the trusted local socket.
     pub fn discover(words: &[String]) -> Option<Self> {
-        let config = fractal_daemon::config::Config::load_client_unvalidated(None).ok()?.0;
-        let endpoint = endpoint_word(words).or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"));
+        let config = fractal_daemon::config::Config::load_client_unvalidated(None)
+            .ok()?
+            .0;
+        let endpoint =
+            endpoint_word(words).or_else(|| fractal_drivers::contracts::env("ST3_ENDPOINT"));
         let socket = match endpoint.map(fractal_daemon::client::Endpoint::parse) {
             Some(Ok(fractal_daemon::client::Endpoint::Unix(socket))) => socket,
             Some(_) => return None,
@@ -318,9 +321,7 @@ pub async fn resolution_candidates(
     Ok(select(entity, &listed, target, chrono::Utc::now()))
 }
 
-async fn joined<F: Future<Output = Result<Vec<Resource>, ClientError>>>(
-    join: F,
-) -> Vec<Resource> {
+async fn joined<F: Future<Output = Result<Vec<Resource>, ClientError>>>(join: F) -> Vec<Resource> {
     tokio::time::timeout(JOIN_DEADLINE, join)
         .await
         .ok()
@@ -851,7 +852,8 @@ mod tests {
         assert_eq!(subject("agent/other"), "agent/other");
         // Step 3 wins before step 4: `host-a` prefixes one last segment.
         assert_eq!(subject("host-a"), "agent/host-a.ci-watcher");
-        let Resolution::Ambiguous(matches) = resolve("interactive", "agent", &fleet, Matching::Fuzzy)
+        let Resolution::Ambiguous(matches) =
+            resolve("interactive", "agent", &fleet, Matching::Fuzzy)
         else {
             panic!("interactive names two subjects");
         };
@@ -864,10 +866,7 @@ mod tests {
 
     #[test]
     fn exact_namespace_subject_wins_over_segments() {
-        let fleet = vec![
-            candidate("pty/steward"),
-            candidate("agent/project/steward"),
-        ];
+        let fleet = vec![candidate("pty/steward"), candidate("agent/project/steward")];
         assert_eq!(
             resolve("steward", "pty", &fleet, Matching::Fuzzy),
             Resolution::Subject("pty/steward".into())

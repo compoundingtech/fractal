@@ -25,7 +25,7 @@ struct Control {
     permanent: Mutex<Option<(u16, String)>>,
     reports: Mutex<Vec<Value>>,
     report_changed: Notify,
-    attachment: AtomicU8,  // 0: absent, 1: admitted, 2: failed check
+    attachment: AtomicU8, // 0: absent, 1: admitted, 2: failed check
     /// How long the attachment endpoint takes to answer, as a loaded daemon does.
     attachment_delay_ms: AtomicU64,
     publication: AtomicU8, // 0: acknowledged, 1: no commit, 2: commit without acknowledgement
@@ -355,7 +355,8 @@ impl Fixture {
             loop_state: std::mem::take(&mut self.state),
         };
         let path =
-            fractal_drivers::reexec::write_state(self._root.path(), "driver-resume", &resume).unwrap();
+            fractal_drivers::reexec::write_state(self._root.path(), "driver-resume", &resume)
+                .unwrap();
         let restored: DriverResume = fractal_drivers::reexec::read_state(&path).unwrap();
         assert_eq!(restored.incarnation, resume.incarnation);
         assert_eq!(restored.session, resume.session);
@@ -647,7 +648,8 @@ async fn claude_attachment_publication_acknowledged_resume_does_not_republish() 
             },
             loop_state: std::mem::take(&mut f.state),
         };
-        let path = fractal_drivers::reexec::write_state(root.path(), "driver-resume", &resume).unwrap();
+        let path =
+            fractal_drivers::reexec::write_state(root.path(), "driver-resume", &resume).unwrap();
         let restored: DriverResume = fractal_drivers::reexec::read_state(&path).unwrap();
         f.state = restored.loop_state;
         assert!(f.state.claude_attachment_reconciled);
@@ -1264,7 +1266,8 @@ async fn hookless_readiness_never_bypasses_native_blocked_ended_or_unknown_state
         let mut observations =
             NativeObservations::start(&dir, &f.control.owner.incarnation).unwrap();
         let seq =
-            fractal_drivers::harness_state::claim(&dir, "example/quartz", "claude", "provider").unwrap();
+            fractal_drivers::harness_state::claim(&dir, "example/quartz", "claude", "provider")
+                .unwrap();
         let mut writer = Writer::new(&dir, "example/quartz", "claude", Some("quartz-pty".into()))
             .with_ownership("provider", seq);
         if state == "ended" {
@@ -1286,13 +1289,17 @@ async fn hookless_readiness_never_bypasses_native_blocked_ended_or_unknown_state
         if state == "unknown" {
             // Unknown is derived from expired evidence; it is never a valid writer input.
             let mut snapshot: Value = serde_json::from_slice(
-                &fractal_drivers::harness_events::read_runtime_state(&dir, &f.control.owner.incarnation)
-                    .unwrap()
-                    .unwrap(),
+                &fractal_drivers::harness_events::read_runtime_state(
+                    &dir,
+                    &f.control.owner.incarnation,
+                )
+                .unwrap()
+                .unwrap(),
             )
             .unwrap();
-            snapshot["writtenAtMs"] =
-                json!(now - fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64 - 1);
+            snapshot["writtenAtMs"] = json!(
+                now - fractal_drivers::harness_state::HARNESS_STATE_STALE.as_millis() as u64 - 1
+            );
             fractal_drivers::harness_events::write_snapshot(
                 &dir,
                 "harness-state",
@@ -1432,7 +1439,12 @@ async fn an_unpushed_settled_phase_is_rechecked_every_ten_seconds_not_every_tick
     let settled = f.gets();
     ticks(&mut f, start + 1_000, 59).await;
     // The old loop made 59 more GETs here; now one at 10, 20, 30, 40 and 50 seconds.
-    assert_eq!(f.gets() - settled, 5, "an attached unpushed seat was checked {} times in 59 ticks", f.gets() - settled);
+    assert_eq!(
+        f.gets() - settled,
+        5,
+        "an attached unpushed seat was checked {} times in 59 ticks",
+        f.gets() - settled
+    );
     assert_eq!(f.codes(), vec!["claude-channel-attached"]);
 
     // The channel detaches: the next recheck, at most ten seconds later, sees and publishes it.
@@ -1446,7 +1458,11 @@ async fn an_unpushed_settled_phase_is_rechecked_every_ten_seconds_not_every_tick
     );
     // Blocked is settled too.
     ticks(&mut f, start + 70_000, 60).await;
-    assert!(f.gets() <= gets + 8, "{} checks in 70 blocked ticks", f.gets() - gets);
+    assert!(
+        f.gets() <= gets + 8,
+        "{} checks in 70 blocked ticks",
+        f.gets() - gets
+    );
 
     // A replacement binding is never held back by its predecessor's poll.
     let now = start + 125_000;
@@ -1600,7 +1616,10 @@ async fn a_daemon_that_cannot_answer_yet_never_blocks_an_attached_channel() {
 async fn a_check_the_daemon_is_too_slow_to_answer_does_not_block_the_channel() {
     let mut f = Fixture::new().await;
     f.control.attachment_delay_ms.store(2_200, Ordering::SeqCst);
-    assert!(f.check().await.is_err(), "the publication's own check timed out too");
+    assert!(
+        f.check().await.is_err(),
+        "the publication's own check timed out too"
+    );
     let pending = f.state.claude_attachment_pending.as_ref().unwrap();
     assert_eq!(pending.phase, "starting");
     let reason = pending.input.fields["reason"].as_str().unwrap();

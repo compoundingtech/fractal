@@ -1,6 +1,5 @@
 //! `st ui open` against the real terminal interface: a seat asks, in a separate process, for an
 //! agent or a mission to be shown in a tab or a split, and the picture in a PTY changes.
-use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::Dimensions,
@@ -8,9 +7,10 @@ use alacritty_terminal::{
     term::{Config, Term},
     vte::ansi::Processor,
 };
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use fractal_daemon::{api::AppState, store::Store};
 use fractal_client::Client;
+use fractal_daemon::SeatsStoreCore;
+use fractal_daemon::{api::AppState, store::Store};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -150,19 +150,23 @@ fn state(root: &Path, node: &str) -> AppState {
     // a publisher reading claims while the seat asks gave `503 database-locked: database table is
     // locked: claims` from `st work ask`.
     let store = Store::open(&root.join("claims.sqlite3"), node).unwrap();
-    AppState { owning_person: None,
-    store: Arc::new(store),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: node.into(),
-    state_dir: root.into(),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("unused-pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(store),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 /// A store holding `sources`, served on a unix socket for `PERSON`.

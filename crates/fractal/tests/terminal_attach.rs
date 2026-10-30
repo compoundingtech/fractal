@@ -14,10 +14,10 @@ use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
+use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 
 const SUBJECT: &str = "agent/example/worker";
@@ -26,19 +26,23 @@ const CREATED_AT: &str = "2026-09-29T08:00:00.000Z";
 const SCREEN: &[u8] = b"the worker's screen";
 
 pub(crate) fn state(root: &Path) -> AppState {
-    AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("attach-node").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "attach-node".into(),
-    state_dir: root.join("daemon"),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("bin/pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(Store::open_memory("attach-node").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "attach-node".into(),
+        state_dir: root.join("daemon"),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("bin/pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 /// The reconciler's observation of the running terminal.
@@ -236,7 +240,9 @@ async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
     let mut command = fractal_daemon::test_support::command(binary);
     // An operator command: the harness running the suite must not lend its seat identity, and
     // its own PTY session must not trip the nested-attach guard.
-    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    command
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("ST3_ENDPOINT")
@@ -262,7 +268,9 @@ async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
 async fn configured_attach(root: &Path, daemon_wait: &str) -> (Output, u32, Duration) {
     let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut command = fractal_daemon::test_support::command(binary);
-    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    command
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("ST3_ENDPOINT")
@@ -287,7 +295,8 @@ async fn configured_attach(root: &Path, daemon_wait: &str) -> (Output, u32, Dura
 pub(crate) async fn serve_unix(state: AppState, socket: &Path) -> tokio::task::JoinHandle<()> {
     let server_socket = socket.to_path_buf();
     let server = tokio::spawn(async move {
-        let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await;
+        let _ = fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
+            .await;
     });
     let deadline = Instant::now() + Duration::from_secs(5);
     while std::os::unix::net::UnixStream::connect(socket).is_err() {
@@ -583,7 +592,9 @@ async fn waiting_on_a_daemon_that_does_not_answer_says_so() {
     // No PTY session of the subject runs on this host, so only the daemon can attach it.
     ConfiguredRegistry::new(root.path());
     let binary = test_bin!("fractal-fixture").to_path_buf();
-    let mut child = fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let mut child = fractal_daemon::test_support::command(binary)
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("ST3_ENDPOINT")
@@ -737,8 +748,11 @@ fn fabric_tunnel(
     let terminal_socket = socket.with_file_name("owner-terminals.sock");
     if let Exposure::Socket = exposure {
         std::mem::forget(
-            fractal_daemon::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root.clone())
-                .unwrap(),
+            fractal_daemon::terminal_fabric::TerminalSocket::start(
+                &terminal_socket,
+                pty_root.clone(),
+            )
+            .unwrap(),
         );
     }
     std::thread::spawn(move || {
@@ -765,7 +779,9 @@ fn fabric_tunnel(
                 Some(std::process::id())
             }
             Exposure::Exec => {
-                let mut serve = fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+                let mut serve = fractal_daemon::test_support::command(binary)
+                    .env_remove("ST_AGENT")
+                    .env_remove("FRACTAL_AGENT")
                     .env_remove("PTY_SESSION")
                     .args(["terminals", "serve-fabric", "--stdio", "--pty-root"])
                     .arg(&pty_root)
@@ -807,7 +823,9 @@ fn forward(tunnel: std::os::unix::net::UnixStream, service: std::os::unix::net::
 async fn remote_attach(root: &Path, endpoint: &str) -> Output {
     let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut command = fractal_daemon::test_support::command(binary);
-    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    command
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("ST3_ENDPOINT")
@@ -965,7 +983,9 @@ async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
     remote_terminal(root.path(), &incarnation(CREATED_AT));
     fabric_shim(root.path(), None);
     let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
-    command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    command
+        .env_remove("ST_AGENT")
+        .env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_STATE_HOME", root.path().join("state"))

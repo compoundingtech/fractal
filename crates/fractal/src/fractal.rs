@@ -33,10 +33,15 @@ pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
     let url = match std::env::var("FRACTAL_WEB_URL") {
         Ok(url) => url,
         Err(std::env::VarError::NotPresent) => {
-            let path = explicit_state.or_else(|| {
-                fractal_daemon::config::Config::load_unvalidated(None).ok().map(|config| config.state_dir)
-            }).map(|state| state.join("web-launch-url"));
-            let result = path.ok_or_else(|| anyhow::anyhow!("cannot resolve daemon state directory"))
+            let path = explicit_state
+                .or_else(|| {
+                    fractal_daemon::config::Config::load_unvalidated(None)
+                        .ok()
+                        .map(|config| config.state_dir)
+                })
+                .map(|state| state.join("web-launch-url"));
+            let result = path
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve daemon state directory"))
                 .and_then(|path| {
                     use std::io::Read as _;
                     let mut file = fractal_daemon::config::open_token_file(&path)?;
@@ -47,7 +52,9 @@ pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
             match result {
                 Ok(url) => url,
                 Err(error) => {
-                    eprintln!("fractal web: {error:#}; start the daemon with built web assets first");
+                    eprintln!(
+                        "fractal web: {error:#}; start the daemon with built web assets first"
+                    );
                     return ExitCode::from(1);
                 }
             }
@@ -112,8 +119,20 @@ mod tests {
     fn tui_alias_reuses_ui_arguments_with_global_endpoint() {
         for arguments in [
             &["fractal", "tui", "--demo"][..],
-            &["fractal", "--endpoint", "http://localhost:7410", "tui", "--demo"],
-            &["fractal", "tui", "--endpoint", "http://localhost:7410", "--demo"],
+            &[
+                "fractal",
+                "--endpoint",
+                "http://localhost:7410",
+                "tui",
+                "--demo",
+            ],
+            &[
+                "fractal",
+                "tui",
+                "--endpoint",
+                "http://localhost:7410",
+                "--demo",
+            ],
         ] {
             let cli = parse(arguments);
             assert!(matches!(cli.command, crate::Command::Ui(options) if options.demo));

@@ -1,9 +1,9 @@
-use serde_json::json;
 use fractal_daemon::api::{AppState, router, serve_unix};
 use fractal_daemon::backup;
 use fractal_daemon::client::{Client, Endpoint};
 use fractal_daemon::model::ClaimInput;
 use fractal_daemon::store::Store;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +11,8 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
 fn backup_cli(root: &Path, socket: &Path) -> tokio::process::Command {
-    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
+    let mut command =
+        fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     command.env("XDG_CONFIG_HOME", root.join("config"));
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_DATA_HOME", root.join("data"));
@@ -49,19 +50,23 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
             .unwrap();
     }
     let socket = root.path().join("api.sock");
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "alder".into(),
-    state_dir: root.path().into(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "alder".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -139,33 +144,62 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
 async fn a_streamed_export_failure_names_the_cause_and_never_publishes_a_cli_backup() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join("config/st3")).unwrap();
-    std::fs::write(root.path().join("config/st3/config.toml"), "node = \"alder\"\n").unwrap();
+    std::fs::write(
+        root.path().join("config/st3/config.toml"),
+        "node = \"alder\"\n",
+    )
+    .unwrap();
     let socket = root.path().join("error.sock");
     let server_socket = socket.clone();
-    let router = axum::Router::new().route("/v1/backup", axum::routing::get(|| async {
-        let mut bytes = serde_json::to_vec(&backup::Record::Failure {
-            code: "backup-fixture-io".into(),
-            message: "export fixture ran out of disk space".into(),
-        }).unwrap();
-        bytes.push(b'\n');
-        ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")], bytes)
-    }));
-    let server = tokio::spawn(async move { serve_unix(&server_socket, router).await.unwrap(); });
+    let router = axum::Router::new().route(
+        "/v1/backup",
+        axum::routing::get(|| async {
+            let mut bytes = serde_json::to_vec(&backup::Record::Failure {
+                code: "backup-fixture-io".into(),
+                message: "export fixture ran out of disk space".into(),
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+                bytes,
+            )
+        }),
+    );
+    let server = tokio::spawn(async move {
+        serve_unix(&server_socket, router).await.unwrap();
+    });
     // A missing endpoint is the only startup condition being awaited here.
     for _ in 0..100 {
-        if socket.exists() { break; }
+        if socket.exists() {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let archive = root.path().join("failed-backup.jsonl");
     let output = backup_cli(root.path(), &socket)
-        .args(["backup", "create"]).arg(&archive).output().await.unwrap();
+        .args(["backup", "create"])
+        .arg(&archive)
+        .output()
+        .await
+        .unwrap();
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("backup-fixture-io"), "{error}");
-    assert!(error.contains("export fixture ran out of disk space"), "{error}");
+    assert!(
+        error.contains("export fixture ran out of disk space"),
+        "{error}"
+    );
     assert!(!archive.exists());
-    assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| {
-        entry.unwrap().file_name().to_string_lossy().starts_with(".tmp")
-    }), "the failed download must also remove its private temporary file");
+    assert!(
+        !std::fs::read_dir(root.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tmp")
+        }),
+        "the failed download must also remove its private temporary file"
+    );
     server.abort();
 }

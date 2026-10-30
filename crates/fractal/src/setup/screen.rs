@@ -56,7 +56,11 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
             row.selected = &row.id == requested && row.facts.found.is_some();
         }
         anyhow::ensure!(
-            requested == "none" || form.rows.iter().any(|row| &row.id == requested && row.selected),
+            requested == "none"
+                || form
+                    .rows
+                    .iter()
+                    .any(|row| &row.id == requested && row.selected),
             "{requested} is not installed on the daemon's login PATH; install it and open a new login shell, then run fractal setup"
         );
     }
@@ -89,7 +93,9 @@ pub(super) async fn run(start: Start) -> Result<PreparedSetup> {
         }
         match &row.outcome {
             Some(Outcome::Ready(note)) => println!("{}: ready. {note}", row.name),
-            Some(Outcome::NeedsLogin(note)) => println!("{}: needs you to sign in. {note}", row.name),
+            Some(Outcome::NeedsLogin(note)) => {
+                println!("{}: needs you to sign in. {note}", row.name)
+            }
             Some(Outcome::Failed(error)) => println!("{}: failed. {error}", row.name),
             None => {}
         }
@@ -118,7 +124,8 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
     let login_note = if cfg!(target_os = "macos") {
         format!(
             "Installs a launch agent for Fractal in {}/Library/LaunchAgents. No admin rights. Remove it with {} service uninstall.",
-            home.display(), start.args.program()
+            home.display(),
+            start.args.program()
         )
     } else {
         let config_home = environment
@@ -127,7 +134,8 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
             .unwrap_or_else(|| home.join(".config"));
         format!(
             "Installs a systemd user service at {}/systemd/user/st3.service. No admin rights. Remove it with {} service uninstall.",
-            config_home.display(), start.args.program()
+            config_home.display(),
+            start.args.program()
         )
     };
     Form {
@@ -312,14 +320,20 @@ pub(super) fn signin(id: &str, environment: &BTreeMap<String, String>, home: &Pa
                 .get("hasCompletedOnboarding")
                 .and_then(serde_json::Value::as_bool)
                 .map_or(Tri::No, |done| if done { Tri::Yes } else { Tri::No });
-            let signed_in = if json.get("oauthAccount").is_some_and(serde_json::Value::is_object) {
+            let signed_in = if json
+                .get("oauthAccount")
+                .is_some_and(serde_json::Value::is_object)
+            {
                 Tri::Yes
             } else if key {
                 Tri::Unknown
             } else {
                 Tri::No
             };
-            Signin { first_run, signed_in }
+            Signin {
+                first_run,
+                signed_in,
+            }
         }
         "codex" => {
             let dir = environment
@@ -327,7 +341,8 @@ pub(super) fn signin(id: &str, environment: &BTreeMap<String, String>, home: &Pa
                 .filter(|dir| !dir.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".codex"));
-            let has_login = read_small(&dir.join("auth.json")).is_some_and(|text| text.trim().len() > 2);
+            let has_login =
+                read_small(&dir.join("auth.json")).is_some_and(|text| text.trim().len() > 2);
             Signin {
                 first_run: Tri::Unknown,
                 signed_in: if has_login {
@@ -364,23 +379,34 @@ fn needs_you(state: Signin) -> bool {
 
 fn sign_in_words(id: &str) -> &'static str {
     match id {
-        "claude" => "Claude is installed, but its first launch or sign-in is not finished. Run claude in your own terminal, pick a theme and sign in, then retry.",
-        "codex" => "Codex is installed, but not signed in. Run codex login in your own terminal, then retry.",
-        _ => "OpenCode is installed, but not signed in. Run opencode auth login in your own terminal, then retry.",
+        "claude" => {
+            "Claude is installed, but its first launch or sign-in is not finished. Run claude in your own terminal, pick a theme and sign in, then retry."
+        }
+        "codex" => {
+            "Codex is installed, but not signed in. Run codex login in your own terminal, then retry."
+        }
+        _ => {
+            "OpenCode is installed, but not signed in. Run opencode auth login in your own terminal, then retry."
+        }
     }
 }
 
 /// Run a harness's own first launch in this terminal, so the person can finish it, and return
 /// when they leave it.
 fn hand_over(id: &str) -> Result<(), String> {
-    let environment = fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
-    let program = fractal_runtime::resolve_executable(id, &environment).map_err(|error| format!("{error:#}"))?;
+    let environment =
+        fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
+    let program = fractal_runtime::resolve_executable(id, &environment)
+        .map_err(|error| format!("{error:#}"))?;
     let (arguments, note): (&[&str], &str) = match id {
         "claude" => (
             &[],
             "Claude is starting so you can pick a theme and sign in. Leave it with /exit when you are done, and setup carries on.",
         ),
-        "codex" => (&["login"], "Codex is asking you to sign in. Setup carries on when it finishes."),
+        "codex" => (
+            &["login"],
+            "Codex is asking you to sign in. Setup carries on when it finishes.",
+        ),
         "opencode" => (
             &["auth", "login"],
             "OpenCode is asking you to sign in. Setup carries on when it finishes.",
@@ -421,15 +447,24 @@ fn starts(program: &Path, environment: &BTreeMap<String, String>) -> Result<Stri
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{} did not answer --version within 15 seconds", program.display()));
+                return Err(format!(
+                    "{} did not answer --version within 15 seconds",
+                    program.display()
+                ));
             }
             Err(error) => return Err(error.to_string()),
         }
     }
-    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| error.to_string())?;
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_owned();
     if output.status.success() {
-        Ok(text(&output.stdout).lines().next().unwrap_or_default().to_owned())
+        Ok(text(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned())
     } else {
         Err(format!(
             "{} --version failed ({}): {}{}",
@@ -550,7 +585,11 @@ async fn stages(
             .await
             .map_err(|error| anyhow::anyhow!("{name}: {error}"))?;
         if matches!(outcome, Outcome::Ready(_)) {
-            shared.lock().expect("result lock").ready.push(row.id.clone());
+            shared
+                .lock()
+                .expect("result lock")
+                .ready
+                .push(row.id.clone());
         }
         reporter.row(&row.id, outcome);
     }
@@ -558,13 +597,23 @@ async fn stages(
     // The Assistant starts while the screen is still up, once something is ready to run it.
     let (harness, ready, started) = {
         let shared = shared.lock().expect("result lock");
-        (shared.ready.first().cloned(), shared.ready.clone(), shared.started_assistant)
+        (
+            shared.ready.first().cloned(),
+            shared.ready.clone(),
+            shared.started_assistant,
+        )
     };
     if let (Some(harness), false) = (harness, started) {
         if daemon_ready(&next).await {
             reporter.step("Starting the Assistant");
-            let subject =
-                crate::onboarding::start(&next, &harness, &ready, start.args.onboarding, start.args.program()).await?;
+            let subject = crate::onboarding::start(
+                &next,
+                &harness,
+                &ready,
+                start.args.onboarding,
+                start.args.program(),
+            )
+            .await?;
             let mut shared = shared.lock().expect("result lock");
             shared.started_assistant = true;
             shared.harness = Some(harness);
@@ -574,7 +623,10 @@ async fn stages(
                 !start.args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            said(format!("Start the Fractal daemon and run {} setup to begin onboarding.", start.args.program()));
+            said(format!(
+                "Start the Fractal daemon and run {} setup to begin onboarding.",
+                start.args.program()
+            ));
         }
     }
     Ok(())
@@ -599,7 +651,9 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
     let mut note = String::new();
     if id == "claude" {
         if let Err(error) = ensure_claude_channel(executable) {
-            return Outcome::Failed(format!("The Fractal channel plugin could not be installed: {error}"));
+            return Outcome::Failed(format!(
+                "The Fractal channel plugin could not be installed: {error}"
+            ));
         }
         facts.integration = Tri::Yes;
         note.push_str(if fractal_drivers::claude_channel::fractal_policy_available() {
@@ -611,14 +665,28 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
         match starts(&program, &environment) {
             Ok(version) => {
                 facts.integration = Tri::Yes;
-                note.push_str(&format!("{} starts{}.", id, if version.is_empty() { String::new() } else { format!(" ({version})") }));
+                note.push_str(&format!(
+                    "{} starts{}.",
+                    id,
+                    if version.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({version})")
+                    }
+                ));
             }
             Err(error) => return Outcome::Failed(error),
         }
     }
     let mut state = signin(id, &environment, &home);
     if needs_you(state) && matches!(id, "claude" | "codex" | "opencode") {
-        reporter.facts(id, Facts { signed_in: state.signed_in, ..facts.clone() });
+        reporter.facts(
+            id,
+            Facts {
+                signed_in: state.signed_in,
+                ..facts.clone()
+            },
+        );
         reporter.handover(id);
         fractal_daemon::environment::refresh();
         state = signin(id, &environment, &home);
@@ -649,10 +717,22 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let env = environment(home.path());
         let state = signin("claude", &env, home.path());
-        assert_eq!((state.first_run, state.signed_in), (Tri::No, Tri::No), "never run");
-        std::fs::write(home.path().join(".claude.json"), r#"{"hasCompletedOnboarding":true}"#).unwrap();
+        assert_eq!(
+            (state.first_run, state.signed_in),
+            (Tri::No, Tri::No),
+            "never run"
+        );
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"hasCompletedOnboarding":true}"#,
+        )
+        .unwrap();
         let state = signin("claude", &env, home.path());
-        assert_eq!((state.first_run, state.signed_in), (Tri::Yes, Tri::No), "first run done, no account");
+        assert_eq!(
+            (state.first_run, state.signed_in),
+            (Tri::Yes, Tri::No),
+            "first run done, no account"
+        );
         std::fs::write(
             home.path().join(".claude.json"),
             r#"{"hasCompletedOnboarding":true,"oauthAccount":{"emailAddress":"ada@example.com"}}"#,
@@ -662,7 +742,11 @@ mod tests {
         assert_eq!((state.first_run, state.signed_in), (Tri::Yes, Tri::Yes));
         assert!(!needs_you(state));
         std::fs::write(home.path().join(".claude.json"), "{ not json").unwrap();
-        assert_eq!(signin("claude", &env, home.path()).signed_in, Tri::Unknown, "unreadable is unknown, not signed out");
+        assert_eq!(
+            signin("claude", &env, home.path()).signed_in,
+            Tri::Unknown,
+            "unreadable is unknown, not signed out"
+        );
     }
 
     #[test]
@@ -686,7 +770,10 @@ mod tests {
         )
         .unwrap();
         let mut env = environment(home.path());
-        env.insert("CLAUDE_CONFIG_DIR".into(), other.path().display().to_string());
+        env.insert(
+            "CLAUDE_CONFIG_DIR".into(),
+            other.path().display().to_string(),
+        );
         assert_eq!(signin("claude", &env, home.path()).signed_in, Tri::Yes);
     }
 
@@ -700,7 +787,11 @@ mod tests {
         assert_eq!(signin("codex", &env, home.path()).signed_in, Tri::Yes);
         assert_eq!(signin("opencode", &env, home.path()).signed_in, Tri::No);
         std::fs::create_dir_all(home.path().join(".local/share/opencode")).unwrap();
-        std::fs::write(home.path().join(".local/share/opencode/auth.json"), r#"{"example":{"type":"api"}}"#).unwrap();
+        std::fs::write(
+            home.path().join(".local/share/opencode/auth.json"),
+            r#"{"example":{"type":"api"}}"#,
+        )
+        .unwrap();
         assert_eq!(signin("opencode", &env, home.path()).signed_in, Tri::Yes);
         // Pi and Omp keep sign-in in ways st does not read: it says it does not know.
         assert_eq!(signin("pi", &env, home.path()).signed_in, Tri::Unknown);
@@ -715,7 +806,8 @@ mod tests {
         for name in ["claude", "omp"] {
             let path = bin.join(name);
             std::fs::write(&path, "#!/bin/sh\necho 1.0\n").unwrap();
-            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
         }
         let mut env = environment(home.path());
         env.insert("PATH".into(), bin.display().to_string());
@@ -724,29 +816,65 @@ mod tests {
             rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["claude", "codex", "opencode", "pi", "omp"]
         );
-        let found = rows.iter().filter(|row| row.facts.found.is_some()).map(|row| row.id.as_str()).collect::<Vec<_>>();
+        let found = rows
+            .iter()
+            .filter(|row| row.facts.found.is_some())
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(found, ["claude", "omp"]);
-        assert!(rows.iter().all(|row| row.selected == row.facts.found.is_some()));
-        assert!(rows.iter().all(|row| row.facts.integration == Tri::Unknown), "nothing has checked an integration yet");
+        assert!(
+            rows.iter()
+                .all(|row| row.selected == row.facts.found.is_some())
+        );
+        assert!(
+            rows.iter().all(|row| row.facts.integration == Tri::Unknown),
+            "nothing has checked an integration yet"
+        );
         let claude = &rows[0];
-        assert!(claude.sets_up.contains("claude-channel/marketplace"), "{}", claude.sets_up);
-        assert!(claude.sets_up.contains(&format!("{}/.claude", home.path().display())), "{}", claude.sets_up);
-        assert!(rows[1].install_hint.contains("press r"), "a missing agent says how to get it");
+        assert!(
+            claude.sets_up.contains("claude-channel/marketplace"),
+            "{}",
+            claude.sets_up
+        );
+        assert!(
+            claude
+                .sets_up
+                .contains(&format!("{}/.claude", home.path().display())),
+            "{}",
+            claude.sets_up
+        );
+        assert!(
+            rows[1].install_hint.contains("press r"),
+            "a missing agent says how to get it"
+        );
     }
 
     #[test]
     fn a_program_that_cannot_start_is_reported_whole() {
         let home = tempfile::tempdir().unwrap();
         let broken = home.path().join("codex");
-        std::fs::write(&broken, "#!/bin/sh\necho 'cannot load libexample.so' >&2\nexit 3\n").unwrap();
-        std::fs::set_permissions(&broken, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::write(
+            &broken,
+            "#!/bin/sh\necho 'cannot load libexample.so' >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&broken, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         let error = starts(&broken, &BTreeMap::new()).unwrap_err();
         assert!(error.contains("cannot load libexample.so"), "{error}");
-        assert!(error.contains("exit status: 3") || error.contains("3"), "{error}");
+        assert!(
+            error.contains("exit status: 3") || error.contains("3"),
+            "{error}"
+        );
         let good = home.path().join("good");
         std::fs::write(&good, "#!/bin/sh\necho 'good 2.5'\n").unwrap();
-        std::fs::set_permissions(&good, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&good, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
         assert_eq!(starts(&good, &BTreeMap::new()).unwrap(), "good 2.5");
-        assert!(starts(&home.path().join("absent"), &BTreeMap::new()).unwrap_err().contains("could not be started"));
+        assert!(
+            starts(&home.path().join("absent"), &BTreeMap::new())
+                .unwrap_err()
+                .contains("could not be started")
+        );
     }
 }

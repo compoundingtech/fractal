@@ -166,7 +166,8 @@ pub(super) async fn run_message(
     match command {
         MessageCommand::Send(args) => {
             if !args.print_kdl {
-                preflight_message_recipient(client, &args.to, args.allow_undeclared_recipient).await?;
+                preflight_message_recipient(client, &args.to, args.allow_undeclared_recipient)
+                    .await?;
             }
             let attachments = if args.attach.is_empty() {
                 Vec::new()
@@ -180,9 +181,15 @@ pub(super) async fn run_message(
             // The message has landed. A projection that misses it catches up on the next command;
             // failing here would invite a resend of a message that was sent.
             if let Err(error) = sync_message_projection(client).await {
-                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
-                receipt.idempotency_key,
-                plain_error(&error)));
+                crate::stderr_message(
+                    "st",
+                    format_args!(
+                        "{} was sent (idempotency key {}), but the message projection was not refreshed: {}",
+                        receipt.message.subject,
+                        receipt.idempotency_key,
+                        plain_error(&error)
+                    ),
+                );
             }
             print_message_receipt(&receipt, json_output)
         }
@@ -207,7 +214,11 @@ pub(super) async fn run_message(
                 args.identity.clone().or(args.actor.clone()),
                 fractal_drivers::contracts::env("ST_AGENT"),
             )?;
-            let actor = args.actor.as_deref().map(normalize_message_subject).unwrap_or_else(|| identity.clone());
+            let actor = args
+                .actor
+                .as_deref()
+                .map(normalize_message_subject)
+                .unwrap_or_else(|| identity.clone());
             reject_foreign_agent_actor(&actor)?;
             let sender = args.sender.map(|sender| normalize_message_subject(&sender));
             let mut count = 0_u64;
@@ -281,7 +292,9 @@ pub(super) async fn run_message(
             } else if json_output {
                 println!("]");
             } else {
-                if actor != identity { println!("Mail for {identity}; acting as {actor} on its behalf"); }
+                if actor != identity {
+                    println!("Mail for {identity}; acting as {actor} on its behalf");
+                }
                 print!(
                     "{}",
                     render_mailbox(&identity, sender.as_deref(), args.archive, &rows)
@@ -306,7 +319,9 @@ pub(super) async fn run_message(
                     let mut value = serde_json::to_value(message)?;
                     if message.body_ref.is_some() {
                         // `content` is only the preview; `text` is the whole message.
-                        value["text"] = fractal_daemon::message_body::full_text(client, message).await?.into();
+                        value["text"] = fractal_daemon::message_body::full_text(client, message)
+                            .await?
+                            .into();
                     }
                     if let Some(provenance) = message_provenance(client, &message.subject).await {
                         value["provenance"] = provenance;
@@ -332,7 +347,8 @@ pub(super) async fn run_message(
                     } else {
                         println!("Message: {}", message.subject);
                         println!("From: {}", message.from);
-                        if let Some(provenance) = message_provenance(client, &message.subject).await {
+                        if let Some(provenance) = message_provenance(client, &message.subject).await
+                        {
                             println!("Signed: {}", provenance_line(&provenance));
                         }
                         println!("To: {}", message.to);
@@ -400,7 +416,8 @@ pub(super) async fn run_message(
             print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Wait(args) => {
-            let actor = message_list_identity(args.actor, fractal_drivers::contracts::env("ST_AGENT"))?;
+            let actor =
+                message_list_identity(args.actor, fractal_drivers::contracts::env("ST_AGENT"))?;
             reject_foreign_agent_actor(&actor)?;
             let sender = normalize_message_subject(&args.sender);
             let timeout = parse_timeout(&args.timeout)?;
@@ -414,29 +431,42 @@ pub(super) async fn run_message(
             };
             let reply = wait_for_reply(client, &actor, &sender, after, timeout).await?;
             let reply = match reply {
-                Some(message) => {
-                    Some(read_message_after_lifecycle(client, &message.subject, &actor, false).await?)
-                }
+                Some(message) => Some(
+                    read_message_after_lifecycle(client, &message.subject, &actor, false).await?,
+                ),
                 None => None,
             };
             sync_message_projection(client).await?;
             print_reply_wait(reply.as_ref(), json_output)
         }
-        MessageCommand::Cleanup { all, actor, older_than, dry_run } => {
+        MessageCommand::Cleanup {
+            all,
+            actor,
+            older_than,
+            dry_run,
+        } => {
             if let Some(actor) = actor.as_deref() {
                 reject_foreign_agent_actor(actor)?;
             }
             let older_than_ms = fractal_daemon::graph::parse_duration(&older_than, true)?;
             let result: Value = client
-                .post("/v1/messages/cleanup", &json!({
-                    "older_than_ms": older_than_ms, "to": actor, "all": all, "dry_run": dry_run,
-                }))
+                .post(
+                    "/v1/messages/cleanup",
+                    &json!({
+                        "older_than_ms": older_than_ms, "to": actor, "all": all, "dry_run": dry_run,
+                    }),
+                )
                 .await?;
             sync_message_projection(client).await?;
             if json_output {
                 print_value(&result, true)
             } else {
-                println!("{} {} unread messages older than {}", if dry_run { "Would archive" } else { "Archived" }, result["count"], older_than);
+                println!(
+                    "{} {} unread messages older than {}",
+                    if dry_run { "Would archive" } else { "Archived" },
+                    result["count"],
+                    older_than
+                );
                 if dry_run {
                     for id in result["messages"].as_array().into_iter().flatten() {
                         if let Some(id) = id.as_str() {
@@ -716,7 +746,12 @@ fn earliest_reply(messages: Vec<MessageView>, sender: &str, after: u64) -> Optio
         .min_by_key(|message| message.created_index)
 }
 
-async fn unread_replies(client: &Client, actor: &str, sender: &str, after: u64) -> Result<Option<MessageView>> {
+async fn unread_replies(
+    client: &Client,
+    actor: &str,
+    sender: &str,
+    after: u64,
+) -> Result<Option<MessageView>> {
     let mut candidates = Vec::new();
     for_each_message(client, Some(actor), false, |message| {
         candidates.push(message);
@@ -739,8 +774,14 @@ fn may_be_reply(event: &EventRecord, actor: &str, sender: &str) -> bool {
     if event.kind != "message.sent" || !event.subject.starts_with("message/") {
         return false;
     }
-    let endpoint = |name: &str| event.body.pointer(&format!("/fields/{name}")).and_then(Value::as_str);
-    endpoint("to").is_none_or(|to| to == actor) && endpoint("from").is_none_or(|from| from == sender)
+    let endpoint = |name: &str| {
+        event
+            .body
+            .pointer(&format!("/fields/{name}"))
+            .and_then(Value::as_str)
+    };
+    endpoint("to").is_none_or(|to| to == actor)
+        && endpoint("from").is_none_or(|from| from == sender)
 }
 
 /// Wait until `sender` writes to `actor` or the deadline passes. The graph's event feed wakes the
@@ -773,7 +814,9 @@ async fn wait_for_reply(
     loop {
         let mut remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if let Some(last) = last_read {
-            let pause = REPLY_WAIT_PACE.saturating_sub(last.elapsed()).min(remaining);
+            let pause = REPLY_WAIT_PACE
+                .saturating_sub(last.elapsed())
+                .min(remaining);
             if !pause.is_zero() {
                 tokio::time::sleep(pause).await;
                 remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -785,7 +828,10 @@ async fn wait_for_reply(
         last_read = Some(tokio::time::Instant::now());
         let wait_ms = remaining.as_millis().clamp(1, 30_000);
         let page = event_feed
-            .read(client, &format!("after={cursor}&wait=true&timeout_ms={wait_ms}"))
+            .read(
+                client,
+                &format!("after={cursor}&wait=true&timeout_ms={wait_ms}"),
+            )
             .await?;
         for event in &page.items {
             if event.store_index <= floor || !may_be_reply(event, actor, sender) {

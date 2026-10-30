@@ -6,7 +6,8 @@ use fractal_daemon::client::FollowTestReply as Reply;
 const SUBJECT: &str = "host/follow-fixture";
 const RUN: &str = "mission-run/example/follow-fixture";
 const RUN_PATH: &str = "/v1/mission-runs/mission-run%2Fexample%2Ffollow-fixture";
-const TREE_PATH: &str = "/v1/mission-runs/tree?root=mission-run%2Fexample%2Ffollow-fixture&limit=50";
+const TREE_PATH: &str =
+    "/v1/mission-runs/tree?root=mission-run%2Fexample%2Ffollow-fixture&limit=50";
 
 struct FollowOutput {
     result: Result<()>,
@@ -246,9 +247,8 @@ async fn trace_follow_refuses_an_endpoint_version_transition_without_entering_le
     let message = output.result.unwrap_err().to_string();
     assert!(message.contains("2026-10-16 13:50 UTC"));
     assert!(
-        message.contains(
-            "https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh"
-        )
+        message
+            .contains("https://raw.githubusercontent.com/compoundingtech/fractal/main/install.sh")
     );
     assert!(message.contains("--edge --no-run"));
     assert!(message.contains("If the daemon just restarted"));
@@ -502,19 +502,33 @@ async fn mission_follow_honors_page_limit_and_refreshes_when_lookahead_appears()
             (RUN_PATH.into(), Reply::Value(running.clone())),
             (tree_path.clone(), Reply::Value(tree(running.clone(), None))),
             (RUN_PATH.into(), Reply::Value(running.clone())),
-            (tree_path.clone(), Reply::Value(tree(running, Some("page-child-020")))),
+            (
+                tree_path.clone(),
+                Reply::Value(tree(running, Some("page-child-020"))),
+            ),
             (RUN_PATH.into(), Reply::Value(finished.clone())),
-            (tree_path.clone(), Reply::Value(tree(finished, Some("page-child-020")))),
+            (
+                tree_path.clone(),
+                Reply::Value(tree(finished, Some("page-child-020"))),
+            ),
         ],
     )
     .await;
     assert!(output.result.is_ok(), "{}", stderr(&output));
     assert_eq!(
-        output.requests.iter().filter(|(path, _)| path == &tree_path).count(),
+        output
+            .requests
+            .iter()
+            .filter(|(path, _)| path == &tree_path)
+            .count(),
         3
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(stdout.matches("STATE     running · normal").count(), 2, "{stdout}");
+    assert_eq!(
+        stdout.matches("STATE     running · normal").count(),
+        2,
+        "{stdout}"
+    );
     assert_eq!(stdout.matches("More runs follow").count(), 2, "{stdout}");
     assert!(stdout.contains("--cursor page-child-020 --limit 20"));
 }

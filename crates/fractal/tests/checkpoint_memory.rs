@@ -58,7 +58,10 @@ fn peak_during<T>(work: impl FnOnce() -> T) -> (T, usize) {
     let baseline = LIVE.load(Ordering::Relaxed);
     PEAK.store(baseline, Ordering::Relaxed);
     let result = work();
-    (result, PEAK.load(Ordering::Relaxed).saturating_sub(baseline))
+    (
+        result,
+        PEAK.load(Ordering::Relaxed).saturating_sub(baseline),
+    )
 }
 
 const MIB: usize = 1024 * 1024;
@@ -123,7 +126,9 @@ struct Pass {
 fn pass(claims: usize) -> Pass {
     // A checkpoint refuses a filesystem with too little room, and its budget is about a disk.
     let directory = fractal_daemon::test_support::disk_tempdir();
-    let store = fractal_daemon::store::Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
+    let store =
+        fractal_daemon::store::Store::open(&directory.path().join("claims.sqlite3"), "alder")
+            .unwrap();
     // The trim rests at least 100 ms after each 20 ms chunk so a daemon's writer keeps up. A
     // rest allocates nothing, and trim pacing has its own tests; without the rests this measures
     // the same heap with a sixth of the trim's wall time.
@@ -140,12 +145,17 @@ fn pass(claims: usize) -> Pass {
             (staged, plan)
         });
         assert_eq!(plan.sealed_claims, claims);
-        let (proof, proof_peak) =
-            peak_during(|| store.prove_staged_checkpoint_plan(&staged, &plan, &scratch).unwrap());
+        let (proof, proof_peak) = peak_during(|| {
+            store
+                .prove_staged_checkpoint_plan(&staged, &plan, &scratch)
+                .unwrap()
+        });
         assert!(proof.passed, "{:?}", proof.mismatches);
         let ((), trim) = peak_during(|| {
             let mut actions = Vec::new();
-            store.trim_staged_checkpoint(&checkpoint, &staged, &plan, &mut actions).unwrap();
+            store
+                .trim_staged_checkpoint(&checkpoint, &staged, &plan, &mut actions)
+                .unwrap();
         });
         Pass {
             capture_and_plan,
@@ -172,15 +182,33 @@ fn a_checkpoint_pass_holds_a_fixed_budget_whatever_the_history() {
         );
     }
     // The writer's newest claim is the newest of its slot too, so its guard keeps nothing more.
-    assert_eq!(small.dropped, SMALL / 4 * 3, "the rule drops three of every four");
-    assert_eq!(large.dropped, LARGE / 4 * 3, "the rule drops three of every four");
+    assert_eq!(
+        small.dropped,
+        SMALL / 4 * 3,
+        "the rule drops three of every four"
+    );
+    assert_eq!(
+        large.dropped,
+        LARGE / 4 * 3,
+        "the rule drops three of every four"
+    );
     for (stage, small, large) in [
-        ("capture and plan", small.capture_and_plan, large.capture_and_plan),
+        (
+            "capture and plan",
+            small.capture_and_plan,
+            large.capture_and_plan,
+        ),
         ("proof", small.proof, large.proof),
         ("trim", small.trim, large.trim),
     ] {
-        assert!(small <= BUDGET, "{stage} holds {small} bytes at {SMALL} claims, above {BUDGET}");
-        assert!(large <= BUDGET, "{stage} holds {large} bytes at {LARGE} claims, above {BUDGET}");
+        assert!(
+            small <= BUDGET,
+            "{stage} holds {small} bytes at {SMALL} claims, above {BUDGET}"
+        );
+        assert!(
+            large <= BUDGET,
+            "{stage} holds {large} bytes at {LARGE} claims, above {BUDGET}"
+        );
         // Anything proportional to history grows four times; the fixed set does not.
         assert!(
             large <= small.max(MIB) * 3 / 2,

@@ -2,8 +2,7 @@ use super::*;
 
 fn fixture() -> (tempfile::TempDir, Arc<Store>) {
     let directory = tempfile::tempdir().unwrap();
-    let store =
-        Arc::new(Store::open(&directory.path().join("claims.sqlite3"), "node").unwrap());
+    let store = Arc::new(Store::open(&directory.path().join("claims.sqlite3"), "node").unwrap());
     store
         .append_claim(&smallclaims::ClaimInput {
             subject: "custom/test/clock-anchor".into(),

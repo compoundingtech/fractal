@@ -1,22 +1,26 @@
-use fractal_daemon::{api::AppState, store::Store};
 use fractal_client::{Client, CollectionEvent};
+use fractal_daemon::{api::AppState, store::Store};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::{Notify, watch};
 
 fn state(root: &Path) -> AppState {
-    AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("presence-test").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "presence-test".into(),
-    state_dir: root.into(),
-    pty_root: root.join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(Store::open_memory("presence-test").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "presence-test".into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 /// The clients st lists: a client that names itself and one that does not, a stream that
@@ -28,7 +32,9 @@ async fn clients_list_shows_streams_appearing_and_leaving_and_the_header_is_opti
     let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app)
+            .await
+            .unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -110,7 +116,9 @@ async fn a_collection_stream_answers_a_websocket_ping_without_a_request() {
     let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app)
+            .await
+            .unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -126,12 +134,19 @@ async fn a_collection_stream_answers_a_websocket_ping_without_a_request() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(matches!(first, CollectionEvent::Snapshot { .. }), "{first:?}");
+    assert!(
+        matches!(first, CollectionEvent::Snapshot { .. }),
+        "{first:?}"
+    );
     let heard = stream.heard();
     // Quiet: nothing arrives while nothing changes.
     let quiet = tokio::time::timeout(Duration::from_millis(1500), stream.next_event()).await;
     assert!(quiet.is_err(), "nothing was expected: {quiet:?}");
-    assert!(heard.quiet_for() >= Duration::from_millis(1200), "{:?}", heard.quiet_for());
+    assert!(
+        heard.quiet_for() >= Duration::from_millis(1200),
+        "{:?}",
+        heard.quiet_for()
+    );
     // A ping is answered: what it brings back is no frame, only the pong that resets the quiet.
     stream.ping().await.unwrap();
     // The pong is read as the stream is waited on, as the feed does, and is no event.
@@ -156,7 +171,9 @@ async fn an_observer_sees_request_and_frame_timings_without_contents() {
     let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app)
+            .await
+            .unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -179,7 +196,8 @@ async fn an_observer_sees_request_and_frame_timings_without_contents() {
     assert!(!seen.contains('?') && !seen.contains("since_ms"), "{seen}");
     assert!(seen.contains("status: Some(200)"), "{seen}");
     assert!(
-        seen.contains("id: \"timing-glasses\", kind: \"snapshot\"") && seen.contains("since_subscribe: Some("),
+        seen.contains("id: \"timing-glasses\", kind: \"snapshot\"")
+            && seen.contains("since_subscribe: Some("),
         "{seen}"
     );
     server.abort();
@@ -213,13 +231,21 @@ async fn an_observer_keeps_a_request_the_caller_cancelled_apart_from_completions
         }
     });
     let client = Client::unix_as(&socket, "person/ada");
-    let waited = tokio::time::timeout(Duration::from_millis(150), client.usage_period(Some(11), Some(12))).await;
+    let waited = tokio::time::timeout(
+        Duration::from_millis(150),
+        client.usage_period(Some(11), Some(12)),
+    )
+    .await;
     assert!(waited.is_err(), "the server never answers");
     tokio::time::sleep(Duration::from_millis(50)).await;
     let seen = SEEN.lock().unwrap().clone();
     let mine = seen
         .iter()
-        .filter(|line| line.contains("Request") && line.contains("/v1/client/usage") && line.contains("Cancelled"))
+        .filter(|line| {
+            line.contains("Request")
+                && line.contains("/v1/client/usage")
+                && line.contains("Cancelled")
+        })
         .collect::<Vec<_>>();
     assert_eq!(mine.len(), 1, "{seen:#?}");
     assert!(mine[0].contains("status: None"), "{}", mine[0]);
@@ -227,7 +253,9 @@ async fn an_observer_keeps_a_request_the_caller_cancelled_apart_from_completions
     assert!(took.contains("ms"), "{}", mine[0]);
     // Nothing for that request was reported as completed.
     assert!(
-        !seen.iter().any(|line| line.contains("/v1/client/usage") && line.contains("outcome: Completed") && line.contains("status: None")),
+        !seen.iter().any(|line| line.contains("/v1/client/usage")
+            && line.contains("outcome: Completed")
+            && line.contains("status: None")),
         "{seen:#?}"
     );
     held.abort();
@@ -242,7 +270,9 @@ async fn an_observer_keeps_first_frame_timers_only_for_live_subscriptions() {
     let app = fractal_daemon::api::router(state(root.path()));
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
-        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+        fractal_daemon::api::serve_unix(&server_socket, app)
+            .await
+            .unwrap();
     });
     for _ in 0..100 {
         if socket.exists() {
@@ -252,9 +282,19 @@ async fn an_observer_keeps_first_frame_timers_only_for_live_subscriptions() {
     }
     let client = Client::unix_as(&socket, "person/ada");
     let mut stream = client.collection_stream().await.unwrap();
-    stream.subscribe("a", "attention", 10, None, None).await.unwrap();
-    stream.subscribe("a", "attention", 10, None, None).await.unwrap();
-    assert_eq!(stream.observed_pending(), 1, "a replacement restarts the timer");
+    stream
+        .subscribe("a", "attention", 10, None, None)
+        .await
+        .unwrap();
+    stream
+        .subscribe("a", "attention", 10, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.observed_pending(),
+        1,
+        "a replacement restarts the timer"
+    );
     stream.unsubscribe("a").await.unwrap();
     assert_eq!(stream.observed_pending(), 0, "an unsubscribe drops it");
     for index in 0..20 {
@@ -263,6 +303,10 @@ async fn an_observer_keeps_first_frame_timers_only_for_live_subscriptions() {
             .await
             .unwrap();
     }
-    assert!(stream.observed_pending() <= 8, "bounded by the socket's subscriptions: {}", stream.observed_pending());
+    assert!(
+        stream.observed_pending() <= 8,
+        "bounded by the socket's subscriptions: {}",
+        stream.observed_pending()
+    );
     server.abort();
 }

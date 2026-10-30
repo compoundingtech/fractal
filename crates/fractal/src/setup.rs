@@ -311,9 +311,12 @@ async fn prepare_harness(
             Ok(found) => found,
             // A running daemon from before this route cannot answer; read the login PATH here.
             Err(error)
-                if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
+                if fractal_daemon::client::is_missing_route(&error)
+                    || fractal_daemon::client::is_not_found(&error) =>
             {
-                println!("The running daemon is older than this Fractal build; checking the login PATH from here.");
+                println!(
+                    "The running daemon is older than this Fractal build; checking the login PATH from here."
+                );
                 fractal_daemon::environment::available_harnesses()?
             }
             Err(error) => return Err(error),
@@ -329,7 +332,8 @@ async fn prepare_harness(
     }
     if found.is_empty() {
         say!(
-            "No supported harness is installed on the daemon's login PATH. Install Claude Code, Codex, OpenCode, Pi or Omp, then run {} setup. No onboarding seat was created.", args.program()
+            "No supported harness is installed on the daemon's login PATH. Install Claude Code, Codex, OpenCode, Pi or Omp, then run {} setup. No onboarding seat was created.",
+            args.program()
         );
         return Ok(None);
     }
@@ -393,12 +397,11 @@ async fn prepare_harness(
             return Ok(fallback_harness(&found));
         }
         if fractal_drivers::claude_channel::fractal_policy_available() {
-            say!(
-                "Claude channel policy is present; seats use --channels plugin:st-channel@st."
-            );
+            say!("Claude channel policy is present; seats use --channels plugin:st-channel@st.");
         } else {
             say!(
-                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. Fractal accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy", args.program()
+                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. Fractal accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy",
+                args.program()
             );
         }
     }
@@ -409,7 +412,8 @@ async fn prepare_harness(
 /// Make sure the st Claude channel is installed for this account; the error is the install
 /// command's own stderr, whole.
 pub(crate) fn ensure_claude_channel(executable: &Path) -> std::result::Result<(), String> {
-    let environment = fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
+    let environment =
+        fractal_daemon::environment::snapshot().map_err(|error| format!("{error:#}"))?;
     let status = Command::new(executable)
         .args(["claude-channel", "status"])
         .envs(&environment)
@@ -460,17 +464,17 @@ fn confirm_assistant(config: &Config, harness: &str, args: &SetupArgs) -> Result
         true,
     )?;
     if !start {
-        println!("Not started. Run {} setup --onboarding when you want it.", args.program());
+        println!(
+            "Not started. Run {} setup --onboarding when you want it.",
+            args.program()
+        );
     }
     Ok(start)
 }
 
 /// Name what starting the Assistant created and how to stop it.
 fn print_assistant_summary(config: &Config, harness: &str, program: &str) -> Result<()> {
-    let person = config
-        .person
-        .as_deref()
-        .context("setup needs a person")?;
+    let person = config.person.as_deref().context("setup needs a person")?;
     println!(
         "Created: the agent agent/st/assistant ({harness}, working in {}), the guide document doc/st/guide, and a run of mission/st/onboarding.\nStop it with: {program} agents stop agent/st/assistant --as {person}",
         crate::onboarding::workspace(config)?.display()
@@ -686,8 +690,9 @@ fn find_pty(executable: &Path) -> Result<PathBuf> {
         return Ok(sibling);
     }
     let environment = fractal_daemon::environment::snapshot()?;
-    fractal_runtime::resolve_executable("pty", &environment)
-        .context("pty is missing; unpack the complete Fractal archive (st3, st and pty) before setup")
+    fractal_runtime::resolve_executable("pty", &environment).context(
+        "pty is missing; unpack the complete Fractal archive (st3, st and pty) before setup",
+    )
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
@@ -713,8 +718,14 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     fs::create_dir_all(&bin)?;
     let target = bin.join("st3");
     let replacing = [
-        ("st3", fs::symlink_metadata(&target).is_ok() && !same_file(executable, &target)),
-        ("pty", fs::symlink_metadata(bin.join("pty")).is_ok() && !same_file(&pty, &bin.join("pty"))),
+        (
+            "st3",
+            fs::symlink_metadata(&target).is_ok() && !same_file(executable, &target),
+        ),
+        (
+            "pty",
+            fs::symlink_metadata(bin.join("pty")).is_ok() && !same_file(&pty, &bin.join("pty")),
+        ),
         (
             "st",
             fs::symlink_metadata(bin.join("st")).is_ok()

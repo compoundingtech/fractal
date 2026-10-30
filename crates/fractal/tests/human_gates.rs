@@ -1,8 +1,8 @@
 //! A person answers a mission's human gate from every surface: client-v0 actions (Fractal TUI, iOS),
 //! the CLI, and the HTTP API. Each test drives a real reconciler and an in-process API.
 
-use fractal_daemon::MissionsStore;
 use fractal_daemon::EvidenceStore;
+use fractal_daemon::MissionsStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -10,30 +10,34 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use serde_json::{Value, json};
 use fractal_daemon::api::AppState;
 use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest};
 use fractal_daemon::reconcile::Reconciler;
 use fractal_daemon::store::Store;
+use serde_json::{Value, json};
 use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
 const NODE: &str = "human-gates";
 
 fn test_state(root: &Path) -> AppState {
-    AppState { owning_person: None,
-    store: Arc::new(Store::open_memory(NODE).unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: NODE.into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    AppState {
+        owning_person: None,
+        store: Arc::new(Store::open_memory(NODE).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 /// A runtime that starts nothing: gates here wait only on people.
@@ -43,7 +47,10 @@ impl fractal_daemon::reconcile::RuntimeControl for NoRuntime {
     fn snapshot_ptys(&self) -> anyhow::Result<Vec<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(Vec::new())
     }
-    fn observe_exec(&self, _: &str) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
+    fn observe_exec(
+        &self,
+        _: &str,
+    ) -> anyhow::Result<Option<fractal_daemon::reconcile::RuntimeObservation>> {
         Ok(None)
     }
     fn start(&self, _: &fractal_daemon::model::MemberSpec) -> anyhow::Result<()> {
@@ -399,7 +406,9 @@ async fn run_cli(socket: &Path, args: &[&str]) -> Output {
     let socket = socket.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
-        fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(binary)
+            .env_remove("ST_AGENT")
+            .env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .arg("--endpoint")
             .arg(socket)

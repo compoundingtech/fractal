@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
-use serde_json::json;
 use fractal_daemon::store::Store;
+use serde_json::json;
 
 fn cpu_seconds() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();

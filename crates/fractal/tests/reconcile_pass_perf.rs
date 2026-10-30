@@ -20,14 +20,14 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
-use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::RuntimeStartsStore;
 use fractal_daemon::model::{ClaimInput, MemberSpec};
+use fractal_daemon::reconcile::{Reconciler, RuntimeControl, RuntimeObservation};
 use fractal_daemon::store::{RuntimeStartAdmission, RuntimeStartOperation, Store};
 use serde_json::json;
 use tokio::sync::Notify;
@@ -129,7 +129,12 @@ impl RuntimeControl for RevokedTerminalRuntime {
     fn start(&self, _: &MemberSpec) -> Result<()> {
         anyhow::bail!("persisted revoked starts must not launch")
     }
-    fn start_operation(&self, id: &str, terminal: bool, incarnation: &str) -> Result<Option<String>> {
+    fn start_operation(
+        &self,
+        id: &str,
+        terminal: bool,
+        incarnation: &str,
+    ) -> Result<Option<String>> {
         self.provenance_reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.operations.get(id).and_then(|(expected, operation)| {
             (terminal && expected == incarnation).then(|| operation.clone())
@@ -147,8 +152,12 @@ impl RuntimeControl for RevokedTerminalRuntime {
         incarnation: &str,
     ) -> Result<bool> {
         anyhow::ensure!(
-            self.provenance_matches && terminal
-                && self.operations.get(id).is_some_and(|(expected, _)| expected == incarnation),
+            self.provenance_matches
+                && terminal
+                && self
+                    .operations
+                    .get(id)
+                    .is_some_and(|(expected, _)| expected == incarnation),
             "retirement must target the exact operation-owned terminal incarnation"
         );
         self.retirements.fetch_add(1, Ordering::Relaxed);
@@ -156,7 +165,10 @@ impl RuntimeControl for RevokedTerminalRuntime {
     }
     fn stop(&self, _: &str, _: bool, _: Option<&str>) -> Result<()> {
         self.signals.fetch_add(1, Ordering::Relaxed);
-        anyhow::ensure!(self.provenance_matches, "must not stop a different operation");
+        anyhow::ensure!(
+            self.provenance_matches,
+            "must not stop a different operation"
+        );
         // Successful signal submission cannot establish native retirement.
         Ok(())
     }
@@ -221,29 +233,33 @@ fn seed_revoked_terminal_starts(store: &Store, count: usize) -> RevokedTerminalR
         );
         assert!(store.dispatch_runtime_start(&operation_id, count).unwrap());
         let append = |kind: &str, fields, evidence, key| {
-            store.append_claim(&ClaimInput {
-                subject: subject.clone(),
-                kind: kind.into(),
-                actor: None,
-                fields,
-                evidence,
-                expected_subject: None,
-                idempotency_key: Some(key),
-            }).unwrap()
+            store
+                .append_claim(&ClaimInput {
+                    subject: subject.clone(),
+                    kind: kind.into(),
+                    actor: None,
+                    fields,
+                    evidence,
+                    expected_subject: None,
+                    idempotency_key: Some(key),
+                })
+                .unwrap()
         };
         let request = append(
             "runtime.action.requested",
             serde_json::from_value(json!({
                 "action": "terminate", "runtime_id": runtime_id, "terminal": true,
                 "incarnation_id": incarnation, "deadline_unix_ms": "0"
-            })).unwrap(),
+            }))
+            .unwrap(),
             Vec::new(),
             format!("terminate:{subject}:{incarnation}"),
         );
         let deadline_key = format!("stop-deadline:{subject}:{incarnation}");
         let deadline = append(
             "runtime.action.deadline-reached",
-            serde_json::from_value(json!({"action": "terminate", "incarnation_id": incarnation})).unwrap(),
+            serde_json::from_value(json!({"action": "terminate", "incarnation_id": incarnation}))
+                .unwrap(),
             vec![request.id.clone()],
             deadline_key.clone(),
         );
@@ -251,17 +267,24 @@ fn seed_revoked_terminal_starts(store: &Store, count: usize) -> RevokedTerminalR
             "runtime.action.succeeded",
             serde_json::from_value(json!({
                 "action": "kill", "incarnation_id": incarnation, "deadline_key": deadline_key
-            })).unwrap(),
+            }))
+            .unwrap(),
             vec![deadline.id],
             format!("kill:{subject}:{incarnation}"),
         );
-        store.revoke_runtime_start(&operation_id, &request.id).unwrap();
-        store.finish_runtime_start(
-            &operation_id,
-            &json!({"error": "launch owner ended before its result"}),
-        ).unwrap();
+        store
+            .revoke_runtime_start(&operation_id, &request.id)
+            .unwrap();
+        store
+            .finish_runtime_start(
+                &operation_id,
+                &json!({"error": "launch owner ended before its result"}),
+            )
+            .unwrap();
         store.runtime_start_applied(&operation_id).unwrap();
-        runtime.operations.insert(runtime_id.clone(), (incarnation.clone(), operation_id));
+        runtime
+            .operations
+            .insert(runtime_id.clone(), (incarnation.clone(), operation_id));
         runtime.observations.push(RuntimeObservation {
             runtime_id,
             terminal: true,
@@ -277,7 +300,11 @@ fn seed_revoked_terminal_starts(store: &Store, count: usize) -> RevokedTerminalR
 fn revoked_terminal_starts_preserve_safety_with_one_registry_snapshot_per_pass() {
     let mut results = Vec::new();
     for (count, provenance_matches) in [(7, false), (50, false), (7, true), (50, true)] {
-        let scenario = if provenance_matches { "matched" } else { "mismatched" };
+        let scenario = if provenance_matches {
+            "matched"
+        } else {
+            "mismatched"
+        };
         let directory = fractal_daemon::test_support::memory_tempdir();
         let path = directory.path().join("claims.sqlite3");
         let store = Store::open(&path, "test").unwrap();
@@ -295,10 +322,15 @@ fn revoked_terminal_starts_preserve_safety_with_one_registry_snapshot_per_pass()
         let seeded = store.pending_runtime_starts().unwrap();
         assert_eq!(seeded.len(), count);
         assert!(seeded.iter().all(|operation| operation.finished
-            && operation.applied && operation.dispatched
-            && operation.revoked_by.is_some() && !operation.cleanup_verified));
+            && operation.applied
+            && operation.dispatched
+            && operation.revoked_by.is_some()
+            && !operation.cleanup_verified));
         let reconciler = Reconciler::new(
-            store.clone(), runtime.clone(), "test".into(), Arc::new(Notify::new()),
+            store.clone(),
+            runtime.clone(),
+            "test".into(),
+            Arc::new(Notify::new()),
         );
         let mut passes = Vec::new();
         for pass in 1..=3 {
@@ -320,7 +352,10 @@ fn revoked_terminal_starts_preserve_safety_with_one_registry_snapshot_per_pass()
             passes.push((snapshots, pending, result));
         }
         results.push((
-            count, scenario, provenance_matches, passes,
+            count,
+            scenario,
+            provenance_matches,
+            passes,
             runtime.retirements.load(Ordering::Relaxed),
             runtime.signals.load(Ordering::Relaxed),
         ));
@@ -339,8 +374,14 @@ fn revoked_terminal_starts_preserve_safety_with_one_registry_snapshot_per_pass()
             );
         }
         if !provenance_matches {
-            assert_eq!(retirements, 0, "N={count}: must not retire a different operation");
-            assert_eq!(signals, 0, "N={count}: must not signal a different operation");
+            assert_eq!(
+                retirements, 0,
+                "N={count}: must not retire a different operation"
+            );
+            assert_eq!(
+                signals, 0,
+                "N={count}: must not signal a different operation"
+            );
         }
     }
 }
@@ -419,7 +460,8 @@ fn quiet_reconcile_passes_on_a_store_copy() {
     for _ in 0..passes {
         let started = Instant::now();
         let cpu_started = thread_cpu_ms();
-        fractal_daemon::profile::task("task reconcile-pass", || reconciler.reconcile_once()).unwrap();
+        fractal_daemon::profile::task("task reconcile-pass", || reconciler.reconcile_once())
+            .unwrap();
         cpu.push(thread_cpu_ms() - cpu_started);
         wall.push(started.elapsed().as_secs_f64() * 1000.0);
     }

@@ -32,7 +32,15 @@ const GROUPS: &[(&str, &[&str])] = &[
     ),
     (
         "Inside an agent",
-        &["work", "changes", "gh", "claim", "diagnostic", "trace", "skill"],
+        &[
+            "work",
+            "changes",
+            "gh",
+            "claim",
+            "diagnostic",
+            "trace",
+            "skill",
+        ],
     ),
     (
         "Running fractal on a machine or fleet",
@@ -118,12 +126,18 @@ pub(super) fn root_help(all: bool) -> String {
             let _ = writeln!(output, "  {name:14} {about}");
         }
     }
-    let _ = writeln!(output, "\n{}", fractal_daemon::skill::message_sender_guidance());
+    let _ = writeln!(
+        output,
+        "\n{}",
+        fractal_daemon::skill::message_sender_guidance()
+    );
     // Let clap keep the options, defaults and environment variables accurate.
     let mut options = command.clone().help_template("\nOptions:\n{options}");
     output.push('\n');
     output.push_str(&options.render_help().to_string());
-    output.push_str("\nUse fractal help COMMAND for command help; fractal help --all also lists plumbing.\n");
+    output.push_str(
+        "\nUse fractal help COMMAND for command help; fractal help --all also lists plumbing.\n",
+    );
     output.push_str(
         "\nIssues and suggestions are welcome. Please file an upstream issue:\n  gh issue create --repo compoundingtech/fractal\nPull requests are welcome too: https://github.com/compoundingtech/fractal\n",
     );
@@ -185,7 +199,12 @@ pub(super) fn agent_state(
 
 pub(super) fn agent_next_steps(subject: &str, actor: &str, state: &str) -> String {
     let subject = shell_argument(subject);
-    if state.starts_with("Retired") { return next_steps(state, &[("Show history", format!("fractal agents show {subject}"))]); }
+    if state.starts_with("Retired") {
+        return next_steps(
+            state,
+            &[("Show history", format!("fractal agents show {subject}"))],
+        );
+    }
     let attach_actor = if actor.starts_with("person/") {
         format!(" --as {}", shell_argument(actor))
     } else {
@@ -204,7 +223,10 @@ pub(super) fn agent_next_steps(subject: &str, actor: &str, state: &str) -> Strin
                 format!("fractal conversations send {subject} --from {actor} --body 'Hello'"),
             ),
             ("Show", format!("fractal agents show {subject}")),
-            ("Stop", format!("fractal agents stop {subject} --as {actor}")),
+            (
+                "Stop",
+                format!("fractal agents stop {subject} --as {actor}"),
+            ),
         ],
     );
     output.push_str("\nUse fractal agents new NAME --attach to attach as soon as the agent starts. Detach with Ctrl+\\.\n");
@@ -234,11 +256,16 @@ pub(super) fn mission_next_steps(run: &super::MissionRunView) -> String {
     next_steps(
         &state,
         &[
-            ("Follow", format!("fractal missions show {subject} --follow")),
+            (
+                "Follow",
+                format!("fractal missions show {subject} --follow"),
+            ),
             ("Show", format!("fractal missions show {subject}")),
             (
                 "Stop",
-                format!("fractal missions cancel {subject} --as {actor} --reason 'No longer needed'"),
+                format!(
+                    "fractal missions cancel {subject} --as {actor} --reason 'No longer needed'"
+                ),
             ),
         ],
     )
@@ -274,7 +301,10 @@ pub(super) fn pairing_next_steps(person: &str) -> String {
                 "Complete on the device",
                 "fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256".to_owned(),
             ),
-            ("Show paired devices", format!("fractal devices --as {person}")),
+            (
+                "Show paired devices",
+                format!("fractal devices --as {person}"),
+            ),
             (
                 "Pair again",
                 format!("fractal devices pair DEVICE_NAME --as {person}"),
@@ -404,7 +434,11 @@ mod tests {
             ("starting", Some("starting"), "initializing"),
             ("waiting", Some("needs-login"), "Waiting for you"),
             ("waiting", Some("blocked"), "Waiting for you"),
-            ("waiting", Some("indeterminate"), "Quiet — st has no current report"),
+            (
+                "waiting",
+                Some("indeterminate"),
+                "Quiet — st has no current report",
+            ),
             ("failed", None, "Could not start"),
             ("down", None, "Down — st sees no running session"),
         ] {
@@ -460,7 +494,12 @@ mod tests {
         for (state, harness, reachability, command) in [
             ("down", None, "reachable", "fractal agents show"),
             ("suspended", None, "reachable", "fractal agents resume"),
-            ("waiting", Some("indeterminate"), "indeterminate", "fractal terminals"),
+            (
+                "waiting",
+                Some("indeterminate"),
+                "indeterminate",
+                "fractal terminals",
+            ),
         ] {
             assert!(agent_state(state, harness, None, reachability).contains(command));
         }
@@ -479,7 +518,10 @@ mod tests {
         assert!(!state.contains("Still starting"));
         assert!(!state.contains("Waiting for you"));
         for other in ["unreachable", "remote", "unknown"] {
-            assert!(agent_state("waiting", Some("ready"), None, other).starts_with("Still starting"), "{other}");
+            assert!(
+                agent_state("waiting", Some("ready"), None, other).starts_with("Still starting"),
+                "{other}"
+            );
         }
     }
 

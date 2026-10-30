@@ -26,6 +26,10 @@ export const externalSchedule = {
   ...declarations.schedules[0], work: { mission: 'docs/daily-review', revision: 'abc', workspace: '.' },
 } as const satisfies Schedule
 
+export const catchUpAll = {
+  ...externalSchedule, catchUp: 'all', maxCatchUp: 3,
+} as const satisfies Schedule
+
 // Negative contracts fail compilation if an unsupported form becomes assignable.
 // Type-level assertions avoid suppressing diagnostics on invalid runtime examples.
 type Assert<T extends true> = T
@@ -35,7 +39,7 @@ type Equal<TLeft, TRight> = [TLeft] extends [TRight] ? [TRight] extends [TLeft] 
 export type AgentFields = Assert<Equal<keyof Agent, 'id' | 'workspace' | 'launch' | 'under'>>
 export type MissionFields = Assert<Equal<keyof Mission, 'id' | 'state' | 'reportTo' | 'goals' | 'completion' | 'steps'>>
 export type StepFields = Assert<Equal<keyof Step, 'id' | 'assignedTo' | 'goals'>>
-export type ScheduleFields = Assert<Equal<keyof Schedule, 'id' | 'host' | 'every' | 'anchor' | 'catchUp' | 'work'>>
+export type ScheduleFields = Assert<Equal<keyof Schedule, 'id' | 'host' | 'every' | 'anchor' | 'catchUp' | 'maxCatchUp' | 'work'>>
 export type WorkFields = Assert<Equal<keyof Schedule['work'], 'mission' | 'revision' | 'workspace'>>
 export type DeclarationFields = Assert<Equal<keyof Declarations, 'agents' | 'missions' | 'schedules'>>
 export type UnderFields = Assert<Equal<keyof NonNullable<Agent['under']>, 'agent' | 'reason'>>

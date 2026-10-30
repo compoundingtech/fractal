@@ -295,11 +295,15 @@ async fn checkpoint_plan_waiting_for_proof(
     loop {
         match client.post("/v1/checkpoint/plan", request).await {
             Err(error)
-                if fractal_daemon::client::api_error_code(&error) == Some("checkpoint-proof-in-progress")
+                if fractal_daemon::client::api_error_code(&error)
+                    == Some("checkpoint-proof-in-progress")
                     && started.elapsed() < CHECKPOINT_PLAN_PROOF_WAIT =>
             {
                 if !announced {
-                    crate::stderr_message("st", format_args!("waiting for the running checkpoint proof to finish"));
+                    crate::stderr_message(
+                        "st",
+                        format_args!("waiting for the running checkpoint proof to finish"),
+                    );
                     announced = true;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;

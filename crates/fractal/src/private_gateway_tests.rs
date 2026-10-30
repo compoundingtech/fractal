@@ -105,8 +105,7 @@ fn gateway_comparison_normalizes_missing_suffix_after_resolving_symlinks() {
     // After canceling a missing component, resolve an existing symlink before parent traversal.
     std::os::unix::fs::symlink(real.join("deep"), real.join("link")).unwrap();
     assert_eq!(
-        gateway_path_for_comparison(&real.join("missing/../link/../run/st3-client.sock"))
-            .unwrap(),
+        gateway_path_for_comparison(&real.join("missing/../link/../run/st3-client.sock")).unwrap(),
         gateway_path_for_comparison(&target).unwrap()
     );
     assert!(!real.join("deep/missing").exists());

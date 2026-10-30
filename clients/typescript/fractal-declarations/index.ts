@@ -37,6 +37,7 @@ export interface Schedule {
   readonly every: string
   readonly anchor: string
   readonly catchUp: CatchUp
+  readonly maxCatchUp?: number
   readonly work: ScheduledWork
 }
 
@@ -108,8 +109,9 @@ export const encodeKdl = (declarations: Declarations): string => {
       `  host ${quote(schedule.host)}`,
       `  every ${quote(schedule.every)}`,
       `  anchor ${quote(schedule.anchor)}`,
-      `  catch-up ${quote(schedule.catchUp)}`,
-      '  work {',
+      `  catch-up ${quote(schedule.catchUp)}`)
+    if (schedule.maxCatchUp !== undefined) lines.push(`  max-catch-up ${schedule.maxCatchUp}`)
+    lines.push('  work {',
       `    mission ${quote(`mission/${missionId}@${schedule.work.revision}`)}`,
       `    workspace ${quote(schedule.work.workspace)}`,
       '  }', '}')
