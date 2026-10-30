@@ -92,6 +92,7 @@ use crate::model::IntentInput;
 use crate::store::Store;
 
 pub mod wire_names;
+pub mod seat_freshness;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -800,6 +801,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
+        // crate::peer::SEAT_FRESHNESS_INTERNAL_PATH; the cost inventory reads route literals.
+        .route("/v1/internal/seat-freshness", post(seat_freshness::seat_freshness))
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
@@ -3220,7 +3223,7 @@ fn overlay_agent_resources_at(
             // querying diagnostic and local-observation history here made every read grow with it.
             // The seat's host also hears the re-stamps that stay local, in one seek per card.
             let heard_at = match &harness {
-                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness)?),
+                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness, now)?),
                 None => None,
             };
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
@@ -3260,12 +3263,13 @@ fn overlay_agent_resources_at(
     })
 }
 
-/// When this node last heard the seat's harness: its replicated report, or on the seat's host the
-/// newest local re-stamp of the same incarnation, whichever is later. Re-stamps that change nothing
-/// stay in the host's local log, so without it the host's own cards read a resting seat stale.
-pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
-    let local = store.local_harness_observed_at(subject, &harness.incarnation_id)?;
-    Ok(local.map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)))
+/// When this node last heard the seat's harness: its replicated report; on the seat's host the
+/// newest local re-stamp of the same incarnation; elsewhere the seat's host's latest answer about
+/// it (`seat_freshness`), whichever is latest. Re-stamps that change nothing stay in the host's
+/// local log, so without them a resting seat reads stale.
+pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView, now: u128) -> anyhow::Result<u128> {
+    let heard = store.heard_harness_at(subject, &harness.incarnation_id, now)?;
+    Ok(heard.map_or(harness.observed_at_unix_ms, |heard| heard.max(harness.observed_at_unix_ms)))
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.

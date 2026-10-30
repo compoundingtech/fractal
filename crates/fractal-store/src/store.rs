@@ -5675,11 +5675,11 @@ impl Store {
     }
 
     /// The newest claim or local observation of `kind` for `subject`.
-    /// When this node last heard `subject`'s harness report for `incarnation`: its newest local
-    /// `harness.observed`, if that is of the incarnation. Local observations never replicate, so
-    /// only the node that runs the seat has one; it hears every re-stamp, replicated or not. One
-    /// seek in `local_observations_subject_kind_index`, whatever the log holds.
-    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+    /// The seat's newest local harness report: its incarnation and when this node heard it. Local
+    /// observations never replicate, so only the node that runs the seat has one; it hears every
+    /// re-stamp, replicated or not. One seek in `local_observations_subject_kind_index`, whatever
+    /// the log holds.
+    pub fn local_harness_newest(&self, subject: &str) -> Result<Option<(String, u128)>> {
         let connection = self.readers.get();
         let newest: Option<(i64, Option<String>)> = connection
             .prepare_cached(
@@ -5689,9 +5689,23 @@ impl Store {
             )?
             .query_row(/* sqlite-large-value: allow-for-now lv-hdfe967515468 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        Ok(newest
-            .filter(|(_, of)| of.as_deref() == Some(incarnation))
-            .map(|(at, _)| at.max(0) as u128))
+        Ok(newest.and_then(|(at, incarnation)| Some((incarnation?, at.max(0) as u128))))
+    }
+
+    /// When this node last heard `subject`'s harness report for `incarnation`, from its local log.
+    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        Ok(self
+            .local_harness_newest(subject)?
+            .filter(|(of, _)| of == incarnation)
+            .map(|(_, at)| at))
+    }
+
+    /// When this node, or the seat's host when it answered within [`RELAYED_FRESHNESS_TTL_MS`],
+    /// last heard `subject`'s harness for `incarnation`.
+    pub fn heard_harness_at(&self, subject: &str, incarnation: &str, now: u128) -> Result<Option<u128>> {
+        let local = self.local_harness_observed_at(subject, incarnation)?;
+        let relayed = self.extension::<RelayedFreshness>().heard_at(subject, incarnation, now);
+        Ok(local.max(relayed))
     }
 
     pub fn latest_observation(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
@@ -22333,3 +22347,39 @@ pub mod checkpoint_agreement_tests_shared_attention_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
+
+/// How long a host's answer about its seats stands. A member asks each host every 30 seconds,
+/// so three missed answers in a row leave its seats to the replicated reports.
+pub const RELAYED_FRESHNESS_TTL_MS: u128 = 90_000;
+
+/// What each seat's host last said about when it heard the seat, kept in memory by the member
+/// that asked. It is never stored: a restart asks again.
+#[derive(Default)]
+pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, RelayedHeard>>);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RelayedHeard {
+    incarnation: String,
+    heard_at: u128,
+    answered_at: u128,
+}
+
+impl RelayedFreshness {
+    /// Record a host's answer, received at `answered_at`, about the seats it names.
+    pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>, answered_at: u128) {
+        let mut heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        heard.retain(|_, entry| answered_at.saturating_sub(entry.answered_at) < RELAYED_FRESHNESS_TTL_MS);
+        for (agent, incarnation, heard_at) in seats {
+            heard.insert(agent, RelayedHeard { incarnation, heard_at, answered_at });
+        }
+    }
+
+    /// When the seat's host heard `subject`'s `incarnation`, if it said so within the TTL.
+    pub fn heard_at(&self, subject: &str, incarnation: &str, now: u128) -> Option<u128> {
+        let heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        heard
+            .get(subject)
+            .filter(|entry| entry.incarnation == incarnation && now.saturating_sub(entry.answered_at) < RELAYED_FRESHNESS_TTL_MS)
+            .map(|entry| entry.heard_at)
+    }
+}

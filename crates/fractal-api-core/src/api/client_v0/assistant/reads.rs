@@ -185,7 +185,7 @@ async fn summary(state: &AppState) -> Result<(ClientSnapshot, Value), ApiError> 
                     let source: Option<crate::model::CurrentHarnessView> =
                         serde_json::from_value(agent["_status_source"].clone()).ok();
                     let heard = match &source {
-                        Some(harness) => Some(crate::api::heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness).map_err(ApiError::internal)?),
+                        Some(harness) => Some(crate::api::heard_at(&reader.store, agent["id"].as_str().unwrap_or_default(), harness, now).map_err(ApiError::internal)?),
                         None => None,
                     };
                     let age = heard.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));

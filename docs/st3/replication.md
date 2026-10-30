@@ -311,6 +311,22 @@ incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-t
 with “This host runs an older Fractal version; update it to open subagent conversations.”
 No session-detail POST or changed child ID is sent to that peer.
 
+Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`. Its
+request names up to 2,048 `agent/` subjects. The signed answer gives, for each seat whose host
+holds a local `harness.observed` of it, the incarnation and when the host last heard it.
+
+A re-stamp that changes nothing stays in the host's local observation log, so this is how
+another member hears a resting seat. Every 30 seconds, each member asks each other member, or
+configured peer, whose own newest `daemon.started` advertises `features.seat_freshness = 1`. It
+asks only about the seats its declarations place on that host, all of them in one request, and
+asks directly, never through a relay hop. It keeps each answer in memory for 90 seconds.
+
+An agent card's freshness and a mail hold read the latest of the replicated report, the local
+log, and that answer. A member that doesn't advertise the feature is never sent the request,
+and its seats keep replicating their re-stamps. A worker that advertises it but answers the
+unsigned 404/405 of a build without the route gives no answer. Its seats then read from the
+replicated report, as before.
+
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the
 gateway version that generated them. The reader derives the root routing session from

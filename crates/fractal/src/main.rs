@@ -6648,7 +6648,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"seat_freshness":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6858,6 +6858,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     fractal_daemon::api::start_agent_roster(&state);
+    fractal_daemon::api::seat_freshness::start_seat_freshness_poll(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
     // Nor does an attention window fold every person's attention.
