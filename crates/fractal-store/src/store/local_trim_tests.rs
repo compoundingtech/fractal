@@ -354,3 +354,372 @@ fn local_trim_leaves_resource_observations_whole() {
     assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
 }
+
+/// One step of a history for the capture equivalence test: a write, or something that makes a
+/// guard of the local cut answer for an observer claim.
+#[derive(Clone, Debug)]
+enum Step {
+    Write(Write),
+    /// A claim of another kind whose evidence cites the `nth` observer claim so far.
+    Cite(u8),
+    /// A mission definition naming the `nth` observer claim, which protects it.
+    Protect(u8),
+    /// A repair naming the `nth` observer claim its replacement, by claim or by record.
+    Repair(u8, bool),
+    /// An observer claim and a claim of another kind in one operation, in two envelopes.
+    Shared(u8),
+    /// An earlier checkpoint's tombstone of one of this writer's envelopes, newer than any it
+    /// holds (`newer`) or older: the writer's-newest guard reads tombstones too.
+    Tombstone(bool),
+    /// A peer's claim citing the `nth` observer claim, written now and received only at the end
+    /// of the history: it arrives after later claims, with an older accepted time.
+    PeerCite(u8),
+    /// The citation cache caught up now, all the way or (`partial`) stopped after one page.
+    CatchUp(bool),
+    /// The `nth` claim retired as a local trim deletes it, an odd `nth` from the claims that
+    /// cite one, so a claim another still cites loses one of its citers; with `stale`, its
+    /// citation rows are put back afterwards, as a binary that kept no cache would leave them.
+    Retire(u8, bool),
+    /// Two observations of one observer in one batch: the older is not the newest of its slot
+    /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
+    Twice(u8),
+}
+
+fn step_strategy() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        6 => write().prop_map(Step::Write),
+        1 => any::<u8>().prop_map(Step::Cite),
+        1 => any::<u8>().prop_map(Step::Protect),
+        1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
+        1 => (0..3u8).prop_map(Step::Shared),
+        1 => (0..3u8).prop_map(Step::Twice),
+        1 => any::<bool>().prop_map(Step::Tombstone),
+        1 => any::<u8>().prop_map(Step::PeerCite),
+        1 => any::<bool>().prop_map(Step::CatchUp),
+        1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, stale)| Step::Retire(nth, stale)),
+    ]
+}
+
+/// Everything `from` holds that `to` lacks, received and admitted as replication would.
+fn send(from: &Store, to: &Store) {
+    for _ in 0..64 {
+        let exchange = crate::store::tests_shared::exchange_from(from, &to.replication_inventory().unwrap());
+        if exchange.envelopes.is_empty() {
+            return;
+        }
+        crate::store::tests_shared::receive_and_project(to, from.origin(), &exchange);
+    }
+}
+
+fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
+    let observed = || -> Vec<String> {
+        store
+            .readers
+            .get()
+            .prepare("SELECT id FROM claims WHERE kind='observer.observed' ORDER BY store_index")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let nth = |nth: u8| {
+        let ids = observed();
+        (!ids.is_empty()).then(|| ids[usize::from(nth) % ids.len()].clone())
+    };
+    match step {
+        Step::Write(write) => apply(store, write, n),
+        Step::Cite(k) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .append_claim(&ClaimInput {
+                    subject: "resource/pr/9".into(),
+                    kind: "resource.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("kind".into(), json!("vcs.pull-request")),
+                        ("state".into(), json!("open")),
+                        ("observer".into(), json!("observer/watch-0")),
+                    ]),
+                    evidence: vec![id],
+                    expected_subject: None,
+                    idempotency_key: Some(format!("history-{n}")),
+                })
+                .unwrap();
+        }
+        Step::Protect(k) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .connection
+                .write()
+                .execute(
+                    /* sqlite-large-value: allow-for-now lv-h044f482464e7 owner=fractal_store::store::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO mission_definitions(mission_id, revision, state, claim_id)
+                     VALUES (?1, 'r', 'active', ?2)",
+                    params![format!("mission/protects-{n}"), id],
+                )
+                .unwrap();
+        }
+        Step::Repair(k, true) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .append_claim(&ClaimInput {
+                    subject: format!("repair/test-{n}"),
+                    kind: "record.repaired".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("record".into(), json!(format!("record/original-{n}"))),
+                        ("replacement".into(), json!(id)),
+                        ("reason".into(), json!("a test repair")),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("history-{n}")),
+                })
+                .unwrap();
+        }
+        Step::Repair(k, false) => {
+            let Some(id) = nth(*k) else { return };
+            store
+                .connection
+                .write()
+                .execute(
+                    /* sqlite-large-value: allow-for-now lv-h0ad6d7859fc0 owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
+                         state, claim_id, replacement_claim_id, updated_at_unix_ms)
+                     VALUES (?1, 'node.elsewhere', ?2, 'repaired', 0, X'', 'repaired', ?3, ?4, '1')",
+                    params![format!("record/repaired-{n}"), n as i64, format!("claim/original-{n}"), id],
+                )
+                .unwrap();
+        }
+        Step::PeerCite(k) => {
+            let Some(id) = nth(*k) else { return };
+            // A writer cites what it holds.
+            store.seal_local_batches().unwrap();
+            send(store, peer);
+            peer.append_claim(&ClaimInput {
+                subject: "resource/pr/8".into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("kind".into(), json!("vcs.pull-request")),
+                    ("state".into(), json!("open")),
+                    ("observer".into(), json!("observer/watch-1")),
+                ]),
+                evidence: vec![id],
+                expected_subject: None,
+                idempotency_key: Some(format!("peer-{n}")),
+            })
+            .unwrap();
+        }
+        Step::CatchUp(partial) => {
+            if *partial {
+                store.set_trim_fault(Some(smallclaims::store::TrimFault::AfterCitationPages(1)));
+            }
+            let _ = store.catch_up_local_trim_citations();
+            store.set_trim_fault(None);
+        }
+        Step::Retire(k, stale) => {
+            let claims: Vec<ClaimRecord> = {
+                let connection = store.readers.get();
+                let which = if k % 2 == 1 {
+                    "json_array_length(body, '$.evidence') > 0"
+                } else {
+                    "kind IN ('observer.observed', 'resource.observed')"
+                };
+                let sql = format!("SELECT {} FROM claims WHERE {which} ORDER BY store_index", smallclaims::store::CLAIM_COLUMNS);
+                let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hcc86b5e9b027 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+                statement.query_map([], smallclaims::store::claim_from_row).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+            };
+            if claims.is_empty() {
+                return;
+            }
+            let claim = &claims[usize::from(*k / 2) % claims.len()];
+            let rows: Vec<(String, String)> = store
+                .readers
+                .get()
+                .prepare("SELECT cited, citer FROM local_trim_citations WHERE cited=?1 OR citer=?1")
+                .unwrap()
+                .query_map([&claim.id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            // A claim a projection row still names is one a trim keeps: retire only what may go.
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ce7384320fa owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ "SAVEPOINT retire").unwrap();
+            let retired = smallclaims::store::checkpoint::delete_dropped_rows_tx(
+                &transaction,
+                &[],
+                &[smallclaims::store::checkpoint::ClaimTombstone {
+                    id: claim.id.clone(),
+                    operation_id: smallclaims::store::operation_parts(&claim.body).map(|(id, _)| id.to_owned()),
+                    writer: String::new(),
+                    sequence: 0,
+                    envelope_hash: String::new(),
+                    subject: claim.subject.clone(),
+                    kind: claim.kind.clone(),
+                    actor: claim.actor.clone(),
+                    predecessors: claim.predecessors.clone(),
+                    request_digest: smallclaims::store::operation_parts(&claim.body).map(|(_, digest)| digest.to_owned()),
+                    accepted_at_unix_ms: claim.accepted_at_unix_ms,
+                }],
+            );
+            if retired.is_err() {
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h147460d38c0c owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ "ROLLBACK TO retire; RELEASE retire").unwrap();
+                return;
+            }
+            transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h3fec8e4cbeb7 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ "RELEASE retire").unwrap();
+            if *stale {
+                for (cited, citer) in rows {
+                    transaction
+                        .execute(/* sqlite-large-value: allow-for-now lv-h3458778f2d90 owner=fractal_store::store::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_trim_citations(cited, citer) VALUES (?1, ?2)", params![cited, citer])
+                        .unwrap();
+                }
+            }
+            transaction.commit().unwrap();
+        }
+        Step::Tombstone(newer) => {
+            let sequence = if *newer { 1_000_000 + n as i64 } else { 0 };
+            store
+                .connection
+                .write()
+                .execute(
+                    /* sqlite-large-value: allow-for-now lv-h23de9485734a owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_envelopes(writer, sequence, envelope_hash, accepted_at_unix_ms, checkpoint)
+                     VALUES (?1, ?2, ?3, 1, 'checkpoint/1970-01-02')",
+                    params![store.origin, sequence, format!("tombstone-{n}")],
+                )
+                .unwrap();
+        }
+        Step::Twice(observer) => {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let mut batch = None;
+            for status in ["ok", "changed"] {
+                let claim = append_claim_tx(
+                    &transaction,
+                    &store.origin,
+                    &format!("observer/watch-{observer}"),
+                    "observer.observed",
+                    None,
+                    &json!({"fields": {"status": status}}),
+                    &[],
+                    batch.as_deref(),
+                )
+                .unwrap();
+                batch = Some(claim.batch_id);
+            }
+            transaction.commit().unwrap();
+        }
+        Step::Shared(observer) => {
+            let operation = json!({"id": format!("operation/shared-{n}"), "request_digest": format!("digest-{n}")});
+            for (subject, kind, fields) in [
+                (format!("observer/watch-{observer}"), "observer.observed", json!({"status": "ok"})),
+                (
+                    format!("resource/pr/{observer}"),
+                    "resource.observed",
+                    json!({"kind": "vcs.pull-request", "state": "open", "observer": format!("observer/watch-{observer}")}),
+                ),
+            ] {
+                // One transaction each: two batches, so two envelopes.
+                let mut connection = store.connection.write();
+                let transaction = connection.transaction().unwrap();
+                append_claim_tx(
+                    &transaction,
+                    &store.origin,
+                    &subject,
+                    kind,
+                    None,
+                    &json!({"fields": fields, "_operation": operation}),
+                    &[],
+                    None,
+                )
+                .unwrap();
+                transaction.commit().unwrap();
+            }
+        }
+    }
+}
+
+/// Stage `store` at `cut` as a local cut does, fully or scoped, and plan it.
+fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let kinds = smallclaims::store::LOCAL_TRIM_KINDS;
+    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(kinds)).unwrap();
+    staged.protect_all_but(kinds).unwrap();
+    smallclaims::store::checkpoint_staging::without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
+    let claims = staged.dropped_claims(0, usize::MAX >> 1).unwrap().into_iter().map(|claim| claim.id).collect();
+    let envelopes = staged
+        .dropped_envelopes(0, usize::MAX >> 1)
+        .unwrap()
+        .into_iter()
+        .map(|envelope| format!("{}/{}/{}", envelope.writer, envelope.sequence, envelope.envelope_hash))
+        .collect();
+    (claims, envelopes, staged.guard_answers(kinds).unwrap())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+    /// For random histories, a local cut's scoped capture plans the same drop as a full capture
+    /// restricted to the kinds it drops, and every guard answers the same for each claim it
+    /// could drop: newest of slot, writer's newest envelope, operations, envelopes, protections,
+    /// repairs and citations.
+    #[test]
+    fn a_scoped_capture_plans_what_a_full_one_plans(
+        steps in proptest::collection::vec(step_strategy(), 1..60)
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let context = context(scratch.path(), 0);
+        let store = local_member("alder");
+        let peer = Store::open_memory("birch").unwrap();
+        for (n, step) in steps.iter().enumerate() {
+            take_step(&store, &peer, step, n);
+        }
+        store.seal_local_batches().unwrap();
+        // The peer's claims arrive last, after claims accepted later than theirs.
+        send(&peer, &store);
+        let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+        let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+        let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+        prop_assert_eq!(&scoped.0, &full.0, "dropped claims");
+        prop_assert_eq!(&scoped.1, &full.1, "dropped envelopes");
+        prop_assert_eq!(&scoped.2, &full.2, "guard answers");
+        let check = store.verify_local_trim_citations().unwrap();
+        prop_assert!(check.missing.is_empty() && check.extra.is_empty(), "{:?}", check);
+    }
+}
+
+/// A claim two others cite keeps the citer that is still here after the other is retired: the
+/// deleting transaction removes only the retired claim's own citation rows.
+#[test]
+fn a_retired_citer_leaves_what_the_others_cite() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let peer = Store::open_memory("birch").unwrap();
+    for n in 0..2 {
+        take_step(&store, &peer, &Step::Write(Write::Observer { observer: 0, status: n, cursor: None }), usize::from(n));
+    }
+    // Both cite the older observation, the one the cut could drop.
+    take_step(&store, &peer, &Step::Cite(0), 2);
+    take_step(&store, &peer, &Step::Cite(0), 3);
+    store.catch_up_local_trim_citations().unwrap();
+    let citers: Vec<String> = store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims WHERE json_array_length(body, '$.evidence') > 0 ORDER BY store_index")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(citers.len(), 2);
+    take_step(&store, &peer, &Step::Retire(1, false), 4);
+    assert!(store.claim_by_id(&citers[0]).unwrap().is_none(), "the first citer is retired");
+    store.seal_local_batches().unwrap();
+    let check = store.verify_local_trim_citations().unwrap();
+    assert!(check.missing.is_empty() && check.extra.is_empty(), "{check:?}");
+    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+    let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+    assert_eq!(scoped, full);
+    assert!(scoped.2.iter().any(|answer| answer.contains("cited=1")), "{:?}", scoped.2);
+}

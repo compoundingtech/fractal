@@ -43,6 +43,35 @@ export const tailnetAdmission = ({ origin, logins, listener }: TailnetAdmissionO
   }
 }
 
+export interface EdgeOrTailnetAdmissionOptions {
+  readonly origin: string | undefined
+  readonly logins: readonly string[]
+  /** The deployment's unchanged Devnet edge and direct-loopback admission. */
+  readonly edge: (request: IncomingMessage) => boolean
+}
+
+/**
+ * Adds a canonical tailnet origin without weakening an existing Devnet edge policy.
+ *
+ * Serve's HTTP proxy preserves Host and overwrites X-Forwarded-Host with that same Host, including
+ * for tagged nodes without identity headers. Devnet instead sends the listener Host and a distinct
+ * external X-Forwarded-Host. Do not let Serve traffic fall through to the login-free edge policy.
+ * The listener must remain loopback-only: local processes can forge either proxy's headers.
+ */
+export const edgeOrTailnetAdmission = ({ origin, logins, edge }: EdgeOrTailnetAdmissionOptions) => {
+  if (origin === undefined) return edge
+  // Validate eagerly, including the nonempty allowlist, before opening the listener.
+  const tailnet = tailnetAdmission({ origin, logins, listener: () => undefined })
+  const host = new URL(origin).host
+  return (request: IncomingMessage): boolean => {
+    if (request.headers.host === host) return tailnet(request)
+    if (request.headers['x-forwarded-host'] !== undefined &&
+      request.headers['x-forwarded-host'] === request.headers.host) return false
+    if (Object.keys(request.headers).some((name) => name.startsWith('tailscale-'))) return false
+    return edge(request)
+  }
+}
+
 export interface HostConfig {
   readonly dist: string
   readonly host: string
