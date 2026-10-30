@@ -114,6 +114,41 @@ purpose is `#[ignore]`d.
 host", and the seat starts as today. A seat's lane is applied when the seat starts; a change to the
 declaration or the switch takes effect at its next start.
 
+### Placement for unlaned daemon seats
+
+The optional `[unlaned_seat]` table in `~/.config/st3/config.toml` places only daemon-launched
+seats that have no active lane. Omit it to keep the existing placement. Restart the daemon
+after changing it; existing seats retain their placement. Laned seats keep their lane slice
+and limits; directly constructed runtimes and non-systemd launches do not use this policy.
+Do not combine it with a generic `st3-.scope.d` drop-in that overrides `Slice=`.
+
+For placement without resource caps:
+
+```toml
+[unlaned_seat]
+slice = "app-seats.slice"
+```
+
+To also set caps and OOM behavior:
+
+```toml
+[unlaned_seat]
+slice = "app-seats.slice"
+memoryMax = 8589934592
+memorySwapMax = 0
+oomPolicy = "kill"
+```
+
+Only `slice` is required; unknown fields are rejected. `memoryMax`, `memorySwapMax`, and
+`oomPolicy` are independently optional: an absent field emits no corresponding `-p` argument.
+When present, memory values are integer byte counts (`memoryMax` positive, `memorySwapMax`
+nonnegative). `oomPolicy` is `continue`, `stop`, or `kill`; setting it requires a systemd version
+supporting `OOMPolicy` on scopes (254+).
+`slice` is a non-root `.slice` name containing letters, digits, underscores and single internal
+hyphens. The launcher passes `--slice=`, `MemoryMax=`, `MemorySwapMax=` and `OOMPolicy=` directly
+to `systemd-run`. Older daemons reject this table; remove it before downgrading.
+
+
 ## macOS
 
 No cgroups. A declared lane is logged at launch as "not enforced: this host has no systemd user

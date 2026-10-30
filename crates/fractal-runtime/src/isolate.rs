@@ -159,7 +159,7 @@ pub(crate) fn sanitize(value: &str) -> String {
 }
 
 pub fn wrap(unit: &str, program: &OsStr, arguments: &[&OsStr]) -> Command {
-    wrap_in(unit, program, arguments, None, None)
+    wrap_in(unit, program, arguments, None, None, None)
 }
 
 /// Construct the launcher with its final environment before selecting the host systemd session.
@@ -170,6 +170,7 @@ pub(crate) fn wrap_in(
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
     lane: Option<&crate::lane::Lane>,
+    unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
 ) -> Command {
     wrap_for_mode(
         mode(),
@@ -179,6 +180,7 @@ pub(crate) fn wrap_in(
         arguments,
         environment,
         lane,
+        unlaned_seat,
     )
 }
 
@@ -196,6 +198,7 @@ fn wrap_for_mode(
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
     lane: Option<&crate::lane::Lane>,
+    unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
 ) -> Command {
     match isolation {
         Isolation::Scope => {
@@ -220,6 +223,8 @@ fn wrap_for_mode(
                 command.args(lane.scope_arguments());
                 let seat = |key: &str| environment?.get(key).cloned();
                 command.envs(crate::lane::environment(lane, seat, |key| std::env::var(key).ok()));
+            } else if let Some(policy) = unlaned_seat {
+                policy.apply(&mut command);
             }
             instance_scope_environment(&mut command, environment);
             command.arg("--").arg(program).args(arguments);
@@ -525,6 +530,7 @@ mod tests {
             &arguments,
             None,
             None,
+            None,
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -547,6 +553,7 @@ mod tests {
             "st-studio.scope",
             program,
             &arguments,
+            None,
             None,
             None,
         );
@@ -610,6 +617,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("%n:$HOME")],
             Some(&environment),
+            None,
             None,
         );
         assert_eq!(
@@ -700,6 +708,31 @@ mod tests {
     }
 
     #[test]
+    fn unlaned_daemon_seat_placement_is_explicit_and_never_overrides_a_lane() {
+        let policy = crate::seat_placement::tests::policy();
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
+        let arguments = |lane: Option<&crate::lane::Lane>, policy: Option<&crate::UnlanedSeatPlacement>| {
+            wrap_for_mode(Isolation::Scope, true, "st3-work.scope",
+                OsStr::new("provider"), &[], None, lane, policy)
+                .get_args().map(std::ffi::OsString::from).collect::<Vec<_>>()
+        };
+        assert_eq!(arguments(None, None), [
+            "--user", "--scope", "--collect", "--quiet", "--no-ask-password",
+            "--unit=st3-work.scope", "--description=Fractal seat", "--expand-environment=no",
+            "--", "provider",
+        ].map(std::ffi::OsString::from));
+        assert_eq!(arguments(Some(&lane), Some(&policy)), arguments(Some(&lane), None));
+        let placed = arguments(None, Some(&policy));
+        assert_eq!(placed[8..], [
+            "--slice=app-seats.slice", "-p", "MemoryMax=1073741824", "-p",
+            "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--", "provider",
+        ].map(std::ffi::OsString::from));
+        let detached = wrap_for_mode(Isolation::Detached, false, "unused.scope",
+            OsStr::new("provider"), &[], None, None, Some(&policy));
+        assert!(detached.get_args().next().is_none());
+    }
+
+    #[test]
     fn a_lane_caps_the_scope_and_keeps_its_builds_inside() {
         let environment = std::collections::BTreeMap::from([
             ("PATH".to_owned(), "/bin".to_owned()),
@@ -714,6 +747,7 @@ mod tests {
             &[OsStr::new("--flag")],
             Some(&environment),
             Some(&lane),
+            None,
         );
         let arguments = command.get_args().collect::<Vec<_>>();
         let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
@@ -740,6 +774,7 @@ mod tests {
             &[],
             Some(&environment),
             Some(&lane),
+            None,
         );
         assert!(detached.get_args().next().is_none());
         assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));
