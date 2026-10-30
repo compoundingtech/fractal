@@ -365,9 +365,10 @@ transitional exceptions do not prove byte-size or execution-cost bounds.
 
 ## Native question lifecycle inventory review (PR #4191)
 
-`fractal_store::store` owns schema site `lv-h0113908d5df7`, replacing
-`lv-h82624af80f95` because the schema adds `local_harness_question_generations`.
-The other schema declarations are unchanged. The new primary key is the derived
+`fractal_store::store` owns schema site `lv-h77b21804192f`, combining lifecycle
+site `lv-h0113908d5df7` with receipt-index site `lv-h806ead738248`. It adds
+`local_harness_question_generations` and the receipt actor/key index; all other
+schema declarations are unchanged. The new primary key is the derived
 question subject; its inline JSON value holds authenticated process birth,
 provider ownership and native-session witnesses, never question or option text.
 The schema maintainer retains `chunk-or-reference-variable-columns`; the local
@@ -382,3 +383,18 @@ lease. The maintainer retains `bound-or-reference-values-and-reclamation`:
 establish the complete serialized witness/key bounds or a bounded reference
 representation, preserving compare-and-delete and crash-recovery semantics.
 These exceptions do not claim a storage-size bound or change admission.
+
+## Harness receipt lookup inventory review (PR #3916)
+
+`fractal_store::store` owns the combined schema site `lv-h77b21804192f`.
+The additive receipt actor/key index from `lv-h806ead738248` extracts the
+existing receipt digest and retains existing origin/subject TEXT
+keys; it stores no new question content. Canonical first-resolution and local
+owner checks remain authoritative after the indexed candidate lookup. Existing
+declaration metadata and the producer's `chunk-or-reference-variable-columns`
+work remain; an indexed seek is not a byte-size proof for the retained keys.
+
+Fixture-only `lv-hc58fa3f9b3bb`, owned by `fractal::main_tests`, includes the
+existing client capability envelope to prove CLI answer fences come from the
+caller, not a new question read. It adds no production writer or SQL value.
+Its `trace-statement-and-value-representation` work remains with that module.

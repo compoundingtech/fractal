@@ -184,6 +184,10 @@ No adapter is installed by default; capability is unavailable and submission ret
 Every per-harness flag and the web-client flag remain off; this contract does not wire
 the O1 adapter or ship an answering form.
 
+Synchronous native availability checks and settlement run on blocking workers,
+not async executor threads. This includes availability checks while building
+metadata list and detail responses, as well as capability checks and answer submission.
+
 `harness.answer` posts to `/v1/client/actions` with parameters
 `{question, answers}`, where `answers` maps canonical `q0`–`q15` or hashed question
 ids to `{positions:[0,2]}`. Positions are unique and zero-based in native option order.
@@ -214,8 +218,11 @@ including reuse across generic client actions, private-notes writes and harness 
 in either direction. Private-notes writes retain their owner-local exact-request recovery,
 current ownership checks and fence validation; the shared graph reservation never replays
 private content or private fences.
-Harness receipts stay solely in the existing compact resolution. An unknown key is
-new; a new key after resolution returns `already_resolved` before adapter or answer
+Harness receipts stay solely in the existing compact resolution. Shared-key admission
+seeks owner-authored receipts through an actor/key expression index; it never scans the
+indefinitely retained resolved-question collection. The index supplies candidates only:
+the canonical first resolution and owner provenance still decide trust. An unknown key
+is new; a new key after resolution returns `already_resolved` before adapter or answer
 validation, but still requires current authority, snapshot provenance and question/runtime
 fences. The result is an ordinary completed action with a nested `harness_answer`
 containing its status and the authoritative resolution. `accepted` acknowledges adapter
@@ -248,7 +255,8 @@ fractal harness-questions list --as person/alex
 fractal harness-questions list --as person/alex --limit 50 --cursor CURSOR
 fractal harness-questions show QUESTION --as person/alex
 fractal harness-questions answer QUESTION --as person/alex \
-  --answers-file answers.json --idempotency-key alex-harness-answer-0001
+  --answers-file answers.json --revision REVISION --incarnation INCARNATION \
+  --idempotency-key alex-harness-answer-0001
 ```
 
 List prints one page. Continue with its `page.next_cursor`, preserving `--limit`.
@@ -256,10 +264,17 @@ The generated Rust, Swift and TypeScript list helpers expose the same cursor and
 controls; callers must follow `next_cursor` when `has_more` is true.
 
 `answers.json` contains only a map such as `{"q0":{"positions":[1]}}`.
-The CLI reads canonical detail to populate all three fences. Its action id is
+Read `show` before answering and pass its resource `revision` as `--revision` and
+`runtime_incarnation` as `--incarnation`. Both flags are required explicitly; the CLI
+never fetches question detail to replace them with fresh values. If the question or
+runtime changed since review, submission refuses the stale fence rather than answering
+the changed question. The CLI obtains only snapshot provenance from capabilities.
+Its action id is
 `action/harness-answer-` plus SHA-256 hex over the key and canonical question id,
-each prefixed by its UTF-8 byte length as a big-endian u64. Retain the file and key
-to reproduce the same action identity. Rust, Swift and TypeScript clients are generated
+each prefixed by its UTF-8 byte length as a big-endian u64. A bare question id is
+prefixed with `harness-question/` locally. Retain the file, key and reviewed fences
+to reproduce the same action identity without silently refreshing the review.
+Rust, Swift and TypeScript clients are generated
 from the shared schema and templates with `cargo run -p fractal-client-codegen`.
 
 This is an additive client contract, not a new stored schema, receipt format or
