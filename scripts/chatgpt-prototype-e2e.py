@@ -52,7 +52,7 @@ def ready(predicate, process):
     raise RuntimeError('readiness deadline exceeded; see '+str(STATE))
 
 def cli(*args):
-    output=subprocess.run([str(BIN/'st3'),'--endpoint',str(STATE/'st3.sock'),'--json',*args],env=ENV,text=True,capture_output=True)
+    output=subprocess.run([str(BIN/'fractal'),'--endpoint',str(STATE/'st3.sock'),'--json',*args],env=ENV,text=True,capture_output=True)
     if output.returncode: raise RuntimeError(output.stderr)
     return json.loads(output.stdout)
 

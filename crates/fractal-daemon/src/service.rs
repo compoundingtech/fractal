@@ -596,7 +596,7 @@ fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-/// Whether `argv` is a st3 daemon: the program is `st3` or `st` and one of its arguments is `up`.
+/// Whether `argv` is a Fractal daemon (including transitional names) started with `up`.
 fn is_daemon_argv(argv: &[String]) -> bool {
     let Some(program) = argv.first() else {
         return false;
@@ -605,12 +605,12 @@ fn is_daemon_argv(argv: &[String]) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    matches!(name, "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+    matches!(name, "fractal" | "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
 /// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
-/// that holds its startup lock) is signalled, and only when it is a st3 daemon; a signal goes to
+/// that holds its startup lock) is signalled, and only when it is a Fractal daemon; a signal goes to
 /// the process whose start time was read first, never to a later process that reused its pid.
 /// Returns whether such a daemon was found and has ended.
 pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
@@ -1347,8 +1347,10 @@ mod tests {
     }
 
     #[test]
-    fn a_daemon_is_st3_or_st_started_with_up() {
+    fn a_daemon_is_fractal_or_a_transitional_name_started_with_up() {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert!(is_daemon_argv(&argv("/opt/example/bin/fractal up --config c")));
+        assert!(!is_daemon_argv(&argv("fractal agents ls")));
         assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));

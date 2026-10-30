@@ -217,7 +217,7 @@ def say(screen: Screen, write, pump, events: Events, marker: str, timeout: float
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default="target/release/st3")
+    parser.add_argument("--binary", default="target/release/fractal")
     parser.add_argument("--space", help="open this space instead of the last one used on this device")
     parser.add_argument("--seconds", type=float, default=180)
     parser.add_argument("--label", default="measure")

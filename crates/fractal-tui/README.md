@@ -123,7 +123,7 @@ cargo test -p fractal-tui --locked --lib
 cargo test -p fractal --locked --test integration typed_keys
 cargo test -p fractal --locked --test integration client_only
 cargo build -p fractal --locked
-ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
+ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/fractal --ui
 ```
 
 After an intended mission-rendering change, regenerate its text, style and target golden with

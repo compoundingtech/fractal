@@ -103,10 +103,10 @@ elif args[:1] == ['test']:
 elif args[:1] == ['tree']:
     print('standalone model -> std')
 elif args[:1] == ['build']:
-    binary = Path(os.environ['RUNNER_TEMP']) / 'production-st3'
+    binary = Path(os.environ['RUNNER_TEMP']) / 'production-fractal'
     binary.write_text('#!/bin/sh\\nexit 0\\n')
     binary.chmod(0o755)
-    print(json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'st3'}, 'executable': str(binary), 'features': [], 'profile': {'test': False}}))
+    print(json.dumps({'reason': 'compiler-artifact', 'target': {'name': 'fractal'}, 'executable': str(binary), 'features': [], 'profile': {'test': False}}))
 elif args[:2] == ['nextest', 'list']:
     target = Path(args[args.index('--extract-to') + 1]) / 'target'
     (target / 'nextest').mkdir(parents=True)

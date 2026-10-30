@@ -94,7 +94,6 @@
                 systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 launchd.agents = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
-              config.programs.smalltalk.fractalBinary.enable = extraConfig.fractalBinary or false;
               config.home.file = extraConfig.homeFiles or { };
               config.xdg.configFile = lib.recursiveUpdate (extraConfig.configFiles or { })
                 (lib.optionalAttrs (extraConfig.forceLegacyConfig or false) {
@@ -106,7 +105,7 @@
                 socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
                 declarations.seats = [ ./examples/fractal/seats/claude.kdl ];
-              } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" "homeFiles" "configFiles" ];
+              } // builtins.removeAttrs extraConfig [ "forceLegacyConfig" "homeFiles" "configFiles" ];
             })
           ];
         };
@@ -470,7 +469,7 @@
         st3Check = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
           assert deployPolicyFile == null || pkgs.lib.hasPrefix "${builtins.storeDir}/" "${deployPolicyFile}";
           pkgs.rustPlatform.buildRustPackage {
-          pname = "st3";
+          pname = "fractal";
           inherit version;
           src = self;
           # Embedded hooks are published into immutable runtime hook sets. The
@@ -666,25 +665,26 @@
             mkdir -p "$out/share"
             cp -r ${fractalWeb}/share/fractal-web "$out/share/fractal-web"
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-            ln -s st3 $out/bin/st
+            ln -s fractal $out/bin/st
+            ln -s fractal $out/bin/st3
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
             ln -s ${ptyPackage}/bin/pty $out/bin/pty
-            $out/bin/st completions bash > st.bash
-            $out/bin/st completions zsh > _st
-            $out/bin/st completions fish > st.fish
-            installShellCompletion --cmd st --bash st.bash --zsh _st --fish st.fish
+            $out/bin/fractal completions bash > fractal.bash
+            $out/bin/fractal completions zsh > _fractal
+            $out/bin/fractal completions fish > fractal.fish
+            installShellCompletion --cmd fractal --bash fractal.bash --zsh _fractal --fish fractal.fish
           '';
           meta = {
             description = "Fractal claims-graph runtime, terminal UI, and KDL migration tool";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
-            mainProgram = "st3";
+            mainProgram = "fractal";
           };
         }) { };
 
         # Installing the current tools must not depend on running the full runtime suite.
         # Keep that suite as checks.st3; st/ci also runs it in the native test environment.
-        st3 = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
+        fractal = pkgs.lib.makeOverridable ({ deployPolicyFile ? null }:
           (st3Check.override { inherit deployPolicyFile; }).overrideAttrs (_: {
             doCheck = false;
           })
@@ -713,15 +713,10 @@
           installPhase = ''touch "$out"'';
         };
 
-        # Explicit opt-in: the default st3 package never gains bin/fractal.
-        fractal = pkgs.runCommand "fractal-${version}" {
-          meta = st3.meta // { mainProgram = "fractal"; };
-        } ''
-          mkdir -p $out/bin
-          # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-          ln -s ${st3}/bin/st3 $out/bin/fractal
-          # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-        '';
+        # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+        # Attribute compatibility selects the complete canonical product, never a wrapper.
+        st3 = fractal;
+        # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
         stChatgpt = pkgs.rustPlatform.buildRustPackage {
           pname = "st-chatgpt";
@@ -759,49 +754,54 @@
         st3Help = pkgs.runCommand "st3-help-${version}" {
           nativeBuildInputs = [ pkgs.bashInteractive pkgs.fish pkgs.zsh ];
         } ''
-          test "$(readlink ${st3}/bin/st)" = st3
-          test ! -e ${st3}/bin/stui
-          test ! -e ${st3}/bin/fractal
+          test "$(readlink ${fractal}/bin/st)" = fractal
+          test "$(readlink ${fractal}/bin/st3)" = fractal
+          test ! -L ${fractal}/bin/fractal
+          test ! -e ${fractal}/bin/stui
           test -x ${st3}/bin/pty
           expected='${version}+${sourceRev}${pkgs.lib.optionalString (sourceDirty && !(pkgs.lib.hasSuffix "-dirty" sourceRev)) "-dirty"}'
-          ${st3}/bin/st3 --version > st3.version
+          ${fractal}/bin/fractal --version > st3.version
           grep -F "$expected" st3.version
           test "$(wc -l < st3.version)" -eq 1
           ${st3}/bin/st --version --json > version.json
           test "$(${pkgs.jq}/bin/jq -r .machine_version version.json)" = "$expected"
           ${st3}/bin/st ui --version | grep -F "$expected"
-          ${st3}/bin/st3 --help > st3.help
+          ${fractal}/bin/fractal --help > st3.help
           ${st3}/bin/st --help > st.help
           cmp st3.help st.help
           grep -F "Usage: fractal [" st.help
-          test -s ${st3}/share/bash-completion/completions/st.bash
-          test -s ${st3}/share/zsh/site-functions/_st
-          test -s ${st3}/share/fish/vendor_completions.d/st.fish
+          test -s ${fractal}/share/bash-completion/completions/fractal.bash
+          test -s ${fractal}/share/zsh/site-functions/_fractal
+          test -s ${fractal}/share/fish/vendor_completions.d/fractal.fish
           bash ${./scripts/check-installed-completions} ${st3}
           ${st3}/bin/st3-migrate --help > /dev/null
           touch $out
         '';
 
-        # Current package aliases must select st3 without pulling in the st2 package.
-        # Every install path leaves `st` resolving to the installed st3.
+        # Transitional package attributes select the complete canonical product.
+        # Installed st and st3 resolve through reverse aliases to the physical fractal.
         installLayout =
           assert self.packages.${system}.default.drvPath == st3.drvPath;
           assert self.packages.${system}.st.drvPath == st3.drvPath;
           assert self.packages.${system}.small-talk.drvPath == st3.drvPath;
           pkgs.runCommand "st3-install-layout-${version}" { } ''
             export HOME=$(mktemp -d)
-            test "$(readlink ${st3}/bin/st)" = st3
-            printf '%s\n' pty st st3 st3-migrate > expected-package-bin
+            test ! -L ${fractal}/bin/fractal
+            test "$(readlink ${fractal}/bin/st)" = fractal
+            test "$(readlink ${fractal}/bin/st3)" = fractal
+            printf '%s\n' fractal pty st st3 st3-migrate > expected-package-bin
             ls ${st3}/bin | sort > actual-package-bin
             cmp expected-package-bin actual-package-bin
 
             mkdir built
-            ln -s ${st3}/bin/st3 ${st3}/bin/st3-migrate built/
+            cp -p ${fractal}/bin/fractal ${fractal}/bin/st3-migrate built/
             bash ${self}/scripts/install --from built --bin-dir "$PWD/bin"
-            printf '%s\n' st st3 st3-migrate > expected-source-bin
+            printf '%s\n' fractal st st3 st3-migrate > expected-source-bin
             ls bin | sort > actual-source-bin
             cmp expected-source-bin actual-source-bin
-            test "$(readlink bin/st)" = st3
+            test "$(readlink bin/st)" = fractal
+            test "$(readlink bin/st3)" = fractal
+            test ! -L bin/fractal
             bin/st --help > st.help
             bin/st3 --help > st3.help
             cmp st.help st3.help
@@ -1156,7 +1156,7 @@
           let
             rendered = hmModuleEval.config;
             stableBinDir = "${rendered.services.smalltalk.stateDir}/bin";
-            stableExecutable = "${stableBinDir}/st3";
+            stableExecutable = "${stableBinDir}/fractal";
             package = toString (builtins.head rendered.home.packages);
             activation = rendered.home.activation.smalltalkBinary;
             daemonEnvironment = if pkgs.stdenv.hostPlatform.isLinux then
@@ -1196,7 +1196,7 @@
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
             builtins.head rendered.launchd.agents.smalltalk.config.ProgramArguments == stableExecutable);
-          assert builtins.match ".*/nix/store/[^ ]*/bin/st3.*" args == null;
+          assert builtins.match ".*/nix/store/[^ ]*/bin/fractal.*" args == null;
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             map toString rendered.systemd.user.services.smalltalk.Unit.X-Restart-Triggers == [ package ]
           else
@@ -1207,8 +1207,7 @@
             (if pkgs.stdenv.hostPlatform.isLinux then "reloadSystemd" else "setupLaunchAgents")
           ];
           assert builtins.deepSeq activation.data true;
-          assert !rendered.programs.smalltalk.fractalBinary.enable;
-          assert !(pkgs.lib.hasInfix ''/bin/ln -s st3 "$binDir/fractal"'' activation.data);
+          assert pkgs.lib.hasInfix ''/bin/ln -sfn fractal "$binDir/st3"'' activation.data;
           assert builtins.length rendered.home.packages == 1;
           assert builtins.deepSeq (if pkgs.stdenv.hostPlatform.isLinux then
             rendered.systemd.user.services.smalltalk-apply.Service.ExecStart
@@ -1314,7 +1313,7 @@
                 then ''state_dir = "/home/example/.local/state/fractal/store"''
                 else ''state_dir = "/home/example/.local/state/st3/store"'') file.text
               && (phase == "legacy" || (
-                pkgs.lib.hasInfix "/home/example/.local/state/fractal/store/bin/st3"
+                pkgs.lib.hasInfix "/home/example/.local/state/fractal/store/bin/fractal"
                   evaluated.systemd.user.services.fractal.Service.ExecStart
                 && pkgs.lib.hasInfix "/home/example/.local/state/fractal/pty"
                   evaluated.systemd.user.services.fractal.Service.ExecStart
@@ -1360,7 +1359,7 @@
             && !(completed.systemd.user.services ? smalltalk-apply)
             && completed.systemd.user.services.fractal.Install.WantedBy == [ "default.target" ]
             && daemon.Service.ExecCondition == apply.Service.ExecCondition
-            && pkgs.lib.hasInfix "/home/example/.local/state/fractal/bin/st3" daemon.Service.ExecStart
+            && pkgs.lib.hasInfix "/home/example/.local/state/fractal/bin/fractal" daemon.Service.ExecStart
             && pkgs.lib.hasInfix "/home/example/.config/fractal/config.toml" daemon.Service.ExecStart
             && !(noApply.systemd.user.services ? fractal-apply)
           else
@@ -1463,29 +1462,30 @@
           );
         checks.fractal-aliases =
           let
-            rendered = (mkHmModuleEval { fractalBinary = true; }).config;
+            rendered = hmModuleEval.config;
             external = (mkHmModuleEval {
-              fractalBinary = true;
-              binary.path = "/opt/fractal/bin/st3";
+              binary.path = "/opt/fractal/bin/fractal";
             }).config;
             activation = rendered.home.activation.smalltalkBinary.data;
           in
-          assert rendered.programs.smalltalk.fractalBinary.enable;
           assert builtins.length rendered.home.packages == 1;
-          assert pkgs.lib.hasInfix ''/bin/ln -s st3 "$binDir/fractal"'' activation;
-          assert pkgs.lib.hasInfix ''[[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]'' activation;
-          assert !(pkgs.lib.hasInfix ''ln -sfn st3 "$binDir/fractal"'' activation);
+          assert pkgs.lib.hasInfix ''/bin/ln -sfn fractal "$binDir/st"'' activation;
+          assert pkgs.lib.hasInfix ''/bin/ln -sfn fractal "$binDir/st3"'' activation;
+          assert pkgs.lib.hasInfix ''/bin/fractal'' activation;
           assert !(external.home.activation ? smalltalkBinary);
-          assert self.packages.${system}.default == st3;
+          assert self.packages.${system}.default == fractal;
+          assert self.packages.${system}.fractal.drvPath == self.packages.${system}.st3.drvPath;
           pkgs.runCommand "fractal-aliases-${version}" { } ''
-            test "$(readlink ${fractal}/bin/fractal)" = ${st3}/bin/st3
+            test ! -L ${fractal}/bin/fractal
             test -x ${fractal}/bin/fractal
-            test ! -e ${st3}/bin/fractal
+            test "$(readlink ${fractal}/bin/st3)" = fractal
+            test "$(readlink ${fractal}/bin/st)" = fractal
+            test -f ${fractal}/share/fractal-web/index.html
             touch $out
           '';
         checks.hm-module-external-binary-eval =
           let
-            executable = "/opt/fractal/bin/st3";
+            executable = "/opt/fractal/bin/fractal";
             externalConfig = { binary.path = executable; };
             rendered = (mkHmModuleEval externalConfig).config;
             successor = (mkHmModuleEval (externalConfig // {

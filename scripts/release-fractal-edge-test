@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
@@ -58,7 +59,12 @@ save()
 
 
 def sh(*cmd, cwd, env=None):
-    return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True, env=env).stdout.strip()
+    print('fixture git stage: ' + json.dumps(cmd), file=sys.stderr, flush=True)
+    try:
+        return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True, env=env).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        error.add_note(f'fixture command stdout:\n{error.stdout}\nstderr:\n{error.stderr}')
+        raise
 
 
 def build_dist(dist, source, marker):
@@ -78,11 +84,11 @@ def build_dist(dist, source, marker):
                         info.size = len(data)
                         archive.addfile(info, io.BytesIO(data))
                 add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
-                add('bin/st3', marker.encode())
+                add('bin/fractal', marker.encode())
                 add('bin/pty', b'pty')
                 add('share/fractal-web/index.html', b'web', 0o644)
-                add('bin/st', link='st3')
-                add('bin/fractal', link='st3')
+                add('bin/st', link='fractal')
+                add('bin/st3', link='fractal')
                 add('install.sh'); add('install-macos.py'); add('macos-installation.md', b'', 0o644)
             digest = hashlib.sha256((dist / f'{package}.tar.gz').read_bytes()).hexdigest()
             line = f'{digest}  {package}.tar.gz\n'
@@ -100,6 +106,9 @@ with tempfile.TemporaryDirectory() as temporary:
     for name in ('release-fractal-edge', 'release-fractal-manifest.py'):
         shutil.copy(repo / 'scripts' / name, checkout / 'scripts' / name)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
+    # Fixture history must not depend on the account's interactive signing agent.
+    sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     commits = []
