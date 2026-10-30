@@ -15,7 +15,7 @@ pub(super) fn flush_preparation(transaction: &Transaction<'_>) -> Result<()> {
 mod preparation_tests;
 
 const VERSION: &str = "2";
-const PENDING_TRIGGER_VERSION: &str = "1";
+const PENDING_TRIGGER_VERSION: &str = "2";
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hdacd067611e1 owner=fractal_store::store::resources TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS resource_observations (
     subject TEXT PRIMARY KEY,
@@ -32,18 +32,19 @@ CREATE INDEX IF NOT EXISTS resource_observations_run_subject ON resource_observa
 CREATE TABLE IF NOT EXISTS local_resource_projection_pending (subject TEXT PRIMARY KEY);
 "#;
 
-// The existence probes use the pending subject primary key. Avoiding the duplicate INSERT
+// A newer `vcs.item.state` lays its compact facts over an item's observed facts, so either kind
+// marks the subject pending. The existence probes use the pending subject primary key. Avoiding the duplicate INSERT
 // entirely also works when the statement firing a trigger has its own conflict policy.
 const PENDING_TRIGGERS: &str = /* sqlite-large-value: allow-for-now lv-h00e1d3cc0874 owner=fractal_store::store::resources TODO=chunk-or-reference-exact-wire-values */ r#"
 CREATE TRIGGER IF NOT EXISTS resource_observations_insert AFTER INSERT ON claims
-WHEN NEW.kind='resource.observed' BEGIN
+WHEN NEW.kind IN ('resource.observed','vcs.item.state') BEGIN
     INSERT INTO local_resource_projection_pending(subject)
     SELECT NEW.subject WHERE NOT EXISTS (
         SELECT 1 FROM local_resource_projection_pending WHERE subject=NEW.subject
     );
 END;
 CREATE TRIGGER IF NOT EXISTS resource_observations_delete AFTER DELETE ON claims
-WHEN OLD.kind='resource.observed' BEGIN
+WHEN OLD.kind IN ('resource.observed','vcs.item.state') BEGIN
     INSERT INTO local_resource_projection_pending(subject)
     SELECT OLD.subject WHERE NOT EXISTS (
         SELECT 1 FROM local_resource_projection_pending WHERE subject=OLD.subject
@@ -52,7 +53,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS resource_observations_record_insert AFTER INSERT ON replica_records
 WHEN NEW.claim_id IS NOT NULL BEGIN
     INSERT INTO local_resource_projection_pending(subject)
-    SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind='resource.observed'
+    SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind IN ('resource.observed','vcs.item.state')
         AND NOT EXISTS (
             SELECT 1 FROM local_resource_projection_pending WHERE subject=claims.subject
         );
@@ -60,7 +61,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS resource_observations_record_update AFTER UPDATE ON replica_records
 WHEN NEW.claim_id IS NOT NULL BEGIN
     INSERT INTO local_resource_projection_pending(subject)
-    SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind='resource.observed'
+    SELECT claims.subject FROM claims WHERE claims.id=NEW.claim_id AND claims.kind IN ('resource.observed','vcs.item.state')
         AND NOT EXISTS (
             SELECT 1 FROM local_resource_projection_pending WHERE subject=claims.subject
         );
@@ -100,6 +101,11 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
         // CREATE TRIGGER IF NOT EXISTS in create_schema cannot upgrade a persisted trigger.
         // Replace all four with their marker in the same opening transaction.
         replace_pending_triggers(transaction)?;
+        // Compact item states this store took while it ran a build whose triggers ignored them.
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ITEM-STATE-PENDING owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='vcs.item.state'",
+            [],
+        )?;
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-hcd95eed6317e owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('resource_pending_trigger_version',?1)",
             [PENDING_TRIGGER_VERSION],
@@ -206,13 +212,18 @@ pub fn merge_observation(
 }
 
 pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    let item_state = newest_item_state(transaction, subject)?;
     let claim = transaction.query_row(/* sqlite-large-value: allow-for-now lv-he6304e096edd owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT id, body, accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='resource.observed'
          AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1"), [subject],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
     ).optional()?;
-    if let Some((id, body, accepted)) = claim {
+    // A subject a poller from step 3b of the plugin store described only in compact state.
+    let claim = claim.or_else(|| item_state.as_ref().map(|(id, _, accepted)| {
+        (id.clone(), json!({"fields": {}}).to_string(), accepted.clone())
+    }));
+    if let Some((mut id, body, mut accepted)) = claim {
         let mut body: Value = serde_json::from_str(&body)?;
         let fields: BTreeMap<String, Value> = match body.get_mut("fields").map(Value::take) {
             Some(Value::Null) | None => BTreeMap::new(),
@@ -241,10 +252,32 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
                 }
             }
         }
-        let kind = fields
+        let mut kind = fields
             .get("kind")
             .and_then(Value::as_str)
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .to_owned();
+        // Readers take the item's newest state: a `vcs.item.state` accepted no earlier than the
+        // observation lays its compact facts over the observed ones.
+        if let Some((state_id, state, state_accepted)) = &item_state
+            && (kind.is_empty() || state_accepted.parse::<u128>()? >= accepted.parse::<u128>()?)
+        {
+            for (name, value) in fractal_schema::github_plugin::item_state_updates(state) {
+                match value {
+                    None => facts.remove(name),
+                    Some(value) => facts.insert(name.into(), value.clone()),
+                };
+            }
+            if kind.is_empty() {
+                kind = state.get("item_kind").and_then(Value::as_str).unwrap_or_default().to_owned();
+                if let Some(number) = subject.rsplit('/').next().and_then(|number| number.parse::<u64>().ok()) {
+                    facts.entry("number".to_owned()).or_insert_with(|| number.into());
+                }
+            }
+            id = state_id.clone();
+            accepted = state_accepted.clone();
+        }
+        let kind = kind.as_str();
         // `fields.observed_at` has no declared unit and no producer; the admitted claim time is the
         // observation time every other resource reader uses.
         let observed_at = chrono::DateTime::from_timestamp_millis(accepted.parse()?)
@@ -269,6 +302,24 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         [subject],
     )?;
     preparation::flush(transaction)
+}
+
+/// The newest `vcs.item.state` of `subject`: its claim, compact fields and accepted time.
+pub fn newest_item_state(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<(String, serde_json::Map<String, Value>, String)>> {
+    let row = connection.query_row(/* sqlite-large-value: allow-for-now lv-PLACEHOLDER-ITEM-STATE-READ owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
+        "SELECT id, json_extract(body, '$.fields'), accepted_at_unix_ms FROM claims
+         WHERE subject=?1 AND kind='vcs.item.state'
+         AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+         ORDER BY CANONICAL_DESC(claims) LIMIT 1"), [subject],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
+    ).optional()?;
+    Ok(row.and_then(|(id, fields, accepted)| {
+        let fields = serde_json::from_str::<Value>(&fields?).ok()?;
+        Some((id, fields.as_object()?.clone(), accepted))
+    }))
 }
 
 fn prefix_successor(prefix: &str) -> Option<String> {
@@ -304,6 +355,36 @@ impl Store {
             .optional()?
             .flatten()
             .filter(|recorder| recorder != observer))
+    }
+
+    /// The pull requests and issues recorded under the repository resource `resource`, as the
+    /// local projection holds them, number order. With `number`, only that item. Each is the
+    /// item's subject, kind, current facts (a newer `vcs.item.state` laid over its observed facts)
+    /// and the claim that recorded them.
+    pub fn repository_items(&self, resource: &str, number: Option<u64>) -> Result<Vec<crate::model::RecordedItem>> {
+        let prefix = format!("{resource}/");
+        let upper = prefix_successor(&prefix).unwrap_or_default();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT subject, kind, facts, claim_id FROM resource_observations
+             WHERE subject>=?1 AND subject<?2 AND kind IN ('vcs.pull-request','vcs.issue')",
+        )?;
+        let rows = statement.query_map(params![prefix, upper], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        })?;
+        let mut items = Vec::new();
+        for row in rows {
+            let (subject, kind, facts, claim) = row?;
+            let Some(rest) = subject.strip_prefix(&prefix) else { continue };
+            let Some((family, item)) = rest.split_once('/') else { continue };
+            let Ok(item) = item.parse::<u64>() else { continue };
+            if !matches!(family, "pull-request" | "issue") || number.is_some_and(|number| number != item) {
+                continue;
+            }
+            items.push((item, crate::model::RecordedItem { subject, kind, facts: serde_json::from_str(&facts)?, claim }));
+        }
+        items.sort_by_key(|(number, _)| *number);
+        Ok(items.into_iter().map(|(_, item)| item).collect())
     }
 
     /// The cursor in `observer`'s newest `observer.observed` claim. A build before the GitHub
@@ -833,6 +914,130 @@ END;
             assert!(sql.contains("NOT EXISTS"), "{name}: {sql}");
         }
         assert_eq!(projection_digest::tables(&connection).unwrap(), projection_digest::oracle(&connection).unwrap());
+    }
+
+    fn item_state(store: &Store, subject: &str, facts: Value) -> ClaimRecord {
+        let compact = fractal_schema::github_plugin::compact_item_state(
+            "vcs.pull-request", "observer/github/acme/garden", facts.as_object().unwrap(),
+        ).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: fractal_schema::github_plugin::ITEM_STATE.into(),
+            actor: None,
+            fields: compact.into_iter().collect(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
+    }
+
+    fn observed(store: &Store, subject: &str, facts: Value) -> ClaimRecord {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("kind".into(), json!("vcs.pull-request")), ("facts".into(), facts)]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap()
+    }
+
+    fn current(store: &Store, subject: &str) -> Value {
+        store.resource_collection_page(None, None, Some(subject), None, 10).unwrap()
+            .into_iter().find(|row| row["id"] == subject).unwrap()
+    }
+
+    /// Readers on this build take an item's newest state: a newer `vcs.item.state` lays its
+    /// compact facts over the observed ones, a newer observation replaces them, and an item
+    /// described only in compact state still reads as its kind and number.
+    #[test]
+    fn a_newer_item_state_lays_its_compact_facts_over_the_observed_ones() {
+        let store = Store::open_memory("item-state").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/7";
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(3));
+        observed(&store, subject, json!({"number": 7, "state": "open", "title": "Garden paths", "head_sha": "a",
+            "merge_queue": {"state": "QUEUED", "position": 1}, "recent_comments": [{"kind": "comment", "id": 1}]}));
+        pause();
+        let state = item_state(&store, subject, json!({"state": "closed", "merged": true, "head_sha": "b"}));
+        let row = current(&store, subject);
+        assert_eq!(row["facts"]["state"], "closed");
+        assert_eq!(row["facts"]["merged"], true);
+        assert_eq!(row["facts"]["head_sha"], "b");
+        assert_eq!(row["facts"]["title"], "Garden paths");
+        assert_eq!(row["facts"]["recent_comments"][0]["id"], 1);
+        assert!(row["facts"].get("merge_queue").is_none());
+        let projected: String = store.readers.get().query_row(
+            "SELECT claim_id FROM resource_observations WHERE subject=?1", [subject], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(projected, state.id);
+        let actual = store.latest_actual_value(subject).unwrap().unwrap();
+        assert_eq!(actual["facts"], row["facts"], "the actual-state fold reads the same facts");
+        pause();
+        observed(&store, subject, json!({"number": 7, "state": "open", "title": "Garden paths", "head_sha": "c"}));
+        let row = current(&store, subject);
+        assert_eq!(row["facts"]["state"], "open");
+        assert_eq!(row["facts"]["head_sha"], "c");
+
+        let compact_only = "resource/github/acme/garden/pull-request/8";
+        item_state(&store, compact_only, json!({"state": "open", "draft": true, "head_sha": "d"}));
+        let row = current(&store, compact_only);
+        assert_eq!(row["kind"], "vcs.pull-request");
+        assert_eq!(row["facts"]["number"], 8);
+        assert_eq!(row["facts"]["draft"], true);
+        assert_eq!(store.latest_actual_value(compact_only).unwrap().unwrap()["kind"], "vcs.pull-request");
+        let items = store.repository_items("resource/github/acme/garden", None).unwrap();
+        assert_eq!(items.iter().map(|item| item.subject.as_str()).collect::<Vec<_>>(), [subject, compact_only]);
+        assert_eq!(store.repository_items("resource/github/acme/garden", Some(8)).unwrap().len(), 1);
+        assert_eq!(projection_digest::tables(&store.readers.get()).unwrap(),
+                   projection_digest::oracle(&store.readers.get()).unwrap());
+    }
+
+    /// A store that ran an older build's triggers while it took compact states, as after a
+    /// rollback, reads them once this build reopens it.
+    #[test]
+    fn reopening_after_older_triggers_reads_the_item_states_they_missed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("item-state-triggers.sqlite3");
+        let store = Store::open(&path, "item-state-triggers").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/7";
+        observed(&store, subject, json!({"number": 7, "state": "open", "head_sha": "a"}));
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            replace_pending_triggers(&transaction).unwrap();
+            let older = PENDING_TRIGGERS
+                .replace("kind IN ('resource.observed','vcs.item.state')", "kind='resource.observed'");
+            transaction.execute_batch(
+                "DROP TRIGGER resource_observations_insert;
+                 DROP TRIGGER resource_observations_delete;
+                 DROP TRIGGER resource_observations_record_insert;
+                 DROP TRIGGER resource_observations_record_update;
+                 UPDATE meta SET value='1' WHERE key='resource_pending_trigger_version';",
+            ).unwrap();
+            transaction.execute_batch(&older).unwrap();
+            transaction.commit().unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        {
+            // As an older build takes it: no projector of this build runs.
+            let compact = fractal_schema::github_plugin::compact_item_state(
+                "vcs.pull-request", "observer/github/acme/garden",
+                json!({"state": "closed", "head_sha": "a"}).as_object().unwrap(),
+            ).unwrap();
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            append_claim_record_tx(
+                &transaction, &store.origin, subject, fractal_schema::github_plugin::ITEM_STATE, None,
+                &json!({"fields": compact}), &[], None,
+            ).unwrap();
+            assert_eq!(pending_count(&transaction, subject), 0, "the older triggers ignore it");
+            transaction.commit().unwrap();
+        }
+        assert_eq!(current(&store, subject)["facts"]["state"], "open");
+        drop(store);
+        let reopened = Store::open(&path, "item-state-triggers").unwrap();
+        assert_eq!(current(&reopened, subject)["facts"]["state"], "closed");
     }
 
     #[test]

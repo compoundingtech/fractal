@@ -6881,6 +6881,7 @@ impl MissionsStore for Store {
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
+                        recorded_items: Vec::new(),
                     }, false)));
                 }
                 let mut batches = ObservationBatches::default();
@@ -6974,6 +6975,7 @@ impl MissionsStore for Store {
                 let mut collection_discoveries = BTreeMap::<String, Vec<(String, String)>>::new();
                 let mut item_claims = Vec::new();
                 let mut item_mentions = Vec::new();
+                let mut mirrored_items = Vec::new();
                 for (field, item) in discovered {
                     let DiscoveredItem {
                         subject,
@@ -7043,6 +7045,12 @@ impl MissionsStore for Store {
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
+                    mirrored_items.push(crate::model::RecordedItem {
+                        subject: subject.clone(),
+                        kind: kind.to_owned(),
+                        facts: item_facts.clone(),
+                        claim: claim.id.clone(),
+                    });
                     if !data_types.is_empty() {
                         let prior = recorded_items.get(&subject).cloned().flatten();
                         let mentions = if data_types.contains("mentions") {
@@ -7648,11 +7656,12 @@ impl MissionsStore for Store {
                         message_subjects.push(message_subject);
                     }
                 }
-                let outcome = ResourceObservationOutcome {
+                let mut outcome = ResourceObservationOutcome {
                     baseline,
                     changed_fields,
                     observation_claim: observation_claim.map(|claim| claim.id),
                     message_subjects,
+                    recorded_items: Vec::new(),
                 };
                 transaction
                     .execute(
@@ -7663,6 +7672,7 @@ impl MissionsStore for Store {
                         ],
                     )
                     .map_err(internal)?;
+                outcome.recorded_items = mirrored_items;
                 Ok(Some((outcome, true)))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;

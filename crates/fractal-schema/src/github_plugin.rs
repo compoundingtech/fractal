@@ -127,21 +127,27 @@ pub fn compact_item_state(
     Some(fields)
 }
 
+/// What a `vcs.item.state` sets on an item's facts: each compact fact's value, or `None` where it
+/// removes that fact. Facts it does not carry (title, comments) stay as they were.
+pub fn item_state_updates(
+    state: &serde_json::Map<String, Value>,
+) -> impl Iterator<Item = (&'static str, Option<&Value>)> {
+    COMPACT_FACTS
+        .iter()
+        .map(|name| (*name, state.get(*name).filter(|value| !value.is_null())))
+}
+
 /// Lay a `vcs.item.state`'s compact fields over an item's facts: each compact fact replaces the
 /// fact of that name, and a null removes it. Facts it does not carry (title, comments) stay.
 pub fn overlay_item_state(
     facts: &mut serde_json::Map<String, Value>,
     state: &serde_json::Map<String, Value>,
 ) {
-    for name in COMPACT_FACTS {
-        match state.get(*name) {
-            None | Some(Value::Null) => {
-                facts.remove(*name);
-            }
-            Some(value) => {
-                facts.insert((*name).into(), value.clone());
-            }
-        }
+    for (name, value) in item_state_updates(state) {
+        match value {
+            None => facts.remove(name),
+            Some(value) => facts.insert(name.into(), value.clone()),
+        };
     }
 }
 

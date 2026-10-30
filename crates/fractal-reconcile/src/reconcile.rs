@@ -1441,7 +1441,7 @@ impl Reconciler<NativeRuntime> {
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
-            github_plugin: Arc::new(github_plugin_store::GithubPluginStore::open(state_dir)?),
+            github_plugin: github_plugin_store::GithubPluginStore::shared(state_dir)?,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -16944,6 +16944,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     }
                                 }
                                 durable_changed = wrote;
+                                if spec.provider == "github.repository" {
+                                    mirror_observation(&store, &github_plugin, &observer_subject, &spec, &outcome.recorded_items);
+                                }
                                 previous_facts = Some(observation.facts);
                                 // The cursor survives a restart only in the plugin database. A poll
                                 // that cannot keep it there is the observer's failure, which its
@@ -18503,6 +18506,40 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|subject, _| used.contains(subject));
+    }
+}
+
+/// Lay what one look at a GitHub repository recorded into the poller's plugin mirror. The first
+/// time this process mirrors the repository it first seeds the mirror from the graph's items, so
+/// a mirror left behind by a rollback or a crash catches up. The mirror is a cache: a failure is
+/// logged and the reads it serves fall back to the graph, never failing the observer.
+fn mirror_observation(
+    store: &Store,
+    plugin: &github_plugin_store::GithubPluginStore,
+    observer: &str,
+    spec: &crate::model::ObserverSpec,
+    recorded: &[crate::model::RecordedItem],
+) {
+    let item = |recorded: &crate::model::RecordedItem| {
+        recorded.facts.as_object().map(|facts| github_plugin_store::MirrorItem {
+            subject: recorded.subject.clone(),
+            item_kind: recorded.kind.clone(),
+            facts: facts.clone(),
+            claim: Some(recorded.claim.clone()),
+        })
+    };
+    let result = (|| -> Result<()> {
+        if !plugin.seeded(&spec.resource) {
+            let items = store.repository_items(&spec.resource, None)?;
+            plugin.seed(&spec.resource, observer, &spec.locator, &items.iter().filter_map(item).collect::<Vec<_>>())?;
+        }
+        if !recorded.is_empty() {
+            plugin.mirror(&spec.resource, observer, &spec.locator, &recorded.iter().filter_map(item).collect::<Vec<_>>())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
     }
 }
 
