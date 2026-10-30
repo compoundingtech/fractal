@@ -169,12 +169,12 @@ mod tests {
 
     #[test]
     fn desired_lifecycle_uses_authoritative_suspension_and_omits_stopped_agents() {
-        use crate::CoordinationStore;
+        use crate::SeatsStoreCore;
         const AGENT: &str = "agent/example/desired-metric";
         let store = Store::open_memory("node").unwrap();
         let source = "version 2\nagent \"example/desired-metric\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n";
-        let declare = |source: &str| {
-            store.apply_internal(&crate::graph::parse_intent(source, "node").unwrap(), "desired-metric").unwrap();
+        let declare = |source: &str, key: &str| {
+            store.apply_internal(&crate::graph::parse_intent(source, "node").unwrap(), key).unwrap();
         };
         let append = |kind: &str, fields: Value, evidence: Vec<String>, key: Option<String>| {
             store.append_claim(&crate::model::ClaimInput {
@@ -190,7 +190,7 @@ mod tests {
             // Neither a publication nor a runtime heartbeat exists: liveness cannot select intent.
             assert_eq!(series.state, "stale");
         };
-        declare(source);
+        declare(source, "desired-initial");
         expect("running");
         let token = store.selected_desired_token(AGENT).unwrap().unwrap();
         let suspend = append("runtime.action.requested",
@@ -205,10 +205,10 @@ mod tests {
         append("runtime.action.succeeded", json!({"action":"resume","operation_status":"resumed"}),
             vec![resume.id.clone()], Some(crate::suspension::resume_completed_key(&resume.id)));
         expect("running");
-        declare("version 2\nstop \"agent/example/desired-metric\"\n");
+        declare("version 2\nstop \"agent/example/desired-metric\"\n", "desired-stop");
         assert!(summarize(&store, &Summary::default()).unwrap().series.is_empty(),
             "stopped declarations are outside the unchanged shared metric membership");
-        declare(source);
+        declare(source, "desired-start");
         expect("running");
     }
 
