@@ -15,13 +15,10 @@ use std::path::PathBuf;
 /// Live tab chrome. Never stored with the workspace: observations can change between frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TabBadge {
-    kind: &'static str,
     activity: &'static str,
     alerts: Option<usize>,
     ask: bool,
     needs_person: bool,
-    /// The original agent/mission needs-person projection, independent of alert volume.
-    attention_marker: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -57,16 +54,23 @@ impl TabStatuses {
             .collect();
         for agent in world.agents.items() {
             let activity = match agent.state {
-                AgentState::Working | AgentState::Compacting => ">",
-                AgentState::Idle => "-",
-                AgentState::Down | AgentState::Stopped | AgentState::Retired => "x",
-                AgentState::NeedsYou | AgentState::NeedsLogin => "◆",
+                AgentState::Working | AgentState::Compacting => "●",
+                AgentState::Idle | AgentState::NeedsYou | AgentState::NeedsLogin => "○",
+                AgentState::Down | AgentState::Stopped | AgentState::Retired => "×",
                 AgentState::Fault => "!",
                 AgentState::Starting | AgentState::Unknown => "~",
             };
-            status.agents.insert(agent.id.clone(), SubjectBadge {
-                activity, needs_person: activity == "◆", ..SubjectBadge::default()
-            });
+            status.agents.insert(
+                agent.id.clone(),
+                SubjectBadge {
+                    activity,
+                    needs_person: matches!(
+                        agent.state,
+                        AgentState::NeedsYou | AgentState::NeedsLogin
+                    ),
+                    ..SubjectBadge::default()
+                },
+            );
         }
         for mission in world.missions.items() {
             if mission.decision.is_some() {
@@ -119,51 +123,88 @@ impl TabStatuses {
 }
 
 impl TabBadge {
-    fn activity_label(self) -> &'static str {
-        if self.attention_marker && self.activity == "◆" { "" } else { self.activity }
+    fn attention(self) -> &'static str {
+        if self.ask {
+            "?"
+        } else if self.needs_person {
+            "◆"
+        } else {
+            ""
+        }
+    }
+
+    /// Match the shared truncator without allocating a temporary title for width queries.
+    fn title(title: &str) -> (&str, bool) {
+        use unicode_width::UnicodeWidthChar as _;
+        if text::width(title) <= 26 {
+            return (title, false);
+        }
+        let mut used = 0;
+        for (end, character) in title.char_indices() {
+            used += character.width().unwrap_or(0);
+            if used > 25 {
+                return (&title[..end], true);
+            }
+        }
+        (title, false)
     }
 
     fn width(self, title: &str, counts: bool) -> usize {
-        let count = if counts {
-            match self.alerts {
-                Some(count) if count > 0 => 2 + count.ilog10() as usize + 1,
-                None if !self.kind.is_empty() => 3,
-                _ => 0,
-            }
-        } else if self.needs_person && !self.ask && !self.attention_marker { 2 } else { 0 };
-        let prefix = text::width(self.kind) + text::width(self.activity_label())
-            + if self.ask { 2 } else { 0 } + count
-            + if self.attention_marker { 2 } else { 0 };
-        // Keep the pre-badge title budget (26 cells plus padding). Status chrome must not
-        // consume the last distinguishing characters of a title that previously fitted.
-        1 + prefix + usize::from(prefix > 0) + text::width(title).min(26) + 1
+        let attention = self.attention();
+        let count = if counts && !attention.is_empty() {
+            self.alerts
+                .filter(|count| *count > 1)
+                .map_or(0, |count| count.ilog10() as usize + 1)
+        } else {
+            0
+        };
+        let (title, truncated) = Self::title(title);
+        // Preserve the existing 26-cell title budget independently of status chrome.
+        2 + text::width(self.activity)
+            + text::width(title)
+            + usize::from(truncated)
+            + if attention.is_empty() { 0 } else { 2 + count }
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
-        let mut label = format!(" {}{}", self.kind, self.activity_label());
-        if self.ask {
-            label.push_str(" ?");
-        }
-        if counts {
-            match self.alerts {
-                Some(count) if count > 0 => { let _ = write!(label, " ◆{count}"); }
-                None if !self.kind.is_empty() => label.push_str(" ◆?"),
-                _ => {}
-            }
-        } else if self.needs_person && !self.ask && !self.attention_marker {
-            label.push_str(" ◆");
-        }
-        // Preserve the existing standalone marker next to the subject's name. A count
-        // diamond or a type/activity glyph is not a replacement for this projection.
-        if self.attention_marker {
-            label.push_str(" ◆");
-        }
-        if label.len() > 1 {
-            label.push(' ');
-        }
-        label.push_str(title);
+        let (title, truncated) = Self::title(title);
+        let attention = self.attention();
+        let digits = if counts && !attention.is_empty() {
+            self.alerts
+                .filter(|count| *count > 1)
+                .map_or(0, |count| count.ilog10() as usize + 1)
+        } else {
+            0
+        };
+        let capacity = 2
+            + self.activity.len()
+            + title.len()
+            + if truncated { "…".len() } else { 0 }
+            + if attention.is_empty() {
+                0
+            } else {
+                1 + attention.len() + digits
+            };
+        let mut label = String::with_capacity(capacity);
         label.push(' ');
-        text::truncate(&label, width.min(self.width(title, counts)))
+        label.push_str(self.activity);
+        label.push_str(title);
+        if truncated {
+            label.push('…');
+        }
+        if !attention.is_empty() {
+            label.push(' ');
+            label.push_str(attention);
+            if counts && let Some(count) = self.alerts.filter(|count| *count > 1) {
+                let _ = write!(label, "{count}");
+            }
+        }
+        label.push(' ');
+        if text::width(&label) <= width {
+            label
+        } else {
+            text::truncate(&label, width)
+        }
     }
 }
 
@@ -2489,7 +2530,7 @@ impl Ui {
         let label_width = if counts { usize::from(available) }
             else { usize::from(available).saturating_sub(2 * marker + 1) };
         let labels: Vec<_> = tabs.iter()
-            .map(|(title, badge)| (badge.label(title, label_width, counts), badge.needs_person))
+            .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
             .collect();
         let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
         let (first, last) = visible_tabs(&widths, group.current, area.width.saturating_sub(x - area.x));
@@ -2502,8 +2543,8 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
             x += width;
         }
-        for (shown, (label, needs)) in labels.iter().enumerate().take(last + 1).skip(first) {
-            let needs = *needs;
+        for (shown, (label, badge)) in labels.iter().enumerate().take(last + 1).skip(first) {
+            let needs = badge.needs_person;
             let style = match (shown == group.current, focused) {
                 (true, true) => Style::default()
                     .fg(theme::CRUST)
@@ -2517,6 +2558,19 @@ impl Ui {
             // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
             let width = widths[shown].min((area.x + area.width).saturating_sub(x));
             buf.set_stringn(x, area.y, label, width as usize, style);
+            // What waits on the person keeps its colour on every tab, the one in front too.
+            if let Some(at) = attention_at(label, badge.attention()) {
+                let offset = text::width(&label[..at]) as u16;
+                if offset < width {
+                    buf.set_stringn(
+                        x + offset,
+                        area.y,
+                        &label[at..],
+                        usize::from(width - offset),
+                        style.fg(theme::PERSON),
+                    );
+                }
+            }
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
             x += width + 1;
         }
@@ -2597,12 +2651,9 @@ impl Ui {
     }
 
     fn tab_badge(&self, tab: &Tab, pane: Option<&Pane>) -> TabBadge {
-        let kind = match tab.kind() {
-            TabKind::Agent => "A",
-            TabKind::Mission => "M",
-            TabKind::Inbox => "I",
-            TabKind::Other => return TabBadge::default(),
-        };
+        if tab.kind() == TabKind::Other {
+            return TabBadge::default();
+        }
         let statuses = &self.tab_statuses;
         let subject = match pane {
             Some(Pane::Agent(Some(id)) | Pane::Terminal(id)) => statuses.agents.get(id),
@@ -2612,12 +2663,10 @@ impl Ui {
             _ => None,
         }.copied().unwrap_or_default();
         TabBadge {
-            kind,
             activity: if tab.kind() == TabKind::Agent && subject.activity.is_empty() { "~" } else { subject.activity },
             alerts: statuses.loaded.then_some(subject.alerts),
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
-            attention_marker: subject.needs_person,
         }
     }
 
@@ -4463,6 +4512,19 @@ fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
     (first, last)
 }
 
+/// Where the attention suffix (` ?2`, ` ◆`) starts in a tab's label, if the label still has it.
+fn attention_at(label: &str, attention: &str) -> Option<usize> {
+    if attention.is_empty() {
+        return None;
+    }
+    let body = label
+        .trim_end_matches(' ')
+        .trim_end_matches(|c: char| c.is_ascii_digit());
+    body.strip_suffix(attention)
+        .filter(|before| before.ends_with(' '))
+        .map(str::len)
+}
+
 /// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
 /// or `stale · Agents +1` for more. Each reason is `List: why`; clicking the word says the why.
 fn stale_word(stale: &[String]) -> String {
@@ -4763,14 +4825,106 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_strip_snapshot_shows_kind_activity_counts_and_pending_ask() {
-        let ui = tab_badge_world();
-        assert_eq!(tab_badge_strip(&ui, 120),
-            "A> ? ◆2 Atlas A- Idle Ax Stopped M ? ◆2 Mission I ? ◆2 Inbox +");
+    fn tab_badge_agent_activity_states_keep_attention_on_the_right() {
+        for (state, glyph, attention) in [
+            (AgentState::Working, "●", false),
+            (AgentState::Compacting, "●", false),
+            (AgentState::Idle, "○", false),
+            (AgentState::Down, "×", false),
+            (AgentState::Stopped, "×", false),
+            (AgentState::Retired, "×", false),
+            (AgentState::Fault, "!", false),
+            (AgentState::Starting, "~", false),
+            (AgentState::Unknown, "~", false),
+            (AgentState::NeedsYou, "○", true),
+            (AgentState::NeedsLogin, "○", true),
+        ] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            next.attention = Load::Ready(Vec::new());
+            if let Load::Ready(agents) = &mut next.agents {
+                agents[0].state = state;
+            }
+            ui.set_world(next);
+            let tab = Tab::pane("agent:agent/a");
+            let badge = ui.tab_badge(&tab, Pane::parse(&tab.pane).as_ref());
+            assert_eq!(badge.activity, glyph, "{state:?}");
+            assert_eq!(
+                badge.label("Atlas", 80, true),
+                format!(" {glyph}Atlas{} ", if attention { " ◆" } else { "" }),
+                "{state:?}"
+            );
+        }
     }
 
     #[test]
-    fn tab_badge_keeps_projected_needs_person_marker_adjacent_to_agent_and_mission_names() {
+    fn tab_badge_attention_count_rules_and_display_widths() {
+        for (alerts, ask, needs_person, suffix) in [
+            (None, false, false, ""),
+            (Some(0), false, false, ""),
+            (Some(0), false, true, " ◆"),
+            (Some(1), false, true, " ◆"),
+            (Some(3), false, true, " ◆3"),
+            (Some(1), true, true, " ?"),
+            (Some(2), true, true, " ?2"),
+            (Some(12), true, true, " ?12"),
+        ] {
+            for activity in ["", "●", "○", "×", "!", "~"] {
+                let badge = TabBadge {
+                    activity,
+                    alerts,
+                    ask,
+                    needs_person,
+                };
+                assert_eq!(
+                    badge.label("Atlas", 80, true),
+                    format!(" {activity}Atlas{suffix} ")
+                );
+                for title in [
+                    "Atlas",
+                    "短い名前",
+                    "e\u{301}",
+                    "界".repeat(20).as_str(),
+                    "a".repeat(25).as_str(),
+                    "a".repeat(26).as_str(),
+                    "a".repeat(27).as_str(),
+                ] {
+                    for counts in [false, true] {
+                        let label = badge.label(title, usize::MAX, counts);
+                        assert_eq!(badge.width(title, counts), text::width(&label), "{label}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_strip_snapshot_shows_compact_activity_and_attention_suffixes() {
+        let ui = tab_badge_world();
+        assert_eq!(
+            tab_badge_strip(&ui, 120),
+            "●Atlas ?2 ○Idle ×Stopped Mission ?2 Inbox ?2 +"
+        );
+    }
+
+    #[test]
+    fn tab_badge_strip_render_widths() {
+        for width in [120, 60, 40] {
+            let ui = tab_badge_world();
+            let area = Rect::new(0, 0, width, 1);
+            let mut buffer = Buffer::empty(area);
+            ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+            let row = (0..width)
+                .map(|x| buffer[(x, 0)].symbol())
+                .collect::<String>();
+            println!("BADGES {width}: |{}|", row.trim_end());
+            assert!(row.contains("●Atlas"));
+            assert!(!row.contains("◆?"));
+        }
+    }
+
+    #[test]
+    fn tab_badge_merges_projected_attention_and_questions_into_one_suffix() {
         for state in [AgentState::NeedsYou, AgentState::NeedsLogin] {
             let mut ui = tab_badge_world();
             let mut next = ui.world.clone();
@@ -4786,21 +4940,22 @@ mod tests {
                 let tab = Tab::pane(key);
                 let badge = ui.tab_badge(&tab, Pane::parse(key).as_ref());
                 let wide = badge.label(title, 80, true);
-                assert!(wide.contains("◆2"), "{wide}");
-                assert!(wide.contains(&format!("◆ {title}")), "{wide}");
+                assert_eq!(wide.matches('?').count(), 1, "{wide}");
+                assert!(wide.contains(&format!("{title} ?2")), "{wide}");
+                assert!(!wide.contains('◆'), "{wide}");
                 let compact = badge.label(title, 80, false);
-                assert!(!compact.contains("◆2"), "{compact}");
-                assert!(compact.contains(&format!("◆ {title}")), "{compact}");
+                assert!(compact.contains(&format!("{title} ? ")), "{compact}");
+                assert!(!compact.contains('2'), "{compact}");
             }
         }
     }
 
     #[test]
-    fn tab_badge_narrow_strip_drops_counts_before_type_and_question() {
+    fn tab_badge_narrow_strip_preserves_activity_after_dropping_attention_chrome() {
         let ui = tab_badge_world();
         let shown = tab_badge_strip(&ui, 18);
-        assert!(shown.starts_with("A> ?"), "{shown}");
-        assert!(!shown.contains("◆2"), "{shown}");
+        assert!(shown.starts_with('●'), "{shown}");
+        assert!(!shown.contains("?2"), "{shown}");
         assert!(shown.contains('›'), "hidden tabs remain reachable: {shown}");
     }
 
@@ -4815,11 +4970,14 @@ mod tests {
         let badge = ui.tab_badge(&tab, pane.as_ref());
         assert_eq!(badge.alerts, Some(0));
         assert!(!badge.ask);
-        assert_eq!(badge.label("Atlas", 28, true), " A> Atlas ");
+        assert_eq!(badge.label("Atlas", 28, true), " ●Atlas ");
         let mut next = ui.world.clone();
         next.attention = Load::Loading;
         ui.set_world(next);
-        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true), " A> ◆? Atlas ");
+        assert_eq!(
+            ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true),
+            " ●Atlas "
+        );
     }
 
     #[test]
@@ -4893,7 +5051,7 @@ mod tests {
             for width in [12, 14, 18] {
                 ui.frame.borrow_mut().hits.clear();
                 let shown = tab_badge_strip(&ui, width);
-                assert!(!shown.contains("◆2"), "{width}: {shown}");
+                assert!(!shown.contains("?2"), "{width}: {shown}");
                 if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
                 if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
                 for (rect, hit) in &ui.frame.borrow().hits {
@@ -4918,7 +5076,7 @@ mod tests {
             assert_eq!(ui.tab_badge(&tab, pane.as_ref()), before);
         }
         ui.set_world(ui.world.clone());
-        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).activity, "x");
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).activity, "×");
     }
 
     /// The focused group, the tab it shows (Home is group 0's 0), and every group's pane keys.
@@ -5326,7 +5484,7 @@ mod tests {
                 .lines()
                 .nth(2)
                 .unwrap()
-                .contains("◆ Atlas Builder"),
+                .contains("Atlas Builder ◆"),
             "it needs the person"
         );
         // Up and Down scroll the agent's pane; they never move to another agent.
