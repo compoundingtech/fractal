@@ -1387,7 +1387,14 @@ members until a person excuses it.
 
 Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
-checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
+what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
+same operation, the protections naming those claims, each writer's newest envelope, and the claims
+citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
+each cut first reads the claims that arrived since the last, in arrival order, committing each page
+with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
+sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
+drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
 and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
 and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
