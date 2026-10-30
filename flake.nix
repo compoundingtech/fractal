@@ -618,7 +618,8 @@
             ST3_OTELITE_BIN=$(command -v otelite)
             FRACTAL_MESSAGING_COMPAT_BIN=$ST3_MESSAGING_COMPAT_BIN
             FRACTAL_OTELITE_BIN=$ST3_OTELITE_BIN
-            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN FRACTAL_MESSAGING_COMPAT_BIN FRACTAL_OTELITE_BIN
+            FRACTAL_PINNED_PTY_BIN=$(command -v pty)
+            export ST3_MESSAGING_COMPAT_BIN ST3_OTELITE_BIN FRACTAL_MESSAGING_COMPAT_BIN FRACTAL_OTELITE_BIN FRACTAL_PINNED_PTY_BIN
             export FRACTAL_OTEL_REQUIRE=1 ST3_OTEL_REQUIRE=1
             export HOME=$(mktemp -d)
             export SHELL=${pkgs.bashInteractive}/bin/bash
@@ -1873,7 +1874,7 @@
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           # The pty this flake pins, for crates/fractal/tests/pinned_pty.rs: a host whose PATH puts
-          # its own pty first would otherwise test that one instead.
+          # its own pty first would otherwise test that one instead. scripts/ci-local keeps it.
           FRACTAL_PINNED_PTY_BIN = "${ptyPackage}/bin/pty";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''

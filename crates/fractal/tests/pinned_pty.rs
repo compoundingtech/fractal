@@ -5,8 +5,8 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-/// `PTY_BINARY` when set (a control against another build), else the dev shell's pinned pty, else
-/// `pty` on PATH, which is the pinned one in the flake's own checks.
+/// `PTY_BINARY` when set (a control against another build), else the pinned pty the dev shell and
+/// the flake's st3 check name, else `pty` on PATH. Every failure names the binary it ran.
 fn pty(root: &Path) -> Command {
     let binary = std::env::var_os("PTY_BINARY")
         .or_else(|| std::env::var_os("FRACTAL_PINNED_PTY_BIN"))
@@ -88,11 +88,12 @@ fn a_wait_for_an_exit_that_already_happened_returns_the_recorded_exit() {
         "--timeout",
         "5",
     ]);
+    let binary = wait.get_program().to_owned();
     let (out, finished) = bounded(wait, Duration::from_secs(10));
-    assert!(finished, "events --wait hung: {out:?}");
+    assert!(finished, "{binary:?} events --wait hung: {out:?}");
     assert!(
         out.status.success(),
-        "an exited session's wait must succeed: {out:?}"
+        "an exited session's wait must succeed ({binary:?}): {out:?}"
     );
     let event: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("one session_exit event as JSON");
@@ -120,10 +121,11 @@ fn a_wait_for_a_session_that_never_started_fails_without_waiting() {
         "--timeout",
         "5",
     ]);
+    let binary = wait.get_program().to_owned();
     let (out, finished) = bounded(wait, Duration::from_secs(10));
-    assert!(finished, "events --wait hung: {out:?}");
-    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(finished, "{binary:?} events --wait hung: {out:?}");
+    assert_eq!(out.status.code(), Some(1), "{binary:?}: {out:?}");
     // Before pty#197 this waited out its timeout instead ("Timed out after 5s ...").
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("vanished"), "{stderr}");
+    assert!(stderr.contains("vanished"), "{binary:?}: {stderr}");
 }
