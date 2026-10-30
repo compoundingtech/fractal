@@ -1008,7 +1008,9 @@ push take the gate from their payload base, as before.
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
 level, which allocates no runner at all: `linux-tests` and its three shards, `linux-clippy` and
-`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. `linux-test-build` feeds the test shards, so
+`linux-fleet-compat` skip when `evidence-gate-linux-gate` decides skip. Each keyed stage also skips on its own gate:
+the test jobs on `rust-tests`, `linux-clippy` and `linux-fleet-compat` on a note for their own input key (`docs/keyed-clippy.md`), all
+in shadow until each entry is flipped. `linux-test-build` feeds the test shards, so
 it skips only when **every one of them** is covered; that condition is derived from theirs in the generator, never
 written twice. The VM tests (`isolation-vm`) and the mail redelivery canaries were members too, and required checks of
 their own, until 2026-10-23: they now run once a day (`daily-long.yml`), and a red daily run comments on its one open issue.
@@ -1660,6 +1662,11 @@ including transport configuration supplied through `GIT_CONFIG_*`. `EVIDENCE_PUS
 that configuration. The child `evidence-wrap` argv is echoed before each signed check (never the token).
 Only the selected checks' covering records are sent, not the checkout's cached evidence namespace; per-crate publication batches at most
 40 explicit refs per push. Repeating `scripts/fractal-test --check CHECK --push origin` publishes already-covered evidence without rerunning that check.
+Once every check is done, one `ls-remote` asks REMOTE for every ref of what the summary calls covered: each covering record's
+tag, note and input-key index refs, the crates' records rust-tests pushed, and records pushed as they were. Its `on-remote` row
+says `confirmed`, or `pushed again` when some were gone and are back. If one is still missing it says `FAILED` and the run exits 1.
+A push git reported as done can be undone before the run ends: on 2026-10-29 the nightly GC deleted the first two records of a
+run whose branch was not pushed yet, and the run said covered (#4186).
 
 **Break-glass for a broken `fractal-test` on main:** `ST_TEST_REEXEC` set to any value skips fractal-test's re-execution of the base's copy, so the
 branch's own copy runs. It is only for signing and pushing a fix to `fractal-test` itself, only on the coordinating lead's word for that one run, and

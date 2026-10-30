@@ -118,6 +118,9 @@ LOCAL = {
     # The clippy stage alone, keyed by what it reads (docs/keyed-clippy.md). Opt-in while linux-gate's own run still includes clippy,
     # so a default run never runs it twice: `--check linux-clippy` signs it.
     'linux-clippy': ['nix', 'develop', '-c', 'bash', 'scripts/ci-clippy-keyed'],
+    # The fleet-compat stage alone (the previous release's st3 against this tree's), keyed by what it reads, opt-in for the same reason:
+    # `--check linux-fleet-compat` signs it.
+    'linux-fleet-compat': ['nix', 'develop', '-c', 'bash', 'scripts/ci-fleet-compat-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
@@ -129,12 +132,12 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
-BUILDS = frozenset({'linux-gate', 'linux-clippy', 'fractal-web', RUST_TESTS})
+BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web', RUST_TESTS})
 # rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
 # notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-OPT_IN = frozenset({'linux-clippy'})
+OPT_IN = frozenset({'linux-clippy', 'linux-fleet-compat'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate', 'linux-clippy'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
@@ -552,6 +555,38 @@ def shared_target(tree_target=None):
     return target, lock
 
 
+def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """The cap this process runs under, as one string, or None. Only the two caps made for builds count: builds.slice, and a
+    seat's lane, app-lanes-<seat>.slice directly in app-lanes.slice (docs/st3/seat-lanes.md). The process must be inside one, and
+    that slice or a cgroup below it, on the way to the process, must hold a memory.max and a cpu.max quota: read from the kernel's
+    files, never from a name alone or a variable. Limits above the cap (any other cgroup's) do not count."""
+    try:
+        text = Path(cgroup_file).read_text()
+    except OSError:
+        return None
+    path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
+    parts = path.split('/') if path else []
+    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
+        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
+    if cap is None:
+        return None
+
+    def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
+        try:
+            return cgroup.joinpath(file).read_text().split()[0] != 'max'
+        except (OSError, IndexError):
+            return False
+
+    memory = cpu = None
+    for depth in range(cap + 1, len(parts) + 1):
+        cgroup = Path(root, *parts[:depth])
+        if memory is None and limited(cgroup, 'memory.max'):
+            memory = parts[depth - 1]
+        if cpu is None and limited(cgroup, 'cpu.max'):
+            cpu = parts[depth - 1]
+    return f'{parts[cap]}: memory by {memory}, CPU by {cpu}' if memory and cpu else None
+
+
 def governed(argv, name):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
@@ -561,8 +596,16 @@ def governed(argv, name):
     (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
+    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+
+    A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
+    (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
+    name or an environment variable a caller could set."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
+        return argv
+    cap = own_cap()
+    if cap:
+        print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
         return argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
@@ -1245,6 +1288,7 @@ def push_record(directory, remote, tree, record):
         extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
                  f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
     pushed = git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref in refs], cwd=directory, env=extra, check=False)
+    CLAIMED.extend(refs)
     if pushed.returncode != 0:
         message = pushed.stderr.decode(errors='replace')
         return message.replace(token, '***').strip()[-400:] if token else message.strip()[-400:]
@@ -1436,6 +1480,54 @@ def push_records(directory, remote, refs):
             return None
     shown = ', '.join(f'{ref} ({reasons.get(ref, "failed")[:120]})' for ref in pending[:3])
     return f'push of {len(pending)} of {len(refs)} refs failed after {PUSH_TRIES} tries: {shown}' + (' ...' if len(pending) > 3 else '')
+
+
+EVIDENCE_NAMESPACES = ('refs/tags/evidence/', 'refs/notes/evidence/', 'refs/notes/evidence-input/')
+# The refs of every record this run's summary calls covered and pushed: a check's covering record (tag, note and input-key index refs), the
+# crates' records rust-tests pushed, and records already signed that were pushed as they are. confirm_pushed asks the remote for them.
+CLAIMED = []
+
+
+def record_refs(directory, record):
+    """Every local ref naming RECORD: its tag and note under its tree, and the input-key index refs."""
+    names = text(git('for-each-ref', '--format=%(refname)', *EVIDENCE_NAMESPACES, cwd=directory, check=False)).split()
+    return [name for name in names if name.endswith(f'/{record}')]
+
+
+def missing_on_remote(directory, remote, refs):
+    """The refs of REFS that REMOTE does not have (ls-remote, a chunk of names at a time), or None when the remote cannot be listed."""
+    token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+    extra = {}
+    if token:  # the same header the pushes send
+        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+        count = int(os.environ.get('GIT_CONFIG_COUNT', '0'))
+        extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                 f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
+    have = set()
+    for start in range(0, len(refs), 200):
+        done = git('ls-remote', remote, *refs[start:start + 200], cwd=directory, env=extra, check=False)
+        if done.returncode != 0:
+            return None
+        have |= {line.split('\t', 1)[1] for line in text(done).splitlines() if '\t' in line}
+    return [ref for ref in refs if ref not in have]
+
+
+def confirm_pushed(directory, remote, refs):
+    """(result, detail) of asking REMOTE, once every check is done, for every ref of what this run calls covered. A push git reported done
+    can still be gone by now: on 2026-10-29 the nightly GC deleted the first two records of a run whose branch was not pushed yet, and
+    the run's summary said covered (#4186). A missing ref is pushed again and asked for again; one still missing is a failure."""
+    missing = missing_on_remote(directory, remote, refs)
+    if missing is None:
+        return 'FAILED', f'could not list {remote} to confirm the {len(refs)} refs this run pushed'
+    if not missing:
+        return 'confirmed', f'all {len(refs)} refs this run pushed are on {remote}'
+    shown = ', '.join(ref.rsplit('/', 1)[1][:12] for ref in missing[:4]) + (' ...' if len(missing) > 4 else '')
+    error = push_records(directory, remote, missing)
+    still = None if error else missing_on_remote(directory, remote, missing)
+    if error or still is None or still:
+        why = error or (f'{len(still)} still missing' if still else f'could not list {remote} again')
+        return 'FAILED', f'{len(missing)} of {len(refs)} refs this run pushed were not on {remote} ({shown}); pushing them again failed: {why}'[:400]
+    return 'pushed again', f'{len(missing)} of {len(refs)} refs this run pushed were not on {remote} ({shown}); pushed again and confirmed'
 
 
 def sign_jobs():
@@ -1637,6 +1729,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     pushing_from = time.monotonic()
     if args.push and pushable:
         pushed = push_records(directory, args.push, pushable)
+        CLAIMED.extend(pushable)
         if pushed:
             rows.append(('rust-tests:push', 'FAILED', 0, pushed))
             failed = True
@@ -1974,6 +2067,7 @@ def utc(seconds):
 
 def main(argv):
     main_started = time.monotonic()
+    CLAIMED.clear()
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     scrub_git_environment()
@@ -2247,7 +2341,9 @@ def main(argv):
                 if args.out:
                     why = 'packs exported, not imported or verified' if ok else 'export failed'
                 else:
-                    is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                    is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                    if args.push and is_covered and record:
+                        CLAIMED.extend(record_refs(directory, record))
                 return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
 
             # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
@@ -2287,6 +2383,13 @@ def main(argv):
                 rows += row if isinstance(row, list) else [row]
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
+            confirm = sorted(set(CLAIMED)) if args.push and not args.out else []
+            if confirm:
+                # "pushed" meant git said so at the time; this asks the remote now, once, before the summary says what is covered.
+                confirming = time.monotonic()
+                result, why = confirm_pushed(directory, args.push, confirm)
+                rows.append(('on-remote', result, round(time.monotonic() - confirming), why))
+                failed = failed or result == 'FAILED'
             print(f'\nfractal-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
             for name, result, seconds, why in rows:
