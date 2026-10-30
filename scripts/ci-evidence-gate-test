@@ -650,7 +650,7 @@ class EndToEnd(unittest.TestCase):
         for kwargs in ({'key': self.stranger}, {'signer': 'fleet/not-allowed'}):
             with self.subTest(kwargs):
                 base = self.commit_base()
-                commit, tree = self.head()
+                commit, tree = self.f.commit('invalid ' + str(kwargs))
                 self.note(commit, tree, **kwargs)
                 fields, outputs = self.run_gate(base)
                 self.assertEqual((fields['decision'], fields['outcome'], outputs['refuse']),
