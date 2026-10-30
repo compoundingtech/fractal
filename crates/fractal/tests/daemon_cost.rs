@@ -3129,6 +3129,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                     }),
                 ).unwrap();
             }
+            // Sealing queues signatures; drain this finite setup judgment work so the
+            // summary measures steady state, not the receipt-history fixture backlog.
+            store.seal_local_batches().unwrap();
+            store.judge_claims(false).unwrap();
         }).await.unwrap();
     }
     let mut samples = Vec::new();
