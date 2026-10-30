@@ -142,17 +142,25 @@ pub async fn checkpoint_resume(
     Json(request): Json<crate::store::CheckpointResumeRequest>,
 ) -> Result<Json<crate::store::CheckpointStatusView>, ApiError> {
     let store = state.store.clone();
-    blocking_action(move || {
-        store.resume_checkpoints(&request.actor, &request.reason)?;
-        store.recover_local_trim_stops(&request.actor, &request.reason)
-    })
-    .await?;
+    blocking_action(move || store.resume_stopped_trims(&request.actor, &request.reason)).await?;
     signal_changed(&state);
     let store = state.store.clone();
     let peers = state.configured_peers.clone();
     blocking_store(move || store.checkpoint_status(client_now_ms(), &peers))
         .await
         .map(Json)
+}
+
+/// A bound harness reaches this only as itself (`guard_bound_request`); the store allows a person
+/// or the fleet's fault agent.
+pub async fn signature_resume(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::store::principals::SignatureResumeRequest>,
+) -> Result<Json<smallclaims::store::principals::SignatureResume>, ApiError> {
+    let store = state.store.clone();
+    let resumed = blocking_action(move || store.resume_signature_migration_as(&request.actor, &request.reason)).await?;
+    signal_changed(&state);
+    Ok(Json(resumed))
 }
 
 pub async fn repair_replication_record(

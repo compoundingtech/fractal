@@ -4208,6 +4208,7 @@ impl MissionsStore for Store {
                 params![retired.id, retired.revision, mission_state_name(&retired.state), claim.id],
             )
             .map_err(internal)?;
+        fractal_store::store::ordered_membership::flush(&transaction).map_err(internal)?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h87aff5859f70 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
@@ -6213,6 +6214,12 @@ impl MissionsStore for Store {
                 }
                 if let Some(input) = handoff {
                     adhoc_work::transfer_tx(transaction, &self.origin, &current, input, &mut body)?;
+                }
+                if matches!(action, "complete" | "fail" | "release") {
+                    // The run is judged on its origin, maybe another member, as soon as the step
+                    // ends, and a loop's token budget reads the seat's replicated usage then: its
+                    // held rollups replicate with this receipt, not when their hour is over.
+                    fractal_store::store::flush_held_usage_tx(transaction, &self.origin, &actor, now)?;
                 }
                 let claim_kind = match action {
                     "claim" => "work.claimed",

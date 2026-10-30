@@ -1172,15 +1172,20 @@ summarizes that per claim kind, at a cut, so members can compare it:
   moving key's older claim, the keys a narrowing lists carry each moving key, marked `moving`,
   and a key moving on either member is no difference.
 - Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
-  keys and answers. `claims` is compared only between members that trim the same way.
+  keys and answers. `claims` is compared only between members that trim the same way, have
+  finished trimming the same checkpoint (`trimmed_cut_unix_ms`), and had no later trim
+  unfinished while they computed (`trim_unfinished`): a day's trim deletes claims older than the
+  answers cut, so two members that computed either side of it count different claims and answer
+  the same.
 - A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
   depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
   leaves out every claim in `projection_digest_repaired_claims`.
 - Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
   difference narrows to a bucket and then to its keys without listing a whole kind.
 
-A summary reads every claim, one kind per statement on a reader connection: about a minute and a
-half on a store of three million claims. It is taken once a day and kept, never per request. The
+A summary reads every claim on a reader connection, ten thousand claims per statement in index
+order, so no statement holds a read snapshot (and the WAL) for minutes: ten minutes or more on a
+store of three million claims. It is taken once a cut and kept, never per request. The
 property test `a_trim_that_keeps_each_newest_claim_answers_the_same` holds the trim invariant for
 random histories and cuts.
 
@@ -1188,11 +1193,18 @@ Once a day each member compares its answers with every peer it dials. The cut is
 UTC day, and the check waits an hour into the day so replication has brought every member what
 was written before it. A member asks a peer only after an exchange with it moved nothing, over the
 signed peer route `/v1/peer/answers`, authenticated like an exchange. The daemon computes its
-answers on a thread of its own and keeps them twenty minutes, answering `pending` until it has
-them, so a request never waits for a pass over the store.
+answers on a thread of its own, answering `pending` until it has them, so a request never waits
+for a pass over the store. It keeps the summary for the rest of the cut's day, and beside its
+database (`claims.sqlite3.answers.json`, readable by its owner only), so a restart and every
+peer's ask at the same cut are answered from it rather than computed again; a new build computes
+again. The summary also records the newest claim admitted when it was computed. A claim keeps
+the time its origin accepted it, so a member that was offline replays claims older than the cut
+after the summary was taken; before answering from a kept summary the member looks for a claim
+admitted since that is older than the cut, a short range of the primary key, and computes again
+if it finds one. A claim accepted after the cut only moves its key.
 
-When a kind differs the member compares again every half hour, when both members have computed
-again and counted any claim that arrived late. A difference that lasts two hours is narrowed:
+When a kind differs the member compares again two hours later. A difference that lasts two hours
+is narrowed:
 bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
 kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
 its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
@@ -1361,19 +1373,25 @@ Each day such a member trims its own due cut (the day before yesterday, as for a
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
 checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed` and `resource.observed`, which observers write in
-the same batches. Everything else is kept, as a protected claim is, and envelopes still go whole.
-`harness.observed` stays out: its audited rule drops a credential transition that moves the `since`
-of a seat's needs-login state, which no projection digest covers. Two checks stand in for the
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
+and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+rules stay out because a reader reads the history they drop, which no projection digest covers.
+`harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
+needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
+and a watch walks those observations back to find when the pull request left the merge queue. Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything
 is recorded. While deleting, every chunk compares the projection digests before and after and
 stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
 an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
 trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
-such a member, by an agent (`--as agent/...`); the stopped cut is set aside and the next day's cut
-goes on, and the resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
 The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
 disk cannot hold.
+Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
+and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
+at once.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges

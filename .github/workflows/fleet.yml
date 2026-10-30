@@ -3119,7 +3119,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CLIPPY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
       BASE_INPUTS_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-      CI_KEYED_CLIPPY_POLICY: .st/evidence-skip-policy.json
+      CI_KEYED_CLIPPY_POLICY: "auto:.st/evidence-skip-policy.json"
       CI_CACHE_DEV_SHELL: default
     steps:
       - uses: actions/checkout@v4
@@ -3328,7 +3328,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
-      CI_KEYED_FLEET_COMPAT_POLICY: .st/evidence-skip-policy.json
+      CI_KEYED_FLEET_COMPAT_POLICY: "auto:.st/evidence-skip-policy.json"
       CI_CACHE_DEV_SHELL: default
     steps:
       - uses: actions/checkout@v4
@@ -3730,7 +3730,11 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
         run: |
-          git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+          key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+          key_path=.st/evidence-keys
+          if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+          git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \
             --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"
       - name: Shadow-verify the published notes
@@ -3844,7 +3848,11 @@ jobs:
         continue-on-error: true
         run: |
           [ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
-          git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+          key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+          key_path=.st/evidence-keys
+          if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+          git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
           python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \
             --checks rust-tests --limit 400 --remote origin
       - name: Remove the key

@@ -225,6 +225,8 @@ impl Store {
             // The exact call it asks about, as its hook or driver named it for this observation.
             let call = prompt_call(&connection, &seat, &harness)?;
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: claim,
                 priority: "high".into(),
                 kind: "harness-prompt".into(),
@@ -598,6 +600,8 @@ impl Store {
                 continue;
             }
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: claim.id,
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -726,6 +730,8 @@ impl Store {
             ),
         };
         Ok(Some(AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             episode: state.id,
             priority: if severity == "warning" {
                 "normal"
@@ -796,6 +802,8 @@ impl Store {
             let codex = desired.member.as_ref().and_then(|member| member.driver.as_deref()) == Some("codex");
             let diagnostic = self.last_driver_diagnostic(&source)?;
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: parked.episode.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: source.clone(), person: owner, requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: if codex { "A Codex agent stopped after repeated failures" } else { "An agent stopped after repeated runtime failures" }.into(),
@@ -887,6 +895,8 @@ impl Store {
                 None => " The driver has left no diagnostic: it never ran.".into(),
             };
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: token.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: source.clone(), person: REVIEWER.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: "An agent seat has not started".into(),
@@ -927,6 +937,8 @@ impl Store {
                 continue;
             }
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: format!("deadline-admission-missing:{id}"),
                 priority: "high".into(), kind: "fault".into(), review_mode: None,
                 subject: run.subject.clone(), person: run.requester.clone(),
@@ -1076,6 +1088,8 @@ impl Store {
             }
             let source = desired.subject;
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: first.id.clone(),
                 priority: "high".into(),
                 kind: "fault".into(),
@@ -1539,7 +1553,30 @@ pub fn person_attention_item(
         Some(_) => ("done", &["--text", "FEEDBACK"]),
         None => ("done", &["--summary", "RESPONSE"]),
     };
+    // An ask resolves by itself at its deadline, with its default answer if it names one. Only
+    // while this member counts deadlines (`[asks] deadlines` on): off, nothing resolves by one.
+    let (counting_since, default_ms) = person_work::ask_deadline_policy(connection)?;
+    let (deadline_unix_ms, default_answer) = match &ask {
+        Some(ask) if counting_since != 0 && !person_work::is_update(ask) => {
+            let default_answer = person_work::ask_default_answer(ask).and_then(|id| {
+                request
+                    .as_ref()?
+                    .get("answers")?
+                    .as_array()?
+                    .iter()
+                    .find(|answer| answer["id"] == id)
+                    .map(|answer| json!({"id": id, "label": answer["label"]}))
+            });
+            (
+                person_work::ask_deadline(ask, counting_since, default_ms),
+                default_answer,
+            )
+        }
+        _ => (None, None),
+    };
     Ok(Some(AttentionItemView {
+        deadline_unix_ms,
+        default_answer,
         episode,
         priority: "normal".into(),
         kind: "person-step".into(),
@@ -1746,6 +1783,8 @@ impl Store {
             ),
         };
         Ok(Some(AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             episode: claim,
             priority: "high".into(),
             kind: "harness-prompt".into(),
@@ -1898,6 +1937,8 @@ impl Store {
             let tool = fields["status"].as_str().unwrap_or("tool");
             let reason = fields["reason"].as_str().filter(|reason| !reason.is_empty()).unwrap_or("no reason given");
             items.push(AttentionItemView {
+                deadline_unix_ms: None,
+                default_answer: None,
                 episode: claim,
                 priority: "high".into(),
                 kind: "harness-prompt".into(),
@@ -2001,9 +2042,16 @@ impl Store {
                 .expect("a native answer has an idempotency key");
             let body = json!({"fields":input.fields,"evidence":input.evidence,
                 "_operation":{"id":operation_id,"request_digest":request_digest}});
+            #[cfg(any(test, feature = "test-support"))]
+            delegated_write_probe::reached();
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
             return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
+                // The fence above read a reader's snapshot. A concurrent dismissal may have
+                // committed its answer since: it is the answer, and a second one is not written.
+                if let Some(previous) = native_prompt_answer_claim(tx, episode).map_err(internal)? {
+                    return same_delegated_dismissal(previous, seat, actor, proof).map(Some);
+                }
                 let recorded = append_claim_tx(tx, &self.origin, seat, "harness.diagnostic", Some(actor),
                     &body, &[episode.to_owned()], None).map_err(claim_append_error)?;
                 register_operation_tx(tx, &recorded).map_err(internal)?;
@@ -2386,6 +2434,65 @@ pub fn native_prompt_answer(connection: &Connection, observation: &str) -> Resul
         .flatten())
 }
 
+/// Tells a test that this thread's delegated dismissal passed its reader fence and is about to
+/// ask the writer for its answer. The probe is per thread, so only the test's own callers see it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod delegated_write_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PROBE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// Call `probe` each time this thread's delegated dismissal reaches its write.
+    pub fn set(probe: impl Fn() + 'static) {
+        PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+    }
+
+    pub(crate) fn reached() {
+        PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow().as_ref() {
+                probe();
+            }
+        });
+    }
+}
+
+/// The claim that answered the native prompt `observation`, if one is recorded.
+fn native_prompt_answer_claim(connection: &Connection, observation: &str) -> Result<Option<ClaimRecord>> {
+    connection
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8472dc4d0454 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id') IS NOT NULL
+               AND json_extract(body, '$._operation.id')=?1
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation))], claim_from_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+/// An earlier answer is this delegated dismissal's own result when it is the same dismissal by the
+/// same agent under the same proof; any other answer means the denial is no longer waiting.
+fn same_delegated_dismissal(
+    previous: ClaimRecord,
+    seat: &str,
+    actor: &str,
+    proof: &crate::model::DelegationProof,
+) -> std::result::Result<ClaimRecord, St3Error> {
+    if previous.subject == seat
+        && previous.actor.as_deref() == Some(actor)
+        && previous.body["fields"]["status"] == "dismiss"
+        && previous.body["fields"]["delegation"] == json!(proof)
+    {
+        return Ok(previous);
+    }
+    Err(St3Error::new(
+        "stale-fence",
+        "the denial already has another answer",
+    ))
+}
+
 /// Fold the native prompt's terminal-only release into the shared harness view.
 /// Driver heartbeats can restate the old blocked file after Esc/No; their
 /// unchanged episode must not resurrect a resolved hold in sender status/cards.
@@ -2517,6 +2624,19 @@ impl Store {
             Ok((id, at.parse()?, body.get("fields").cloned().unwrap_or(body)))
         })
         .transpose()
+    }
+
+    /// The id of the exact call the native prompt `episode` of `seat` asks about, while it is the
+    /// seat's newest observation: what its hook (Claude) or driver (Codex) published for it.
+    pub fn native_prompt_call(&self, seat: &str, episode: &str) -> Result<Option<String>> {
+        let Some((claim, _, harness)) = self.newest_harness_observation(seat)? else {
+            return Ok(None);
+        };
+        if claim != episode {
+            return Ok(None);
+        }
+        let connection = self.readers.get();
+        prompt_call(&connection, seat, &harness)
     }
 
     /// The prompt a hook waits on: the very observation it published, named by the state
@@ -2713,29 +2833,9 @@ impl Store {
         }
         // An identical retry returns the actual previous result, not a second
         // denial answer or a new grant-dependent side effect.
-        let previous = {
-            let connection = self.readers.get();
-            connection.query_row(/* sqlite-large-value: allow-for-now lv-hf9df02d62f06 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-                 FROM claims INDEXED BY claims_operation_index
-                 WHERE json_extract(body, '$._operation.id') IS NOT NULL
-                   AND json_extract(body, '$._operation.id')=?1
-                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&proof.episode))], claim_from_row)
-                .optional().map_err(internal)?
-        };
+        let previous = native_prompt_answer_claim(&self.readers.get(), &proof.episode).map_err(internal)?;
         if let Some(previous) = previous {
-            if previous.subject == seat
-                && previous.actor.as_deref() == Some(actor)
-                && previous.body["fields"]["status"] == "dismiss"
-                && previous.body["fields"]["delegation"] == json!(proof)
-            {
-                return Ok(previous);
-            }
-            return Err(St3Error::new(
-                "stale-fence",
-                "the denial already has another answer",
-            ));
+            return same_delegated_dismissal(previous, seat, actor, proof);
         }
         self.answer_denial(seat, &proof.episode, "dismiss", actor, Some(proof))?
             .ok_or_else(|| {

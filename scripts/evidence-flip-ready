@@ -3,11 +3,11 @@
 
   scripts/evidence-flip-ready [--repo OWNER/NAME] [--cache DIR] [--propose [--dry-run]]
 
-For every check in `.st/evidence-skip-policy.json` at origin/main it reads the `evidence-decision v1` line of each
+For every check in `evidence-skip-policy.json` at origin/main (.fractal first, .st only if absent) it reads the `evidence-decision v1` line of each
 `evidence-gate-<check>` job of the `Workspace CI` (fleet.yml) pull_request runs created in the last 24 hours, and says
 whether the flip trigger holds (docs/st3/gate-evidence.md, "When a check is ready to flip"):
   - 24 h of fresh published log: no line in the window says log=stale, absent, unsigned or `-` (the base did not pin
-    .st/evidence-log-key yet), and the first line with a log value after the last `-` is at least 24 h old;
+    evidence-log-key yet), and the first line with a log value after the last `-` is at least 24 h old;
   - at least 30 lines with outcome=satisfied and log=ok (rust-tests, LOWERED: at least 5 agreeing host-signed lines, satisfied,
     log=ok and real result success, and none whose real result was failure);
   - no line with log=missing;
@@ -24,6 +24,11 @@ whether the flip trigger holds (docs/st3/gate-evidence.md, "When a check is read
     job of its own (the per-crate `rust-tests`) is judged by the jobs its skip skips, those whose `if` reads it: its real
     result is `failure` when one of them failed or was cancelled, and that red is hidden. While no job skips on it, it
     is not ready.
+  - a run that concluded `cancelled` (a push replaced it, a duplicate run was stopped, a person cancelled it) is no
+    evidence, neither an ok line nor a red, unless a job it judged failed: one the skip would skip, or the check's own
+    job when it has no members. Its runs are reported as `cancelled_runs`. A timeout concludes the run `failure`, so
+    its red stays (2026-10-30, run 41016722904: a cancelled duplicate run's fractal-web gate failed on a cancelled
+    execution and read as a hidden red).
 Prints JSON; exit 0, or 2 when GitHub could not be read. Read only, except `--propose`: for each ready check that is not
 enforced and has no open pull request from `evidence-flip/<check>`, it makes the flip in a temporary worktree of
 origin/main, pushes that branch and opens the pull request (`--dry-run`: prints the diff instead). Exit 1 when a
@@ -210,9 +215,6 @@ def collect(github, checks, since, until, members):
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         job_lists = list(pool.map(
             lambda run: github.items(f'repos/{github.repo}/actions/runs/{run["id"]}/jobs?per_page=100&filter=all', 'jobs'), finished))
-    newer = {}  # (head repository, head branch) -> [(created, head sha)], for superseded()
-    for run in runs:
-        newer.setdefault(head_of(run), []).append((parse_time(run.get('created_at')), run.get('head_sha')))
     wanted = []
     for run, jobs in zip(finished, job_lists):
         real = {(job.get('name'), job.get('run_attempt')): job.get('conclusion') for job in jobs}
@@ -228,12 +230,11 @@ def collect(github, checks, since, until, members):
             wanted.append((run, job, check, own,
                            [other.get('name') for other in jobs if other.get('run_attempt') == attempt
                             and member_of(other.get('name'), members.get(check, ())) and other.get('conclusion') in ('failure', 'cancelled')],
-                           superseded(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()),
-                                      newer)))
+                           no_evidence(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()), own)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         logs = list(pool.map(lambda item: lines_of(github, item[1]), wanted))
     rows = []
-    for (run, job, check, conclusion, members_red, was_superseded), lines in zip(wanted, logs):
+    for (run, job, check, conclusion, members_red, was_cancelled), lines in zip(wanted, logs):
         for text in lines:
             fields = fields_of(text)
             if fields.get('check') == check:
@@ -241,12 +242,8 @@ def collect(github, checks, since, until, members):
                              'actor': ((run.get('actor') or {}).get('login') or '-'),
                              'base': (((run.get('pull_requests') or [{}])[0] or {}).get('base') or {}).get('sha'),
                              'fields': fields, 'real': conclusion, 'aggregate': check in members, 'members_red': members_red,
-                             'superseded': was_superseded})
+                             'cancelled': was_cancelled})
     return rows
-
-
-def head_of(run):
-    return ((run.get('head_repository') or {}).get('full_name'), run.get('head_branch'))
 
 
 def member_of(name, members):
@@ -254,18 +251,16 @@ def member_of(name, members):
     return any(name == key or (name or '').startswith(f'{key} (') for key in members)
 
 
-def superseded(run, jobs, needed, newer):
-    """Whether an aggregate's red in this attempt came only from a push that replaced the run: the run concluded cancelled;
-    of the jobs a skip of the check would skip (`needed`), none failed and at least one was cancelled; and a run of a
-    different head on the same branch was created before the first of those was cancelled. A timeout, a cancel with no
-    newer run, or a failed member stays a hidden red; a red of a member that always runs stays visible."""
-    conclusions = {job.get('name'): job for job in jobs if member_of(job.get('name'), needed)}
-    cancelled = [parse_time(job.get('completed_at')) for job in conclusions.values() if job.get('conclusion') == 'cancelled']
-    if run.get('conclusion') != 'cancelled' or not cancelled or None in cancelled \
-            or any(job.get('conclusion') == 'failure' for job in conclusions.values()):
+def no_evidence(run, jobs, needed, own):
+    """Whether this attempt says nothing either way about the check: the run concluded cancelled and nothing it judged failed.
+    With members (`needed`, the jobs a skip of the check would skip) only theirs count: an aggregate's own job fails when a
+    member was cancelled, and a red of a member that always runs is not the check's. Without, the check's own job (`own`)
+    counts. A failed one keeps the red; a timeout concludes the run `failure`, so it is never no evidence."""
+    if run.get('conclusion') != 'cancelled':
         return False
-    created = parse_time(run.get('created_at'))
-    return any(created < when < min(cancelled) and sha != run.get('head_sha') for when, sha in newer.get(head_of(run), ()) if when)
+    if needed:
+        return not any(member_of(job.get('name'), needed) and job.get('conclusion') == 'failure' for job in jobs)
+    return own != 'failure'
 
 
 def old_base(root, row, runner, seen):
@@ -283,6 +278,18 @@ def old_base(root, row, runner, seen):
     return reason if seen[key] else None
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — same pinned revision or checkout root.
+def config_path(root, path, revision=None, runner=default_runner):
+    new = path.replace('.st/', '.fractal/', 1)
+    if revision is not None:
+        return new if git(root, 'ls-tree', '--full-tree', '-z', revision, '--', new, runner=runner) else path
+    try:
+        (Path(root) / new).lstat()
+    except FileNotFoundError:
+        return path
+    return new
+
+
 def predates(root, base, reason, check, runner):
     def ok(*args):
         return runner(['git', '-C', str(root), *args]).returncode == 0
@@ -290,11 +297,12 @@ def predates(root, base, reason, check, runner):
         return False
     if reason == 'no-gate-at-base':
         return not ok('cat-file', '-e', f'{base}:{GATE}')
-    if not ok('cat-file', '-e', f'{base}:{POLICY}'):
-        return True  # the base predates the policy file
     try:
-        return check not in json.loads(runner(['git', '-C', str(root), 'show', f'{base}:{POLICY}']).stdout)['checks']
-    except (ValueError, KeyError, TypeError):
+        path = config_path(root, POLICY, base, runner)
+        if not git(root, 'ls-tree', '--full-tree', '-z', base, '--', path, runner=runner):
+            return True  # genuinely absent at the old base, not an unreadable object
+        return check not in json.loads(git(root, 'show', f'{base}:{path}', runner=runner))['checks']
+    except (RuntimeError, ValueError, KeyError, TypeError):
         return False
 
 
@@ -374,12 +382,13 @@ def evaluate(rows, enforce, now, lowered=None, published=None):
     for row, value in zip(window, log):
         if value == 'unlogged_pass' and not explained(row, published):
             unexplained += 1
-    red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
+    # A cancelled run's line is no evidence: neither an ok line nor a red. It is reported on its own.
+    cancelled = sorted({row['run'] for row in window if row.get('cancelled')})
+    counted = [(row, value) for row, value in zip(window, log) if not row.get('cancelled')]
+    red = [row for row, _ in counted if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
     # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
-    # A red from a run that a newer push replaced (superseded) is neither: it is reported on its own.
-    replaced = sorted({row['run'] for row in red if row.get('superseded')})
-    hidden = sorted({row['run'] for row in red if not row['aggregate'] or row['members_red']} - set(replaced))
-    visible = sorted({row['run'] for row in red} - set(hidden) - set(replaced))
+    hidden = sorted({row['run'] for row in red if not row['aggregate'] or row['members_red']})
+    visible = sorted({row['run'] for row in red} - set(hidden))
     # The log window began with the first line that has a log value after the last line without one. An old base's line
     # (old_base) neither starts nor restarts it; the report counts those it set aside.
     ignored = {}
@@ -392,13 +401,13 @@ def evaluate(rows, enforce, now, lowered=None, published=None):
     window_start = began[0]['created_at'] if began else None
     result = {
         'enforce': enforce, 'lines': len(window),
-        'satisfied_log_ok': sum(1 for row, value in zip(window, log) if value == 'ok' and row['fields'].get('outcome') == 'satisfied'),
+        'satisfied_log_ok': sum(1 for row, value in counted if value == 'ok' and row['fields'].get('outcome') == 'satisfied'),
         'log_missing': log.count('missing'), 'unlogged_pass_unexplained': unexplained, 'hidden_red': hidden,
         'visible_red': visible, 'log_window_start': iso(window_start), 'old_base_lines': ignored,
-        'superseded_red': replaced,
+        'cancelled_runs': cancelled,
     }
     if lowered:
-        mine = [(row, value) for row, value in zip(window, log)
+        mine = [(row, value) for row, value in counted
                 if row['fields'].get('outcome') == 'satisfied' and row['fields'].get('trust_level') in lowered['levels']]
         result['agreeing'] = sum(1 for row, value in mine if value == 'ok' and row['real'] == 'success')
         result['disagreeing'] = sorted({row['run'] for row, _ in mine if row['real'] == 'failure'})
@@ -594,8 +603,9 @@ def flip(tree, check, today):
     note = tree / f'release-notes/evidence-enforce-{check}.json'
     if note.exists():
         raise ValueError(f'{note.relative_to(tree)} already exists')
-    policy, entry = flip_policy((tree / POLICY).read_text(), check)
-    edits = {POLICY: policy, DOC: flip_doc((tree / DOC).read_text(), check, entry, today)}
+    path = config_path(tree, POLICY)
+    policy, entry = flip_policy((tree / path).read_text(), check)
+    edits = {path: policy, DOC: flip_doc((tree / DOC).read_text(), check, entry, today)}
     for path, name in TEST_LISTS:
         edits[path] = flip_test_list((tree / path).read_text(), path, name, check)
     for path, text in edits.items():
@@ -664,7 +674,8 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
     github = GitHub(args.repo, runner, args.cache)
     try:
         git(root, 'fetch', '-q', 'origin', 'main', runner=runner)
-        policy = json.loads(git(root, 'show', f'origin/main:{POLICY}', runner=runner))['checks']
+        path = config_path(root, POLICY, 'origin/main', runner)
+        policy = json.loads(git(root, 'show', f'origin/main:{path}', runner=runner))['checks']
         since = now - datetime.timedelta(seconds=WINDOW_S + LOOKBACK_S)
         members = skipped_members(git(root, 'show', f'origin/main:{WORKFLOW}', runner=runner), policy)
         rows = collect(github, set(policy), since, now, members)

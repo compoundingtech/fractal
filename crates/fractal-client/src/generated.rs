@@ -116,6 +116,15 @@ pub enum ErrorCode {
     InvalidArrangementFolder,
     InvalidArrangementName,
     InvalidArrangementKey,
+    InvalidArrangementVersion,
+    InvalidArrangementBody,
+    UnsupportedMembershipContainer,
+    MembershipOwnerForbidden,
+    InvalidMembershipMember,
+    InvalidMembershipBucket,
+    InvalidMembershipKey,
+    InvalidMembershipOperations,
+    MembershipEditTooLarge,
     InvalidSubjectReference,
     NotFound,
     Forbidden,
@@ -580,6 +589,12 @@ pub struct Attention {
     pub priority: String,
     pub state: String,
     pub requested_at: String,
+    /// When a person-step ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
+    /// The ask's answer that applies at its deadline; absent, it times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<AskDefaultAnswer>,
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default)]
@@ -1944,6 +1959,8 @@ pub struct AgentDelivery {
     #[serde(default)]
     pub polled_seconds_ago: Option<u64>,
     #[serde(default)]
+    pub since_unix_ms: Option<u64>,
+    #[serde(default)]
     pub transport: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3225,6 +3242,8 @@ pub enum ActionType {
     PromptRespond,
     #[serde(rename = "arrangement.edit")]
     ArrangementEdit,
+    #[serde(rename = "arrangement.membership.edit")]
+    ArrangementMembershipEdit,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -3472,6 +3491,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::ArrangementEdit,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn arrangement_membership_edit(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ArrangementMembershipEditParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ArrangementMembershipEdit,
             idempotency_key,
             fence,
             &parameters,
@@ -4293,6 +4326,12 @@ pub struct PersonAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
+/// The answer of a person-step ask that applies at its deadline.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AskDefaultAnswer {
+    pub id: String,
+    pub label: String,
+}
 /// A response to a person ask, as the asker reads it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct PersonAnswerRecord {
@@ -4602,6 +4641,8 @@ pub struct ActionResult {
     pub arrangement_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_answer: Option<HarnessAnswerResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -5458,12 +5499,14 @@ pub struct ArrangementEditParameters {
     pub subject: String,
     pub owner: String,
     pub operations: Vec<ArrangementOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
 }
 pub type ArrangementRegister<T> = fractal_schema::arrangements::Register<T>;
 pub type ArrangementPosition = fractal_schema::arrangements::Position;
 pub type ArrangementPlacement = fractal_schema::arrangements::Placement;
 pub type ArrangementFolder = fractal_schema::arrangements::Folder;
-pub type ArrangementBody = fractal_schema::arrangements::Body;
+pub type ArrangementBody = fractal_schema::arrangements::VersionedBody;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ArrangementResolved {
     pub parents: std::collections::BTreeMap<String, Option<String>>,
@@ -5486,6 +5529,46 @@ pub struct ArrangementPage {
     #[serde(default)]
     pub filters: BTreeMap<String, String>,
     pub items: Vec<Arrangement>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicated: Option<ReplicatedNotice>,
+}
+
+pub type OrderedMembershipOperation = fractal_schema::ordered_membership::Operation;
+pub type OrderedMembershipPosition = fractal_schema::ordered_membership::Position;
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ArrangementMembershipEditParameters {
+    pub subject: String,
+    pub owner: String,
+    pub operations: Vec<OrderedMembershipOperation>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OrderedMembership {
+    pub id: String,
+    pub container: String,
+    pub member: String,
+    pub position: OrderedMembershipPosition,
+    pub revision: String,
+}
+/// The whole container's membership state, carried by every `ordered-memberships` window
+/// frame so a held window observes edits outside its rows. `changed_index` is an opaque,
+/// host-local, monotonic invalidation frontier scoped by the frame's `snapshot.host_id`; it is
+/// neither a canonical revision nor a count of global history and never compares across hosts.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OrderedMembershipState {
+    pub container: String,
+    pub live_count: u64,
+    pub changed_index: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OrderedMembershipPage {
+    pub kind: String,
+    pub collection: String,
+    #[serde(default)]
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<OrderedMembership>,
     pub page: PageInfo,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncNotice>,
