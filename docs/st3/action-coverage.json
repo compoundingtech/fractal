@@ -84,6 +84,13 @@
       "behavior": "real API handler and store tests: stale layout fences merge; fenced retirement compares the current revision and refuses concurrent edits without writes; unfenced retirement remains unconditional; stale authority and launch fences refuse without edits; replay preserves receipts and rejects changed action identity; fenced retirement recovers receipt gaps; agent attribution preserves person ownership; projected heads survive reopen, upgrade backfill and replication"
     },
     {
+      "action": "arrangement.membership.edit",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::arrangement_membership_edits_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; version-2 membership edit accepted after restart; exact replay after another restart adds no duplicate claim and preserves owner, actor, and projected root placement"
+    },
+    {
       "action": "attention.resolve",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::unavailable_actions_refuse_before_and_after_restart_without_writes"
@@ -1557,6 +1564,14 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st missions blocked",
+      "description": "Every blocked run in the fleet, one line each, grouped by cause, from the published work and missions lists",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_and_blocked_runs_read_published_lists_after_restart"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st missions queued",
       "description": "Show one seat's current claim and its queued mission runs in order; same as `st agents queue AGENT`",
       "tests": [
@@ -1633,7 +1648,7 @@
       "command": "st missions waiting-on",
       "description": "What one run waits on: each open step, whom it waits on and since when, open asks, steps not ready and finished, and whether it stalled",
       "tests": [
-        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_reads_published_lists_after_restart"
+        "crates/fractal/tests/action_coverage.rs::cli_waiting_on_and_blocked_runs_read_published_lists_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
@@ -2404,6 +2419,15 @@
         "crates/fractal/tests/action_coverage.rs::cli_reads_preserve_operational_views_after_restart"
       ],
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
+      "command": "st validate",
+      "description": "Validate KDL files offline using default host \"local\", without contacting a daemon",
+      "tests": [
+        "crates/fractal/tests/validate.rs::validate_reads_files_without_a_daemon_or_configuration",
+        "crates/fractal/tests/validate.rs::declaration_mission_revision_is_pinned"
+      ],
+      "verification": "real CLI with no daemon and an unreadable configuration; library parse pinned to a golden revision"
     },
     {
       "command": "st web",

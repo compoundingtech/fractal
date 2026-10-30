@@ -20,6 +20,9 @@ HISTORICAL = {'release_notes.py', 'profile-mailbox-wakes'}
 POLICY_PATHS = (
     '.st/evidence-skip-policy.json',
     '.st/required-lanes.json',
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — tracked path allowlist, not trust lookup.
+    '.fractal/evidence-skip-policy.json',
+    '.fractal/required-lanes.json',
 )
 
 

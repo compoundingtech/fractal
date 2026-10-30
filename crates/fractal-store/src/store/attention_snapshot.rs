@@ -756,85 +756,56 @@ impl Store {
         }))
     }
 
+    /// A fault for each seat st parked after it failed to start, or after a failed explicit
+    /// restart, that has not run since: one per park episode. Its owner is the agent that
+    /// declared the seat when no mission run owns it, else the run's requester, else the
+    /// fleet's fault agent (`fault_owner`). It is never a person's.
     fn parked_runtime_attention_items(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<Vec<AttentionItemView>> {
+        if person.is_some() {
+            return Ok(Vec::new());
+        }
         let connection = self.readers.get();
-        let mut items = Vec::new();
-        for desired in self
+        let seats = self
             .desired_subjects()?
             .into_iter()
             .filter(|desired| desired.kind == "agent")
-        {
-            // Most agents have never been parked. Do not resolve their identities or
-            // declarations just to discover that there is no crash-loop decision.
-            let decisions =
-                self.claims_for(&desired.subject, Some("runtime.reconcile-decision"))?;
-            if !decisions.iter().any(|decision| {
-                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
-                key.starts_with("runtime-crash-loop:") || key.starts_with("codex-crash-loop:")
-            }) {
-                continue;
-            }
-            if !person_work::declaration_live(&connection, &desired.subject)? {
-                continue;
-            }
-            let Some(token) = self.selected_desired_token(&desired.subject)? else {
-                continue;
-            };
-            let decision = decisions.iter().find(|decision| {
-                let key = decision.body["fields"]["key"].as_str().unwrap_or_default();
-                key == format!("runtime-crash-loop:{token}")
-                    || key == format!("codex-crash-loop:{token}")
-            });
-            let Some(decision) = decision else { continue };
-            if decision.accepted_at_unix_ms > as_of {
-                continue;
-            }
-            // A retry of the parked launch that has since succeeded resolves the fault: the seat is
-            // running again without anyone revising its declaration.
-            let retry_prefix = format!("runtime-crash-loop-retry:{token}:");
-            let last_retry = decisions
-                .iter()
-                .filter(|retry| {
-                    retry.body["fields"]["key"].as_str().is_some_and(|key| key.starts_with(&retry_prefix))
-                })
-                .map(crate::store::claim_log_order)
-                .max();
-            if let Some(last_retry) = last_retry
-                && self
-                    .observations_for(&desired.subject, "runtime.action.succeeded")?
-                    .iter()
-                    .any(|success| {
-                        crate::store::claim_log_order(success) > last_retry
-                            && success.body["fields"]["desired_token"].as_str() == Some(token.as_str())
-                    })
+            .map(|desired| (desired.subject.clone(), desired))
+            .collect::<BTreeMap<_, _>>();
+        let subjects = seats.keys().cloned().collect::<Vec<_>>();
+        let mut items = Vec::new();
+        for (source, parked) in self.parked_seats_for(&subjects, current_index(&connection)?)? {
+            if parked.parked_at_unix_ms > as_of
+                || !person_work::declaration_live(&connection, &source)?
             {
                 continue;
             }
-            let codex = decision.body["fields"]["key"]
-                .as_str()
-                .unwrap_or_default()
-                .starts_with("codex-crash-loop:");
-            let reviewer = if codex {
-                "person/alex"
-            } else {
-                "person/operator"
+            let Some(desired) = seats.get(&source) else { continue };
+            // A seat no run owns answers to the agent that declared it; a run's seat to its run.
+            let owner = match &desired.owner_run {
+                Some(_) => String::new(),
+                None => self
+                    .desired_subject_with_writer(&source)?
+                    .and_then(|(_, writer)| writer)
+                    .filter(|writer| writer.starts_with("agent/"))
+                    .unwrap_or_default(),
             };
-            if person.is_some_and(|person| person != reviewer) {
-                continue;
-            }
-            let source = desired.subject;
+            let codex = desired.member.as_ref().and_then(|member| member.driver.as_deref()) == Some("codex");
             let diagnostic = self.last_driver_diagnostic(&source)?;
             items.push(AttentionItemView {
-                episode: decision.id.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
-                subject: source.clone(), person: reviewer.into(), requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
+                episode: parked.episode.clone(), priority: "high".into(), kind: "fault".into(), review_mode: None,
+                subject: source.clone(), person: owner, requester_id: None, launch_id: None, variant_id: None, message_id: None, prompt_call: None, answers: Vec::new(), conversation: None,
                 title: if codex { "A Codex agent stopped after repeated failures" } else { "An agent stopped after repeated runtime failures" }.into(),
-                detail: format!("{source}: {}.{} Inspect the seat and revise its desired declaration before restarting.", decision.body["fields"]["reason"].as_str().unwrap_or("the runtime is parked"), diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default()),
-                mission: None, mission_run: desired.owner_run, step: None, targets: vec![source.clone()], requested_at_unix_ms: decision.accepted_at_unix_ms,
-                actions: vec![attention_action("inspect source", &["st", "subject", &source])],
+                detail: format!(
+                    "{source}: {}.{} Fix what keeps it from starting, then `st agents restart {source}`; this fault clears when it runs again.",
+                    parked.reason.trim_end_matches('.'),
+                    diagnostic.map(|diagnostic| format!(" The driver's last diagnostic: {diagnostic}.")).unwrap_or_default(),
+                ),
+                mission: None, mission_run: desired.owner_run.clone(), step: None, targets: vec![source.clone()], requested_at_unix_ms: parked.parked_at_unix_ms,
+                actions: vec![attention_action("inspect source", &["st", "agents", "show", &source])],
                 request: None,
             });
         }
@@ -2030,9 +2001,16 @@ impl Store {
                 .expect("a native answer has an idempotency key");
             let body = json!({"fields":input.fields,"evidence":input.evidence,
                 "_operation":{"id":operation_id,"request_digest":request_digest}});
+            #[cfg(any(test, feature = "test-support"))]
+            delegated_write_probe::reached();
             // A delegated close and its source notification commit together.
             // The shared append seam rechecks policy/source fences in this writer.
             return self.connection.batched(|tx| -> std::result::Result<Option<ClaimRecord>, St3Error> {
+                // The fence above read a reader's snapshot. A concurrent dismissal may have
+                // committed its answer since: it is the answer, and a second one is not written.
+                if let Some(previous) = native_prompt_answer_claim(tx, episode).map_err(internal)? {
+                    return same_delegated_dismissal(previous, seat, actor, proof).map(Some);
+                }
                 let recorded = append_claim_tx(tx, &self.origin, seat, "harness.diagnostic", Some(actor),
                     &body, &[episode.to_owned()], None).map_err(claim_append_error)?;
                 register_operation_tx(tx, &recorded).map_err(internal)?;
@@ -2415,6 +2393,65 @@ pub fn native_prompt_answer(connection: &Connection, observation: &str) -> Resul
         .flatten())
 }
 
+/// Tells a test that this thread's delegated dismissal passed its reader fence and is about to
+/// ask the writer for its answer. The probe is per thread, so only the test's own callers see it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod delegated_write_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PROBE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+
+    /// Call `probe` each time this thread's delegated dismissal reaches its write.
+    pub fn set(probe: impl Fn() + 'static) {
+        PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+    }
+
+    pub(crate) fn reached() {
+        PROBE.with(|slot| {
+            if let Some(probe) = slot.borrow().as_ref() {
+                probe();
+            }
+        });
+    }
+}
+
+/// The claim that answered the native prompt `observation`, if one is recorded.
+fn native_prompt_answer_claim(connection: &Connection, observation: &str) -> Result<Option<ClaimRecord>> {
+    connection
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8472dc4d0454 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id') IS NOT NULL
+               AND json_extract(body, '$._operation.id')=?1
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+            [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(observation))], claim_from_row)
+        .optional()
+        .map_err(Into::into)
+}
+
+/// An earlier answer is this delegated dismissal's own result when it is the same dismissal by the
+/// same agent under the same proof; any other answer means the denial is no longer waiting.
+fn same_delegated_dismissal(
+    previous: ClaimRecord,
+    seat: &str,
+    actor: &str,
+    proof: &crate::model::DelegationProof,
+) -> std::result::Result<ClaimRecord, St3Error> {
+    if previous.subject == seat
+        && previous.actor.as_deref() == Some(actor)
+        && previous.body["fields"]["status"] == "dismiss"
+        && previous.body["fields"]["delegation"] == json!(proof)
+    {
+        return Ok(previous);
+    }
+    Err(St3Error::new(
+        "stale-fence",
+        "the denial already has another answer",
+    ))
+}
+
 /// Fold the native prompt's terminal-only release into the shared harness view.
 /// Driver heartbeats can restate the old blocked file after Esc/No; their
 /// unchanged episode must not resurrect a resolved hold in sender status/cards.
@@ -2742,29 +2779,9 @@ impl Store {
         }
         // An identical retry returns the actual previous result, not a second
         // denial answer or a new grant-dependent side effect.
-        let previous = {
-            let connection = self.readers.get();
-            connection.query_row(/* sqlite-large-value: allow-for-now lv-hf9df02d62f06 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
-                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
-                 FROM claims INDEXED BY claims_operation_index
-                 WHERE json_extract(body, '$._operation.id') IS NOT NULL
-                   AND json_extract(body, '$._operation.id')=?1
-                 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
-                [smallclaims::store::operation_id_for_key(&native_prompt_answer_key(&proof.episode))], claim_from_row)
-                .optional().map_err(internal)?
-        };
+        let previous = native_prompt_answer_claim(&self.readers.get(), &proof.episode).map_err(internal)?;
         if let Some(previous) = previous {
-            if previous.subject == seat
-                && previous.actor.as_deref() == Some(actor)
-                && previous.body["fields"]["status"] == "dismiss"
-                && previous.body["fields"]["delegation"] == json!(proof)
-            {
-                return Ok(previous);
-            }
-            return Err(St3Error::new(
-                "stale-fence",
-                "the denial already has another answer",
-            ));
+            return same_delegated_dismissal(previous, seat, actor, proof);
         }
         self.answer_denial(seat, &proof.episode, "dismiss", actor, Some(proof))?
             .ok_or_else(|| {

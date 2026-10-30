@@ -20,6 +20,16 @@ loader.exec_module(check)
 
 POLICY = '.st/evidence-skip-policy.json'
 
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout reads only.
+def config_path(root, legacy):
+    preferred = root / legacy.replace('.st/', '.fractal/', 1)
+    try:
+        preferred.lstat()
+    except FileNotFoundError:
+        return root / legacy
+    return preferred
+
 class DepInfo(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -140,12 +150,28 @@ class DepInfo(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=1 uncovered=0')
 
-    def test_the_committed_policy_declares_the_check_and_its_lane_lists_the_same_tree_inputs(self):
+    def test_a_shadow_check_s_files_are_warnings_and_its_stage_passes_but_clippy_s_fail(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs', 'crates/alpha/src/../../../docs/st3/schema.md'])
+        code, out = self.run_check('--warn')
+        self.assertEqual(code, 0, out)
+        self.assertIn("::warning::linux-clippy read docs/st3/schema.md, which its input key does not cover", out)
+        self.assertNotIn('::error::', out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=2 uncovered=1')
+        # ci-linux passes --warn for fleet-compat only: no default local run checks it yet, so a failure would first show in the merge
+        # queue. linux-clippy is a default local check (scripts/st-test), so CI's clippy stage fails on the same files.
+        calls = [line for line in (HERE / 'ci-linux').read_text().splitlines() if line.lstrip().startswith('python3 scripts/dep-info-check')]
+        self.assertEqual(len(calls), 2, calls)
+        by_check = {('linux-fleet-compat' if '--check linux-fleet-compat' in line else 'linux-clippy'): line for line in calls}
+        self.assertIn('--warn', by_check['linux-fleet-compat'])
+        self.assertNotIn('--warn', by_check['linux-clippy'])
+
+    def test_the_committed_policy_declares_each_keyed_check_and_its_lane_lists_the_same_tree_inputs(self):
         root = HERE.parent
-        inputs = check.declared((root / POLICY).read_text())
-        lane = json.loads((root / '.st/required-lanes.json').read_text())['lanes'][check.CHECK]
-        for path in lane['definition_paths'] + lane['tree_inputs']:
-            self.assertTrue(check.covered(path, inputs), f'{path} is in the lane but not in the input key')
+        for name in (check.CHECK, 'linux-fleet-compat'):
+            inputs = check.declared(config_path(root, POLICY).read_text(), name)
+            lane = json.loads(config_path(root, '.st/required-lanes.json').read_text())['lanes'][name]
+            for path in lane['definition_paths'] + lane['tree_inputs']:
+                self.assertTrue(check.covered(path, inputs), f'{name}: {path} is in the lane but not in the input key')
 
 
 class LinuxClippyKey(unittest.TestCase):

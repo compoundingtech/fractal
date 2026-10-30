@@ -85,19 +85,23 @@ fn attachment(store: &Store, incarnation: &str, attached: bool) -> u128 {
         .accepted_at_unix_ms
 }
 
+/// Whether recovery acted: it parked the seat, or it recorded a restart request, which it leaves
+/// to the ordinary restart path in the same evaluation. These tests call that path themselves.
 fn recover(
     reconciler: &Reconciler<FakeRuntime>,
     desired: &DesiredSubject,
     incarnation: &str,
     at: u128,
 ) -> Result<bool> {
-    reconciler.reconcile_claude_channel_recovery(
+    let requested = attempts(&reconciler.store).len();
+    let parked = reconciler.reconcile_claude_channel_recovery(
         desired,
         desired.member.as_ref().unwrap(),
         Some(&claude_seat_pty("orchid", "running", incarnation)),
         None,
         at,
-    )
+    )?;
+    Ok(parked || attempts(&reconciler.store).len() > requested)
 }
 
 fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
@@ -301,6 +305,45 @@ fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation(
         Arc::new(Notify::new()),
     );
     assert!(!recover(&restarted, &desired, "orchid-one", since + 30_000).unwrap());
+}
+
+/// A restart that recovery requests is carried out in the pass that requests it, as a changed
+/// declaration is. Left to the next pass, it waited for the rest of the pass that wrote it, which
+/// took minutes on a loaded daemon.
+#[test]
+fn a_recovery_restart_is_carried_out_in_the_pass_that_requests_it() {
+    let (store, runtime, reconciler, _) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    smallclaims::store::set_thread_clock(Some(since + 10_000));
+    let pass = reconciler.reconcile_once();
+    smallclaims::store::set_thread_clock(None);
+    pass.unwrap();
+    assert_eq!(attempts(&store).len(), 1);
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// A park still ends its evaluation. The ordinary restart path does not run after it, so the last
+/// attempt is not completed as if its replacement had been observed, and nothing is stopped
+/// until the parked seat's next evaluation.
+#[test]
+fn a_recovery_park_still_ends_its_evaluation() {
+    let (store, runtime, reconciler, desired) = setup();
+    for (index, backoff) in [10_000, 20_000, 40_000].into_iter().enumerate() {
+        let incarnation = format!("orchid-{index}");
+        let since = attachment(&store, &incarnation, false);
+        assert!(recover(&reconciler, &desired, &incarnation, since + backoff).unwrap());
+    }
+    let last = attempts(&store).pop().unwrap();
+    attachment(&store, "orchid-parked", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-parked")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().len(), 1);
+    let completion = format!("agent-restart-completed:{}", last.id);
+    assert!(store.operation_claim(&completion).unwrap().is_none());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
 }
 
 /// After a deploy each driver has to reach the new daemon again before its channel reads as

@@ -21,6 +21,17 @@ sys.dont_write_bytecode = True
 POLICY = '.st/evidence-skip-policy.json'
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge, as scripts/ci-linux's keyed_policy resolves it for CI's
+# linux-clippy job: the .fractal/ copy when the checkout has one, else the .st/ path.
+def policy_path(path=POLICY):
+    preferred = os.path.join('.fractal', os.path.basename(path))
+    try:
+        os.lstat(preferred)
+    except FileNotFoundError:
+        return path
+    return preferred
+
+
 def main(argv):
     report = os.environ.get('CLIPPY_REPORT')
     if argv or not report:
@@ -30,7 +41,7 @@ def main(argv):
         print(f'ci-clippy-result: the clippy stage did not pass ({report} has no `passed`)')
         return 1
     check = [sys.executable, str(Path(__file__).resolve().parent / 'dep-info-check'), '--logs', report, '--check', 'linux-clippy',
-             '--policy', POLICY, '--jsonl', 'clippy-*.jsonl']
+             '--policy', policy_path(), '--jsonl', 'clippy-*.jsonl']
     return subprocess.run(check).returncode
 
 

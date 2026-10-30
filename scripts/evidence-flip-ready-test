@@ -54,7 +54,8 @@ def in_shadow(path, text):
     return text
 
 
-SHADOW = {path: in_shadow(path, (ROOT / path).read_text()) for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS))}
+SHADOW = {path: in_shadow(path, (ROOT / (flip.config_path(ROOT, path) if path == flip.POLICY else path)).read_text())
+          for path in (flip.POLICY, flip.DOC, *(path for path, _ in flip.TEST_LISTS))}
 TEMPLATE = ('2026-10-22T05:58:31.4Z git show "$BASE_SHA:scripts/ci-evidence-gate" || { echo "evidence-decision v1 check=$CHECK '
             'decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }')
 
@@ -415,7 +416,7 @@ class FlipReady(unittest.TestCase):
                 self.assertEqual((entry['superseded_red'], entry['hidden_red'], trigger_reasons(entry)), ([], [7000], ['1 runs with a hidden red']))
 
     def test_an_aggregates_members_are_the_jobs_that_read_its_skip_output_and_one_with_none_is_unreadable(self):
-        policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
+        policy = json.loads((ROOT / flip.config_path(ROOT, flip.POLICY)).read_text())['checks']
         members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
         # the checks whose wrapper command is an aggregate, and rust-tests, which has no job of its own
         self.assertEqual(sorted(members), ['fractal-web', 'linux-gate', 'rust-tests'])
@@ -428,7 +429,7 @@ class FlipReady(unittest.TestCase):
             flip.skipped_members('jobs:\n  linux-gate:\n    steps: []\n', policy)
 
     def test_a_check_without_a_job_of_its_own_is_judged_by_the_jobs_whose_if_reads_its_skip(self):
-        policy = json.loads((ROOT / flip.POLICY).read_text())['checks']
+        policy = json.loads((ROOT / flip.config_path(ROOT, flip.POLICY)).read_text())['checks']
         members = flip.skipped_members((ROOT / flip.WORKFLOW).read_text(), policy)
         # linux-gate's test jobs skip on rust-tests; the linux-gate verdict reads it in a step only, so it is not a member.
         self.assertEqual(members['rust-tests'], ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
@@ -707,6 +708,21 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((entry['sample_one_in'], json.loads(new)['checks']['linux-gate']['sample_one_in']), (1, 1))
         with self.assertRaises(ValueError):
             flip.flip_policy(text, 'typescript-client')  # already enforced
+
+
+class LayoutBridge(unittest.TestCase):
+    def test_flip_writes_selected_new_policy_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            tree = Path(folder)
+            for path, text in SHADOW.items():
+                (tree / path).parent.mkdir(parents=True, exist_ok=True)
+                (tree / path).write_text(text)
+            new = tree / '.fractal/evidence-skip-policy.json'
+            new.parent.mkdir()
+            new.write_text(SHADOW[flip.POLICY])
+            flip.flip(tree, CHECK, '2026-10-27')
+            self.assertEqual((tree / flip.POLICY).read_text(), SHADOW[flip.POLICY])
+            self.assertTrue(json.loads(new.read_text())['checks'][CHECK]['enforce'])
 
 
 if __name__ == '__main__':
