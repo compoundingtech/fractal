@@ -43,7 +43,15 @@ with tempfile.TemporaryDirectory() as scratch:
     git(repo, "init", "-q")
     for path in ("scripts/ci-fractal-web-changes", "scripts/evidence-verify", ".st/evidence-skip-policy.json"):
         (repo / path).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(root / path, repo / path)
+        source = root / path
+        if path.startswith(".st/"):
+            # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live source, historical destination.
+            source = root / path.replace(".st/", ".fractal/", 1)
+            try:
+                source.lstat()
+            except FileNotFoundError:
+                source = root / path
+        shutil.copy(source, repo / path)
     base = commit(repo, "base", {
         "packages/fractal-ui/src/Kit.tsx": "kit\n", "apps/fractal-web/src/App.tsx": "app\n",
         "apps/fractal-web/src/changelog/seen.ts": "seen\n", "crates/fractal/src/lib.rs": "rust\n",
@@ -114,3 +122,42 @@ with tempfile.TemporaryDirectory() as scratch:
     fetched = git(clone, "for-each-ref", "--format=%(refname)", "refs/tags/", "refs/notes/").split()
     assert sorted(fetched) == sorted(wanted), fetched
     print("passed: --fetch brings this tree's records and the keyed input records, as tags or notes, and no other ref")
+
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — copy ONLY the entry point, no sibling resolver.
+    copied = Path(scratch) / "copied-proof"
+    shutil.copy(tool, copied)
+    tool = copied
+    old_policy = repo / ".st/evidence-skip-policy.json"
+    new_policy = repo / ".fractal/evidence-skip-policy.json"
+    new_policy.parent.mkdir()
+    shutil.copy(old_policy, new_policy)
+    old_policy.write_text("{")  # valid new must win even when old is malformed
+    both = commit(repo, "new layout shadows old", {})
+    lines = decisions(repo, both, both)
+    assert lines["fractal-web-kit"]["reason"] == "shadow", lines
+    nested = repo / "nested"
+    nested.mkdir()
+    subdir = subprocess.run([str(tool), "--base", both, "--head", both], cwd=nested,
+                           capture_output=True, text=True, env=clean)
+    assert subdir.returncode == 0, subdir.stderr
+    assert "reason=shadow" in subdir.stdout, "subdirectory lookup must select the root's new policy"
+    old_policy.unlink()
+    moved = commit(repo, "new layout only", {})
+    assert decisions(repo, moved, moved)["fractal-web-kit"]["reason"] == "shadow"
+    new_policy.write_text("{")
+    malformed = commit(repo, "malformed new", {".st/evidence-skip-policy.json": json.dumps(policy)})
+    failed = subprocess.run([str(tool), "--base", malformed, "--head", malformed], cwd=repo,
+                            capture_output=True, text=True, env=clean)
+    assert failed.returncode != 0, "malformed new policy must not fall back to old"
+    failed = subprocess.run([str(tool), "--base", "f" * 40, "--head", moved], cwd=repo,
+                            capture_output=True, text=True, env=clean)
+    assert failed.returncode != 0, "missing revision must fail closed"
+    # The selected revision stays old-layout even though the checkout is new-layout/malformed.
+    assert decisions(repo, base, base)["fractal-web"]["reason"] == "no-record"
+    unique_policy = dict(policy, bridge_missing_blob=True)
+    missing_blob = commit(repo, "selected new blob to remove", {".fractal/evidence-skip-policy.json": json.dumps(unique_policy)})
+    oid = git(repo, "rev-parse", f"{missing_blob}:.fractal/evidence-skip-policy.json")
+    (repo / ".git/objects" / oid[:2] / oid[2:]).unlink()
+    failed = subprocess.run([str(tool), "--base", missing_blob, "--head", moved], cwd=repo,
+                            capture_output=True, text=True, env=clean)
+    assert failed.returncode != 0, "an existing new entry whose blob is missing must not fall back"
