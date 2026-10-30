@@ -106,11 +106,13 @@ Normal installers retain legacy service names until cutover.
 
 `fractal migrate host --dry-run` checks the cutover without stopping services or
 writing a journal. The mover performs only same-filesystem renames and never
-copies. Before any service stop or journal write, Linux preflight refuses mounts
-at either legacy product root, either Fractal destination, or anywhere below a
-legacy root (including bind mounts), naming the mount path, source and filesystem
-from `/proc/self/mountinfo`. macOS checks root mount points by device identity.
-The same-filesystem check remains a backstop.
+copies. Before any service stop or journal write, preflight refuses mounts at or
+below either legacy product root or Fractal destination, naming the mount path,
+source and filesystem. Linux reads `/proc/self/mountinfo` (including bind mounts);
+macOS enumerates `statfs` records with `getfsstat`, resolving `/private/var` aliases
+and folding `/System/Volumes/Data` firmlink spellings only when both paths name
+the same object. Device-identity root checks and the same-filesystem check remain
+as backstops.
 
 For a legacy root or nested mount, stop the legacy units and move the mount out
 of the legacy root before cutover, preserving its data in ordinary directories
