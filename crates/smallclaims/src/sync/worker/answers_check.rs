@@ -3,17 +3,18 @@
 //! UTC day. It waits an hour into the day, so replication has brought every member what was
 //! written before the cut, and checks a peer only after an exchange with it moved nothing.
 //!
-//! A kind that differs is compared again every half hour, when both members have computed their
-//! answers again and counted any claim that arrived late. A difference that lasts two hours is
-//! narrowed to buckets and keys and handed to the store to record, which raises a fault. A kind
-//! whose differing keys all moved past the cut on one member is no difference: that member only
-//! computed after the newer claim arrived. An
-//! agreeing check is handed over too, so the store can end an earlier fault. A peer on a build
+//! A kind that differs is compared again two hours later. Each member keeps its summary at a cut
+//! until a claim older than the cut arrives, so a real difference stays, and comparing more often
+//! only costs the members another read. A difference that lasts two
+//! hours is narrowed to buckets and keys and handed to the store to record, which raises a fault.
+//! A kind whose differing keys all moved past the cut on one member is no difference: that member
+//! only computed after the newer claim arrived. An agreeing check is handed over too, so the store
+//! can end an earlier fault. A peer on a build
 //! without the check answers 404 and is not compared.
 use super::*;
 use crate::answers::{
-    AnswersCheck, AnswersReply, AnswersRequest, KindReport, differing_buckets, differing_keys,
-    differing_kinds,
+    AnswersCheck, AnswersReply, AnswersRequest, KindReport, claims_compare, differing_buckets,
+    differing_keys, differing_kinds,
 };
 use crate::sync::ANSWERS_PATH;
 
@@ -22,7 +23,7 @@ const GRACE_MS: u128 = 3_600_000;
 /// How soon to ask again when either member is still computing.
 const PENDING: Duration = Duration::from_secs(60);
 /// How soon to compare again after a difference, longer than `ANSWERS_FRESH`.
-const RECHECK: Duration = Duration::from_secs(30 * 60);
+const RECHECK: Duration = Duration::from_secs(2 * 60 * 60);
 /// How long a difference lasts before it is reported.
 const SETTLE: Duration = Duration::from_secs(2 * 60 * 60);
 /// The claim kinds narrowed to keys (fold readers are always narrowed), the buckets read per
@@ -165,7 +166,7 @@ async fn compare_answers<B: Backend>(
     let (Some(ours), Some(theirs)) = (ours.summary, theirs.summary) else {
         return Ok(Step::Pending);
     };
-    let compare_claims = ours.trims_locally == theirs.trims_locally;
+    let compare_claims = claims_compare(&ours, &theirs);
     let kinds = differing_kinds(&ours, &theirs, compare_claims);
     if !kinds.is_empty() && !settled {
         return Ok(Step::Differ);

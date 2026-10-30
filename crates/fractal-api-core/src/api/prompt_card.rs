@@ -105,26 +105,166 @@ fn pending_calls(items: &[Value]) -> Vec<Value> {
     calls
 }
 
-/// The tool calls without a result in `seat`'s conversation on this node, or why st cannot
-/// read it: the seat runs elsewhere, has no session yet, or its harness keeps none st reads.
-/// `follow` is given the transcript before it is read, so a change after the read is never
-/// missed; when st cannot follow it, the card says so instead.
-pub(crate) fn seat_pending_calls(
+/// The tool calls without a result in `seat`'s conversation, read on this node or, when another
+/// member runs the seat, through the client-read relay from that host; or why st cannot read
+/// it: the seat has no session yet, its harness keeps none st reads, or its host cannot be
+/// reached. `follow` is given the conversation before it is read, so a change after the read is
+/// never missed; when st cannot follow it, the card says so instead. For a transcript here it
+/// returns `None` and the card reads it now. For a conversation another member keeps it returns
+/// the calls its follower read last: the fold never waits on another member.
+pub fn seat_pending_calls(
     state: &AppState,
     seat: &str,
-    follow: impl FnOnce(&Path) -> Result<(), String>,
+    follow: impl FnOnce(Follow<'_>) -> Result<Option<Vec<Value>>, String>,
 ) -> Result<Vec<Value>, String> {
-    source_pending_calls(&seat_source(state, seat)?, follow)
+    match seat_conversation(state, seat)? {
+        Conversation::Here(source) => match follow(Follow::Transcript(&source.transcript))? {
+            Some(calls) => Ok(calls),
+            None => Ok(pending_calls(&tail(&source)?)),
+        },
+        Conversation::Elsewhere(remote) => follow(Follow::Remote(&remote))?
+            .ok_or_else(|| format!("st cannot follow this seat's conversation on {}", remote.host)),
+    }
 }
 
-/// `seat`'s conversation on this node, or why st cannot read it.
-fn seat_source(state: &AppState, seat: &str) -> Result<crate::external_sessions::ExternalSession, String> {
+/// What a prompt card follows for changes: a transcript on this node, or a conversation another
+/// member keeps.
+pub enum Follow<'a> {
+    Transcript(&'a Path),
+    Remote(&'a RemoteConversation),
+}
+
+/// Where a seat's conversation is kept.
+enum Conversation {
+    Here(crate::external_sessions::ExternalSession),
+    Elsewhere(RemoteConversation),
+}
+
+/// A seat's conversation another member keeps, read through the client-read relay as the seat's
+/// person, as their own client's reads of it are.
+#[derive(Clone)]
+pub struct RemoteConversation {
+    relay: crate::peer::ClientRelay,
+    host: String,
+    session_id: String,
+    person: String,
+}
+
+/// The most a relayed read waits for a change (the relay's own limit).
+const REMOTE_CHANGE_WAIT_MS: u64 = 10_000;
+
+/// How long a follower whose relayed read failed waits before reading again, doubling to the
+/// most while its host stays out of reach.
+const REMOTE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+const REMOTE_RETRY_MOST: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl RemoteConversation {
+    async fn read(&self, request: crate::peer::ClientReadOperation) -> Result<Value, String> {
+        let request = crate::peer::ClientReadRequest { authority_actor: self.person.clone(), relay: None, request };
+        self.relay
+            .read(&self.host, &request)
+            .await
+            .map_err(|error| format!("st cannot read this seat's conversation on {}: {error:#}", self.host))
+    }
+
+    /// The calls without a result among the conversation's newest entries, and where the
+    /// conversation was before they were read, for the follower to wait on changes from.
+    async fn pending(&self) -> Result<(Option<String>, Vec<Value>), String> {
+        let (after, _) = self.changes(None, 0).await?;
+        let page = self
+            .read(crate::peer::ClientReadOperation::Timeline {
+                session_id: self.session_id.clone(),
+                limit: TAIL,
+                cursor: None,
+            })
+            .await?;
+        Ok((after, pending_calls(page["items"].as_array().map(Vec::as_slice).unwrap_or_default())))
+    }
+
+    /// The conversation's cursor after `after`, waiting up to `wait_ms` for a change, and
+    /// whether it changed.
+    async fn changes(&self, after: Option<String>, wait_ms: u64) -> Result<(Option<String>, bool), String> {
+        let changes = self
+            .read(crate::peer::ClientReadOperation::ConversationChanges {
+                session_id: self.session_id.clone(),
+                after: after.clone(),
+                wait_ms,
+            })
+            .await?;
+        let changed = changes["items"].as_array().is_some_and(|items| !items.is_empty());
+        Ok((changes["next_cursor"].as_str().map(str::to_owned).or(after), changed))
+    }
+
+    /// Read the conversation, publish its calls in `latest` and wake the refresher whenever they
+    /// change, until the follower is stopped. A read that fails is published too, so a card
+    /// offers no answer from what it read before, and read again after a pause.
+    async fn follow(self, shared: Arc<Delivery>, latest: Arc<Mutex<Option<RemoteRead>>>) {
+        let publish = |read: RemoteRead| {
+            let mut latest = latest.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if latest.as_ref() != Some(&read) {
+                *latest = Some(read);
+                drop(latest);
+                shared.changed();
+            }
+        };
+        let mut pause = REMOTE_RETRY;
+        loop {
+            let failed = match self.pending().await {
+                Ok((mut after, calls)) => {
+                    publish(Ok(calls));
+                    pause = REMOTE_RETRY;
+                    loop {
+                        match self.changes(after, REMOTE_CHANGE_WAIT_MS).await {
+                            Ok((_, true)) => break None,
+                            Ok((next, false)) => after = next,
+                            Err(error) => break Some(error),
+                        }
+                    }
+                }
+                Err(error) => Some(error),
+            };
+            if let Some(error) = failed {
+                publish(Err(error));
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(REMOTE_RETRY_MOST);
+            }
+        }
+    }
+
+    /// A follower reads as the person it was made for: when the seat's person changes, a new
+    /// follower reads as the new one, and the old one, read by no card, is stopped.
+    fn key(&self) -> RemoteKey {
+        (self.host.clone(), self.session_id.clone(), self.person.clone())
+    }
+}
+
+/// Where `seat`'s conversation is kept, or why st cannot read it.
+fn seat_conversation(state: &AppState, seat: &str) -> Result<Conversation, String> {
     let unreadable = |error: ApiError| format!("st cannot read this seat's conversation: {}", error.message);
     let session = super::client_v0::conversation_session_id(state, seat).map_err(unreadable)?;
     let index = state.store.index().map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
+    let routing = super::client_v0::routing_session_owner_at(&state.store, index, &session)
+        .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
+    let origin = routing.as_ref().and_then(|(_, _, origin)| origin.as_deref());
+    if let Some(origin) = origin.filter(|origin| *origin != state.store.origin()) {
+        let host = super::client_host_id(origin);
+        let relay = state
+            .client_relay
+            .clone()
+            .filter(|relay| relay.reaches(&host))
+            .ok_or_else(|| format!("st cannot read this seat's conversation: no peer reaches {host}, which runs it"))?;
+        let person = state
+            .store
+            .agent_person(seat)
+            .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?
+            .ok_or_else(|| format!("st cannot read this seat's conversation on {host}: the seat has no person to read it as"))?;
+        return Ok(Conversation::Elsewhere(RemoteConversation { relay, host, session_id: session, person }));
+    }
     let managed = managed_session_owner_at(&state.store, index, &session)
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
-    super::client_v0::conversation_blocks::source(state, &session, managed.as_ref()).map_err(unreadable)
+    super::client_v0::conversation_blocks::source(state, &session, managed.as_ref())
+        .map(Conversation::Here)
+        .map_err(unreadable)
 }
 
 /// The newest entries of a conversation, as a prompt card reads them.
@@ -159,19 +299,31 @@ pub(crate) fn source_pending_calls(
 /// seat's conversation changes no claim attention reads. It watches each transcript's
 /// directory, so a transcript created or replaced later, and a SQLite source's write-ahead log
 /// and journal beside it, are followed too. An event the watcher could not deliver in full (an
-/// error, an overflow that asks for a rescan, or one that names no path) or one on a watched
+/// error, an overflow that asks for a rescan, or one that names no path) or a change to a watched
 /// directory itself (removed or renamed, which drops its watch) means a change may have been
 /// lost and the subscriptions may no longer hold: the next refresh makes the watcher again and
-/// subscribes each card's conversation anew before reading it. A change to what is watched
+/// subscribes each card's conversation anew before reading it. Reading a watched directory
+/// (listing it, or measuring it with `du`) changes nothing. A change to what is watched
 /// counts as a change too: FSEvents (macOS) restarts its stream from now on every watch and
 /// unwatch, so an event around it can be lost. A transcript it cannot watch is not followed:
 /// its card says so and offers no answer.
-pub(crate) struct PromptWatch {
+///
+/// A conversation another member keeps is followed through the client-read relay by a task of
+/// its own: it reads the conversation, waits on its changes from where it was before that read,
+/// and reads it again when any arrive, waking the refresher whenever the calls it read change.
+/// The refresher's fold only takes the task's latest read, so a host that is slow or out of
+/// reach delays no other card. Until a first read arrives, or while the host cannot be read,
+/// the card says so and offers no answer.
+pub struct PromptWatch {
     shared: Arc<Delivery>,
     watcher: Option<notify::RecommendedWatcher>,
     /// The transcripts followed, and those the refresh in progress read.
     followed: HashSet<PathBuf>,
     read: HashSet<PathBuf>,
+    /// The conversations other members keep that are followed, by host, session and the person
+    /// read as, and those the refresh in progress read.
+    remote: std::collections::HashMap<RemoteKey, RemoteFollower>,
+    remote_read: HashSet<RemoteKey>,
     /// How many times the watcher was made again after a delivery failure.
     rebuilds: usize,
 }
@@ -188,7 +340,33 @@ struct Delivery {
     broken: AtomicBool,
 }
 
+/// The calls a follower read last from a conversation another member keeps, or why it could not.
+type RemoteRead = Result<Vec<Value>, String>;
+
+/// A followed conversation another member keeps: its host, session and the person read as.
+type RemoteKey = (String, String, String);
+
+/// A task following a conversation another member keeps, and the calls it read last or why it
+/// could not.
+struct RemoteFollower {
+    task: tokio::task::JoinHandle<()>,
+    latest: Arc<Mutex<Option<RemoteRead>>>,
+}
+
+impl Drop for PromptWatch {
+    fn drop(&mut self) {
+        for follower in self.remote.values() {
+            follower.task.abort();
+        }
+    }
+}
+
 impl Delivery {
+    fn changed(&self) {
+        self.changed.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+
     fn deliver(&self, event: notify::Result<notify::Event>) {
         let relevant = match &event {
             Err(_) => {
@@ -197,12 +375,12 @@ impl Delivery {
             }
             Ok(event)
                 if event.need_rescan()
-                    || event.paths.is_empty() && !matches!(event.kind, notify::EventKind::Access(_))
-                    || {
-                        let directories =
-                            self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        event.paths.iter().any(|path| directories.contains(path))
-                    } =>
+                    || !matches!(event.kind, notify::EventKind::Access(_))
+                        && (event.paths.is_empty() || {
+                            let directories =
+                                self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            event.paths.iter().any(|path| directories.contains(path))
+                        }) =>
             {
                 self.broken.store(true, Ordering::Release);
                 true
@@ -215,8 +393,7 @@ impl Delivery {
             }
         };
         if relevant {
-            self.changed.store(true, Ordering::Release);
-            self.wake.notify_one();
+            self.changed();
         }
     }
 }
@@ -232,7 +409,7 @@ fn change_files(transcript: &Path) -> [PathBuf; 3] {
 }
 
 impl PromptWatch {
-    pub(crate) fn new(wake: Arc<tokio::sync::Notify>) -> Self {
+    pub fn new(wake: Arc<tokio::sync::Notify>) -> Self {
         let mut watch = Self {
             shared: Arc::new(Delivery {
                 wake,
@@ -244,6 +421,8 @@ impl PromptWatch {
             watcher: None,
             followed: HashSet::new(),
             read: HashSet::new(),
+            remote: std::collections::HashMap::new(),
+            remote_read: HashSet::new(),
             rebuilds: 0,
         };
         // A watcher that cannot be made now is made again when a card first follows a seat.
@@ -262,7 +441,7 @@ impl PromptWatch {
     }
 
     /// Whether a followed conversation changed since this was last asked.
-    pub(crate) fn take_changed(&self) -> bool {
+    pub fn take_changed(&self) -> bool {
         self.shared.changed.swap(false, Ordering::AcqRel)
     }
 
@@ -279,8 +458,9 @@ impl PromptWatch {
 
     /// A refresh is about to present the prompts. After a delivery failure nothing followed is
     /// trusted: the watcher is made again, and each card subscribes anew before it reads.
-    pub(crate) fn begin(&mut self) {
+    pub fn begin(&mut self) {
         self.read.clear();
+        self.remote_read.clear();
         if self.shared.broken.swap(false, Ordering::AcqRel) {
             self.watcher = None;
             self.followed.clear();
@@ -288,6 +468,35 @@ impl PromptWatch {
             self.shared.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
             self.shared.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         }
+    }
+
+    /// Follow a card's conversation from now on, before it is read: a transcript here gives
+    /// `None`, to be read now; a conversation another member keeps gives its follower's latest
+    /// read.
+    pub fn follow_conversation(&mut self, conversation: Follow<'_>) -> Result<Option<Vec<Value>>, String> {
+        match conversation {
+            Follow::Transcript(transcript) => self.follow(transcript).map(|()| None),
+            Follow::Remote(remote) => self.follow_remote(remote).map(Some),
+        }
+    }
+
+    /// Follow a conversation another member keeps, starting its follower the first time, and
+    /// give the calls it read last.
+    fn follow_remote(&mut self, remote: &RemoteConversation) -> Result<Vec<Value>, String> {
+        let key = remote.key();
+        let follower = match self.remote.entry(key.clone()) {
+            std::collections::hash_map::Entry::Occupied(follower) => follower.into_mut(),
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                let runtime = tokio::runtime::Handle::try_current()
+                    .map_err(|_| format!("st cannot follow this seat's conversation on {}: no runtime", remote.host))?;
+                let latest = Arc::new(Mutex::new(None));
+                let task = runtime.spawn(remote.clone().follow(Arc::clone(&self.shared), Arc::clone(&latest)));
+                vacant.insert(RemoteFollower { task, latest })
+            }
+        };
+        let latest = follower.latest.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        self.remote_read.insert(key);
+        latest.unwrap_or_else(|| Err(format!("st is still reading this seat's conversation on {}", remote.host)))
     }
 
     /// Follow `transcript` from now on, before it is read.
@@ -321,7 +530,14 @@ impl PromptWatch {
     }
 
     /// The refresh presented the prompts: stop following what no card read.
-    pub(crate) fn finish(&mut self) {
+    pub fn finish(&mut self) {
+        self.remote.retain(|key, follower| {
+            let read = self.remote_read.contains(key);
+            if !read {
+                follower.task.abort();
+            }
+            read
+        });
         let gone = self.followed.difference(&self.read).cloned().collect::<Vec<_>>();
         for transcript in gone {
             self.followed.remove(&transcript);
@@ -349,6 +565,53 @@ impl PromptWatch {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A follower reads as the person it was made for. When the seat's person changes, the card
+    /// reads from a new follower as the new person, with nothing the old one read, and the old
+    /// one stops once no card reads it.
+    #[tokio::test]
+    async fn a_remote_follower_reads_as_the_seats_person_now() {
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        std::fs::write(&secret, [7_u8; 32]).unwrap();
+        std::fs::set_permissions(&secret, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        let relay = crate::peer::ClientRelay::from_config(&crate::config::Config {
+            node: "prompt-gateway".into(),
+            fleet_id: Some("fleet-test".into()),
+            shared_secret_file: Some(secret),
+            // Nothing listens: every read fails.
+            peers: vec![crate::config::PeerConfig { name: "prompt-host".into(), url: "http://127.0.0.1:9".into() }],
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+        let conversation = |person: &str| RemoteConversation {
+            relay: relay.clone(),
+            host: "host/prompt-host".into(),
+            session_id: "session-prompt".into(),
+            person: person.into(),
+        };
+        let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        let first = loop {
+            watch.begin();
+            let read = watch.follow_remote(&conversation("person/one")).unwrap_err();
+            watch.finish();
+            if !read.contains("still reading") {
+                break read;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the first follower never read");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert!(first.contains("on host/prompt-host"), "{first}");
+
+        watch.begin();
+        let read = watch.follow_remote(&conversation("person/two")).unwrap_err();
+        watch.finish();
+        assert!(read.contains("still reading"), "{read}");
+        let persons = watch.remote.keys().map(|(_, _, person)| person.as_str()).collect::<Vec<_>>();
+        assert_eq!(persons, ["person/two"]);
+    }
 
     fn row(answers: Value, call: Value) -> Value {
         json!({"action_parameters": {"prompt.respond": {"answers": answers, "call_id": call}}})
@@ -520,6 +783,29 @@ pub(crate) mod tests {
         let mut log = OsString::from(database.as_os_str());
         log.push("-wal");
         std::fs::metadata(PathBuf::from(log)).is_ok_and(|log| log.len() > 0)
+    }
+
+    /// Listing a followed transcript's directory opens it, which inotify reports as an access to
+    /// the directory itself: the watch holds, and the next refresh keeps the watcher.
+    #[tokio::test]
+    async fn reading_a_watched_directory_keeps_its_watch() {
+        let root = tempfile::tempdir().unwrap();
+        let oak = root.path().join("oak.jsonl");
+        std::fs::write(&oak, "{}\n").unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        watch.begin();
+        watch.follow(&oak).unwrap();
+        watch.finish();
+        watch.take_changed();
+
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        // The watcher delivers events in order: once the append after the listing wakes the
+        // refresher, the listing's events have been delivered too.
+        append(&oak);
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+        watch.begin();
+        assert_eq!(watch.rebuilds, 0, "listing the directory was taken for a lost watch");
     }
 
     /// A watched directory renamed away drops its watch with it; an overflow asks for a rescan;
