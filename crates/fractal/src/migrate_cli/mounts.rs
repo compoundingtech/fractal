@@ -4,8 +4,8 @@ use super::*;
 enum Location {
     SourceRoot,
     DestinationRoot,
-    #[cfg(any(target_os = "linux", test))]
     NestedSource,
+    NestedDestination,
 }
 
 #[derive(Debug)]
@@ -24,7 +24,7 @@ impl std::fmt::Display for MountRefusal {
             write!(f, " (source {source}, filesystem {fstype})")?;
         }
         write!(f, "; `fractal migrate host` performs only same-filesystem renames and never copies. ")?;
-        if self.location == Location::DestinationRoot {
+        if matches!(self.location, Location::DestinationRoot | Location::NestedDestination) {
             write!(f, "Unmount or relocate this mount before cutover; {} must be absent or an empty ordinary directory. Do not remount populated legacy data there and rerun: the mover requires a real legacy directory at {} and refuses a populated destination.", self.new.display(), self.old.display())
         } else {
             let suffix = self.path.strip_prefix(&self.old).map_err(|_| std::fmt::Error)?;
@@ -36,7 +36,6 @@ impl std::fmt::Display for MountRefusal {
 
 impl std::error::Error for MountRefusal {}
 
-#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, PartialEq, Eq)]
 struct Mount {
     path: PathBuf,
@@ -78,7 +77,6 @@ fn parse_mountinfo(text: &[u8]) -> Result<Vec<Mount>> {
     }).collect()
 }
 
-#[cfg(any(target_os = "linux", test))]
 fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
     for mount in mounts {
         let location = if mount.path == old {
@@ -87,6 +85,8 @@ fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
             Location::DestinationRoot
         } else if mount.path.starts_with(old) {
             Location::NestedSource
+        } else if mount.path.starts_with(new) {
+            Location::NestedDestination
         } else {
             continue;
         };
@@ -101,24 +101,89 @@ fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
 // Resolve symlinked XDG ancestors before comparing with kernel mount paths.
 fn resolved(path: &Path) -> Result<PathBuf> {
     match fs::canonicalize(path) {
-        Ok(path) => Ok(path),
+        Ok(path) => normalize_resolved(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let parent = path.parent().context("product root has no parent")?;
-            Ok(fs::canonicalize(parent)?.join(path.file_name().context("product root has no filename")?))
+            Ok(normalize_resolved(fs::canonicalize(parent)?)?.join(path.file_name().context("product root has no filename")?))
         }
         Err(error) => Err(error).with_context(|| format!("resolve product root {}", path.display())),
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn data_volume_alias(path: &Path) -> Option<PathBuf> {
+    let suffix = path.strip_prefix("/System/Volumes/Data").ok()?;
+    Some(Path::new("/").join(suffix))
+}
+
+fn normalize_resolved(path: PathBuf) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(alias) = data_volume_alias(&path) {
+        match fs::metadata(&alias) {
+            Ok(alias_metadata) => {
+                let metadata = fs::metadata(&path)?;
+                // Only fold a Data-volume spelling when both paths name the
+                // same object; unrelated Data directories are not firmlinks.
+                if metadata.dev() == alias_metadata.dev() && metadata.ino() == alias_metadata.ino() {
+                    return Ok(fs::canonicalize(alias)?);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect macOS firmlink alias"),
+        }
+    }
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mounts() -> Result<Vec<Mount>> {
+    use std::ffi::CStr;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    // getfsstat writes into caller-owned storage, unlike getmntinfo's shared
+    // static buffer, which another thread could invalidate.
+    // SAFETY: a null buffer with length zero only queries the mount count.
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count < 0 { return Err(std::io::Error::last_os_error()).context("count macOS mounts"); }
+    let capacity = usize::try_from(count)? + 1;
+    let mut entries = Vec::<libc::statfs>::with_capacity(capacity);
+    let size = i32::try_from(capacity.checked_mul(std::mem::size_of::<libc::statfs>()).context("macOS mount buffer overflow")?)?;
+    // SAFETY: the buffer has capacity for size bytes of statfs records. The
+    // kernel initializes at most that many complete entries, whose count it returns.
+    let count = unsafe { libc::getfsstat(entries.as_mut_ptr(), size, libc::MNT_NOWAIT) };
+    if count < 0 { return Err(std::io::Error::last_os_error()).context("enumerate macOS mounts"); }
+    let count = usize::try_from(count)?;
+    ensure!(count < capacity, "macOS mount topology changed during preflight; rerun `fractal migrate host`");
+    // SAFETY: getfsstat initialized exactly count entries within the allocation.
+    unsafe { entries.set_len(count); }
+    entries.iter().map(|entry| {
+        // SAFETY: successful getfsstat returns NUL-terminated mount path, source
+        // and filesystem-name arrays in each initialized statfs record.
+        let (path, source, fstype) = unsafe {
+            (
+                CStr::from_ptr(entry.f_mntonname.as_ptr()),
+                CStr::from_ptr(entry.f_mntfromname.as_ptr()),
+                CStr::from_ptr(entry.f_fstypename.as_ptr()),
+            )
+        };
+        Ok(Mount {
+            path: resolved(&PathBuf::from(std::ffi::OsString::from_vec(path.to_bytes().to_vec())))?,
+            source: source.to_string_lossy().into_owned(),
+            fstype: fstype.to_string_lossy().into_owned(),
+        })
+    }).collect()
+}
+
 pub(super) fn preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
     #[cfg(target_os = "linux")]
     let mounts = parse_mountinfo(&fs::read("/proc/self/mountinfo").context("read mountinfo before host cutover")?)?;
+    #[cfg(target_os = "macos")]
+    let mounts = macos_mounts()?;
     for (old, new) in pairs {
         let old = resolved(old)?;
         let new = resolved(new)?;
-        #[cfg(target_os = "linux")]
         check_mounts(&old, &new, &mounts)?;
-        // Backstop on Linux; on macOS detect root mounts without /proc.
+        // Device identity remains an independent root-mount backstop.
         for (path, location) in [(&old, Location::SourceRoot), (&new, Location::DestinationRoot)] {
             let metadata = match fs::symlink_metadata(path) {
                 Ok(metadata) => metadata,
@@ -159,13 +224,14 @@ mod tests {
             ("/state/st3", Location::SourceRoot, "/state/fractal"),
             ("/state/fractal", Location::DestinationRoot, "/state/fractal"),
             ("/state/st3/store", Location::NestedSource, "/state/fractal/store"),
+            ("/state/fractal/store", Location::NestedDestination, "/state/fractal/store"),
         ] {
             let text = format!("36 25 0:32 / {path} rw - zfs pool/state rw\n");
             let mounts = parse_mountinfo(text.as_bytes())?;
             let error = check_mounts(old, new, &mounts).unwrap_err();
             let refusal = error.downcast_ref::<MountRefusal>().unwrap();
             assert_eq!(refusal.location, location);
-            let guidance = if location == Location::DestinationRoot {
+            let guidance = if matches!(location, Location::DestinationRoot | Location::NestedDestination) {
                 "Unmount or relocate this mount before cutover; /state/fractal must be absent or an empty ordinary directory. Do not remount populated legacy data there and rerun: the mover requires a real legacy directory at /state/st3 and refuses a populated destination.".to_owned()
             } else {
                 format!("Stop the legacy units and move this mount out of /state/st3 before cutover, preserving its data in ordinary directories under /state/st3. Restart the legacy daemon, run `fractal migrate host`, then stop the Fractal units and remount at {target} without hiding migrated data before restarting Fractal. Remounting directly at {target} with /state/st3 absent or a bridge symlink cannot complete cutover: the mover requires real legacy directories and refuses populated destinations.")
@@ -174,6 +240,35 @@ mod tests {
         }
         let mounts = parse_mountinfo(b"36 25 0:32 / /state/st3-other/store rw - zfs pool/state rw\n")?;
         check_mounts(old, new, &mounts)?;
+        Ok(())
+    }
+
+    #[test]
+    fn macos_mount_records_use_the_shared_classifier() -> Result<()> {
+        for root in ["/Users/operator/.local/state", "/private/var/operator/state"] {
+            let old = Path::new(root).join("st3");
+            let new = Path::new(root).join("fractal");
+            for (suffix, location) in [
+                ("st3/store", Location::NestedSource),
+                ("fractal/store", Location::NestedDestination),
+                ("st3", Location::SourceRoot),
+                ("fractal", Location::DestinationRoot),
+            ] {
+                let physical = Path::new("/System/Volumes/Data").join(root.strip_prefix('/').unwrap()).join(suffix);
+                let alias = data_volume_alias(&physical).unwrap();
+                assert_eq!(alias, Path::new(root).join(suffix));
+                let mounts = [Mount { path: alias, source: "/dev/disk4s1".into(), fstype: "apfs".into() }];
+                let error = check_mounts(&old, &new, &mounts).unwrap_err();
+                assert_eq!(error.downcast_ref::<MountRefusal>().unwrap().location, location);
+                assert!(error.to_string().contains("(source /dev/disk4s1, filesystem apfs)"));
+            }
+            for suffix in ["st3-other/store", "fractal-other/store"] {
+                let mounts = [Mount { path: Path::new(root).join(suffix), source: "/dev/disk4s1".into(), fstype: "apfs".into() }];
+                check_mounts(&old, &new, &mounts)?;
+            }
+        }
+        assert_eq!(data_volume_alias(Path::new("/System/Volumes/Data-other/Users")), None);
+        assert_eq!(data_volume_alias(Path::new("/Users/operator")), None);
         Ok(())
     }
 
