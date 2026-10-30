@@ -21344,6 +21344,10 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Write the claim as a build from before its kind became a local observation did: a
+    /// replicated claim. Tests use it for the claims older members still replicate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub as_older_build: bool,
 }
 
 pub fn append_claim_with_commit_context(
@@ -21394,8 +21398,12 @@ pub fn append_claim_with_commit_context(
     if !context.retirement_writer {
         validate_claim_input(input)?;
     }
-    if local_retention(&input.kind)
-        || (input.actor.is_none() && system_local_retention(&input.kind))
+    #[cfg(any(test, feature = "test-support"))]
+    let older_build = context.as_older_build;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let older_build = false;
+    if !older_build
+        && (local_retention(&input.kind) || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
         let connection = graph.readers.get();
         admission(&connection)?;
@@ -21816,9 +21824,46 @@ fn append_local_observation_fenced(
                     return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
                 }
             }
+            // A key an older build recorded as a replicated claim, before the kind became local,
+            // still names that request: a retry gets the claim and a changed request is refused.
+            if let Some(claim) = replicated_operation_outcome_tx(transaction, input)? {
+                return Ok((claim, false));
+            }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
         .map_err(|error| St3Error::new("internal", error))?
+}
+
+/// The outcome of `input`'s idempotency key in the replicated operation registry, as a claim
+/// append would settle it: the stored claim for a retry, an error for a changed or conflicting
+/// request or a checkpointed one, and `None` when no claim was ever written for the key.
+fn replicated_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+) -> Result<Option<ClaimRecord>, St3Error> {
+    let Some((operation_id, request_digest)) = claim_operation(input)? else {
+        return Ok(None);
+    };
+    if let Some((stored_digest, canonical_claim, state)) =
+        operation_tx(transaction, &operation_id).map_err(internal)?
+    {
+        if state == "conflict" {
+            return Err(St3Error::new("idempotency-conflict", "the replicated operation has conflicting requests")
+                .with_detail("operation_id", operation_id));
+        }
+        if stored_digest != request_digest {
+            return Err(St3Error::new("idempotency-mismatch", "the idempotency key already identifies a different request")
+                .with_detail("operation_id", operation_id)
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest));
+        }
+        return claim_by_id_tx(transaction, &canonical_claim)
+            .map_err(internal)?
+            .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))
+            .map(Some);
+    }
+    checkpointed_operation_outcome(transaction, &operation_id, &request_digest)?;
+    Ok(None)
 }
 
 /// Record an observation of `latest` retention. The local observation log keeps every
