@@ -16,7 +16,7 @@ pub const MAX_ARRANGEMENTS: usize = 100;
 
 pub const OPERATION_TAGS: &[&str] = &[
     "create", "rename", "folder.create", "folder.rename", "folder.move",
-    "folder.delete", "subject.place", "retire",
+    "folder.delete", "subject.place", "membership.migrate", "retire",
 ];
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

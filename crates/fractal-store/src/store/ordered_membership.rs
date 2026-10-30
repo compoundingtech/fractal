@@ -296,7 +296,7 @@ pub fn member_repaired(transaction: &Transaction<'_>, subject: &str) -> Result<(
 /// Historical placement claims keep their original canonical key, revision and real actor.
 /// This boundary translates values only; it never creates a replacement authority claim.
 fn legacy_head(transaction: &Transaction<'_>, container: &str, member: &str,
-    placement: &Value, revision: &str, winner: &[u8], index: u64, view: &ContainerView) -> Result<()> {
+    placement: &Value, (revision, winner): (&str, &[u8]), index: u64, view: &ContainerView) -> Result<()> {
     let position = canonical_serialized_json_text(&Position {
         bucket: placement["folder"].as_str().map(str::to_owned),
         key: placement["key"].as_str().context("historical placement key")?.to_owned(),
@@ -323,7 +323,7 @@ pub(super) fn backfill_legacy(transaction: &Transaction<'_>, container: &str, in
     drop(statement);
     for (member, value, revision, winner) in rows {
         legacy_head(transaction, container, &member, &serde_json::from_str(&value)?,
-            &revision, &winner, index, &view)?;
+            (&revision, &winner), index, &view)?;
     }
     Ok(())
 }
@@ -337,7 +337,7 @@ pub(super) fn project_legacy_claim(transaction: &Transaction<'_>, claim: &ClaimR
     for operation in operations {
         if let fractal_schema::arrangements::Operation::SubjectPlace { subject, folder, key } = operation {
             legacy_head(transaction, &claim.subject, &subject, &json!({"folder":folder,"key":key}),
-                &claim.id, &winner, claim.store_index, &view)?;
+                (&claim.id, &winner), claim.store_index, &view)?;
         }
     }
     Ok(())

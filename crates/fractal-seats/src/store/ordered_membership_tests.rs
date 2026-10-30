@@ -1119,7 +1119,7 @@ fn placement_migration_rerun_keeps_pair_winners_and_accepts_only_new_placement_a
 #[test]
 fn placement_migration_concurrent_legacy_writer_is_included_or_refused_atomically() {
     for round in 0..8 {
-        let store = Arc::new(Store::open_memory(&format!("migration-race-{round}")).unwrap());
+        let store = Arc::new(Store::open_memory(format!("migration-race-{round}")).unwrap());
         legacy_migration_fixture(&store);
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let writer = store.clone();
@@ -1306,6 +1306,7 @@ fn placement_migration_mixed_rules_twenty_one_twenty_two_exchange_authority_but_
     use smallclaims::store::checkpoint_agreement::{CheckpointContext, SealTerms, seal_difference};
     let legacy = Store::open_memory("migration-rules21").unwrap();
     let modern = Store::open_memory("migration-rules22").unwrap();
+    modern.graph.capture_divergences(true);
     folder_edit(&legacy, json!([{"op":"create","name":"Mixed peers"}]));
     let old_layout = canonical_hash(&(
         "st3.shared-projections.slo-breach-episodes-declared-resource-edges-ordered-membership.v1", fractal_schema::registry().digest(),
@@ -1324,7 +1325,7 @@ fn placement_migration_mixed_rules_twenty_one_twenty_two_exchange_authority_but_
     summary.projection_digests.insert("arrangements".into(), "different-rules21-table".into());
     let receipt = modern.receive_replication_exchange_asking(&legacy.origin, &fleet, &summary, true).unwrap();
     assert_eq!(receipt.received, 0);
-    let status = modern.replication_status(true, Some(&fleet), &[legacy.origin.clone()]).unwrap();
+    let status = modern.replication_status(true, Some(&fleet), std::slice::from_ref(&legacy.origin)).unwrap();
     assert!(status.peers[0].projection_comparison_waiting);
     assert!(status.peers[0].differing_tables.is_empty());
     assert!(!status.peers[0].sync.as_ref().unwrap().diverged);
