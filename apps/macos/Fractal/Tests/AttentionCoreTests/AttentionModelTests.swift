@@ -112,7 +112,7 @@ final class AttentionModelTests: XCTestCase {
   func testMissingConfigurationDoesNotAttemptARead() async {
     // A missing configuration is represented by no adapter. Refresh must not
     // turn this into a read failure or claim a successful connection.
-    let reason = "Missing ATTENTION_ST_ENDPOINT"
+    let reason = "Missing ATTENTION_FRACTAL_ENDPOINT"
     let model = AttentionModel(adapter: nil, configurationError: reason)
 
     XCTAssertEqual(model.connection, .unconfigured(reason))
@@ -156,7 +156,7 @@ final class AttentionModelTests: XCTestCase {
       XCTAssertEqual(model.connection, .fresh(now))
       XCTAssertEqual(
         model.controlMessage,
-        "Notice controls are preview-only until smalltalk#3476 PR1; nothing was changed."
+        "Notice controls are preview-only until fractal#3476 PR1; nothing was changed."
       )
     }
 

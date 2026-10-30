@@ -30,7 +30,7 @@ final class TrayAppDelegate: NSObject, NSApplicationDelegate {
     do {
       let configuration = try TrayConfiguration.load(
         environment: ProcessInfo.processInfo.environment)
-      model = AttentionModel(adapter: STAttentionAdapter(configuration: configuration))
+      model = AttentionModel(adapter: FractalAttentionAdapter(configuration: configuration))
       isConfigured = true
     } catch {
       // No adapter means no network: the model stays `.unconfigured` and refresh is inert.
@@ -226,7 +226,7 @@ private struct ConfigurationErrorView: View {
         .fixedSize(horizontal: false, vertical: true)
         .textSelection(.enabled)
       Text(
-        "Set ATTENTION_ST_ENDPOINT, ATTENTION_ST_CREDENTIAL and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
+        "Set ATTENTION_FRACTAL_ENDPOINT, ATTENTION_FRACTAL_CREDENTIAL and ATTENTION_FRACTAL_URL, then relaunch. Nothing is fetched until all three are set."
       )
       .font(.system(size: 11))
       .foregroundStyle(.secondary)

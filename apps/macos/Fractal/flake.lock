@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "fractal": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1793265987,
+        "narHash": "sha256-NMvavwH6h/oSg3IHzSzGggbe9T17XADaDKs3C5Lk5aA=",
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "05b5f5d96c369a37c18766b4740b80959c320102",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fractal",
+        "rev": "05b5f5d96c369a37c18766b4740b80959c320102",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1789178647,
@@ -18,25 +35,8 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs",
-        "smalltalk": "smalltalk"
-      }
-    },
-    "smalltalk": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1792443904,
-        "narHash": "sha256-qltZJ8P533+1HaT5jSr7Fzkhsev3ro7Ax9FMu6HGAvA=",
-        "owner": "compoundingtech",
-        "repo": "smalltalk",
-        "rev": "e9a9167884ea56ae22ed0605bdf284610b6fa9fb",
-        "type": "github"
-      },
-      "original": {
-        "owner": "compoundingtech",
-        "repo": "smalltalk",
-        "rev": "e9a9167884ea56ae22ed0605bdf284610b6fa9fb",
-        "type": "github"
+        "fractal": "fractal",
+        "nixpkgs": "nixpkgs"
       }
     }
   },

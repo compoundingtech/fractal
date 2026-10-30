@@ -1,6 +1,6 @@
 import Foundation
 
-/// TEMPORARY presentation model for smalltalk#3476's design snapshot, not a wire codec.
+/// TEMPORARY presentation model for fractal#3476's design snapshot, not a wire codec.
 /// Replace with generated FractalClient models when PR1 defines the final schema.
 /// No encoding, graph writes or inferred delivery receipts are permitted from this type.
 public struct NoticeSnapshot: Identifiable, Sendable, Equatable {
