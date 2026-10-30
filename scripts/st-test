@@ -118,6 +118,9 @@ LOCAL = {
     # The clippy stage alone, keyed by what it reads (docs/keyed-clippy.md). Opt-in while linux-gate's own run still includes clippy,
     # so a default run never runs it twice: `--check linux-clippy` signs it.
     'linux-clippy': ['nix', 'develop', '-c', 'bash', 'scripts/ci-clippy-keyed'],
+    # The fleet-compat stage alone (the previous release's st3 against this tree's), keyed by what it reads, opt-in for the same reason:
+    # `--check linux-fleet-compat` signs it.
+    'linux-fleet-compat': ['nix', 'develop', '-c', 'bash', 'scripts/ci-fleet-compat-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]
@@ -129,12 +132,12 @@ RUN_COMPLETED = frozenset({0, 4, 100})
 FILTERSET_LIMIT = 400
 # Checks that build and test the Rust workspace. Every check runs by default; these are the ones the host's capacity guard governs
 # (a builds.slice scope, the kept target below), which nobody has to ask for.
-BUILDS = frozenset({'linux-gate', 'linux-clippy', 'fractal-web', RUST_TESTS})
+BUILDS = frozenset({'linux-gate', 'linux-clippy', 'linux-fleet-compat', 'fractal-web', RUST_TESTS})
 # rust-tests runs by default, after linux-gate, and signs the crates that have no note from linux-gate's own nextest run (its JUnit report:
 # the same workspace build and selection), so the tests are not run twice. When the gate skips linux-gate's tests stage on the per-crate
 # notes, linux-gate's local command shrinks to clippy and fleet-compat and rust-tests runs the crates without a note itself
 # (docs/per-crate-test-signing.md, step 5).
-OPT_IN = frozenset({'linux-clippy'})
+OPT_IN = frozenset({'linux-clippy', 'linux-fleet-compat'})
 # Checks whose result depends on the base as well as the tree (clippy's ratchet): the base commit is recorded as an input.
 BASE_BOUND = frozenset({'linux-gate', 'linux-clippy'})  # rust-tests is not: a test's result does not depend on the base
 # What the fractal-web note records about the run, as CI's aggregate note does (scripts/ci-evidence-signing): one shard, every kit
