@@ -1121,6 +1121,9 @@ struct UpArgs {
     node: Option<String>,
     #[arg(long)]
     state_dir: Option<PathBuf>,
+    /// Existing directory for only claims.sqlite3 and its WAL/SHM; defaults to --state-dir.
+    #[arg(long)]
+    store_dir: Option<PathBuf>,
     /// Use an existing PTY registry during an st2-to-fractal cutover.
     #[arg(long)]
     pty_root: Option<PathBuf>,
@@ -5638,7 +5641,8 @@ async fn run(cli: Cli) -> Result<()> {
                 file,
                 database: Some(database),
             } => {
-                let header = fractal_daemon::backup::create_from_database(&database, &file)?;
+                let state_root = backup_state_root(&config, &database)?;
+                let header = fractal_daemon::backup::create_from_database(&database, &state_root, &file)?;
                 if cli.json {
                     println!("{}", serde_json::to_string(&header)?);
                 } else {
@@ -5651,8 +5655,9 @@ async fn run(cli: Cli) -> Result<()> {
                 Ok(())
             }
             BackupCommand::Restore { file, database } => {
-                let database = database.unwrap_or_else(|| config.state_dir.join("claims.sqlite3"));
-                let report = fractal_daemon::backup::restore(&file, &database)?;
+                let database = database.unwrap_or_else(|| config.store_path());
+                let state_root = backup_state_root(&config, &database)?;
+                let report = fractal_daemon::backup::restore(&file, &database, &state_root)?;
                 if cli.json {
                     println!("{}", serde_json::to_string(&report)?);
                 } else {
@@ -6256,6 +6261,34 @@ fn gateway_path_for_comparison(socket: &Path) -> Result<PathBuf> {
     ))
 }
 
+fn backup_state_root(config: &Config, database: &Path) -> Result<PathBuf> {
+    let configured = config.store_path();
+    let same_database = database == configured
+        || canonical_database_path(database).ok().zip(canonical_database_path(&configured).ok())
+            .is_some_and(|(database, configured)| database == configured);
+    if same_database {
+        Ok(config.state_dir.clone())
+    } else {
+        database.parent().map(Path::to_path_buf).context("the database path has no parent")
+    }
+}
+
+fn canonical_database_path(database: &Path) -> std::io::Result<PathBuf> {
+    match fs::canonicalize(database) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let absolute = std::path::absolute(database)?;
+            let parent = absolute.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path has no parent")
+            })?;
+            let name = absolute.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "database path has no file name")
+            })?;
+            fs::canonicalize(parent).map(|parent| parent.join(name))
+        }
+        result => result,
+    }
+}
+
 fn select_private_gateway(
     config: &mut Config,
     private_state: bool,
@@ -6323,6 +6356,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     if let Some(state_dir) = args.state_dir {
         config.state_dir = state_dir;
+    }
+    if let Some(store_dir) = args.store_dir {
+        config.store_dir = Some(store_dir);
     }
     if let Some(pty_root) = args.pty_root {
         config.pty_root = Some(pty_root);
@@ -6410,7 +6446,14 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup.phase("open-store");
     startup_telemetry.phase("open-store");
     let store = Arc::new(startup_telemetry.task("startup.open_store", || {
-        fractal_daemon::task_cpu::blocking("startup.open_store", || Store::open(&config.state_dir.join("claims.sqlite3"), &config.node))
+        fractal_daemon::task_cpu::blocking("startup.open_store", || {
+            let database = config.store_path();
+            let store = Store::open(&database, &config.node)?;
+            if config.store_dir.is_some() {
+                fractal_daemon::node_identity::record_store_writer(&database, &config.node)?;
+            }
+            Ok::<_, anyhow::Error>(store)
+        })
     })?);
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;

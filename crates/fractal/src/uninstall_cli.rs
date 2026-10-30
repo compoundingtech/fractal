@@ -70,6 +70,10 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
         config.socket.clone(),
         config.client_gateway_socket.clone(),
     ];
+    if config.store_dir.is_some() {
+        let directory = fractal_daemon::config::store_dir(&config);
+        paths.extend(fractal_daemon::config::STORE_DATABASE_FILES.map(|name| directory.join(name)));
+    }
     paths.extend(fractal_daemon::startup::paths(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
     paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
@@ -151,7 +155,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
     let local_only = config.fleet_id.is_none()
         && !config.state_dir.join("left-fleet.json").exists()
         && !config.state_dir.join("fleet").exists()
-        && config.state_dir.join("claims.sqlite3").exists();
+        && config.store_path().exists();
     anyhow::ensure!(
         !local_only || args.erase_local_graph,
         "this machine's graph exists nowhere else; pass --erase-local-graph to erase it"

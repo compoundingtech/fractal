@@ -450,16 +450,18 @@ async fn lock_fleet_admission(
     services: bool,
     verb: &str,
 ) -> Result<fractal_daemon::node_identity::StateLock> {
-    if client.get::<Value>("/v1/health").await.is_ok() {
+    let mut state_identity = if client.get::<Value>("/v1/health").await.is_ok() {
         anyhow::ensure!(
             services,
             "stop the running st3 daemon first: nothing may write while this machine {verb}"
         );
         fractal_daemon::service::stop()?;
-        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await
+        fractal_daemon::node_identity::lock_after_stop(&config.state_dir).await?
     } else {
-        fractal_daemon::node_identity::lock(&config.state_dir)
-    }
+        fractal_daemon::node_identity::lock(&config.state_dir)?
+    };
+    fractal_daemon::node_identity::lock_store_directory(&mut state_identity, config)?;
+    Ok(state_identity)
 }
 
 /// Pairing credentials travel over the helper's private stdin/stdout, never argv.
@@ -537,6 +539,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
     };
     fractal_daemon::service::preflight(manages_services)?;
     let mut config = Config::load_unvalidated(None)?;
+    config.validate()?;
     // Explicit admissions can repair a pin after their prior attempt saved membership.
     // Other controls must use the daemon's resolved identity, including leave's runtime check.
     if !matches!(&command, FleetCommand::Join(_) | FleetCommand::Create(_)) {
@@ -753,6 +756,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 lock_fleet_admission(&client, &config, use_services, "joins").await?;
             let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
                 state_dir: config.state_dir.clone(),
+                store_path: config.store_path(),
                 configured_node: config.node.clone(),
                 code: code.trim().to_owned(),
                 name: args.name.clone(),
@@ -764,6 +768,9 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
                 version: env!("CARGO_PKG_VERSION").into(),
             })
             .await?;
+            if config.store_dir.is_some() {
+                fractal_daemon::node_identity::record_store_writer(&config.store_path(), &joined.name)?;
+            }
             state_identity.record_fleet_join(&joined)?;
             drop(state_identity);
             if let Some(path) = code_path {
@@ -1355,7 +1362,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     // its store before writing. Invalid admission must not stop healthy services.
     {
         use rusqlite::OptionalExtension as _;
-        let database = config.state_dir.join("claims.sqlite3");
+        let database = config.store_path();
         anyhow::ensure!(
             database.exists(),
             "this store is not bound to a fleet yet; run fractal up once first"
@@ -1395,6 +1402,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     if args.anchor {
         let founded = fractal_daemon::fleet::join::migrate_anchor(
             &config.state_dir,
+            &config.store_path(),
             &config.node,
             &fleet_id,
             &secret_file,
@@ -1426,6 +1434,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         };
         let joined = fractal_daemon::fleet::join::join(&fractal_daemon::fleet::join::JoinOptions {
             state_dir: config.state_dir.clone(),
+            store_path: config.store_path(),
             configured_node: config.node.clone(),
             code: code.trim().to_owned(),
             name: Some(config.node.clone()),
@@ -1441,6 +1450,9 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
             joined.migrate,
             "that code is a join code; use fractal fleet join"
         );
+        if config.store_dir.is_some() {
+            fractal_daemon::node_identity::record_store_writer(&config.store_path(), &joined.name)?;
+        }
         state_identity.record_fleet_join(&joined)?;
         if let Some(path) = code_path {
             let _ = fs::remove_file(path);
