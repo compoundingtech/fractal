@@ -10,12 +10,27 @@ logs="$RUNNER_TEMP/ci-logs"
 mkdir -p "$logs"
 
 fleet_compat() {
+  # Fleet runtime compatibility is separate from Fractal-to-Fractal replication.
+  # Exercise the deployed pty 0.13.0 record through the production mailbox bind handler,
+  # even when the devShell's newer pty writer would hide missing daemonBootId.
+  cargo test -p fractal-api-mailbox --locked --lib \
+    api::mailbox::tests::replay_native_tests::deployed_pty_0_13_0_record_without_boot_id_binds_mailbox \
+    -- --exact 2>&1 | tee "$logs/pty-mailbox-compat-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/pty-mailbox-compat-result.log" || return
   local baseline
   baseline=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/baseline") || return
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   export FRACTAL_COMPAT_BIN="$baseline" ST3_COMPAT_BIN="$baseline"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   test -x "${FRACTAL_COMPAT_BIN-${ST3_COMPAT_BIN-}}" || return
+  # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
+  # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
+  # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
+  # checked. --warn while linux-fleet-compat is in shadow, as for clippy.
+  if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
+    cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-fleet-compat --policy "$CI_KEYED_FLEET_COMPAT_POLICY" --jsonl 'fleet-compat-*.jsonl' --warn || return
+  fi
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade 2>&1 | tee "$logs/compat-result.log" || return
   grep -q "test result: ok. 1 passed" "$logs/compat-result.log"

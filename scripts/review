@@ -20,6 +20,7 @@ import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -207,7 +208,7 @@ Reply with ONE JSON object and nothing else (no prose before or after, no code f
 deterministic risk, final risk, patch-ids, reviewer and standard digest itself; you give the judgement:
 {schema_note}
 Rules: a GO has no blocking finding; CHANGES has at least one blocking finding. risk.level is your own score by the rubric. Name what you
-did not read in "read.structure" or in the text; never a bare GO. Every finding names the file, the line, the reason and the fix that
+did not read in "read.structure" or in the text; never a bare GO. A review whose "read.full" is empty is incomplete and is not recorded. Every finding names the file, the line, the reason and the fix that
 would be accepted. For a round after the first, "answers" lists which earlier finding each change answers.
 """
 
@@ -447,11 +448,14 @@ def assemble(answer, *, head, base, round_number, deterministic, patch, served, 
     return verdict
 
 
-def validate(verdict, repo, base, folder):
-    """The verdict checked by BASE's validator against BASE's schema (the checkout's own only when the base has none yet)."""
+def validate(verdict, repo, base, folder, previous=None):
+    """The verdict checked by BASE's validator against BASE's schema (the checkout's own only when the base has none yet).
+    The earlier verdict goes along when the base's validator takes one; an older one is called as it always was."""
     script = base_script(repo, base, "review-validate", folder)
     validator = load_path("review-validate", script) if script else load_script("review-validate")
     schema_text = base_text(repo, base, ".st/review-verdict.schema.json") or (ROOT / ".st/review-verdict.schema.json").read_text()
+    if previous is not None and "previous" in inspect.signature(validator.validate).parameters:
+        return validator.validate(verdict, json.loads(schema_text), previous=previous)
     return validator.validate(verdict, json.loads(schema_text))
 
 
@@ -548,11 +552,15 @@ def review(args, repo, tools):
             remerge_text = git(repo, "show", "--remerge-diff", "--format=", head, check=False).strip()
         if not changed and not structure and not remerge_text and set(old) == set(patch):
             verdict = carry(previous, head=head, base=base, patch=patch, digest=digest, deterministic=deterministic, merge_base=merge_base)
-            return finish(args, repo, verdict, {"harness": "none", "seconds": 0, "carried_from": previous["head"], "cost_usd": 0}, base, tools)
+            return finish(args, repo, verdict, {"harness": "none", "seconds": 0, "carried_from": previous["head"], "cost_usd": 0}, base, tools,
+                          previous)
     if round_number > MAX_ROUNDS:
         raise Failed(f"this would be round {round_number}; the standard allows {MAX_ROUNDS}, then the change goes to its author's own human")
     answers_note = ""
-    if round_number > 1:
+    if round_number > 1 and previous and previous["verdict"] == "GO":
+        answers_note = ("The earlier verdict was a GO, so there is no earlier finding to answer: review what changed since it as a delta "
+                        "(for example a merge of main that resolved a conflict), and leave \"answers\" empty unless a change answers an advisory finding.")
+    elif round_number > 1:
         answers_note = "This is a round after the first: in \"answers\", say which earlier finding each change since then answers. A GO counts only after a code change that answers them."
     prompt_head = build_prompt(text, head, base, merge_base, changed, structure, served, bool(remerge_text), round_number, previous, answers_note, reads)
     diff_parts = []
@@ -569,16 +577,22 @@ def review(args, repo, tools):
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", checkout], cwd=repo, capture_output=True)
     answer = extract_json(reply)
+    if changed and not (answer.get("read") or {}).get("full"):
+        # A reviewer that could not read (a harness whose only reader it thought it lacked) answers from the prompt alone. That
+        # is not a verdict on the change, so it is neither a GO nor a CHANGES that spends a round.
+        raise Failed(f"the reviewer read no file of the {len(changed)} to read in full, so this is an incomplete review, not a verdict; "
+                     "nothing was written and no round was spent. Run the review again with a harness that can read files in its "
+                     "checkout (--harness); if none can, take the change to your own human")
     reviewer = {"model": model, "family": family, "harness": name}
     verdict = assemble(answer, head=head, base=base, round_number=round_number, deterministic=deterministic, patch=patch, served=served,
                        changed=changed, structure=structure, reviewer=reviewer, digest=digest)
     metrics.update(files=len(paths), changed_lines=deterministic["changed_lines"], read_full=len(changed), served=len(served),
                    prompt_chars=len(prompt), round=round_number)
-    return finish(args, repo, verdict, metrics, base, tools)
+    return finish(args, repo, verdict, metrics, base, tools, previous)
 
 
-def finish(args, repo, verdict, metrics, base, folder):
-    problems = validate(verdict, repo, base, folder)
+def finish(args, repo, verdict, metrics, base, folder, previous=None):
+    problems = validate(verdict, repo, base, folder, previous)
     if problems:
         for problem in problems:
             print(f"review: {problem}", file=sys.stderr)

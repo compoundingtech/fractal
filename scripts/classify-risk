@@ -50,7 +50,7 @@ def classify(rules, paths, diff_lines):
         for content in rule.get("content", []):
             pattern = re.compile(content["pattern"])
             for path in sorted(paths):
-                if matches(content["globs"], path):
+                if matches(content["globs"], path) and not matches(content.get("exclude", []), path):
                     by_line += [f"{path}: {line.strip()}" for line in diff_lines.get(path, []) if pattern.search(line)]
         if by_path or by_line:
             hits.append({"name": rule["name"], "forces": rule.get("forces", []), "paths": by_path, "lines": by_line[:20]})

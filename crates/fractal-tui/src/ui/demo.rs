@@ -39,6 +39,7 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
         id: "snapshot/scenario-demo".into(), host_id: "host/meadow".into(),
         store_index: 1, projection_version: "scenario-demo".into(),
         created_at: chrono::DateTime::from_timestamp_millis(now).context("invalid demo clock")?.to_rfc3339(),
+        published_at: None,
     };
     for collection in [&mut model.now, &mut model.messages, &mut model.launches,
         &mut model.missions, &mut model.work, &mut model.agents, &mut model.sessions,
