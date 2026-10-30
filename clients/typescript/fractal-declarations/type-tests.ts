@@ -30,6 +30,9 @@ export const catchUpAll = {
   ...externalSchedule, catchUp: 'all', maxCatchUp: 3,
 } as const satisfies Schedule
 
+export const maxGoalsMission = { ...mission, goals: ['one', 'two', 'three'], steps: [] } as const satisfies Mission
+export const maxGoalsStep = { ...externalStep, goals: ['one', 'two', 'three'] } as const satisfies Step
+
 // Negative contracts fail compilation if an unsupported form becomes assignable.
 // Type-level assertions avoid suppressing diagnostics on invalid runtime examples.
 type Assert<T extends true> = T
@@ -57,6 +60,13 @@ export type OnlyMissionStates = Assert<Equal<Mission['state'], 'draft' | 'ready'
 export type OnlyCompletion = Assert<Equal<Mission['completion'], 'all-steps-exhausted'>>
 export type NoGoalString = Assert<Rejects<string, Mission['goals']>>
 export type NoStepGoalString = Assert<Rejects<string, Step['goals']>>
+export type NoEmptyMissionGoals = Assert<Rejects<readonly [], Mission['goals']>>
+export type NoFourMissionGoals = Assert<Rejects<readonly [string, string, string, string], Mission['goals']>>
+export type NoFourStepGoals = Assert<Rejects<readonly [string, string, string, string], Step['goals']>>
+export type NoUnboundedMissionGoals = Assert<Rejects<readonly string[], Mission['goals']>>
+export type NoUnboundedStepGoals = Assert<Rejects<readonly string[], Step['goals']>>
+export type NoEmptyDeclarations = Assert<Rejects<{}, Declarations>>
+export type NoEmptyDeclarationCollections = Assert<Rejects<{ agents: readonly []; missions: readonly []; schedules: readonly [] }, Declarations>>
 export type NoStepDependencies = Assert<Rejects<'dependsOn', keyof Step>>
 export type NoCron = Assert<Rejects<'cron', keyof Schedule>>
 export type OnlyCatchUpPolicies = Assert<Equal<Schedule['catchUp'], 'all' | 'latest' | 'skip'>>

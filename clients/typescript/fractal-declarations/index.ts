@@ -19,14 +19,14 @@ export interface Under {
 export interface Step {
   readonly id: string
   readonly assignedTo: AgentReference
-  readonly goals: readonly string[]
+  readonly goals: readonly [] | readonly [string] | readonly [string, string] | readonly [string, string, string]
 }
 
 export interface Mission {
   readonly id: string
   readonly state: MissionState
   readonly reportTo: AgentReference
-  readonly goals: readonly string[]
+  readonly goals: readonly [string] | readonly [string, string] | readonly [string, string, string]
   readonly completion: Completion
   readonly steps: readonly Step[]
 }
@@ -45,11 +45,11 @@ export interface ScheduledWork {
   readonly workspace: string
 }
 
-export interface Declarations {
+export type Declarations = {
   readonly agents?: readonly Agent[]
   readonly missions?: readonly Mission[]
   readonly schedules?: readonly Schedule[]
-}
+} & ({ readonly agents: readonly [Agent, ...Agent[]] } | { readonly missions: readonly [Mission, ...Mission[]] } | { readonly schedules: readonly [Schedule, ...Schedule[]] })
 
 export type MissionState = "draft" | "ready" | "retired"
 

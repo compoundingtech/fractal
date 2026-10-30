@@ -40,9 +40,8 @@ test('the st validate daily review uses object references and matches the canoni
     assert.equal(encodeKdl({ agents: [editor, writer], missions: [mission], schedules: [schedule] }), expected);
 });
 
-test('empty and omitted collections produce only the version and final newline', () => {
-    assert.equal(encodeKdl({}), 'version 2\n');
-    assert.equal(encodeKdl({ agents: [], missions: [], schedules: [] }), 'version 2\n');
+test('empty and omitted optional collections add no declarations beside a nonempty collection', () => {
+    assert.equal(encodeKdl({ agents: [editor], missions: [], schedules: [] }), encodeKdl({ agents: [editor] }));
 });
 
 test('argv preserves argument boundaries, order and empty arguments', () => {
@@ -70,10 +69,10 @@ test('qualified string references match object references without adding declara
     assert.equal(encodeKdl({ missions: [mission] }), `version 2\n\nmission "docs/daily-review" state="ready" report-to="agent/docs/editor" {\n  goal "Review the documentation each day."\n  completion {\n    when "all-steps-exhausted"\n  }\n  step "review" {\n    assigned-to "agent/docs/writer"\n    goal "Review the documentation and report corrections."\n  }\n}\n`);
 });
 
-test('mission states, empty goals and steps, and ordered goals and steps are preserved', () => {
+test('mission states, empty step lists, and ordered goals and steps are preserved', () => {
     for (const state of ['draft', 'ready', 'retired']) {
-        assert.equal(encodeKdl({ missions: [{ ...mission, state, goals: [], steps: [] }] }),
-            `version 2\n\nmission "docs/daily-review" state="${state}" report-to="agent/docs/editor" {\n  completion {\n    when "all-steps-exhausted"\n  }\n}\n`);
+        assert.equal(encodeKdl({ missions: [{ ...mission, state, goals: ['Work'], steps: [] }] }),
+            `version 2\n\nmission "docs/daily-review" state="${state}" report-to="agent/docs/editor" {\n  goal "Work"\n  completion {\n    when "all-steps-exhausted"\n  }\n}\n`);
     }
     assert.equal(encodeKdl({ missions: [{ ...mission, goals: ['first', 'second'], steps: [
         { id: 'second', assignedTo: writer, goals: [] },

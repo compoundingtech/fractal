@@ -37,13 +37,13 @@ model!(Under {
 model!(Step {
     id: String => "readonly id: string",
     assigned_to: AgentReference => "readonly assignedTo: AgentReference",
-    goals: Vec<String> => "readonly goals: readonly string[]",
+    goals: Vec<String> => "readonly goals: readonly [] | readonly [string] | readonly [string, string] | readonly [string, string, string]",
 });
 model!(Mission {
     id: String => "readonly id: string",
     state: MissionState => "readonly state: MissionState",
     report_to: AgentReference => "readonly reportTo: AgentReference",
-    goals: Vec<String> => "readonly goals: readonly string[]",
+    goals: Vec<String> => "readonly goals: readonly [string] | readonly [string, string] | readonly [string, string, string]",
     completion: Completion => "readonly completion: Completion",
     steps: Vec<Step> => "readonly steps: readonly Step[]",
 });
@@ -66,7 +66,7 @@ model!(Declarations {
     agents: Vec<Agent> => "readonly agents?: readonly Agent[]",
     missions: Vec<Mission> => "readonly missions?: readonly Mission[]",
     schedules: Vec<Schedule> => "readonly schedules?: readonly Schedule[]",
-});
+} => "({ readonly agents: readonly [Agent, ...Agent[]] } | { readonly missions: readonly [Mission, ...Mission[]] } | { readonly schedules: readonly [Schedule, ...Schedule[]] })");
 
 macro_rules! choices {
     ($name:ident { $($variant:ident => $value:literal),* $(,)? }) => {
@@ -315,6 +315,18 @@ mod tests {
                 "../../../clients/typescript/fractal-declarations/fixtures/daily-review.kdl"
             )
         );
+        // Mirror the parser's count boundaries, including its unrestricted step count.
+        for mission_goals in 1..=3 {
+            for step_goals in 0..=3 {
+                let mut boundary = document.clone();
+                boundary.missions[0].goals = vec!["Mission goal".into(); mission_goals];
+                boundary.missions[0].steps[0].goals = vec!["Step goal".into(); step_goals];
+                fractal_store::graph::parse_intent(&render(&boundary), "local").unwrap();
+            }
+        }
+        let mut no_steps = document.clone();
+        no_steps.missions[0].steps.clear();
+        fractal_store::graph::parse_intent(&render(&no_steps), "local").unwrap();
     }
 
     #[test]
