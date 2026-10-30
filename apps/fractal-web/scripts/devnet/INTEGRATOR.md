@@ -143,6 +143,21 @@ after an activation failure: the integrator reselects the artifact and retries
 publication without rebuilding. An unchanged candidate is not considered served
 until the published edge reports that exact revision. Reduced-stack cache entries
 record the SHA that actually built successfully, including the ejected PR result.
+
+Activation uses `devnet up --replace` so a serving generation stays published
+until its replacement is Ready and the edge cuts over. A previous registration
+is stopped first only when Devnet status positively reports it is not running
+or its lifecycle is starting/terminal. Missing or failed observations never
+authorize stopping a server; Devnet decides whether replacement can proceed.
+If replacement fails, Devnet owns server recovery. The integrator restores the
+previous build pointer only if the edge confirms that previous revision serves;
+if the candidate serves or the observation is inconclusive, the pointer stays
+unchanged. Neither generation is stopped or relaunched, and the original error
+is propagated. In particular, `ReplacementRecoveryRequired` needs operator
+recovery: the integrator never runs `--abandon-replace`. If replacement succeeds
+but subsequent publication verification fails, the integrator stops the new
+server and relaunches the previous build as before.
+
 After confirmed activation, the integrator keeps the current build and one previous
 rollback build and deletes older build directories. `integrator-activation.json`
 under the production root preserves the confirmed current/previous pair across
