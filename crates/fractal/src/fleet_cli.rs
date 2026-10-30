@@ -1433,15 +1433,17 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
     let settings = migration_settings(&args.member, config);
     if args.anchor {
         let founded = fractal_daemon::fleet::join::migrate_anchor(
-            &config.state_dir,
-            &config.store_path(),
-            state_identity.admitted_store(),
-            &config.node,
-            &fleet_id,
-            &secret_file,
-            &settings,
-            args.fabric_protocol.clone(),
-            fractal_daemon::store::runtime(),
+            fractal_daemon::fleet::join::MigrateAnchorOptions {
+                state_dir: &config.state_dir,
+                store_path: &config.store_path(),
+                admitted_store: state_identity.admitted_store(),
+                node: &config.node,
+                fleet_id: &fleet_id,
+                secret_file: &secret_file,
+                settings: &settings,
+                fabric_protocol: args.fabric_protocol.clone(),
+                runtime: fractal_daemon::store::runtime(),
+            },
         )?;
         state_identity.record_fleet_found(&founded)?;
         println!(
