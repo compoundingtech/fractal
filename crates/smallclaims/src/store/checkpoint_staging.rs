@@ -1090,6 +1090,48 @@ impl StagedSet {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A claim the plan drops that is the newest of its subject and kind in the set, if any.
+    /// Every rule keeps the newest claim of its slot, and no slot is coarser than (subject,
+    /// kind), so this finds only a planner defect.
+    pub fn dropped_newest_claim(&self) -> Result<Option<String>> {
+        Ok(self
+            .staging
+            .query_row(
+                "SELECT claims.id FROM claims
+                 JOIN (SELECT subject, kind, MAX(pos) AS pos FROM claims WHERE first=1
+                       GROUP BY subject, kind) AS newest ON newest.pos=claims.pos
+                 WHERE claims.dropped=1 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Keep every claim of a kind not in `kinds`, as the guards keep a protected claim, and
+    /// forget any plan made without that, so the next plan drops only those kinds.
+    pub fn protect_all_but(&self, kinds: &[&str]) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        transaction.execute(
+            &format!(
+                /* sqlite-large-value: allow-for-now lv-h178cf16dd35e owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE protected=0 AND kind NOT IN ({})",
+                vec!["?"; kinds.len()].join(", ")
+            ),
+            rusqlite::params_from_iter(kinds),
+        )?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-he7052689cff7 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
+    pub(super) fn drop_newest_for_test(&self) -> Result<()> {
+        self.staging.execute(
+            /* sqlite-large-value: allow-for-now lv-hf150403979fb owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET dropped=1 WHERE pos=(SELECT MAX(pos) FROM claims WHERE first=1)",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Whether the plan drops this claim.
     pub fn drops_claim(&self, id: &str) -> Result<bool> {
         Ok(self.staging.query_row(
