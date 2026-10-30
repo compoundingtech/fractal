@@ -1164,7 +1164,13 @@ summarizes that per claim kind, at a cut, so members can compare it:
   in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
 - A key counts once its newest claim is older than the cut. A key with a newer claim is still
   moving and is left out; the cut never selects an older claim, which a trimmed member may no
-  longer hold.
+  longer hold. A member that computes before a key's newer claim arrives still counts the key,
+  so two members that computed minutes apart can differ only in such keys. Each kind also
+  reports `before_cut`, a digest over every key's newest claim older than the cut, moving keys
+  included: members that still hold those claims agree on it whenever they computed, and a kind
+  whose `before_cut` agrees is no difference. Where it does not, because one member trimmed a
+  moving key's older claim, the keys a narrowing lists carry each moving key, marked `moving`,
+  and a key moving on either member is no difference.
 - Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
   keys and answers. `claims` is compared only between members that trim the same way.
 - Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
@@ -1184,7 +1190,10 @@ them, so a request never waits for a pass over the store.
 
 When a kind differs the member compares again every half hour, when both members have computed
 again and counted any claim that arrived late. A difference that lasts two hours is narrowed:
-bucket digests for each differing kind, then the keys of the differing buckets. The member records
+bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
+kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
+where those compare, is no difference. The member records
 one `operational.failure` on its own `daemon/NODE` subject with the condition
 `answers-disagreement`, an episode per member pair, and a `reproduction` that names every
 differing kind with its counts and up to twenty keys, each with both members' answers. The fault
