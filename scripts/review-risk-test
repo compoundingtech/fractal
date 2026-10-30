@@ -216,6 +216,14 @@ class ReviewRisk(unittest.TestCase):
                 self.assertIn("concurrency", self.areas(result))
                 self.assertEqual(result["needs_factory_read"], result["level"] == "medium", result)
 
+    def test_changing_an_existing_lock_acquisition_is_the_concurrency_area(self):
+        self.write("crates/fractal-drivers/src/harness_state.rs", "fn a() { let g = self.state.lock().unwrap(); }\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "medium")
+        self.assertIn("concurrency", self.areas(result))
+        self.assertTrue(result["needs_factory_read"], result)
+
     def test_a_plain_medium_change_does_not_need_a_factory_read(self):
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
         result = self.risk()
