@@ -2215,7 +2215,8 @@ class StTest(unittest.TestCase):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+        # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).

@@ -14,6 +14,10 @@ use notify::Watcher as _;
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
 
+/// The longest a prompt card shows the calls it read from a transcript here without reading it
+/// again, though no change to it was seen: a change whose event was lost shows within this.
+const CALLS_HERE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How far back st looks for a call without a result: the conversation's newest entries, a page
 /// as a client or a peer reads it. A harness waits on the calls it made last, so an older one
 /// without a result was abandoned.
@@ -110,15 +114,16 @@ fn pending_calls(items: &[Value]) -> Vec<Value> {
 /// it: the seat has no session yet, its harness keeps none st reads, or its host cannot be
 /// reached. `follow` is given the conversation before it is read, so a change after the read is
 /// never missed; when st cannot follow it, the card says so instead. For a transcript here it
-/// returns `None` and the card reads it now. For a conversation another member keeps it returns
-/// the calls its follower read last: the fold never waits on another member.
+/// returns the calls it read last while nothing changed the transcript since, or `None` for the
+/// card to read it now. For a conversation another member keeps it returns the calls its
+/// follower read last: the fold never waits on another member.
 pub fn seat_pending_calls(
     state: &AppState,
     seat: &str,
     follow: impl FnOnce(Follow<'_>) -> Result<Option<Vec<Value>>, String>,
 ) -> Result<Vec<Value>, String> {
     match seat_conversation(state, seat)? {
-        Conversation::Here(source) => match follow(Follow::Transcript(&source.transcript))? {
+        Conversation::Here(source) => match follow(Follow::Transcript(&source))? {
             Some(calls) => Ok(calls),
             None => Ok(pending_calls(&tail(&source)?)),
         },
@@ -130,7 +135,7 @@ pub fn seat_pending_calls(
 /// What a prompt card follows for changes: a transcript on this node, or a conversation another
 /// member keeps.
 pub enum Follow<'a> {
-    Transcript(&'a Path),
+    Transcript(&'a crate::external_sessions::ExternalSession),
     Remote(&'a RemoteConversation),
 }
 
@@ -267,8 +272,16 @@ fn seat_conversation(state: &AppState, seat: &str) -> Result<Conversation, Strin
         .map_err(unreadable)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read a conversation's newest entries.
+    static TAIL_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The newest entries of a conversation, as a prompt card reads them.
 fn tail(source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>, String> {
+    #[cfg(test)]
+    TAIL_READS.with(|reads| reads.set(reads.get() + 1));
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let slice = timeline
         .hold()
@@ -308,6 +321,11 @@ pub(crate) fn source_pending_calls(
 /// unwatch, so an event around it can be lost. A transcript it cannot watch is not followed:
 /// its card says so and offers no answer.
 ///
+/// A transcript here is read again only after a change to it, a lost event, a change to what is
+/// watched, a refresh in which no card read it, or a minute since its last read (in case an event
+/// was lost unreported); until then each refresh takes the calls it read last, so a fold does not
+/// reread every card's conversation.
+///
 /// A conversation another member keeps is followed through the client-read relay by a task of
 /// its own: it reads the conversation, waits on its changes from where it was before that read,
 /// and reads it again when any arrive, waking the refresher whenever the calls it read change.
@@ -324,6 +342,11 @@ pub struct PromptWatch {
     /// read as, and those the refresh in progress read.
     remote: std::collections::HashMap<RemoteKey, RemoteFollower>,
     remote_read: HashSet<RemoteKey>,
+    /// The calls without a result each followed transcript held when it was last read, and when.
+    /// An entry stands only while no change to its transcript has been seen since that read, and
+    /// for at most `calls_max_age`.
+    calls: std::collections::HashMap<PathBuf, (std::time::Instant, Vec<Value>)>,
+    calls_max_age: std::time::Duration,
     /// How many times the watcher was made again after a delivery failure.
     rebuilds: usize,
 }
@@ -333,6 +356,8 @@ struct Delivery {
     wake: Arc<tokio::sync::Notify>,
     /// The files whose changes wake the refresher: each followed transcript and its siblings.
     files: Mutex<HashSet<PathBuf>>,
+    /// Those of them that changed since a card last read their transcript.
+    dirty: Mutex<HashSet<PathBuf>>,
     /// The directories watched: an event on one itself drops or moves its watch.
     directories: Mutex<HashSet<PathBuf>>,
     changed: AtomicBool,
@@ -388,7 +413,12 @@ impl Delivery {
             Ok(event) => {
                 !matches!(event.kind, notify::EventKind::Access(_)) && {
                     let files = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    event.paths.iter().any(|path| files.contains(path))
+                    let changed = event.paths.iter().filter(|path| files.contains(*path)).cloned().collect::<Vec<_>>();
+                    drop(files);
+                    !changed.is_empty() && {
+                        self.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(changed);
+                        true
+                    }
                 }
             }
         };
@@ -414,6 +444,7 @@ impl PromptWatch {
             shared: Arc::new(Delivery {
                 wake,
                 files: Mutex::default(),
+                dirty: Mutex::default(),
                 directories: Mutex::default(),
                 changed: AtomicBool::new(false),
                 broken: AtomicBool::new(false),
@@ -423,6 +454,8 @@ impl PromptWatch {
             read: HashSet::new(),
             remote: std::collections::HashMap::new(),
             remote_read: HashSet::new(),
+            calls: std::collections::HashMap::new(),
+            calls_max_age: CALLS_HERE_MAX_AGE,
             rebuilds: 0,
         };
         // A watcher that cannot be made now is made again when a card first follows a seat.
@@ -451,7 +484,8 @@ impl PromptWatch {
     }
 
     /// What is watched changed: read again soon, since an event around the change may be lost.
-    fn watched_changed(&self) {
+    fn watched_changed(&mut self) {
+        self.calls.clear();
         self.keep_changed();
         self.shared.wake.notify_one();
     }
@@ -464,19 +498,56 @@ impl PromptWatch {
         if self.shared.broken.swap(false, Ordering::AcqRel) {
             self.watcher = None;
             self.followed.clear();
+            self.calls.clear();
             self.rebuilds += 1;
             self.shared.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+            self.shared.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
             self.shared.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         }
     }
 
-    /// Follow a card's conversation from now on, before it is read: a transcript here gives
-    /// `None`, to be read now; a conversation another member keeps gives its follower's latest
-    /// read.
+    /// Follow a card's conversation from now on, before it is read, and give its calls without a
+    /// result: a transcript here as read last while nothing changed it, else read now; a
+    /// conversation another member keeps as its follower read it last.
     pub fn follow_conversation(&mut self, conversation: Follow<'_>) -> Result<Option<Vec<Value>>, String> {
         match conversation {
-            Follow::Transcript(transcript) => self.follow(transcript).map(|()| None),
+            Follow::Transcript(source) => {
+                self.follow(&source.transcript)?;
+                self.calls_here(source).map(Some)
+            }
             Follow::Remote(remote) => self.follow_remote(remote).map(Some),
+        }
+    }
+
+    /// The calls without a result in a followed transcript here. A change seen since the last
+    /// read, a watcher that lost events, or a read older than `calls_max_age` has it read again; a
+    /// change during the read leaves it to be read again at the next refresh, which that change
+    /// wakes.
+    fn calls_here(&mut self, source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>, String> {
+        let mut changed = false;
+        let mut dirty = self.shared.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for file in change_files(&source.transcript) {
+            changed |= dirty.remove(&file);
+        }
+        drop(dirty);
+        if !changed
+            && !self.shared.broken.load(Ordering::Acquire)
+            && let Some((read_at, calls)) = self.calls.get(&source.transcript)
+            && read_at.elapsed() < self.calls_max_age
+        {
+            return Ok(calls.clone());
+        }
+        let read_at = std::time::Instant::now();
+        match tail(source) {
+            Ok(items) => {
+                let calls = pending_calls(&items);
+                self.calls.insert(source.transcript.clone(), (read_at, calls.clone()));
+                Ok(calls)
+            }
+            Err(error) => {
+                self.calls.remove(&source.transcript);
+                Err(error)
+            }
         }
     }
 
@@ -541,10 +612,15 @@ impl PromptWatch {
         let gone = self.followed.difference(&self.read).cloned().collect::<Vec<_>>();
         for transcript in gone {
             self.followed.remove(&transcript);
+            // Unfollowed, its changes are no longer seen: read it again if a card reads it later.
+            self.calls.remove(&transcript);
             let mut files = self.shared.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut dirty = self.shared.dirty.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for file in change_files(&transcript) {
                 files.remove(&file);
+                dirty.remove(&file);
             }
+            drop(dirty);
             drop(files);
             let directory = transcript.parent();
             if !self.followed.iter().any(|other| other.parent() == directory)
@@ -897,6 +973,130 @@ pub(crate) mod tests {
         watch.take_changed();
         append(&elm);
         assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+    }
+
+    /// A Codex transcript here, in `directory`, with no calls yet.
+    fn transcript_here(directory: &Path, name: &str) -> crate::external_sessions::ExternalSession {
+        let transcript = directory.join(format!("{name}.jsonl"));
+        let meta = json!({"type": "session_meta", "timestamp": "2026-09-24T12:00:00Z",
+            "payload": {"id": format!("native-{name}"), "cwd": directory, "source": "test"}});
+        std::fs::write(&transcript, format!("{meta}\n")).unwrap();
+        crate::external_sessions::ExternalSession {
+            id: format!("session-{name}"),
+            revision: "revision".into(),
+            driver: crate::external_sessions::ExternalDriver::Codex,
+            native_id: format!("native-{name}"),
+            transcript,
+            codex_home: None,
+            cwd: None,
+            title: None,
+            started_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+            process: None,
+        }
+    }
+
+    /// The harness's calls in a Codex transcript, each `(call, result)`: it calls `call`, or
+    /// gives its result. One write, so a watcher sees one change.
+    fn codex_lines(transcript: &Path, lines: &[(&str, bool)]) {
+        use std::io::Write as _;
+        let text = lines
+            .iter()
+            .map(|&(call, result)| {
+                let payload = if result {
+                    json!({"type": "function_call_output", "call_id": call, "output": "done"})
+                } else {
+                    json!({"type": "function_call", "name": "shell", "arguments": "{\"command\":[\"make\"]}", "call_id": call})
+                };
+                format!("{}\n", json!({"type": "response_item", "timestamp": "2026-09-24T12:00:01Z", "payload": payload}))
+            })
+            .collect::<String>();
+        let mut file = std::fs::OpenOptions::new().append(true).open(transcript).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+
+    fn reads() -> usize {
+        TAIL_READS.with(std::cell::Cell::get)
+    }
+
+    /// One refresh: each card follows its conversation and takes its calls, by call ID.
+    fn refresh_cards(watch: &mut PromptWatch, sources: &[&crate::external_sessions::ExternalSession]) -> Vec<Vec<String>> {
+        watch.begin();
+        let calls = sources
+            .iter()
+            .map(|source| {
+                watch
+                    .follow_conversation(Follow::Transcript(source))
+                    .unwrap()
+                    .unwrap()
+                    .iter()
+                    .map(|call| call["call_id"].as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .collect();
+        watch.finish();
+        calls
+    }
+
+    /// A fold presents every prompt card. A transcript here is read once while nothing changes
+    /// it: each later refresh takes the calls it read. A change to it, a lost event, or a refresh
+    /// in which no card read it has it read again.
+    #[tokio::test]
+    async fn a_transcript_here_is_read_again_only_after_it_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let (oak, elm) = (transcript_here(root.path(), "oak"), transcript_here(root.path(), "elm"));
+        codex_lines(&oak.transcript, &[("call-a", false)]);
+        codex_lines(&elm.transcript, &[("call-e", false)]);
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        // Only changes reread here, however slowly the test runs.
+        watch.calls_max_age = Duration::from_secs(3600);
+        let start = reads();
+        assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [["call-a"], ["call-e"]]);
+        assert_eq!(reads() - start, 2);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        watch.take_changed();
+        assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [["call-a"], ["call-e"]]);
+        assert_eq!(reads() - start, 2, "an unchanged transcript was read again");
+
+        // Oak's harness gets its result and calls again: only oak is read again.
+        codex_lines(&oak.transcript, &[("call-a", true), ("call-b", false)]);
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+        assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [["call-b"], ["call-e"]]);
+        assert_eq!(reads() - start, 3);
+
+        // No card reads elm, so it is no longer followed, and a change to it then is not seen:
+        // when a card reads it again, it is read again.
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-b"]]);
+        codex_lines(&elm.transcript, &[("call-e", true)]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [vec!["call-b"], vec![]]);
+        assert_eq!(reads() - start, 4);
+
+        // The watcher lost events: nothing it followed is trusted, so each is read again.
+        watch.shared.deliver(Err(notify::Error::generic("inotify queue overflowed")));
+        assert_eq!(refresh_cards(&mut watch, &[&oak, &elm]), [vec!["call-b"], vec![]]);
+        assert_eq!(reads() - start, 6);
+    }
+
+    /// An event can be lost without the watcher saying so. A card whose transcript changed no
+    /// file it saw still reads it again once its last read is older than the most a card shows
+    /// a read, so a new prompt is never hidden for longer than that.
+    #[tokio::test]
+    async fn a_transcript_here_is_read_again_after_its_read_grows_old_without_an_event() {
+        let root = tempfile::tempdir().unwrap();
+        let oak = transcript_here(root.path(), "oak");
+        codex_lines(&oak.transcript, &[("call-a", false)]);
+        let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
+        watch.calls_max_age = Duration::from_secs(3600);
+        let start = reads();
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
+        assert_eq!(reads() - start, 1, "a fresh read was read again");
+        // No file event: the read is past its age, so the next refresh reads again.
+        watch.calls_max_age = Duration::ZERO;
+        assert_eq!(refresh_cards(&mut watch, &[&oak]), [["call-a"]]);
+        assert_eq!(reads() - start, 2, "an old read was served without reading again");
     }
 
     /// A transcript st cannot follow is not read as if it could: its card says why.
