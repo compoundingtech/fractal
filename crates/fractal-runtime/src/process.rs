@@ -241,7 +241,7 @@ impl ExecRuntime {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let mut generation: ExecGeneration = match serde_json::from_slice(&bytes) {
+        let generation: ExecGeneration = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
             Err(error) => return Ok(Some(ExecObservation::Indeterminate(error.to_string()))),
         };
@@ -260,33 +260,26 @@ impl ExecRuntime {
         if generation.exit_code.is_some() || generation.exit_signal.is_some() {
             return self.observe_exited_group(id, generation).map(Some);
         }
-        let owned_exit = {
-            let mut children = self
-                .owned_children
-                .lock()
-                .expect("exec child mutex poisoned");
-            let status = children
-                .get_mut(&generation.pid)
-                .map(Child::try_wait)
-                .transpose()?
-                .flatten();
-            if status.is_some() {
-                children.remove(&generation.pid);
-            }
-            status
-        };
-        if let Some(status) = owned_exit {
-            generation.exit_code = status.code();
-            generation.exit_signal = exit_signal(&status);
-            self.write_generation(id, &generation)?;
-            return self.observe_exited_group(id, generation).map(Some);
+        if let Some(status) = self.take_owned_exit(generation.pid)? {
+            return self.observe_owned_exit(id, generation, status).map(Some);
         }
+        #[cfg(test)]
+        BEFORE_IDENTITY.with(|hook| {
+            if let Some(hook) = &*hook.borrow() {
+                hook(generation.pid);
+            }
+        });
         match process_identity(generation.pid) {
             Ok((state, token)) if token == generation.start_token && state != 'Z' => {
                 Ok(Some(ExecObservation::Running(generation)))
             }
+            // An owned child that exited after the look above is a zombie until it is reaped,
+            // so its status is still there to take.
             Ok((_state, token)) if token == generation.start_token => {
-                self.observe_exited_group(id, generation).map(Some)
+                match self.take_owned_exit(generation.pid)? {
+                    Some(status) => self.observe_owned_exit(id, generation, status).map(Some),
+                    None => self.observe_exited_group(id, generation).map(Some),
+                }
             }
             Ok(_) => Ok(Some(ExecObservation::Exited(generation))),
             Err(error) if process_is_absent(&error) => {
@@ -295,6 +288,35 @@ impl ExecRuntime {
             Err(error) if error.is::<crate::ProcessNamespaceMismatch>() => Err(error),
             Err(error) => Ok(Some(ExecObservation::Indeterminate(error.to_string()))),
         }
+    }
+
+    /// Reaps `pid` if it is a child this runtime started and it has exited.
+    fn take_owned_exit(&self, pid: u32) -> Result<Option<std::process::ExitStatus>> {
+        let mut children = self
+            .owned_children
+            .lock()
+            .expect("exec child mutex poisoned");
+        let status = children
+            .get_mut(&pid)
+            .map(Child::try_wait)
+            .transpose()?
+            .flatten();
+        if status.is_some() {
+            children.remove(&pid);
+        }
+        Ok(status)
+    }
+
+    fn observe_owned_exit(
+        &self,
+        id: &str,
+        mut generation: ExecGeneration,
+        status: std::process::ExitStatus,
+    ) -> Result<ExecObservation> {
+        generation.exit_code = status.code();
+        generation.exit_signal = exit_signal(&status);
+        self.write_generation(id, &generation)?;
+        self.observe_exited_group(id, generation)
     }
 
     fn observe_exited_group(
@@ -646,6 +668,17 @@ fn process_identity(pid: u32) -> Result<(char, u64)> {
     }
 }
 
+#[cfg(test)]
+type IdentityHook = Box<dyn Fn(u32)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Runs in `observe` between taking an owned child's status and reading its process, so a
+    /// test can make the child exit in that window.
+    static BEFORE_IDENTITY: std::cell::RefCell<Option<IdentityHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn generation_id(id: &str, pid: u32, start_token: u64, created_at_unix_ms: u128) -> String {
     let mut hash = Sha256::new();
     hash.update(id.as_bytes());
@@ -916,6 +949,47 @@ mod tests {
             }
         }
         panic!("the exec did not exit");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_exec_that_exits_while_it_is_observed_keeps_its_exit_code() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let go = root.path().join("go");
+        runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "while [ ! -e go ]; do sleep 0.01; done; exit 3".into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        // The child is still running when observe takes its status, and has exited, unreaped,
+        // when observe reads its process.
+        BEFORE_IDENTITY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |pid| {
+                fs::write(&go, "").unwrap();
+                for _ in 0..3000 {
+                    if process_identity(pid).unwrap().0 == 'Z' {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                panic!("the exec never exited");
+            }))
+        });
+        let observed = runtime.observe("work").unwrap();
+        BEFORE_IDENTITY.with(|hook| *hook.borrow_mut() = None);
+        let Some(ExecObservation::Exited(generation)) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(generation.exit_code, Some(3));
+        assert_eq!(wait_for_exit(&runtime, "work").exit_code, Some(3));
     }
 
     #[test]
