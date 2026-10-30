@@ -116,6 +116,15 @@ after changing it; existing seats retain their placement. Laned seats keep their
 and limits; directly constructed runtimes and non-systemd launches do not use this policy.
 Do not combine it with a generic `st3-.scope.d` drop-in that overrides `Slice=`.
 
+For placement without resource caps:
+
+```toml
+[unlaned_seat]
+slice = "app-seats.slice"
+```
+
+To also set caps and OOM behavior:
+
 ```toml
 [unlaned_seat]
 slice = "app-seats.slice"
@@ -124,9 +133,11 @@ memorySwapMax = 0
 oomPolicy = "kill"
 ```
 
-All four fields are required; unknown fields are rejected. Memory values are integer byte
-counts (`memoryMax` positive, `memorySwapMax` nonnegative). `oomPolicy` is `continue`, `stop`,
-or `kill` and requires a systemd version supporting `OOMPolicy` on scopes (254+).
+Only `slice` is required; unknown fields are rejected. `memoryMax`, `memorySwapMax`, and
+`oomPolicy` are independently optional: an absent field emits no corresponding `-p` argument.
+When present, memory values are integer byte counts (`memoryMax` positive, `memorySwapMax`
+nonnegative). `oomPolicy` is `continue`, `stop`, or `kill`; setting it requires a systemd version
+supporting `OOMPolicy` on scopes (254+).
 `slice` is a non-root `.slice` name containing letters, digits, underscores and single internal
 hyphens. The launcher passes `--slice=`, `MemoryMax=`, `MemorySwapMax=` and `OOMPolicy=` directly
 to `systemd-run`. Older daemons reject this table; remove it before downgrading.

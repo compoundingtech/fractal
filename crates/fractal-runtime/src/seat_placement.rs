@@ -10,9 +10,12 @@ pub struct UnlanedSeatPlacement(PlacementFields);
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlacementFields {
     slice: String,
-    memory_max: u64,
-    memory_swap_max: u64,
-    oom_policy: OomPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_max: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_swap_max: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oom_policy: Option<OomPolicy>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,7 +39,7 @@ impl TryFrom<PlacementFields> for UnlanedSeatPlacement {
         {
             return Err("slice must be a non-root systemd slice name using letters, digits, underscores and single hyphens");
         }
-        if fields.memory_max == 0 {
+        if fields.memory_max == Some(0) {
             return Err("memoryMax must be a positive byte count");
         }
         Ok(Self(fields))
@@ -47,15 +50,21 @@ impl TryFrom<PlacementFields> for UnlanedSeatPlacement {
 impl UnlanedSeatPlacement {
     pub(crate) fn apply(&self, command: &mut Command) {
         let fields = &self.0;
-        let oom = match fields.oom_policy {
-            OomPolicy::Continue => "continue",
-            OomPolicy::Stop => "stop",
-            OomPolicy::Kill => "kill",
-        };
-        command.arg(format!("--slice={}", fields.slice))
-            .args(["-p", &format!("MemoryMax={}", fields.memory_max)])
-            .args(["-p", &format!("MemorySwapMax={}", fields.memory_swap_max)])
-            .args(["-p", &format!("OOMPolicy={oom}")]);
+        command.arg(format!("--slice={}", fields.slice));
+        if let Some(memory) = fields.memory_max {
+            command.args(["-p", &format!("MemoryMax={memory}")]);
+        }
+        if let Some(swap) = fields.memory_swap_max {
+            command.args(["-p", &format!("MemorySwapMax={swap}")]);
+        }
+        if let Some(policy) = fields.oom_policy {
+            let oom = match policy {
+                OomPolicy::Continue => "continue",
+                OomPolicy::Stop => "stop",
+                OomPolicy::Kill => "kill",
+            };
+            command.args(["-p", &format!("OOMPolicy={oom}")]);
+        }
     }
 }
 
@@ -85,10 +94,31 @@ pub(crate) mod tests {
             invalid[key] = value;
             assert!(serde_json::from_value::<UnlanedSeatPlacement>(invalid).is_err(), "accepted invalid {key}");
         }
-        for key in ["slice", "memoryMax", "memorySwapMax", "oomPolicy"] {
-            let mut invalid = valid.clone();
-            invalid.as_object_mut().unwrap().remove(key);
-            assert!(serde_json::from_value::<UnlanedSeatPlacement>(invalid).is_err());
+        let mut missing_slice = valid;
+        missing_slice.as_object_mut().unwrap().remove("slice");
+        assert!(serde_json::from_value::<UnlanedSeatPlacement>(missing_slice).is_err());
+    }
+
+    #[test]
+    fn unlaned_properties_are_independently_optional() {
+        for (key, value, argument) in [
+            ("memoryMax", serde_json::json!(1024), "MemoryMax=1024"),
+            ("memorySwapMax", serde_json::json!(0), "MemorySwapMax=0"),
+            ("oomPolicy", serde_json::json!("stop"), "OOMPolicy=stop"),
+        ] {
+            let mut fields = serde_json::json!({"slice": "app-seats.slice"});
+            fields[key] = value;
+            let policy: UnlanedSeatPlacement = serde_json::from_value(fields).unwrap();
+            let mut command = Command::new("systemd-run");
+            policy.apply(&mut command);
+            assert_eq!(command.get_args().collect::<Vec<_>>(),
+                ["--slice=app-seats.slice", "-p", argument].map(std::ffi::OsStr::new));
         }
+        let policy: UnlanedSeatPlacement =
+            serde_json::from_str(r#"{"slice":"app-seats.slice"}"#).unwrap();
+        let mut command = Command::new("systemd-run");
+        policy.apply(&mut command);
+        assert_eq!(command.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("--slice=app-seats.slice")]);
     }
 }

@@ -1266,6 +1266,9 @@ mod tests {
         let fields = "[unlaned_seat]\nslice = 'app-seats.slice'\nmemoryMax = 8589934592\nmemorySwapMax = 0\noomPolicy = 'kill'\n";
         let configured: Config = toml::from_str(fields).unwrap();
         assert!(configured.unlaned_seat.is_some());
+        let slice_only: Config = toml::from_str("[unlaned_seat]\nslice = 'app-seats.slice'\n").unwrap();
+        assert!(slice_only.unlaned_seat.is_some());
+        assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
         assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
         assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
     }
