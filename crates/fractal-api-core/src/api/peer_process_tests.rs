@@ -92,7 +92,7 @@ fn receive_socket(stream: &UnixStream) -> UnixStream {
         assert!(!header.is_null());
         assert_eq!((*header).cmsg_level, libc::SOL_SOCKET);
         assert_eq!((*header).cmsg_type, libc::SCM_RIGHTS);
-        assert_eq!((*header).cmsg_len, libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as _);
+        assert_eq!((*header).cmsg_len as usize, libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize);
         let fd = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<libc::c_int>());
         #[cfg(target_os = "macos")]
         assert_ne!(libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC), -1);
