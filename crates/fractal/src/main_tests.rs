@@ -8719,6 +8719,39 @@ async fn the_signature_job_keeps_a_persisted_fault_whole_and_goes_on_after_a_res
     assert_eq!(store.signature_migration().unwrap().fault.as_deref(), Some(fault));
     assert!(!job.is_finished(), "a stopped job waits for a resume");
     assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault));
-    tokio::time::timeout(Duration::from_secs(10), job).await.expect("the resumed job finishes").unwrap();
+    for _ in 0..200 {
+        if store.signature_migration().unwrap().done() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(store.signature_migration().unwrap().done());
+    assert!(!job.is_finished(), "the job stays to drain later verdict backlogs");
+    job.abort();
+}
+
+#[tokio::test]
+async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-drain").unwrap());
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..3_000 {
+            tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [format!("claim/{i:05}")]).unwrap();
+        }
+        // The trust roots these verdicts relied on have since changed.
+        tx.execute("INSERT INTO meta(key,value) VALUES ('claim_candidate_verdict_roots','earlier-roots')", []).unwrap();
+        tx.commit().unwrap();
+    }
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    store.judge_claims_slice(true).unwrap();
+    assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // An in-memory store shares one cache, so this read can meet the job's writer.
+    while store.verdicts_pending().unwrap_or(true) {
+        assert!(Instant::now() < deadline, "the idle job drains what the pass left");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!job.is_finished());
+    job.abort();
 }

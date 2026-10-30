@@ -877,8 +877,12 @@ pub struct Store {
     /// Admission took in claims whose verdicts the next projection pass judges.
     pub verdicts_due: AtomicBool,
     pub(crate) signature_migration_work: Mutex<Option<principals::SignatureEnvelopeWork>>,
-    /// Wakes the stopped signature bootstrap job after an explicit resume.
-    pub signature_migration_resumed: tokio::sync::Notify,
+    /// Wakes the idle signature job: an explicit resume, or a verdict backlog an ordinary
+    /// pass left over.
+    pub signature_job_wake: tokio::sync::Notify,
+    /// The first time and text of a transient storage error the signature work is retrying,
+    /// until the next success. Never persisted; doctor reports it once it lasts.
+    pub(crate) signature_retrying: Mutex<Option<(u128, String)>>,
     pub origin: String,
     /// SQLite's resolved database filename, or the shared-memory URI of an in-memory store.
     /// Readers, checkpoint copies and sidecars must use the opened target, not a caller alias.
@@ -1232,7 +1236,8 @@ impl Store {
             rules_stale: AtomicBool::new(true),
             verdicts_due: AtomicBool::new(false),
             signature_migration_work: Mutex::new(None),
-            signature_migration_resumed: tokio::sync::Notify::new(),
+            signature_job_wake: tokio::sync::Notify::new(),
+            signature_retrying: Mutex::new(None),
             origin,
             path,
             shared_memory,

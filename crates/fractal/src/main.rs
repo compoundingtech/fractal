@@ -19371,7 +19371,8 @@ async fn build_transport_observation_index(store: Arc<Store>) {
     }
 }
 
-/// A finite bootstrap job: committed pages yield the background writer to live requests.
+/// The signature job: the finite bootstrap, then any verdict backlog ordinary passes leave.
+/// Committed pages yield the background writer to live requests.
 /// Local corruption is persisted and visible through doctor/faults; it stops this job until
 /// `st replication signatures resume` clears it. A transient SQLite error (busy, locked, cannot
 /// open) is not corruption: it is logged and the job retries after `SIGNATURE_BOOTSTRAP_RETRY`.
@@ -19381,6 +19382,7 @@ const SIGNATURE_BOOTSTRAP_QUIET_PER_WORK: u32 = 1;
 const SIGNATURE_BOOTSTRAP_RETRY: Duration = Duration::from_secs(30);
 
 async fn migrate_signature_candidates(store: Arc<Store>) {
+    let mut reported_fault = None;
     loop {
         let worker = store.clone();
         // Ok(Some(fault)): the job stopped on a fault already persisted, which it must not rewrap.
@@ -19432,9 +19434,13 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
             }
         }).await;
         match result {
-            Ok(Ok(None)) => return,
+            // Idle until an ordinary pass leaves a verdict backlog, or a resume.
+            Ok(Ok(None)) => reported_fault = None,
             Ok(Ok(Some(fault))) => {
-                stderr_message("st3", format_args!("signature candidate migration stopped on a persisted fault; repair it, then run `st replication signatures resume`: {fault}"));
+                if reported_fault.as_ref() != Some(&fault) {
+                    stderr_message("st3", format_args!("signature candidate migration stopped on a persisted fault; repair it, then run `st replication signatures resume`: {fault}"));
+                    reported_fault = Some(fault);
+                }
             }
             Ok(Err(error)) if smallclaims::store::principals::transient_storage_error(&error) => {
                 stderr_message("st3", format_args!("signature candidate migration retrying in {}s after a transient storage error: {error:#}", SIGNATURE_BOOTSTRAP_RETRY.as_secs()));
@@ -19450,7 +19456,7 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
             }
         }
-        store.signature_migration_resumed.notified().await;
+        store.signature_job_wake.notified().await;
     }
 }
 

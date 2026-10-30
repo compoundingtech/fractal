@@ -205,6 +205,31 @@ pub fn transient_storage_error(error: &anyhow::Error) -> bool {
     })
 }
 
+/// How long a transient storage error may keep recurring before doctor reports it.
+pub(super) const SIGNATURE_RETRY_VISIBLE_MS: u128 = 300_000;
+
+impl Store {
+    /// Remember a transient storage error the signature work is retrying; any other outcome
+    /// ends the episode. A permanent cannot-open then surfaces in doctor instead of only on stderr.
+    pub(super) fn note_signature_retry(&self, error: Option<&anyhow::Error>) {
+        let mut retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
+        match error.filter(|error| transient_storage_error(error)) {
+            Some(error) => {
+                let since = retrying.as_ref().map_or_else(now_ms, |(since, _)| *since);
+                *retrying = Some((since, format!("{error:#}")));
+            }
+            None => *retrying = None,
+        }
+    }
+
+    pub(super) fn lasting_signature_retry(&self) -> Option<String> {
+        let retrying = self.signature_retrying.lock().unwrap_or_else(PoisonError::into_inner);
+        retrying.as_ref().filter(|(since, _)| now_ms().saturating_sub(*since) >= SIGNATURE_RETRY_VISIBLE_MS).map(|(since, error)| {
+            format!("retrying for {}s, not persisted: {error}", now_ms().saturating_sub(*since) / 1_000)
+        })
+    }
+}
+
 pub(super) fn record_fault(connection: &Connection, reason: &str) -> Result<()> {
     connection.execute(
         /* sqlite-large-value: allow-for-now lv-h2cab6e9906c3 owner=smallclaims::store::principals::migration TODO=bound-or-reference-values-and-reclamation */ "UPDATE claim_signature_migration SET fault=?1 WHERE id=1",
@@ -233,6 +258,7 @@ impl Store {
     /// A transient storage error is returned unpersisted, for the caller to retry.
     pub fn advance_signature_migration(&self) -> Result<SignatureMigration> {
         let result = self.advance_signature_migration_inner();
+        self.note_signature_retry(result.as_ref().err());
         if let Err(error) = &result
             && !transient_storage_error(error)
         {
@@ -457,7 +483,7 @@ impl Store {
         )?;
         // Claims admitted while the fault stood were never judged; the next pass takes them.
         self.verdicts_due.store(true, std::sync::atomic::Ordering::Release);
-        self.signature_migration_resumed.notify_one();
+        self.signature_job_wake.notify_one();
         Ok(cleared)
     }
 }
@@ -541,9 +567,22 @@ mod transient_tests {
         assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault.as_str()));
         assert!(store.signature_migration().unwrap().done());
         assert!(store.verdicts_due.load(std::sync::atomic::Ordering::Acquire));
-        tokio::time::timeout(std::time::Duration::from_secs(5), store.signature_migration_resumed.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(5), store.signature_job_wake.notified())
             .await
             .expect("resume wakes the stopped bootstrap job");
         assert_eq!(store.resume_signature_migration().unwrap(), None);
+    }
+
+    #[test]
+    fn a_transient_error_that_lasts_shows_in_doctor_and_success_ends_it() {
+        let store = Store::open_memory("node", Arc::new(crate::store::runtime::Plain)).unwrap();
+        let codes = |store: &Store| store.signature_state_faults().unwrap().into_iter().map(|fault| fault.code).collect::<Vec<_>>();
+        store.note_signature_retry(Some(&sqlite(ffi::SQLITE_CANTOPEN)));
+        assert!(!codes(&store).contains(&"signature-storage-retrying".into()), "a brief retry stays quiet");
+        store.signature_retrying.lock().unwrap().as_mut().unwrap().0 -= SIGNATURE_RETRY_VISIBLE_MS;
+        assert!(codes(&store).contains(&"signature-storage-retrying".into()));
+        assert_eq!(store.signature_migration().unwrap().fault, None, "never persisted");
+        store.note_signature_retry(None);
+        assert!(!codes(&store).contains(&"signature-storage-retrying".into()));
     }
 }

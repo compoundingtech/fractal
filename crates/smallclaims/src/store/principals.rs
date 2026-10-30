@@ -554,6 +554,9 @@ impl Store {
         {
             faults.push(SignatureStateFault { code:"signature-bootstrap-stalled".into(),subject:format!("host/{}",self.origin),detail:format!("no committed candidate bootstrap progress for at least 300s; inspect the writer queue and stopped-job logs; {}",migration.progress_description()) });
         }
+        if let Some(detail) = self.lasting_signature_retry() {
+            faults.push(SignatureStateFault { code: "signature-storage-retrying".into(), subject: format!("host/{}", self.origin), detail });
+        }
         if let Some(fault) = &migration.legacy_fault {
             faults.push(SignatureStateFault {code:"signature-state-corrupt".into(),subject:format!("host/{}",self.origin),detail:format!("legacy authorization is unavailable: {fault}; repair the named local defect before explicit resume")});
         }
@@ -1566,6 +1569,10 @@ impl Store {
         let judged = self.record_judgment_failure(self.judge_claims_inner(check_roots, Some(VERDICT_SLICE_LOANS)))?;
         if self.verdicts_pending()? {
             self.verdicts_due.store(true, Ordering::Release);
+            // The paced signature job owns what a slice leaves; a faulted member waits for resume.
+            if self.signature_migration()?.fault.is_none() {
+                self.signature_job_wake.notify_one();
+            }
         }
         Ok(judged)
     }
@@ -1577,6 +1584,7 @@ impl Store {
     }
 
     fn record_judgment_failure(&self, result: Result<usize>) -> Result<usize> {
+        self.note_signature_retry(result.as_ref().err());
         if let Err(error) = &result
             && !migration::transient_storage_error(error)
         {
