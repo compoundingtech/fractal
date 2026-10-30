@@ -11,8 +11,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// 2: splits whose leaves are groups of tabs. 1 (tabs of splits) is read once and converted.
-const VERSION: u32 = 2;
+/// 3 adds device-local navigation history; versions 1 and 2 still load.
+const VERSION: u32 = 3;
 const MAX_BYTES: u64 = 1 << 20;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -24,6 +24,10 @@ pub struct Stored {
     /// Whether the Ctrl+S sidebar is shown here; unset, it is, as the old Fractal TUI's list was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar: Option<bool>,
+    #[serde(default)]
+    pub history: Vec<StoredPlace>,
+    #[serde(default)]
+    pub history_cursor: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -48,6 +52,15 @@ pub struct StoredView {
     pub focus: usize,
     /// Each group's shown tab as its strip counts them: in the first group, 0 is Home.
     pub current: Vec<usize>,
+}
+
+/// A content destination and the workspace location where it was shown.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredPlace {
+    pub space: String,
+    pub group: usize,
+    pub tab: usize,
+    pub pane: String,
 }
 
 /// Version 1: a glass was tabs, and each tab a tree of split panes.
@@ -95,6 +108,8 @@ fn from_v1(old: StoredV1) -> Stored {
     Stored {
         version: VERSION,
         sidebar: None,
+        history: Vec::new(),
+        history_cursor: 0,
         last: old.last,
         glasses: old
             .glasses
@@ -166,7 +181,7 @@ pub fn load(path: &Path) -> Stored {
         Some(1) => serde_json::from_slice::<StoredV1>(&bytes)
             .map(from_v1)
             .unwrap_or_default(),
-        Some(v) if v == u64::from(VERSION) => {
+        Some(2 | 3) => {
             serde_json::from_slice::<Stored>(&bytes).unwrap_or_default()
         }
         _ => Stored::default(),
@@ -220,6 +235,8 @@ mod tests {
         let stored = Stored {
             version: VERSION,
             sidebar: None,
+            history: Vec::new(),
+            history_cursor: 0,
             last: Some("review".into()),
             glasses: vec![
                 StoredGlass {

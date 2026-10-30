@@ -1349,7 +1349,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             card.blank();
             card.wrap(
                 &text::inline(
-                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    "One sign-in in the seat's terminal (Attach) fixes every seat; this clears when the next authenticated turn succeeds.",
                     theme::dim(),
                 ),
                 inner,

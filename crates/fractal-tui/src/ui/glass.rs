@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+mod navigation;
+
 /// Live tab chrome. Never stored with the workspace: observations can change between frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TabBadge {
@@ -217,6 +219,9 @@ pub(crate) struct Glasses {
     /// is still empty when st first sends the person's glasses, st's glass of that name is
     /// shown instead of keeping both.
     placeholder: Option<String>,
+    history: Vec<glass_store::StoredPlace>,
+    history_cursor: usize,
+    restoring: bool,
 }
 
 /// A tab pressed with the mouse: it becomes a drag once the pointer moves with the button held;
@@ -603,6 +608,20 @@ impl Glasses {
                 .viewed(glass.view)
             })
             .collect::<Vec<_>>();
+        let mut history = Vec::new();
+        let mut history_cursor: usize = 0;
+        for (index, place) in stored.history.into_iter().enumerate() {
+            if Pane::parse(&place.pane).is_some() && all.iter().any(|glass| {
+                glass.id == place.space && glass.layout.groups().get(place.group)
+                    .is_some_and(|group| place.tab < group.tabs.len() || (group.tabs.is_empty() && place.tab == 0 && place.pane == Pane::List(0).key()))
+            }) {
+                if index <= stored.history_cursor { history_cursor = history.len(); }
+                history.push(place);
+            }
+        }
+        let excess = history.len().saturating_sub(50);
+        history.drain(..excess);
+        history_cursor = history_cursor.saturating_sub(excess);
         let name = wanted.or(stored.last).unwrap_or_else(|| "main".to_owned());
         let mut placeholder = None;
         let shown = match all.iter().position(|glass| glass.name == name) {
@@ -628,6 +647,9 @@ impl Glasses {
             last_border: None,
             pending: BTreeMap::new(),
             placeholder,
+            history,
+            history_cursor,
+            restoring: false,
         }
     }
 
@@ -662,6 +684,8 @@ impl Glasses {
         let stored = Stored {
             version: 0,
             sidebar: self.sidebar.configured.then_some(self.sidebar.shown),
+            history: self.history.clone(),
+            history_cursor: self.history_cursor,
             last: Some(self.glass().name.clone()),
             glasses: self
                 .all
@@ -3338,6 +3362,7 @@ impl Ui {
     /// Show `pane` in this glass: where it already shows, else as `how` says. Home stays Home,
     /// so what opens from Home gets its own tab, and a Home item opens on Home itself.
     pub(crate) fn open_in_glass(&mut self, pane: Pane, how: Open) {
+        let before = self.current_place();
         self.open_in_glass_inner(pane.clone(), how);
         // Opening an agent attaches its terminal once its tab has stayed in front a moment,
         // unless this device chose its conversation. Only opening does: moving the focus to a
@@ -3349,6 +3374,7 @@ impl Ui {
         {
             self.attach_when = Some((id.clone(), Instant::now()));
         }
+        self.record_place_change(before);
     }
 
     fn open_in_glass_inner(&mut self, pane: Pane, how: Open) {
@@ -3592,6 +3618,9 @@ impl Ui {
     /// Focus group `group` and show its tab `tab` (as its strip counts them). A tab it does
     /// not have leaves the group showing what it showed.
     pub(crate) fn show_in(&mut self, group: usize, tab: usize) {
+        let before = self.current_place();
+        let changed = self.glasses.glass().layout.groups().get(group)
+            .is_some_and(|shown| tab < shown.tabs.len() && shown.current != tab);
         let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let count = glass.count(group);
@@ -3605,6 +3634,9 @@ impl Ui {
         // Where the person is, remembered on this device for the next start.
         glasses.save();
         self.show_focused();
+        if changed {
+            self.record_place_change(before);
+        }
     }
 
     pub(crate) fn focus_group(&mut self, group: usize) {
@@ -4033,6 +4065,7 @@ impl Ui {
             return;
         };
         let mut released: Option<String> = None;
+        let closed_tab = group.current;
         match group.current.checked_sub(offset(focus)) {
             Some(index) if index < group.tabs.len() => {
                 let closed = group.tabs.remove(index);
@@ -4045,12 +4078,29 @@ impl Ui {
             }
             _ => {}
         }
-        if group.tabs.is_empty() && count > 1 {
+        let removed_group = group.tabs.is_empty() && count > 1;
+        if removed_group {
             let layout = std::mem::take(&mut glass.layout);
             glass.layout = layout.remove(focus).unwrap_or_default();
             glass.focus = focus.saturating_sub(1);
         }
         let id = glass.id.clone();
+        let old_cursor = glasses.history_cursor;
+        let mut retained_before_cursor = 0;
+        let mut index = 0;
+        glasses.history.retain_mut(|place| {
+            let keep = place.space != id || place.group != focus || (!removed_group && place.tab != closed_tab);
+            if keep {
+                if index <= old_cursor { retained_before_cursor += 1; }
+                if place.space == id {
+                    if removed_group && place.group > focus { place.group -= 1; }
+                    if !removed_group && place.group == focus && place.tab > closed_tab { place.tab -= 1; }
+                }
+            }
+            index += 1;
+            keep
+        });
+        glasses.history_cursor = retained_before_cursor.saturating_sub(1);
         if let Some(agent) = released {
             // The one that had the keys also stops being followed through st.
             let focused = self.terminal.as_ref().is_some_and(|view| view.agent == agent);
@@ -4060,6 +4110,7 @@ impl Ui {
         }
         self.glass_changed(&id);
         self.show_focused();
+        self.record_place_change(None);
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
@@ -4069,7 +4120,7 @@ impl Ui {
         ("t", "a new tab"),
         ("v", "split right"),
         ("x", "split below"),
-        ("[ ]", "previous, next tab"),
+        ("[ ]", "back, forward in place history"),
         ("o", "zoom the split, and back"),
         ("s", "show or hide the sidebar"),
         ("g", "another space, or a new one"),
@@ -4115,7 +4166,7 @@ impl Ui {
                     let glasses = &mut self.glasses;
                     glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
                 }
-                '[' | ']' => self.step_tab(letter == ']'),
+                '[' | ']' => self.navigate_history(letter == ']'),
                 _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
@@ -4181,6 +4232,8 @@ impl Ui {
     }
 
     fn show_glass(&mut self, index: usize) {
+        let before = self.current_place();
+        let changed = self.glasses.shown != index;
         let glasses = &mut self.glasses;
         if index >= glasses.all.len() {
             return;
@@ -4188,6 +4241,9 @@ impl Ui {
         glasses.shown = index;
         glasses.save();
         self.show_focused();
+        if changed {
+            self.record_place_change(before);
+        }
     }
 
     /// Whether keys go to the attached terminal: in glasses only while its tab has focus.
@@ -4199,7 +4255,7 @@ impl Ui {
     }
 
     /// Show `pane` in the focused tab in place of what it shows: an agent's conversation and
-    /// its terminal are one tab, switched by Ctrl+] and Ctrl+\.
+    /// its terminal are one tab, switched by Enter and Ctrl+\.
     pub(crate) fn swap_focused_pane(&mut self, pane: Pane) {
         let focus = self.glasses.glass().focus;
         self.swap_shown_pane(focus, pane);
@@ -4207,6 +4263,7 @@ impl Ui {
 
     /// Show `pane` in place of what the split `group` shows.
     pub(crate) fn swap_shown_pane(&mut self, group: usize, pane: Pane) {
+        let before = self.current_place();
         let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let Some(split) = glass.layout.group_mut(group) else {
@@ -4222,6 +4279,7 @@ impl Ui {
         tab.pane = pane.key();
         let id = glass.id.clone();
         self.glass_changed(&id);
+        self.record_place_change(before);
     }
 
     /// The pane each split of the glass in front shows, with the split's index.
@@ -5821,7 +5879,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_bracket_turns_an_agents_tab_into_its_terminal_and_ctrl_backslash_turns_it_back() {
+    fn attach_turns_an_agents_tab_into_its_terminal_and_ctrl_backslash_turns_it_back() {
         let mut ui = glass();
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".into())),
@@ -5835,8 +5893,8 @@ mod tests {
         ui.move_focus(KeyCode::Left);
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.terminal.is_none(), "Enter alone never attaches");
-        // Crossterm reports 0x1d as Ctrl+5. The same tab shows the terminal: no second tab.
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        // The Attach button opens the terminal in this tab, never a second tab.
+        ui.click(Hit::Attach);
         let terminal = "terminal:agent/example/atlas/builder";
         assert_eq!(tabs(&ui).2[0], vec![terminal.to_owned()]);
         assert_eq!(
@@ -5873,7 +5931,7 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::CloseTerminal))
         );
         // Middle-closing an attached terminal's tab uses the same detach action.
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.effects.clear();
         screen(&ui);
         let tab = ui.frame.borrow().hits.iter()
@@ -5991,8 +6049,8 @@ mod tests {
         press(&mut ui, KeyCode::Char('c'), KeyModifiers::NONE);
         ui.terminal = None;
         assert_eq!(tabs(&ui).2, vec![vec![format!("terminal:{shell}")]]);
-        // Ctrl+] attaches this shell again, not whichever agent the list has selected.
-        ctrl(&mut ui, ']');
+        // Enter attaches this shell again, not whichever agent the list has selected.
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
             ui.terminal.as_ref().map(|view| view.agent.as_str()),
             Some(shell)
@@ -6017,9 +6075,9 @@ mod tests {
             panic!("the demo has two agents with terminals");
         };
         ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         assert_eq!(ui.terminal.as_ref().map(|view| view.agent.as_str()), Some(second.as_str()));
         assert_eq!(ui.parked.len(), 1, "the first is still attached");
         let shown = screen(&ui);
@@ -6079,9 +6137,9 @@ mod tests {
             panic!("two demo terminals")
         };
         ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         let mut peers = Vec::new();
         for agent in &ids {
             let (client, mut peer) = UnixStream::pair().unwrap();
@@ -7656,7 +7714,7 @@ mod tests {
             Pane::Terminal("agent/example/atlas/builder".into()),
             Open::Right,
         );
-        // Opening a terminal tab never attaches it; Ctrl+] does.
+        // Opening a terminal tab never attaches it; Enter does.
         assert!(ui.terminal.is_none());
         ui.attach_terminal("agent/example/atlas/builder");
         ui.terminal = Some(crate::ui::TerminalView {
@@ -8395,7 +8453,7 @@ mod tests {
         ui.open_in_glass(Pane::Terminal("terminal/example-shell".into()), Open::Tab);
         assert!(ui.terminal.is_none());
         let shown = screen(&ui);
-        assert!(shown.contains("Not attached. Ctrl+] attaches"), "{shown}");
+        assert!(shown.contains("Not attached. Enter attaches"), "{shown}");
         assert!(
             !shown.contains("Message "),
             "no agent's message box: {shown}"
