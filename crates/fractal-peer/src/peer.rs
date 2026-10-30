@@ -2092,8 +2092,25 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     let main = MainBackend::new(config.socket.clone());
     main.ready().await;
     let mut shards = Vec::new();
-    // A daemon that opens no messages shard, or predates it, has no peers route for it.
-    if let Ok(peers) = shard_peers(&main, MESSAGES_SHARD).await {
+    // A daemon that opens no messages shard, or predates it, answers its peers route with 404.
+    // Any other failure is passing: ask again, so the worker never runs without a shard the
+    // daemon advertises.
+    let held = loop {
+        match shard_peers(&main, MESSAGES_SHARD).await {
+            Ok(peers) => break Some(peers),
+            Err(error)
+                if crate::client::api_error_parts(&error)
+                    .is_some_and(|(status, ..)| status == 404 || status == 405) =>
+            {
+                break None;
+            }
+            Err(error) => {
+                eprintln!("st replication-worker: messages shard peers unavailable, retrying: {error:#}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    };
+    if let Some(peers) = held {
         let (sender, receiver) = watch::channel(peers);
         let shard_wake = wake.clone();
         tokio::spawn(follow_shard_peers(main.clone(), MESSAGES_SHARD, sender, wake.subscribe()));

@@ -155,7 +155,10 @@ fn refuse_ineligible(kind: &str, actor: Option<&str>, fields: &Value) -> Result<
             format!("the messages shard holds only message.sent claims, not `{kind}`"),
         ));
     }
-    if actor.is_some_and(|actor| actor.starts_with("person/")) {
+    let from = fields.get("from").and_then(Value::as_str);
+    if actor.is_some_and(|actor| actor.starts_with("person/"))
+        || from.is_some_and(|from| from.starts_with("person/"))
+    {
         return Err(St3Error::new(
             "shard-kind-refused",
             "a person's message stays a graph claim: its device signature is judged there",
@@ -428,6 +431,7 @@ mod tests {
         for (kind, actor, fields) in [
             ("message.read", Some("agent/cedar"), json!({"status": "read"})),
             ("message.sent", Some("person/ada"), sent("person/ada")),
+            ("message.sent", Some("agent/birch"), sent("person/ada")),
             (
                 "message.sent",
                 Some("agent/birch"),
@@ -460,6 +464,7 @@ mod tests {
         for refused in [
             record("message.closed", Some("agent/cedar"), json!({"status": "closed"})),
             record("message.sent", Some("person/ada"), sent("person/ada")),
+            record("message.sent", None, sent("person/ada")),
             record("work.progress", None, json!({})),
         ] {
             let Err(error) = classify_stream_item(&refused) else {
