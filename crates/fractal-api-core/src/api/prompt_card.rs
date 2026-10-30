@@ -312,10 +312,11 @@ pub(crate) fn source_pending_calls(
 /// seat's conversation changes no claim attention reads. It watches each transcript's
 /// directory, so a transcript created or replaced later, and a SQLite source's write-ahead log
 /// and journal beside it, are followed too. An event the watcher could not deliver in full (an
-/// error, an overflow that asks for a rescan, or one that names no path) or one on a watched
+/// error, an overflow that asks for a rescan, or one that names no path) or a change to a watched
 /// directory itself (removed or renamed, which drops its watch) means a change may have been
 /// lost and the subscriptions may no longer hold: the next refresh makes the watcher again and
-/// subscribes each card's conversation anew before reading it. A change to what is watched
+/// subscribes each card's conversation anew before reading it. Reading a watched directory
+/// (listing it, or measuring it with `du`) changes nothing. A change to what is watched
 /// counts as a change too: FSEvents (macOS) restarts its stream from now on every watch and
 /// unwatch, so an event around it can be lost. A transcript it cannot watch is not followed:
 /// its card says so and offers no answer.
@@ -399,12 +400,12 @@ impl Delivery {
             }
             Ok(event)
                 if event.need_rescan()
-                    || event.paths.is_empty() && !matches!(event.kind, notify::EventKind::Access(_))
-                    || {
-                        let directories =
-                            self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                        event.paths.iter().any(|path| directories.contains(path))
-                    } =>
+                    || !matches!(event.kind, notify::EventKind::Access(_))
+                        && (event.paths.is_empty() || {
+                            let directories =
+                                self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            event.paths.iter().any(|path| directories.contains(path))
+                        }) =>
             {
                 self.broken.store(true, Ordering::Release);
                 true
@@ -858,6 +859,29 @@ pub(crate) mod tests {
         let mut log = OsString::from(database.as_os_str());
         log.push("-wal");
         std::fs::metadata(PathBuf::from(log)).is_ok_and(|log| log.len() > 0)
+    }
+
+    /// Listing a followed transcript's directory opens it, which inotify reports as an access to
+    /// the directory itself: the watch holds, and the next refresh keeps the watcher.
+    #[tokio::test]
+    async fn reading_a_watched_directory_keeps_its_watch() {
+        let root = tempfile::tempdir().unwrap();
+        let oak = root.path().join("oak.jsonl");
+        std::fs::write(&oak, "{}\n").unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        watch.begin();
+        watch.follow(&oak).unwrap();
+        watch.finish();
+        watch.take_changed();
+
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        // The watcher delivers events in order: once the append after the listing wakes the
+        // refresher, the listing's events have been delivered too.
+        append(&oak);
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+        watch.begin();
+        assert_eq!(watch.rebuilds, 0, "listing the directory was taken for a lost watch");
     }
 
     /// A watched directory renamed away drops its watch with it; an overflow asks for a rescan;
