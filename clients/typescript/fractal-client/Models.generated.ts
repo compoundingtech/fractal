@@ -3012,6 +3012,7 @@ export type SloHistory = {
 
 export type SloList = {
   as_of_unix_ms: number;
+  otel_ui_url?: string;
   rows: Array<SloRow>;
 };
 

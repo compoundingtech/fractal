@@ -203,6 +203,7 @@ async fn each_model_response_exports_its_spend_as_a_log_and_bounded_counters() {
         &OtlpConfig {
             endpoint,
             headers_file: None,
+            ui_url: None,
         },
         "node-a",
     )
@@ -274,6 +275,7 @@ async fn the_exporter_delivers_each_observation_once_the_collector_accepts_it() 
         &OtlpConfig {
             endpoint,
             headers_file: Some(headers_file),
+            ui_url: None,
         },
         "node-a",
     )
@@ -366,6 +368,7 @@ async fn hook_signals_carry_the_hook_service_and_do_not_advance_until_every_sign
         &OtlpConfig {
             endpoint,
             headers_file: None,
+            ui_url: None,
         },
         "node-a",
     )

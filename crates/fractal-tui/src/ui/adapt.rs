@@ -49,6 +49,8 @@ pub struct Extras {
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
     /// Why the last refresh failed, while `slo` still holds the rows of an earlier read.
     pub slo_stale: Option<String>,
+    /// Where the exported observation history is read, from the same `slo.list` read.
+    pub slo_otel_url: Option<String>,
 }
 
 fn age(then: &str, now: &str) -> String {
@@ -283,6 +285,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         slo: extras.slo.clone(),
         slo_history: extras.slo_history.clone(),
         slo_stale: extras.slo_stale.clone(),
+        slo_otel_url: extras.slo_otel_url.clone(),
         clients: match &model.clients {
             Some(Ok(list)) => Load::Ready(
                 list.items

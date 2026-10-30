@@ -579,6 +579,7 @@ mod tests {
                 OtlpConfig {
                     endpoint: endpoint.into(),
                     headers_file: None,
+                    ui_url: None,
                 }
                 .validate()
                 .is_err(),

@@ -241,6 +241,9 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
         );
     }
     doc.field("explain", &row.explain, width, theme::text());
+    if let Some(url) = &world.slo_otel_url {
+        doc.field("history", url, width, theme::text());
+    }
     doc.blank();
     let hours = hours.min(CHART_HOURS);
     let what = if row.kind == "budget" {

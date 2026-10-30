@@ -877,7 +877,7 @@ Swift has `usagePeriod(sinceMS:untilMS:)` and TypeScript `usagePeriod({ since_ms
 ### Objectives and budgets
 
 `GET /v1/client/slo` lists every objective and budget, the rows `st slo ls` prints. It requires
-`read.projections`. The value is `SloList { as_of_unix_ms, rows }`. An objective is a target with
+`read.projections`. The value is `SloList { as_of_unix_ms, otel_ui_url?, rows }`; `otel_ui_url` is where a person reads the exported observation history, present only when the daemon's `[observations.otlp]` sets `ui_url` (an http or https address; an older daemon rejects the key, so set it once every member runs this build), and a client shows it as a link beside the rows. An objective is a target with
 windows and an error budget (the daemon's latency, store, CPU and database targets and a paired
 phone's live-share target); a budget is an allowance that resets (each account's weekly and 5-hour
 limit, from the readings `usage.period` reports in `limits`). Every `SloRow` has `id`, `kind`

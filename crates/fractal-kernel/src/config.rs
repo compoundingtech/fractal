@@ -502,6 +502,11 @@ pub struct OtlpConfig {
     /// config so that file can be shared.
     #[serde(default)]
     pub headers_file: Option<PathBuf>,
+    /// Where a person reads those observations, such as a Grafana or otelite address. The usage
+    /// pane links to it when set. An older daemon rejects this key, so set it after every member
+    /// runs this build.
+    #[serde(default)]
+    pub ui_url: Option<String>,
 }
 
 impl OtlpConfig {
@@ -512,6 +517,14 @@ impl OtlpConfig {
             matches!(url.scheme(), "http" | "https"),
             "observations.otlp.endpoint must use http or https"
         );
+        if let Some(ui_url) = &self.ui_url {
+            let url = reqwest::Url::parse(ui_url)
+                .with_context(|| format!("parse observations.otlp.ui_url `{ui_url}`"))?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https"),
+                "observations.otlp.ui_url must use http or https"
+            );
+        }
         Ok(())
     }
 
@@ -1542,6 +1555,18 @@ sekrets_profile = "nathan/daemon-gh"
         let mut config = exported.clone();
         config.observations.otlp.as_mut().unwrap().endpoint = "ftp://collector".into();
         assert!(config.validate().is_err());
+        // The address people read the history at is optional, and a link has to be a web address.
+        assert!(!toml::to_string(&exported).unwrap().contains("ui_url"));
+        let linked: Config = toml::from_str(
+            "[observations.otlp]\nendpoint = \"http://127.0.0.1:4318\"\nui_url = \"https://otel.example.test/d/slo\"\n",
+        )
+        .unwrap();
+        linked.validate().unwrap();
+        for bad in ["otel.example.test", "javascript:alert(1)"] {
+            let mut config = linked.clone();
+            config.observations.otlp.as_mut().unwrap().ui_url = Some(bad.into());
+            assert!(config.validate().is_err(), "{bad}");
+        }
     }
 
     #[test]

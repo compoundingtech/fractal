@@ -884,6 +884,9 @@ pub struct MailBacklog {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SloList {
     pub as_of_unix_ms: u64,
+    /// Where a person reads the exported observation history, when the daemon is configured with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_ui_url: Option<String>,
     pub rows: Vec<SloRow>,
 }
 /// One objective (a target with windows and an error budget) or one budget (an allowance that

@@ -1155,6 +1155,7 @@
       "required": ["as_of_unix_ms", "rows"],
       "properties": {
         "as_of_unix_ms": { "type": "integer", "minimum": 0 },
+        "otel_ui_url": { "type": "string", "description": "Where a person reads the exported observation history, from the daemon's [observations.otlp] ui_url. Absent when none is configured." },
         "rows": { "type": "array", "items": { "$ref": "#/$defs/SloRow" } }
       }
     },

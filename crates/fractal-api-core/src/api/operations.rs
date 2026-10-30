@@ -508,7 +508,11 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
         Ok(rows)
     })
     .await?;
-    Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+    let mut body = json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows});
+    if let Some(url) = crate::slo_history::ui_url() {
+        body["otel_ui_url"] = Value::String(url);
+    }
+    Ok(Json(body))
 }
 
 /// Say on each budget how much will be used when it resets, at the rate the local history log

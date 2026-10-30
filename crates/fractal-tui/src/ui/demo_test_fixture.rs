@@ -102,6 +102,7 @@ pub fn world() -> World {
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
         slo_stale: None,
+        slo_otel_url: Some("https://otel.example.test/d/slo".into()),
         clients: Load::Ready(vec![
             Connected {
                 client: s("stui 0.1.0+1ecae71"),

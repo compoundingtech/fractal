@@ -117,6 +117,9 @@ pub struct World {
     /// from an earlier read.
     #[serde(skip)]
     pub slo_stale: Option<String>,
+    /// Where the exported observation history is read, when the member is configured with one.
+    #[serde(skip)]
+    pub slo_otel_url: Option<String>,
     /// The clients connected to this member now and those seen in the last few minutes.
     pub clients: Load<Vec<Connected>>,
     #[serde(skip)]
