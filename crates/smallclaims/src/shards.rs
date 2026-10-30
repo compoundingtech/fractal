@@ -427,6 +427,66 @@ mod tests {
         shard
     }
 
+    /// After a writer's key rotates, a shard admits its envelopes only with a signature by the
+    /// new key: the old key's incarnation never ended, but a signature by it stays unsigned.
+    #[test]
+    fn a_shard_refuses_a_rotated_out_key() {
+        use crate::claim::ReplicaEnvelope;
+        use crate::fleet::{FleetClaim, Membership, membership::MEMBER_ADMITTED};
+        let admitted = |id: &str, name: &str, key: &str, sequence: u64, floor: u64| FleetClaim {
+            id: id.into(),
+            kind: MEMBER_ADMITTED.into(),
+            subject: format!("host/{name}"),
+            fields: serde_json::from_value(serde_json::json!({
+                "fleet_id": "fleet", "member_key": key, "via": if name == "a" { "anchor" } else { "invite" },
+                "mode": "listening", "writer_floor": floor
+            }))
+            .unwrap(),
+            writer: "a".into(),
+            sequence,
+            signers: BTreeSet::from(["ka".to_owned()]),
+        };
+        let membership = Membership::fold(
+            Some("ka"),
+            &[
+                admitted("1-a", "a", "ka", 1, 0),
+                admitted("2-b", "b", "kb-old", 2, 0),
+                admitted("3-b", "b", "kb-new", 3, 30),
+            ],
+        );
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE replica_envelope_signatures(
+                    writer TEXT, sequence INTEGER, envelope_hash TEXT, member_key TEXT)",
+            )
+            .unwrap();
+        let envelope = |sequence: u64, signer: &str| {
+            let envelope = ReplicaEnvelope {
+                writer: "b".into(),
+                sequence,
+                previous_hash: None,
+                hash: format!("{sequence:064x}"),
+                accepted_at_unix_ms: 0,
+                payload: Vec::new().into(),
+                member_key: None,
+                signature: None,
+            };
+            connection
+                .execute(
+                    "INSERT INTO replica_envelope_signatures VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![envelope.writer, sequence, envelope.hash, signer],
+                )
+                .unwrap();
+            envelope
+        };
+        let hold = |envelope: &ReplicaEnvelope| {
+            crate::store::shard_admission_hold(&connection, &membership, envelope).unwrap()
+        };
+        assert_eq!(hold(&envelope(1, "kb-old")), Some("unsigned"));
+        assert_eq!(hold(&envelope(2, "kb-new")), None);
+    }
+
     /// A shard holds no fleet claims. It signs its envelopes for its authority's fleet in a
     /// domain that names the shard, and admits a keyed member's envelopes only with a signature
     /// in that domain by a key the authority knows: one made for the default store does not count.
