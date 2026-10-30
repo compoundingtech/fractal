@@ -617,6 +617,7 @@ fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
                     .unwrap_or_else(|| clean_message_text(&item.title)),
                 waiting: path.map(|path| format!("step {path}")),
                 age: age(&item.requested_at, now),
+                requested_at: chrono::DateTime::parse_from_rfc3339(&item.requested_at).ok(),
                 deadline: item.deadline_at.as_deref().map(|deadline| {
                     ask_deadline(
                         deadline,
