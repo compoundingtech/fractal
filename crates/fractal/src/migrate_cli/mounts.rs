@@ -77,7 +77,12 @@ fn parse_mountinfo(text: &[u8]) -> Result<Vec<Mount>> {
     }).collect()
 }
 
+#[cfg(test)]
 fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
+    check_mounts_for(old, new, mounts, None, false)
+}
+
+fn check_mounts_for(old: &Path, new: &Path, mounts: &[Mount], expected_store: Option<&Path>, rollback: bool) -> Result<()> {
     for mount in mounts {
         let location = if mount.path == old {
             Location::SourceRoot
@@ -90,6 +95,10 @@ fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
         } else {
             continue;
         };
+        if rollback {
+            bail!("{} is a mount point; unmount it before `fractal migrate host --rollback`; rollback never moves a mounted product root or submount", mount.path.display());
+        }
+        if expected_store == Some(mount.path.as_path()) && mount.path != old && mount.path != new { continue; }
         return Err(MountRefusal {
             path: mount.path.clone(), old: old.to_owned(), new: new.to_owned(), location,
             details: Some((mount.source.clone(), mount.fstype.clone())),
@@ -99,7 +108,7 @@ fn check_mounts(old: &Path, new: &Path, mounts: &[Mount]) -> Result<()> {
 }
 
 // Resolve symlinked XDG ancestors before comparing with kernel mount paths.
-fn resolved(path: &Path) -> Result<PathBuf> {
+pub(super) fn resolved(path: &Path) -> Result<PathBuf> {
     match fs::canonicalize(path) {
         Ok(path) => normalize_resolved(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -175,6 +184,19 @@ fn macos_mounts() -> Result<Vec<Mount>> {
 }
 
 pub(super) fn preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
+    preflight_for(pairs, None, false)
+}
+
+pub(super) fn rollback_preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
+    preflight_for(pairs, None, true)
+}
+
+pub(super) fn committed_preflight(pairs: &[(PathBuf, PathBuf)], store: Option<&Path>) -> Result<()> {
+    preflight_for(pairs, store, false)
+}
+
+fn preflight_for(pairs: &[(PathBuf, PathBuf)], store: Option<&Path>, rollback: bool) -> Result<()> {
+    let store = store.map(resolved).transpose()?;
     #[cfg(target_os = "linux")]
     let mounts = parse_mountinfo(&fs::read("/proc/self/mountinfo").context("read mountinfo before host cutover")?)?;
     #[cfg(target_os = "macos")]
@@ -182,7 +204,7 @@ pub(super) fn preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
     for (old, new) in pairs {
         let old = resolved(old)?;
         let new = resolved(new)?;
-        check_mounts(&old, &new, &mounts)?;
+        check_mounts_for(&old, &new, &mounts, store.as_deref(), rollback)?;
         // Device identity remains an independent root-mount backstop.
         for (path, location) in [(&old, Location::SourceRoot), (&new, Location::DestinationRoot)] {
             let metadata = match fs::symlink_metadata(path) {
@@ -192,6 +214,9 @@ pub(super) fn preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
             };
             let parent = path.parent().context("product root has no parent")?;
             if metadata.is_dir() && metadata.dev() != fs::metadata(parent)?.dev() {
+                if rollback {
+                    bail!("{} is a mount point; unmount it before `fractal migrate host --rollback`; rollback never moves a mounted product root or submount", path.display());
+                }
                 return Err(MountRefusal { path: path.clone(), old: old.clone(), new: new.clone(), location, details: None }.into());
             }
         }
@@ -202,6 +227,36 @@ pub(super) fn preflight(pairs: &[(PathBuf, PathBuf)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_store_mount_is_the_only_expected_submount() -> Result<()> {
+        let old = Path::new("/state/st3");
+        let new = Path::new("/state/fractal");
+        let store = new.join("store");
+        let mounts = [Mount { path: store.clone(), source: "pool/store".into(), fstype: "zfs".into() }];
+        assert!(check_mounts_for(old, new, &mounts, None, false).is_err());
+        check_mounts_for(old, new, &mounts, Some(&store), false)?;
+        for path in [new.to_path_buf(), new.join("other"), store.join("nested"), old.join("store")] {
+            let mounts = [Mount { path, source: "pool/other".into(), fstype: "zfs".into() }];
+            assert!(check_mounts_for(old, new, &mounts, Some(&store), false).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_refuses_all_product_mounts_with_unmount_guidance() -> Result<()> {
+        let old = Path::new("/state/st3");
+        let new = Path::new("/state/fractal");
+        let store = new.join("store");
+        for path in [old.to_path_buf(), new.to_path_buf(), old.join("store"), store.clone()] {
+            let mounts = [Mount { path: path.clone(), source: "pool/store".into(), fstype: "zfs".into() }];
+            let error = check_mounts_for(old, new, &mounts, Some(&store), true).unwrap_err();
+            assert_eq!(error.to_string(), format!("{} is a mount point; unmount it before `fractal migrate host --rollback`; rollback never moves a mounted product root or submount", path.display()));
+        }
+        let mounts = [Mount { path: "/external/store".into(), source: "pool/store".into(), fstype: "zfs".into() }];
+        check_mounts_for(old, new, &mounts, None, true)?;
+        Ok(())
+    }
 
     #[test]
     fn parses_mountinfo_escapes_and_optional_fields() -> Result<()> {
