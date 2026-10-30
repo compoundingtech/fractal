@@ -4319,7 +4319,7 @@ impl Ui {
             return;
         }
         self.sync_terminal_slot();
-        if !self.terminal_focused() && self.glasses.palette.is_none() && self.navigation_key(key) {
+        if !self.terminal_focused() && self.navigation_key(key) {
             return;
         }
         if !self.terminal_focused()
