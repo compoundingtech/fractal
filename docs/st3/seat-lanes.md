@@ -140,7 +140,8 @@ nonnegative). `oomPolicy` is `continue`, `stop`, or `kill`; setting it requires 
 supporting `OOMPolicy` on scopes (254+).
 `slice` is a non-root `.slice` name containing letters, digits, underscores and single internal
 hyphens. The launcher passes `--slice=`, `MemoryMax=`, `MemorySwapMax=` and `OOMPolicy=` directly
-to `systemd-run`. Older daemons reject this table; remove it before downgrading.
+to `systemd-run`. Older daemons reject this table. Upgrade: install/start the new daemon first,
+then add `[unlaned_seat]` and restart. Downgrade: remove the table first, then install the old daemon.
 
 
 ## macOS
