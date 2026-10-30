@@ -12851,12 +12851,14 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
                 }
                 assert_eq!(subjects.len(), 4);
                 assert_eq!(subjects.iter().map(|subject| subject.as_str().unwrap()).collect::<BTreeSet<_>>().len(), 4);
-                for lifecycle in ["read", "closed"] {
-                    for subject in &subjects {
+                let combination = usize::from(mailbox == NEW) * 2 + usize::from(actor == NEW);
+                for lifecycle in ["staged", "delivered", "read", "closed"] {
+                    for subject in subjects.iter().skip(combination).take(1) {
                         let (status, claim) = json_request(app.clone(), &format!(
                             "/v1/messages/{}/claims", urlencoding::encode(subject.as_str().unwrap()),
                         ), json!({
                             "actor":actor,"lifecycle":lifecycle,
+                            "transport":"codex-app-server","runtime_id":"runtime/rename-mail",
                             "idempotency_key":format!("mail-{replica}-{mailbox}-{actor}-{subject}-{lifecycle}"),
                         })).await;
                         assert_eq!(status, StatusCode::OK, "{claim}");
@@ -12867,7 +12869,7 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
                     "/v1/messages/page?to={mailbox}&acting_as={actor}",
                 )).await;
                 assert_eq!(status, StatusCode::OK, "{closed}");
-                assert!(closed["items"].as_array().unwrap().is_empty());
+                assert_eq!(closed["items"].as_array().unwrap().len(), 3 - combination);
             }
             let (status, denied) = get_request(app.clone(), &format!(
                 "/v1/messages/page?to={mailbox}&acting_as=agent/example-unrelated",
