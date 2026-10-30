@@ -4,20 +4,24 @@
 use std::fmt::Write as _;
 
 macro_rules! model {
-    ($name:ident { $($field:ident: $rust:ty => $typescript:literal),* $(,)? }) => {
+    ($name:ident { $($field:ident: $rust:ty => $typescript:literal),* $(,)? } $(=> $constraint:literal)?) => {
         // Production consumes the field metadata; parser-backed tests consume the values.
         #[cfg_attr(not(test), allow(dead_code))]
         #[derive(Clone, Debug)]
         pub struct $name { $(pub $field: $rust),* }
         impl $name {
             fn typescript() -> String {
-                let mut result = concat!("export interface ", stringify!($name), " {\n").to_owned();
-                $(writeln!(result, "  {}", $typescript).unwrap();)*
-                result.push_str("}\n\n");
+                let mut result = model!(@header $name $(, $constraint)?).to_owned();
+                $(if !$typescript.is_empty() { writeln!(result, "  {}", $typescript).unwrap(); })*
+                result.push('}');
+                $(result.push_str(concat!(" & ", $constraint));)?
+                result.push_str("\n\n");
                 result
             }
         }
     };
+    (@header $name:ident) => { concat!("export interface ", stringify!($name), " {\n") };
+    (@header $name:ident, $constraint:literal) => { concat!("export type ", stringify!($name), " = {\n") };
 }
 
 model!(Agent {
@@ -48,10 +52,11 @@ model!(Schedule {
     host: String => "readonly host: string",
     every: String => "readonly every: string",
     anchor: String => "readonly anchor: string",
-    catch_up: CatchUp => "readonly catchUp: CatchUp",
-    max_catch_up: Option<u32> => "readonly maxCatchUp?: number",
+    // These fields are emitted together in the discriminated union below.
+    catch_up: CatchUp => "",
+    max_catch_up: Option<u32> => "",
     work: ScheduledWork => "readonly work: ScheduledWork",
-});
+} => "({ readonly catchUp: 'all'; readonly maxCatchUp: number } | { readonly catchUp: 'latest' | 'skip'; readonly maxCatchUp?: never })");
 model!(ScheduledWork {
     mission: MissionReference => "readonly mission: Mission | string",
     revision: String => "readonly revision: string",

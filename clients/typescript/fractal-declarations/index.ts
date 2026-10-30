@@ -31,15 +31,13 @@ export interface Mission {
   readonly steps: readonly Step[]
 }
 
-export interface Schedule {
+export type Schedule = {
   readonly id: string
   readonly host: string
   readonly every: string
   readonly anchor: string
-  readonly catchUp: CatchUp
-  readonly maxCatchUp?: number
   readonly work: ScheduledWork
-}
+} & ({ readonly catchUp: 'all'; readonly maxCatchUp: number } | { readonly catchUp: 'latest' | 'skip'; readonly maxCatchUp?: never })
 
 export interface ScheduledWork {
   readonly mission: Mission | string
