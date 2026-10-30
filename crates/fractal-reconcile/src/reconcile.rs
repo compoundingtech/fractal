@@ -118,11 +118,11 @@ const WORK_WAKE_MAX_ATTEMPTS: u32 = 3;
 const WORK_WAKE_EXHAUST_GRACE_MS: u128 = 5 * 60_000;
 const CODEX_CRASH_LOOP_ATTEMPTS: usize = 3;
 const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
-// Claude shows its workspace trust prompt within a few seconds of starting. Rechecking the screen
-// on this grid until readiness finds it well before the readiness deadline.
 /// The incremental key for the fleet's member hosts, observed each pass. A stop owned by another
 /// host reads it, so a host joining or leaving marks every such stop at once.
 const FLEET_MEMBER_HOSTS: &str = "fleet-member-hosts";
+// Claude shows its workspace trust prompt within a few seconds of starting. Rechecking the screen
+// on this grid until readiness finds it well before the readiness deadline.
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
@@ -1249,10 +1249,12 @@ pub struct Reconciler<R = NativeRuntime> {
     /// This pass's tasks of each stopped root, by root subject. A root is not settled while
     /// one of them still runs on this host.
     stopped_root_tasks: Mutex<BTreeMap<String, Vec<RootTask>>>,
-    /// Stop items whose last evaluation found another host owns the stop. A full pass leaves
-    /// them out: they are evaluated again only when something they read changed, which
-    /// includes a change in the fleet's member hosts ([`FLEET_MEMBER_HOSTS`]).
-    foreign_stops: Mutex<BTreeSet<String>>,
+    /// Stop and away items whose last evaluation found nothing for this host to do: another
+    /// host owns the stop, or no declaration ever placed the seat here. A full pass leaves them
+    /// out: they are evaluated again only when something they read changed, such as a claim on
+    /// their subject or, for a stop, the fleet's member hosts ([`FLEET_MEMBER_HOSTS`]). Kept in
+    /// memory only, so a restarted daemon evaluates every item again.
+    nothing_here: Mutex<BTreeSet<String>>,
     /// When each batched subscription may next send what it collected.
     batch_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// When a failed `checkout` may run Git again, and why it failed, by agent subject.
@@ -1463,7 +1465,7 @@ impl Reconciler<NativeRuntime> {
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             stopped_root_tasks: Mutex::new(BTreeMap::new()),
-            foreign_stops: Mutex::new(BTreeSet::new()),
+            nothing_here: Mutex::new(BTreeSet::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -1642,7 +1644,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
             stopped_root_tasks: Mutex::new(BTreeMap::new()),
-            foreign_stops: Mutex::new(BTreeSet::new()),
+            nothing_here: Mutex::new(BTreeSet::new()),
             batch_deadlines: Arc::new(Mutex::new(HashMap::new())),
             checkout_retries: Arc::new(Mutex::new(HashMap::new())),
             checkout_conflicts: Mutex::new(HashMap::new()),
@@ -3232,7 +3234,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             let item = format!("stop:{}", subject.subject);
             stops.insert(item.clone());
-            if self.skip_stop(&item, skip_stops) {
+            if self.skip_settled(&item, skip_stops) {
                 continue;
             }
             if !self.owned_desired_ready(subject) {
@@ -3261,7 +3263,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             {
                 let item = format!("away:{}", subject.subject);
                 stops.insert(item.clone());
-                if self.needs_item(&item, !skip_stops) || !skip_stops {
+                // A full pass evaluates it unless its last evaluation found no declaration that
+                // ever placed the seat here: nothing of this host's to retire.
+                if self.needs_item(&item, !skip_stops) || !skip_stops && !self.nothing_here(&item) {
                     // An authority change skips this prepared candidate silently, as the old
                     // pass guard did; it is not a runtime fault or a successful evaluation.
                     if !self.owned_desired_ready(subject) {
@@ -3270,12 +3274,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     }
                     let ((result, due), reads) = smallclaims::touched::record(|| {
                         smallclaims::touched::record_due(|| {
+                            // Whether a declaration ever placed the seat here follows from the
+                            // subject's own claims: a new one marks the item.
+                            smallclaims::touched::note_read(|| subject.subject.clone());
                             caught(|| self.reconcile_placement_away(subject, ptys.as_ref()))
                         })
                     });
                     if result.is_ok() {
                         self.incremental.evaluated(&item, reads, due);
                     }
+                    self.note_nothing_here(&item, matches!(result, Ok(true)));
+                    let result = result.map(|_| ());
                     if let Err(error) =
                         self.record_member_reconcile_result(&subject.subject, result)
                     {
@@ -3287,7 +3296,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             if subject.kind == "stop" {
                 let item = format!("stop:{}", subject.subject);
                 stops.insert(item.clone());
-                if self.skip_stop(&item, skip_stops) {
+                if self.skip_settled(&item, skip_stops) {
                     continue;
                 }
                 if !self.owned_desired_ready(subject) {
@@ -3785,7 +3794,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         drop(members_span);
         self.incremental.retain("stop:", &stops);
-        self.foreign_stops
+        self.nothing_here
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|item| stops.contains(item));
@@ -6256,21 +6265,37 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(fresh)
     }
 
+    /// Whether `item`'s last evaluation found nothing for this host to do, on a reconciler that
+    /// skips settled items.
+    fn nothing_here(&self, item: &str) -> bool {
+        self.skip_unneeded
+            && self
+                .nothing_here
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(item)
+    }
+
+    /// Record whether `item`'s evaluation found nothing for this host to do.
+    fn note_nothing_here(&self, item: &str, nothing: bool) {
+        let mut items = self.nothing_here.lock().unwrap_or_else(PoisonError::into_inner);
+        if nothing {
+            items.insert(item.to_owned());
+        } else {
+            items.remove(item);
+        }
+    }
+
+    /// Whether this pass leaves stop `item` alone: when nothing it read changed and it is not
+    /// due, on a pass that skips settled stops, and on a full pass too when its last evaluation
+    /// found nothing for this host to do.
+    fn skip_settled(&self, item: &str, skip_stops: bool) -> bool {
+        (skip_stops || self.nothing_here(item)) && !self.incremental.needs(item, now_ms())
+    }
+
     /// Evaluate one stop this host owns, or skip it when `skip` and nothing it read changed and
     /// its time has not come. As with mission runs, an evaluation that writes a claim although its
     /// stop was not marked is counted as an incremental correction.
-    /// Whether this pass leaves stop `item` alone: when nothing it read changed and it is not
-    /// due, on a pass that skips settled stops, and on a full pass too when its last evaluation
-    /// found another host owns it.
-    fn skip_stop(&self, item: &str, skip_stops: bool) -> bool {
-        let foreign = self.skip_unneeded
-            && self
-                .foreign_stops
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(item);
-        (skip_stops || foreign) && !self.incremental.needs(item, now_ms())
-    }
 
     fn reconcile_stop_item(
         &self,
@@ -6332,14 +6357,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
         }
-        {
-            let mut foreign = self.foreign_stops.lock().unwrap_or_else(PoisonError::into_inner);
-            if matches!(outcome, Ok(None)) {
-                foreign.insert(item.to_owned());
-            } else {
-                foreign.remove(item);
-            }
-        }
+        self.note_nothing_here(item, matches!(outcome, Ok(None)));
         match outcome {
             Err(error) => diagnostic_errors.push(format!(
                 "{}: determine member owner: {error:#}",
@@ -20034,7 +20052,7 @@ pub mod tests {
     mod gate_on_demand;
     mod github_watch_selection;
     mod helper_launcher;
-    mod foreign_stops;
+    mod nothing_here;
     mod bounded_loop_reads;
     mod incremental_deadlines;
     #[cfg(test)]

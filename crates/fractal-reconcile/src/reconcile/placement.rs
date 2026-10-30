@@ -2,15 +2,17 @@ use super::*;
 
 impl<R: RuntimeControl> Reconciler<R> {
     /// The local process belongs to this host even after its selected declaration moves away.
+    /// True when no declaration ever placed the seat on this host, so there is nothing here to
+    /// retire until a new declaration does.
     pub fn reconcile_placement_away(
         &self,
         subject: &DesiredSubject,
         ptys: Option<&HashMap<String, RuntimeObservation>>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !subject.subject.starts_with("agent/")
             || subject.member.as_ref().is_some_and(|m| m.host == self.host)
         {
-            return Ok(());
+            return Ok(false);
         }
         if subject.kind == "stop"
             && self
@@ -20,10 +22,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .is_none_or(|m| m.host == self.host)
         {
             // The ordinary stop path keeps retention, deadlines and incarnation fencing.
-            return Ok(());
+            return Ok(false);
         }
         let Some(token) = self.store.selected_desired_token(&subject.subject)? else {
-            return Ok(());
+            return Ok(false);
         };
         let mut members = BTreeMap::new();
         // Use this host's declarations, never the selected actual (which may already be
@@ -45,7 +47,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         for member in members.values() {
             let observation = if member.terminal {
                 smallclaims::touched::note_read(|| format!("pty:{}", member.runtime_id));
-                let Some(ptys) = ptys else { return Ok(()) };
+                let Some(ptys) = ptys else { return Ok(false) };
                 ptys.get(&member.runtime_id).cloned()
             } else {
                 smallclaims::touched::note_read(|| format!("exec:{}", member.runtime_id));
@@ -54,7 +56,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             observations.insert(member.runtime_id.clone(), observation);
         }
         if members.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         // A later destination observation must not cause the source to re-emit its stop.
         let all_stopped = observations.values().all(|o| {
@@ -69,7 +71,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .and_then(|f| f.sources.get(&self.host).cloned())
                 .unwrap_or_else(|| BTreeSet::from([token.clone()]));
             if crate::placement::acknowledges(&self.store, claim, &tokens)? {
-                return Ok(());
+                return Ok(false);
             }
         }
         let mut stopped = true;
@@ -140,7 +142,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             self.record_once_with_evidence(&subject.subject, "runtime.observed", fields, evidence)?;
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn placement_start_evidence(&self, subject: &str) -> Result<Option<Vec<String>>> {
