@@ -89,7 +89,7 @@ impl TabStatuses {
             // submission window). Only live attention establishes that the prompt is open.
             let question_seat = match (&world.link, &item.kind) {
                 (Link::Live, AttentionKind::Prompt { seat_id, question, call, .. })
-                    if *question || call.as_ref().and_then(Option::as_deref).is_some_and(|call| {
+                    if *question || call.as_deref().is_some_and(|call| {
                         question_calls.get(seat_id.as_str()).is_some_and(|calls| calls.contains(call))
                     }) => Some(seat_id.as_str()),
                 _ => None,
@@ -4539,7 +4539,7 @@ mod tests {
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).expect("drag files the tab's subject");
         assert!(matches!(&write.operations[..], [fractal_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &first));
         assert_eq!(tabs(&ui), tabs_before, "filing does not close a space tab");
-        assert!(ui.resource_sidebar.arrangement().unwrap().body.placements.is_empty(), "only the stream updates the arrangement projection");
+        assert!({ use super::resource_sidebar::ArrangementV1 as _; ui.resource_sidebar.arrangement().unwrap().v1().placements.is_empty() }, "only the stream updates the arrangement projection");
         ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
         // A resource row can be dragged back into the sidebar as well as out to a tab.
         let rows = ui.resource_sidebar.rows();
@@ -4691,7 +4691,7 @@ mod tests {
             seat: "Atlas".into(), seat_id: "agent/a".into(), text: "Choose".into(),
             question: true,
             answers: vec!["answer".into()], episode: "episode/question".into(),
-            call: Some(Some("call/question".into())),
+            call: Some("call/question".into()),
         };
         let mut second = alert.clone();
         second.id = "attention/b".into();
@@ -4727,7 +4727,7 @@ mod tests {
                     if let AttentionKind::Prompt { question, answers, call, .. } = &mut item.kind {
                         *question = native_kind;
                         answers.clear();
-                        if native_kind { *call = Some(None); }
+                        if native_kind { *call = None; }
                     }
                 }
             }
@@ -5167,19 +5167,19 @@ mod tests {
         // Expanded on a click: the cards fill the room the conversation gives up.
         ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
         let shown = screen(&ui);
-        assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Inbox"), "{shown}");
+        assert!(shown.contains("1 alert") && shown.contains("1. No") && !shown.contains("open in Inbox"), "{shown}");
         let lines: Vec<&str> = shown.lines().collect();
         let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
-        assert!(line("open in Inbox") < line("Message Atlas Builder"), "{shown}");
+        assert!(line("1. No") < line("Message Atlas Builder"), "{shown}");
         assert!(line("Message Atlas Builder") + 3 >= lines.len(), "{shown}");
         // Another agent's conversation shows none of it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Tab);
         let other = screen(&ui);
-        assert!(!other.contains("open in Inbox"), "{other}");
+        assert!(!other.contains("1. No"), "{other}");
         // It clears itself when st stops listing it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
         ui.world.attention = Load::Ready(vec![]);
-        assert!(!screen(&ui).contains("open in Inbox"));
+        assert!(!screen(&ui).contains("1. No"));
     }
 
     #[test]
@@ -5265,7 +5265,7 @@ mod tests {
         println!("{shown}");
         assert_eq!(shown.matches("★ Ship to all").count(), 2, "{shown}");
         assert_eq!(shown.matches("Staging only").count(), 2, "{shown}");
-        assert_eq!(shown.matches("open in Inbox").count(), 2, "{shown}");
+        assert!(!shown.contains("open in Inbox"), "{shown}");
         assert!(shown.contains("Message Atlas Builder"), "{shown}");
         let reasons: Vec<_> = shown.lines().filter(|line| line.contains("★ recommended:")).collect();
         assert_eq!(reasons.len(), 2, "{shown}");
@@ -6321,6 +6321,47 @@ mod tests {
         if std::env::var_os("SLO_PANE_SCREEN").is_some() {
             println!("{detail}");
         }
+    }
+
+    #[test]
+    fn an_unread_objectives_list_never_reads_as_no_spend_all_clear() {
+        let mut ui = glass();
+        ui.world.usage = Load::Ready(Vec::new());
+        ui.world.usage_limits.clear();
+        ui.world.agent_messages = None;
+        ui.click(Hit::Usage);
+        // Nothing is spent and the objectives are not yet known: say so, not "no spend".
+        ui.world.slo = Load::Loading;
+        let shown = screen(&ui);
+        assert!(shown.contains("Loading objectives"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+        // An old daemon's answer reaches the person instead of a green all clear.
+        ui.world.slo = Load::Failed(
+            "This st does not serve objectives and budgets yet: its daemon needs an update.".into(),
+        );
+        let shown = screen(&ui);
+        assert!(shown.contains("daemon needs"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+        // Only a read that came back empty is an all clear.
+        ui.world.slo = Load::Ready(Vec::new());
+        let shown = screen(&ui);
+        assert!(shown.contains("No spend recorded in this"), "{shown}");
+        // An empty reading that could not be read again is the last reading, not an all clear.
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+    }
+
+    #[test]
+    fn a_failed_refresh_marks_the_objectives_shown_as_the_last_reading() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        assert!(!screen(&ui).contains("Last reading"));
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading") && shown.contains("read again (timed out)"), "{shown}");
+        assert!(shown.contains("anthropic-weekl"), "the rows stay:\n{shown}");
     }
 
     #[test]
@@ -7852,7 +7893,7 @@ mod tests {
     }
 
     #[test]
-    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+    fn opened_alerts_read_as_a_pane_with_a_title_bar_and_each_alert_as_its_card() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();
         ui.world.attention = Load::Ready(vec![
@@ -7863,15 +7904,19 @@ mod tests {
         ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
         let shown = screen(&ui);
         let lines: Vec<&str> = shown.lines().collect();
-        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
-        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
+        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ fold")).expect(&shown);
+        let card = lines.iter().position(|line| line.contains("┏━ PROMPT")).expect(&shown);
         let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
-        assert!(title < rule && rule < input, "{shown}");
-        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
-        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
-        assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
-        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
+        assert!(title < card && card < input, "{shown}");
+        // The card is the one Inbox shows: the form's refusal, numbered, and its keys in view.
+        assert!(shown.contains("1. No"), "the answers stay in view: {shown}");
+        assert!(shown.contains("Ctrl+N to answer with the keys"), "{shown}");
+        // Neither names its call, so neither is allowed from here.
+        assert!(shown.contains("Fractal does not say which call this asks about"), "{shown}");
+        assert!(!shown.contains(". Yes"), "{shown}");
+        // A second card shows when it fits, else the band says how many more wait.
+        assert!(shown.matches("┏━ PROMPT").count() == 2 || shown.contains("+1 more in Inbox"), "{shown}");
+        assert!(!shown.contains("open in Inbox"), "{shown}");
     }
 
     #[test]

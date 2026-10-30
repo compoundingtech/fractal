@@ -29,10 +29,9 @@ nothing is signed**. The signature covers the whole artifact, the review's own o
 was said.
 
 **Status of the tools.** The risk script (`scripts/review-risk`), the schema and its validator
-(`.st/review-verdict.schema.json`, `scripts/review-validate`) are merged. The runner (`scripts/review`) follows in the next pull
-request; until it is merged the reviewer does its steps by hand: it writes the verdict against the table below, runs
-`scripts/review-risk` for the deterministic score and `scripts/review-validate` on the verdict. The daily miss rate starts when the
-independent re-review exists.
+(`.st/review-verdict.schema.json`, `scripts/review-validate`) and the runner (`scripts/review`) are all merged. The runner is
+shadow-first: it runs beside the Intake review and the two verdicts are compared; it replaces nothing until that comparison has been
+reported and accepted. The daily miss rate starts when the independent re-review exists.
 
 | Field | Meaning |
 | --- | --- |
@@ -47,7 +46,7 @@ independent re-review exists.
 | `flags` | `public_contract`, `stored_format`, `trust_or_permission`, `global_view`, each `yes` or `no` with one sentence |
 | `read` | what was read in full, what was read as structure only, what was served from the review record |
 | `patch_ids` | the per-file patch-ids of the head's diff, which the next review's delta read starts from |
-| `answers` | for a round after the first: which earlier finding each change answers |
+| `answers` | for a round after the first: which earlier finding each change answers (empty for a delta read after a `GO`, which left none) |
 | `reviewer` | the model, its family and the harness that ran it |
 | `standard` | the digest of this document, so a verdict names the rule it was made under |
 | `text` | the full review text, as the reviewer wrote it |

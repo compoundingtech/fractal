@@ -18,6 +18,7 @@ export function plainMessage(code: Code | string | undefined, message: string): 
     case 'rate-limited': return 'Fractal asked to slow down for a moment';
     case 'runtime-authority-indeterminate': return 'Fractal cannot tell yet which host runs this';
     case 'runtime-list-not-ready': return 'Fractal is still preparing the runtime list; try again shortly';
+    case 'agent-roster-not-ready': return 'Fractal is still preparing the agents roster; try again shortly';
     case 'runtime-list-ended': return 'the runtime list stopped updating; restart fractal';
     case 'idempotency-conflict': return 'this was already sent once in another form, so it was not sent again';
     case 'unsupported-capability': return `this Fractal does not do that yet (${message})`;

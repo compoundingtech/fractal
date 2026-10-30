@@ -6,7 +6,7 @@ name: Fractal tag release
 on:
   push:
     branches: [main]
-    tags: ["**", "!edge", "!evidence/**"]
+    tags: ["**", "!edge", "!embed-*", "!evidence/**"]
   workflow_dispatch: null
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
@@ -24,6 +24,8 @@ on:
       - scripts/release-rust-version
       - scripts/fixtures/install-release-v0.3.17
       - scripts/release-fractal*
+      - scripts/release-fractal-embed.mjs
+      - apps/fractal-web/**
       - scripts/release_notes*
       - scripts/compat-baseline-release*
       - .github/*-compat-baseline.json
@@ -385,6 +387,86 @@ jobs:
           CACHE_REASON: Runs isolated installer fixtures without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  embed:
+    name: release-web-embed
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v4
+        with:
+          path: "${{ runner.temp }}/pnpm-store"
+          key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}"
+        id: cache-1
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Materialize megarepo members
+        env:
+          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+        run: |
+          nix run "github:overengineeringstudio/effect-utils/$(jq -r '.nodes["effect-utils"].locked.rev' flake.lock)#megarepo" -- apply --worktree-mode commit --git-protocol https
+          printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+      - name: Build the offline embed and capture four posters
+        env:
+          pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
+        run: "nix develop .#web --command node scripts/release-fractal-embed.mjs dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-web-embed
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_ENTRIES: '[{"name":"cache-1","outcome":"${{ steps.cache-1.outcome }}","hit":"${{ steps.cache-1.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
+  publishEmbed:
+    name: release-publish-web-embed
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: embed
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-web-embed
+          path: dist
+      - name: Publish once under a source-addressed release, never the rolling edge tag
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check ./*.sha256
+          # No --clobber or edit of an existing release: even reruns cannot replace a pin.
+          gh release create "embed-$SOURCE_SHA" --target "$SOURCE_SHA" --draft --prerelease --latest=false \
+            --title "Fractal web embed $SOURCE_SHA" --notes "Offline embed, four posters and provenance for source $SOURCE_SHA. Verify the archive against its SHA-256 sidecar." \
+            ./*.tar.gz ./*.sha256
+          gh release edit "embed-$SOURCE_SHA" --draft=false
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Publishes the verified immutable web archive; builds nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   build:
     needs: [pick-runner]
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
@@ -516,7 +598,7 @@ jobs:
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
   assemble:
     name: release-assemble
-    needs: [build, installer]
+    needs: [build, embed, installer]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -949,6 +949,14 @@ fn persistent_store_uses_bounded_sqlite_page_caches() {
 #[test]
 fn replication_projection_retries_missing_and_stale_health_only() {
     let store = Store::open_memory("node").unwrap();
+    // A store that holds no claims has projected them all.
+    assert!(!store.replication_projection_needs_recovery().unwrap());
+    store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(/* sqlite-large-value: allow-for-now lv-h789522dbacf2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
+        .unwrap();
     assert!(store.replication_projection_needs_recovery().unwrap());
     assert!(store.project_replication_backlog().unwrap());
     assert!(!store.replication_projection_needs_recovery().unwrap());
@@ -1961,7 +1969,7 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
             match reason {
                 "missing-health" => {
                     transaction
-                        .execute(/* sqlite-large-value: allow-for-now lv-h789522dbacf2 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
+                        .execute(/* sqlite-large-value: allow-for-now lv-hd3f314493cfd owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM projection_health WHERE aggregate='graph'", [])
                         .unwrap();
                 }
                 "unhealthy-projection" => {
@@ -2054,8 +2062,8 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         }
         assert_eq!(
             FULL_REPLAYS.with(std::cell::Cell::get),
-            2,
-            "one setup replay and one fallback: {reason}"
+            1,
+            "the fallback alone; a store with no claims sets up without one: {reason}"
         );
         let digest = store
             .replication_status(true, None, &[])
@@ -5424,6 +5432,68 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
     assert_eq!(source_status.graph_digest, target_status.graph_digest);
 }
 
+/// A node that projected at startup accepts its own claim, which carries an operation, and then
+/// receives a peer's repair replacing that claim before projecting it. Its incremental pass
+/// leaves the operation as a full replay of the same claims does: decided by the replacement,
+/// not by the claim the repair replaced.
+#[test]
+fn incremental_projection_matches_a_replay_after_a_repair_of_a_claim_it_holds() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    // Each node projects as it starts, so later claims project incrementally.
+    source.project_replication_backlog().unwrap();
+    target.project_replication_backlog().unwrap();
+    let publish = |name: &str, command: &str| {
+        let intent = simple(command);
+        let preview = source
+            .mission(&intent, IntentInput { kdl: name.into(), source_name: None })
+            .unwrap();
+        source.apply(&intent, &preview.subject_tokens, name).unwrap();
+        source.selected_desired_token("exec/work").unwrap().unwrap()
+    };
+    let replacement = publish("initial", "true");
+    let original = publish("changed", "printf changed");
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    let record_ref: String = target
+        .readers
+        .get()
+        .query_row("SELECT record_ref FROM replica_records WHERE claim_id=?1", [&original], |row| row.get(0))
+        .unwrap();
+    // The target's build rejects the original, so an operator repairs it.
+    target
+        .connection
+        .lock()
+        .unwrap()
+        .execute(/* sqlite-large-value: allow-for-now lv-h8d3d16dd0a2e owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record_ref])
+        .unwrap();
+    target
+        .repair_replica_record(&record_ref, &replacement, "a test repair", "person/operator", "repair-held-claim")
+        .unwrap();
+    let operation_of = |store: &Store| -> Option<String> {
+        store
+            .readers
+            .get()
+            .query_row(
+                "SELECT id FROM operations WHERE canonical_claim_id=?1",
+                [&original],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    assert!(operation_of(&source).is_some(), "the original decides its operation before the repair");
+
+    FULL_REPLAYS.with(|replays| replays.set(0));
+    receive_and_project(&source, "target", &exchange_from(&target, &source.replication_inventory().unwrap()));
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "the repair projected incrementally");
+    assert_eq!(source.selected_desired_token("exec/work").unwrap().unwrap(), replacement);
+    assert_eq!(operation_of(&source), None, "no operation is decided by a repaired claim");
+    let incremental = graph_digest_of(&source);
+    source.replay_replication_graph().unwrap();
+    assert_eq!(incremental, graph_digest_of(&source), "the incremental projection matches a replay");
+    assert_eq!(incremental, graph_digest_of(&target));
+}
+
 /// Every delivery of four envelopes: either order, each sent once to three times, split into two
 /// exchanges at every point, and then the complete exchange. Thirty cases, all of them.
 #[test]
@@ -7721,6 +7791,34 @@ fn agent_usage_legacy_response_cost_requires_every_delta_priced_in_one_currency(
 }
 
 #[test]
+fn a_local_step_state_write_takes_its_claims_time_as_replay_does() {
+    let store = Store::open_memory("host-one").unwrap();
+    let step = "step-run/example/build";
+    let mut connection = store.connection.lock().unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    // The writer stamped the row from its clock before it appended the claim.
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h219b471e3472 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
+                goals, activated_at_unix_ms, created_at_unix_ms, updated_at_unix_ms)
+             VALUES (?1, 'example', 'example', 'build', 'hash', 'blocked', 1, '[]', '1', '1', '1')",
+        [step],
+    ).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let times = |transaction: &Transaction<'_>| -> (String, String) {
+        transaction.query_row(
+            "SELECT updated_at_unix_ms, activated_at_unix_ms FROM step_runs WHERE subject=?1",
+            [step],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap()
+    };
+    let state = |status: &str| json!({"fields": {"status": status, "reason": null, "readiness_epoch": 1}});
+    normalize_local_projection_timestamps_tx(&transaction, step, "step-run.state", &state("blocked"), 5).unwrap();
+    assert_eq!(times(&transaction), ("5".into(), "1".into()), "only a ready step is activated");
+    normalize_local_projection_timestamps_tx(&transaction, step, "step-run.state", &state("ready"), 7).unwrap();
+    assert_eq!(times(&transaction), ("7".into(), "7".into()));
+}
+
+#[test]
 fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
     let store = Store::open_memory("host-one").unwrap();
     let subject = "agent/example.worker";
@@ -8501,6 +8599,271 @@ fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
     assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
+/// A rollup series replicates its first reading, the last reading of each UTC hour once that hour
+/// is over, and its final totals when the seat ends. Measured on the fleet (2026-10-29), rollups
+/// were 456 of 1528 harness claims in three hours, about one per turn per series. A seat answering
+/// every 4 s through 2.5 hours of 5-minute turns now replicates 4, while its host reads the newest.
+#[test]
+fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |tokens: u64, at: u128| ClaimInput {
+        subject: subject.into(),
+        kind: "harness.usage".into(),
+        actor: Some(subject.into()),
+        fields: BTreeMap::from([
+            ("driver".into(), json!("codex")),
+            ("incarnation_id".into(), json!("inc-1")),
+            ("semantics".into(), json!("response_rollup")),
+            ("model".into(), json!("example-model")),
+            ("total_tokens".into(), json!(tokens)),
+            ("observed_at_unix_ms".into(), json!(at as u64)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(format!("rollup:{tokens}")),
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    // As the cards read: at the request's snapshot index.
+    let host_total = || {
+        let at = Some(store.index().unwrap());
+        let cards = store.usage_summaries_at(&[subject.to_owned()], at).unwrap()[subject].total_tokens;
+        assert_eq!(store.usage_summary_at(subject, None, at).unwrap().unwrap().total_tokens, cards);
+        cards
+    };
+    let mut tokens = 0;
+    let mut at = start;
+    let end = start + 2 * hour + hour / 2;
+    let mut last_of_hour = BTreeMap::new();
+    while at < end {
+        let turn = (at - start) / 300_000;
+        state(if (at - start) % 300_000 < 240_000 { "working" } else { "idle" }, at);
+        tokens += 1;
+        store.append_latest_observation(&rollup(tokens, at), at).unwrap();
+        last_of_hour.insert(at / hour, tokens);
+        assert_eq!(host_total(), tokens, "the host reads its newest rollup at once (turn {turn})");
+        at += 4_000;
+    }
+    let hours = last_of_hour.values().copied().collect::<Vec<_>>();
+    assert_eq!(replicated(), [1, hours[0], hours[1]], "the first reading, then each hour's last once it is over");
+    state("ended", end);
+    assert_eq!(replicated(), [1, hours[0], hours[1], tokens], "the final totals when the seat ends");
+    assert_eq!(host_total(), tokens);
+}
+
+/// A native binding that arrives while a newer rollup waits for its hour binds that reading when
+/// it replicates. The stop flush that binds an older, already replicated rollup must not drop it.
+#[test]
+fn a_late_native_binding_keeps_the_rollup_waiting_for_its_hour() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |tokens: u64, at: u128| {
+        let reading = ClaimInput {
+            subject: subject.into(),
+            kind: "harness.usage".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-1")),
+                ("semantics".into(), json!("response_rollup")),
+                ("model".into(), json!("example-model")),
+                ("total_tokens".into(), json!(tokens)),
+                ("observed_at_unix_ms".into(), json!(at as u64)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("rollup:{tokens}")),
+        };
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| (claim.body["fields"]["total_tokens"].as_u64().unwrap(),
+                claim.body["fields"]["native_session_id"].as_str().map(str::to_owned)))
+            .collect::<Vec<_>>()
+    };
+    state("working", start);
+    rollup(10, start + 1_000);
+    rollup(20, start + 60_000);
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status": "running", "incarnation_id": "inc-1"})),
+        ("harness.session-file", json!({"harness": "codex", "session_id": "native-example", "incarnation_id": "inc-1"})),
+    ] {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state("idle", start + 120_000);
+    assert_eq!(replicated(), [(10, None)], "the turn end binds nothing that would drop the waiting reading");
+    assert_eq!(store.usage_summaries_at(&[subject.to_owned()], Some(store.index().unwrap())).unwrap()[subject].total_tokens, 20);
+    state("ended", start + 180_000);
+    assert_eq!(replicated(), [(10, None), (20, Some("native-example".to_owned()))], "the end replicates it, bound");
+}
+
+/// A held rollup has a deadline and survives the trim. The hourly local trim first replicates a
+/// rollup whose hour is over for a seat that stopped re-stamping, it never deletes a reading its
+/// slot still waits on, and a reading after the seat ended replicates at once.
+#[test]
+fn a_held_rollup_has_a_deadline_and_survives_the_trim() {
+    let store = Store::open_memory("node").unwrap();
+    let hour = 3_600_000_u128;
+    let now = now_ms();
+    let state = |subject: &str, state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |subject: &str, tokens: u64, at: u128| {
+        let reading = ClaimInput {
+            subject: subject.into(),
+            kind: "harness.usage".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-1")),
+                ("semantics".into(), json!("response_rollup")),
+                ("model".into(), json!("example-model")),
+                ("total_tokens".into(), json!(tokens)),
+                ("observed_at_unix_ms".into(), json!(at as u64)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("rollup:{subject}:{tokens}")),
+        };
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = |subject: &str| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>()
+    };
+    // A seat that died two hours ago, its last rollup still held, and a live one this hour.
+    let (dead, live) = ("agent/node.dead", "agent/node.live");
+    let past = (now / hour - 2) * hour + 1_000;
+    state(dead, "working", past);
+    rollup(dead, 10, past + 1_000);
+    rollup(dead, 20, past + 60_000);
+    state(live, "working", now);
+    rollup(live, 1, now);
+    rollup(live, 2, now);
+    // A newer usage reading of another slot, so the held one is no longer the newest row.
+    store.append_latest_observation(&harness_usage(live, "context_occupancy", 5, 0), now).unwrap();
+    let replicated = |subject: &str| replicated(subject).into_iter().filter(|tokens| *tokens != 0).collect::<Vec<_>>();
+    assert_eq!((replicated(dead), replicated(live)), (vec![10], vec![1]));
+    store.trim_local_observations(u128::MAX, 1, 100).unwrap();
+    assert_eq!(replicated(dead), [10, 20], "the trim replicates a rollup whose hour is over");
+    assert_eq!(replicated(live), [1], "one whose hour is still on waits");
+    let at = Some(store.index().unwrap());
+    assert_eq!(store.usage_summaries_at(&[live.to_owned()], at).unwrap()[live].total_tokens, 2, "and was not trimmed");
+    state(live, "ended", now + 1);
+    assert_eq!(replicated(live), [1, 2]);
+    rollup(live, 3, now + 2);
+    assert_eq!(replicated(live), [1, 2, 3], "a reading after the end replicates at once");
+}
+
+/// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
+/// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
+/// reading every minute replicates once, and a reading that changes still replicates.
+#[test]
+fn an_unchanged_usage_reading_replicates_once_not_every_interval() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let mut sent = 0;
+    let mut read = |tokens: u64, at: u128| {
+        sent += 1;
+        let mut reading = harness_usage(subject, "context_occupancy", tokens, 0);
+        reading.idempotency_key = Some(format!("reading-{sent}"));
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+    for tick in 1..=60 {
+        read(10, start + tick * minute);
+    }
+    assert_eq!(tokens(&store), [10], "an hour of the same reading at rest replicates once");
+    read(20, start + 61 * minute);
+    assert_eq!(tokens(&store), [10, 20], "a changed reading past its interval still replicates");
+    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 62, "the local log keeps every reading");
+}
+
+/// A pending reading that a repeat of the replicated one supersedes never replicates: when the turn
+/// ends, the replicated claim is already current.
+#[test]
+fn a_usage_reading_back_at_its_replicated_value_leaves_nothing_pending() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let read = |tokens: u64, key: &str, at: u128| {
+        let mut reading = harness_usage(subject, "context_occupancy", tokens, 0);
+        reading.idempotency_key = Some(key.into());
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    state("idle", start);
+    read(10, "first", start + minute);
+    read(20, "changed", start + 2 * minute);
+    assert_eq!(tokens(&store), [10], "the change waits for its interval");
+    read(10, "back", start + 3 * minute);
+    state("working", start + 4 * minute);
+    state("idle", start + 5 * minute);
+    assert_eq!(tokens(&store), [10], "the turn's end has nothing newer to replicate");
+}
+
+/// The fold sums `response` readings, so two equal responses are two events, not a repeat: each
+/// replicates once its interval allows, and the summary counts both.
+#[test]
+fn two_equal_response_readings_both_replicate_and_both_count() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let respond = |key: &str, at: u128| {
+        let mut reading = harness_usage(subject, "response", 0, 0);
+        reading.fields.remove("context_used_tokens");
+        reading.fields.insert("total_tokens".into(), Value::from(7_u64));
+        reading.idempotency_key = Some(key.into());
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+    respond("first", start + minute);
+    respond("second", start + 7 * minute);
+    assert_eq!(store.claims_for(subject, Some("harness.usage")).unwrap().len(), 2, "both responses replicate");
+    let summary = store.usage_summary_at(subject, Some("inc-1"), None).unwrap().unwrap();
+    assert_eq!(summary.total_tokens, 14, "the summary counts both responses");
+}
+
 #[test]
 fn a_system_runtime_action_stays_local_while_a_requested_one_replicates() {
     let store = Store::open_memory("node").unwrap();
@@ -8632,7 +8995,7 @@ fn retention_event_tail_work_is_bounded_during_and_after_migration() {
         for migrating in [true, false] {
             let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfb3818e1a39a owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ event_tail_sql(migrating)).unwrap();
             let indices = statement
-                .query_map([3], |row| row.get::<_, u64>(0))
+                .query_map([3, i64::MAX], |row| row.get::<_, u64>(0))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
@@ -10219,10 +10582,14 @@ fn a_prompt_names_the_exact_call_its_hook_published() {
         )
     };
     append("runtime.observed", json!({"status":"running", "incarnation_id":"one"}));
-    asked(3);
+    let first = asked(3);
     assert_eq!(call_of_prompt(), None, "not named yet: allowed only in the terminal");
+    assert_eq!(store.native_prompt_call(seat, &first.id).unwrap(), None);
     published(3, "toolu_7");
     assert_eq!(call_of_prompt().as_deref(), Some("toolu_7"));
+    // An answer to this very prompt reads the same call; another episode names none.
+    assert_eq!(store.native_prompt_call(seat, &first.id).unwrap().as_deref(), Some("toolu_7"));
+    assert_eq!(store.native_prompt_call(seat, "claim/elsewhere").unwrap(), None);
     // The next prompt is its own observation: the earlier call is not its call.
     append(
         "harness.observed",
@@ -11715,4 +12082,14 @@ fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
     assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-capacity")]);
     assert_eq!(reads(), before + 3, "a trimmed diagnostic stayed");
     assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
+}
+
+#[test]
+fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
+    let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(&store, crate::store::PARKED_SEATS_SQL, params![r#"["agent/node.worker"]"#, 10]);
+    // Both the raise and the running observation it must follow are seeks on the seat's own
+    // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
+    assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
+    assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
 }
