@@ -184,6 +184,14 @@ class ReviewRisk(unittest.TestCase):
         result = self.risk()
         self.assertNotIn("concurrency", self.areas(result))
 
+    def test_a_lock_constructor_without_a_type_annotation_is_the_concurrency_area(self):
+        self.write("crates/fractal-store/src/store/plain.rs", "fn a() { let m = std::sync::Mutex::new(0); let r = RwLock::new(1); }\n")
+        self.write(".github/workflows/x.yml", "name: x\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "medium")
+        self.assertIn("concurrency", self.areas(result))
+        self.assertTrue(result["needs_factory_read"], result)
+
     def test_a_plain_medium_change_does_not_need_a_factory_read(self):
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
         result = self.risk()
