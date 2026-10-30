@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test no longer walks every pool tree with du at each start: a run that releases its tree records what the tree and its target hold (tree-N.size, beside the lock), a start sums the records, and a tree is walked only when its record is missing or older than a change to it and only when the recorded sum is within 80% of ST_TEST_POOL_MAX_GB.",
+  "replay": {
+    "status": "none",
+    "detail": "scripts/st-test (a local pre-sign script) only; no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "scripts/st-test (a local pre-sign script) only; no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "scripts/st-test (a local pre-sign script) only; no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "scripts/st-test (a local pre-sign script) only; no protocol, schema, policy, workflow or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "scripts/st-test (a local pre-sign script) only; no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert; every start walks every pool tree again. The tree-N.size files are harmless leftovers."
+  }
+}
