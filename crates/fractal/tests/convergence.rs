@@ -77,7 +77,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v10.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v11.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -997,6 +997,7 @@ impl World {
             "file" => format!("file/{}:/srv/example-{small}", self.nodes[index].name),
             "fleet-invite" => format!("fleet-invite/{}", self.fresh("invite")),
             "gate-operation" => format!("gate-operation/{}", self.fresh("gate")),
+            "github-event" => format!("github-event/convergence-{small}/pull-request/{small}/{}", self.fresh("event")),
             "host" => format!("host/{}", self.other_name(index)),
             "loop-run" => format!("loop-run/gen-0/loop-{small}"),
             "message" => format!("message/{}", self.fresh("message")),
@@ -1734,16 +1735,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v10,
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v11,
 /// all 17 fixed seeds converge and trim a checkpoint, including seed 3.
-/// This measured characterization includes the three durable person-repair kinds.
+/// This measured characterization includes the GitHub plugin's two compact kinds.
 /// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
 const NEVER_TRIMS: &[u64] = &[];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v10 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v11 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1957,7 +1958,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v10.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v11.json"
         }))
         .unwrap(),
     )
