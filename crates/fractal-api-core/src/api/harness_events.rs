@@ -111,8 +111,22 @@ pub(super) mod tests {
     pub const SEAT: &str = "agent/example/native-wake";
 
     pub fn peer(agent: &str) -> NativeDeliveryPeer {
-        let (socket, _connector) = tokio::net::UnixStream::pair().unwrap();
-        let identity = local_peer_process(&socket).unwrap();
+        #[cfg(target_os = "linux")]
+        let identity = {
+            let (socket, _connector) = tokio::net::UnixStream::pair().unwrap();
+            local_peer_process(&socket).unwrap()
+        };
+        #[cfg(target_os = "macos")]
+        let identity = {
+            use std::os::fd::AsFd as _;
+            use std::os::unix::net::UnixStream;
+            // The macOS witness rechecks its socket, so both fixture endpoints stay live.
+            static PAIR: std::sync::LazyLock<(UnixStream, UnixStream)> =
+                std::sync::LazyLock::new(|| UnixStream::pair().unwrap());
+            fractal_runtime::PeerProcessIdentity::capture_local_socket(
+                PAIR.0.as_fd().try_clone_to_owned().unwrap(),
+            ).unwrap()
+        };
         NativeDeliveryPeer {
             agent: agent.into(),
             transport: "claude-channel",

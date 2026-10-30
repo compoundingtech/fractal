@@ -100,6 +100,7 @@ fn receive_socket(stream: &UnixStream) -> UnixStream {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn connector_exit_before_first_capture_refuses_surviving_socket_holder() {
     let directory = tempfile::tempdir().unwrap();
@@ -131,4 +132,36 @@ async fn connector_exit_before_first_capture_refuses_surviving_socket_holder() {
     let stream = tokio::net::UnixStream::from_std(stream).unwrap();
     assert_eq!(local_peer_pid(&stream), Some(connector_pid));
     assert!(local_peer_process(&stream).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_live_accessor_change_invalidates_the_existing_capture() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peer.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let mut child = Connector(Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "api::peer_process_tests::connector_socket_child", "--nocapture"])
+        .env(CHILD_SOCKET, &path).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap());
+    let (stream, _) = listener.accept().await.unwrap();
+    let identity = local_peer_process(&stream).unwrap();
+    assert_eq!(identity.pid(), child.0.id());
+    identity.validate().unwrap();
+    let mut stream = stream.into_std().unwrap();
+    stream.set_nonblocking(false).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut transferred = receive_socket(&stream);
+    transferred.write_all(b"y").unwrap();
+    let mut byte = [0_u8];
+    stream.read_exact(&mut byte).unwrap();
+    assert_eq!(byte, *b"y");
+    assert!(child.0.try_wait().unwrap().is_none(), "the original process is still live");
+    stream.set_nonblocking(true).unwrap();
+    let stream = tokio::net::UnixStream::from_std(stream).unwrap();
+    assert_eq!(local_peer_pid(&stream), Some(std::process::id()));
+    assert!(identity.validate().is_err(), "a changed accessor must not inherit an established capture");
+    use tokio::io::AsyncWriteExt as _;
+    let mut stream = stream;
+    stream.write_all(b"x").await.unwrap();
+    assert!(child.0.wait().unwrap().success());
 }
