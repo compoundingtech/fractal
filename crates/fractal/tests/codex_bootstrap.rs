@@ -222,19 +222,24 @@ async fn delivery_recovery_control(
     runtime_claim(&store, &runtime_id, "starting", None);
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "bootstrap".into(),
-    state_dir: root.into(),
-    pty_root: pty_root.clone(),
-    pty_binary: pty.clone(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "bootstrap".into(),
+        state_dir: root.into(),
+        pty_root: pty_root.clone(),
+        pty_binary: pty.clone(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let delay = delayed.clone();
     let read_count = reads.clone();
     let bootstrap_custody = Arc::new(std::sync::Mutex::new(None));
@@ -910,19 +915,24 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     runtime_claim(&store, &runtime_id, status, previous);
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "bootstrap".into(),
-    state_dir: root.path().into(),
-    pty_root: pty_root.clone(),
-    pty_binary: pty.clone(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "bootstrap".into(),
+        state_dir: root.path().into(),
+        pty_root: pty_root.clone(),
+        pty_binary: pty.clone(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let pending_count = pending.clone();
     let bound_count = bound.clone();
     let bound_store = state.store.clone();

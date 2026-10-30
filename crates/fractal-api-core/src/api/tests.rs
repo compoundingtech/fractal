@@ -325,7 +325,7 @@ async fn history_pages_and_detail_do_not_cache_the_whole_claim_log() {
     for number in 0..8 {
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/node".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -968,7 +968,7 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     client_agent_resources(&state.store, false, "first", index).unwrap();
     let index = state
         .store
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/node".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -13039,10 +13039,10 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
     // The refresher follows the transcript before it is read.
     let followed = std::cell::RefCell::new(Vec::new());
     let calls = prompt_card::seat_pending_calls(&state, owner, |conversation| {
-        let prompt_card::Follow::Transcript(path) = conversation else {
+        let prompt_card::Follow::Transcript(source) = conversation else {
             panic!("the seat runs here");
         };
-        followed.borrow_mut().push(path.to_owned());
+        followed.borrow_mut().push(source.transcript.clone());
         Ok(None)
     })
     .unwrap();
