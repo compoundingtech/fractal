@@ -4038,6 +4038,10 @@ pub async fn events(
     let (records, oldest, newest) = loop {
         let (records, oldest, newest) =
             super::read_deadline::query(&state.store, "/v1/client/events", || {
+                // No event or cursor past the published index that client snapshots read at, as
+                // an event page (`read_event_page`): a commit is visible here before its writer
+                // publishes it, and the next read of the resource it names must already show it.
+                let through = state.store.index().map_err(ApiError::internal)?;
                 state
                     .store
                     .read_snapshot(|_| {
@@ -4052,11 +4056,11 @@ pub async fn events(
                             return Ok(Err(error));
                         }
                         let records = if query.after.is_some() {
-                            feed_events_after(&state.store, after, limit.saturating_add(1))?
+                            feed_events_after(&state.store, after, through, limit.saturating_add(1))?
                         } else {
-                            feed_events_tail(&state.store, limit)?
+                            feed_events_tail(&state.store, through, limit)?
                         };
-                        Ok(Ok((records, oldest, newest)))
+                        Ok(Ok((records, oldest, newest.min(through))))
                     })
                     .map_err(ApiError::internal)?
             })?;
@@ -4187,10 +4191,13 @@ fn feed_order(event: &FeedEvent) -> (u64, u64) {
     (event.0.store_index, event.1.unwrap_or(0))
 }
 
-/// Claim events and local observation events after `after`, oldest first.
+/// Claim events and local observation events after `after`, oldest first, none past `through`.
+/// The bound is in each query, before its limit, so an unpublished event never takes the
+/// place of a published one.
 fn feed_events_after(
     store: &Store,
     after: EventCursor,
+    through: u64,
     limit: usize,
 ) -> anyhow::Result<Vec<FeedEvent>> {
     let local_after = match after.local {
@@ -4198,13 +4205,13 @@ fn feed_events_after(
         None => store.local_observation_floor_after_claim(after.claim)?,
     };
     let mut events = store
-        .events_after_bounded(after.claim, limit)?
+        .events_after_bounded(after.claim, through, limit)?
         .into_iter()
         .map(|record| (record, None))
         .collect::<Vec<_>>();
     events.extend(
         store
-            .local_observations_after(local_after, limit)?
+            .local_observations_after_through(local_after, through, limit)?
             .into_iter()
             .map(local_feed_event),
     );
@@ -4214,15 +4221,15 @@ fn feed_events_after(
 }
 
 /// The newest `limit` claim and local observation events, oldest first.
-fn feed_events_tail(store: &Store, limit: usize) -> anyhow::Result<Vec<FeedEvent>> {
+fn feed_events_tail(store: &Store, through: u64, limit: usize) -> anyhow::Result<Vec<FeedEvent>> {
     let mut events = store
-        .events_tail_bounded(limit)?
+        .events_tail_bounded(through, limit)?
         .into_iter()
         .map(|record| (record, None))
         .collect::<Vec<_>>();
     events.extend(
         store
-            .local_observations_tail(limit)?
+            .local_observations_tail_through(through, limit)?
             .into_iter()
             .map(local_feed_event),
     );

@@ -120,6 +120,7 @@ pub use harness_questions::{
 };
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -147,6 +148,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod launch_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
@@ -798,6 +800,14 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication::replication_checkpoint_need),
         )
         .route(
+            "/v1/internal/replication/answers",
+            post(replication::replication_answers),
+        )
+        .route(
+            "/v1/internal/replication/answers-check",
+            post(replication::replication_answers_check),
+        )
+        .route(
             "/v1/internal/replication/checkpoint-adopt",
             post(replication::replication_checkpoint_adopt)
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
@@ -863,6 +873,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/waiting-on",
             get(waiting_on::get_run_waiting_on),
         )
+        .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -2516,8 +2527,10 @@ pub async fn client_capabilities(
     let capability_state = state.clone();
     let capability_session = session.clone();
     let (oldest, newest, capabilities) = blocking_store(move || {
+        // No further than the published index, as an event page (`read_event_page`).
+        let through = store.index()?;
         let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
-        Ok((oldest, newest, client_v0::capabilities(&capability_state, &capability_session)))
+        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session)))
     }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
@@ -3571,6 +3584,7 @@ fn client_agent_cards_presented(
         BTreeMap::new()
     };
     let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
+    let parked_seats = store.parked_seats_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3817,7 +3831,7 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked_seats.get(&subject.subject), retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -10077,7 +10091,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
     blocking_store(move || {
+        // A commit is visible here before its writer publishes the store index that client
+        // snapshots read at. A cursor past that index would let a client read a resource older
+        // than the events it already consumed, then wait for events that already came.
+        let through = store.index()?;
         store.read_snapshot(|frontier| {
+            let frontier = frontier.min(through);
             let (oldest, newest) = store.event_bounds()?;
             let floor = oldest.saturating_sub(1);
             if after < floor || after > newest {
@@ -10088,12 +10107,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     details: Box::new(serde_json::Map::from_iter([
                         ("full_resync".into(), json!(true)),
                         ("resume_floor".into(), json!(floor)),
-                        ("frontier".into(), json!(newest)),
+                        ("frontier".into(), json!(newest.min(through))),
                     ])),
                 }));
             }
             let (items, next_after, has_more) =
-                store.events_page(after, subject.as_deref(), owner.as_deref(), limit)?;
+                store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             Ok(Ok(EventPage {
                 items,
                 next_after,

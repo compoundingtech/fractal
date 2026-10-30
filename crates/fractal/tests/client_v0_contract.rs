@@ -385,6 +385,8 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
     let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
         legacy_request: None,
         person: "person/avery".into(),
         title: "Choose a release date".into(),
@@ -1386,6 +1388,8 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose date".into(),
@@ -1811,6 +1815,60 @@ async fn client_post_json_person(
     let value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     (status, value)
+}
+
+#[tokio::test]
+async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
+    // A commit is visible to readers before its writer publishes the store index that client
+    // snapshots read at. An event or resume cursor past that index lets a client consume a change,
+    // read the resource it names at the older index, and wait for an event that already came.
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let append = |number: usize| {
+        state
+            .store
+            .append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "custom/test/published".into(),
+                kind: "custom.test.recorded".into(),
+                actor: None,
+                fields: Default::default(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("published-{number}")),
+            })
+            .unwrap()
+            .store_index
+    };
+    let first = append(0);
+    let second = append(1);
+    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    let app = fractal_daemon::api::router(state.clone());
+    let path = format!("/v1/client/events?after=event-cursor/{}/{first}", state.node);
+    let (status, page) = client_json(app.clone(), &path).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let sequences = |page: &Value| {
+        page["value"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(sequences(&page).iter().all(|sequence| *sequence <= first), "an event past the published index: {page}");
+    assert!(
+        !page["value"]["resume_cursor"].as_str().unwrap().contains(&format!("/{second}")),
+        "a resume cursor past the published index: {page}"
+    );
+    // A tail read (no cursor) bounds its query before its limit: the unpublished event must
+    // not take the only place and leave the newest published one out.
+    let (status, tail) = client_json(app.clone(), "/v1/client/events?limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{tail}");
+    assert_eq!(sequences(&tail), vec![first], "the newest published event: {tail}");
+
+    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    let (status, page) = client_json(app, &path).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(sequences(&page).contains(&second), "{page}");
 }
 
 #[tokio::test]
@@ -2330,6 +2388,8 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let ask = |person: &str| {
         store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: person.into(),
                 title: format!("Decision for {person}"),
@@ -2716,6 +2776,8 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/ada".into(),
             title: "Decision for Ada".into(),
@@ -3548,6 +3610,8 @@ mission "ios-proof" state="ready" {
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/alex".into(),
             title: "Repair simulator components".into(),
@@ -3665,6 +3729,8 @@ mission "release-proof" state="ready" {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Allocate capacity?".into(),

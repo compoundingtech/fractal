@@ -464,6 +464,10 @@ export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
 
 export const PersonAskParameters = /*#__PURE__*/ (() => Schema.Struct({
+  /** How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). Refused with ask-deadlines-off while the fleet has not turned on ask deadlines. */
+  "deadline_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(60000)).check(Schema.isLessThanOrEqualTo(2592000000))).annotate({ description: "How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). Refused with ask-deadlines-off while the fleet has not turned on ask deadlines." }),
+  /** The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. Refused with ask-deadlines-off while the fleet has not turned on ask deadlines. */
+  "default_answer": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]{0,47}$", "u")))).annotate({ description: "The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. Refused with ask-deadlines-off while the fleet has not turned on ask deadlines." }),
   "new_run": optionalKey(Schema.String),
   "person_id": Id,
   "reason": Schema.String,
@@ -698,7 +702,17 @@ export const AgentEndReason = /*#__PURE__*/ (() => Schema.Struct({
   "ended_at": Timestamp,
   "exit_code": optionalKey(Schema.Int),
   "exit_signal": optionalKey(Schema.String),
-  "kind": Schema.Literals(["completed","stopped-by-person","stopped-by-agent","crashed","harness-exited","host-lost","retired"]),
+  "kind": openEnum([
+  "completed",
+  "stopped-by-person",
+  "stopped-by-agent",
+  "stopped-by-mission",
+  "parked",
+  "crashed",
+  "harness-exited",
+  "host-lost",
+  "retired"
+]),
   "reason": optionalKey(Schema.String)
 }).annotate({ identifier: "AgentEndReason" }))()
 export type AgentEndReason = typeof AgentEndReason.Type
@@ -1778,6 +1792,95 @@ export const AttentionActor = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionActor = typeof AttentionActor.Type
 export type AttentionActorEncoded = typeof AttentionActor.Encoded
 
+export const AttentionLaunchAgent = /*#__PURE__*/ (() => Schema.Struct({
+  /** The harness its seat runs, when st knows it. */
+  "harness": Schema.OptionFromNullOr(Schema.String).annotate({ description: "The harness its seat runs, when st knows it." }),
+  /** The host its seat runs on, when st knows it. */
+  "host": Schema.OptionFromNullOr(Schema.String).annotate({ description: "The host its seat runs on, when st knows it." }),
+  "id": Id,
+  "label": Schema.String
+}).annotate({ identifier: "AttentionLaunchAgent" }))()
+export type AttentionLaunchAgent = typeof AttentionLaunchAgent.Type
+export type AttentionLaunchAgentEncoded = typeof AttentionLaunchAgent.Encoded
+
+export const AttentionLaunchAssignee = /*#__PURE__*/ (() => Schema.Struct({
+  /** The agent, for `agent`. */
+  "agent": Schema.OptionFromNullOr(Id).annotate({ description: "The agent, for `agent`." }),
+  /** `agent` (one named agent), `any` (any of several), `st` (no agent) or `none`. A client shows a kind it does not know by its label. */
+  "kind": Schema.String.annotate({ description: "`agent` (one named agent), `any` (any of several), `st` (no agent) or `none`. A client shows a kind it does not know by its label." }),
+  /** The words a person reads. */
+  "label": Schema.String.annotate({ description: "The words a person reads." })
+}).annotate({ identifier: "AttentionLaunchAssignee" }))()
+export type AttentionLaunchAssignee = typeof AttentionLaunchAssignee.Type
+export type AttentionLaunchAssigneeEncoded = typeof AttentionLaunchAssignee.Encoded
+
+export const AttentionLaunchStep = /*#__PURE__*/ (() => Schema.Struct({
+  /** The paths of the steps it waits for. */
+  "after": Schema.Array(Schema.String).annotate({ description: "The paths of the steps it waits for." }),
+  /** Whether the step stops for a person. */
+  "asks_you": Schema.Boolean.annotate({ description: "Whether the step stops for a person." }),
+  "assignee": AttentionLaunchAssignee,
+  "path": Schema.String,
+  "title": Schema.String
+}).annotate({ identifier: "AttentionLaunchStep" }))()
+export type AttentionLaunchStep = typeof AttentionLaunchStep.Type
+export type AttentionLaunchStepEncoded = typeof AttentionLaunchStep.Encoded
+
+/** A launch card's preview of its newest variant's mission. */
+export const AttentionLaunchPreview = /*#__PURE__*/ (() => Schema.Struct({
+  /** The agents its steps name, each once. */
+  "agents": Schema.Array(AttentionLaunchAgent).annotate({ description: "The agents its steps name, each once." }),
+  /** How many steps stop for a person. */
+  "asks_you": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "How many steps stop for a person." }),
+  "goals": Schema.Array(Schema.String),
+  /** In display order, without finally steps. */
+  "steps": Schema.Array(AttentionLaunchStep).annotate({ description: "In display order, without finally steps." }),
+  /** The variant previewed: the launch's newest. */
+  "variant": Schema.String.annotate({ description: "The variant previewed: the launch's newest." })
+}).annotate({ identifier: "AttentionLaunchPreview", description: "A launch card's preview of its newest variant's mission." }))()
+export type AttentionLaunchPreview = typeof AttentionLaunchPreview.Type
+export type AttentionLaunchPreviewEncoded = typeof AttentionLaunchPreview.Encoded
+
+export const AttentionLaunchUnavailableReason = /*#__PURE__*/ (() => Schema.Struct({
+  /** The planner's first diagnostics, at most three. */
+  "diagnostics": Schema.Array(Schema.String).check(Schema.isMaxLength(3)).annotate({ description: "The planner's first diagnostics, at most three." }),
+  /** Why there is no preview, in plain words. */
+  "reason": Schema.String.annotate({ description: "Why there is no preview, in plain words." })
+}).annotate({ identifier: "AttentionLaunchUnavailableReason" }))()
+export type AttentionLaunchUnavailableReason = typeof AttentionLaunchUnavailableReason.Type
+export type AttentionLaunchUnavailableReasonEncoded = typeof AttentionLaunchUnavailableReason.Encoded
+
+/** A launch card with no variant st can preview. */
+export const AttentionLaunchUnavailable = /*#__PURE__*/ (() => Schema.Struct({
+  "unavailable": AttentionLaunchUnavailableReason
+}).annotate({ identifier: "AttentionLaunchUnavailable", description: "A launch card with no variant st can preview." }))()
+export type AttentionLaunchUnavailable = typeof AttentionLaunchUnavailable.Type
+export type AttentionLaunchUnavailableEncoded = typeof AttentionLaunchUnavailable.Encoded
+
+export const AttentionPromptCall = /*#__PURE__*/ (() => Schema.Struct({
+  "call_id": Schema.String,
+  /** The call's arguments as JSON text, cut at 4 KiB. */
+  "input": Schema.String.check(Schema.isMaxLength(4096)).annotate({ description: "The call's arguments as JSON text, cut at 4 KiB." }),
+  /** False when `input` was cut. */
+  "input_complete": Schema.Boolean.annotate({ description: "False when `input` was cut." }),
+  "tool": Schema.String
+}).annotate({ identifier: "AttentionPromptCall" }))()
+export type AttentionPromptCall = typeof AttentionPromptCall.Type
+export type AttentionPromptCallEncoded = typeof AttentionPromptCall.Encoded
+
+export const AttentionPrompt = /*#__PURE__*/ (() => Schema.Struct({
+  /** True only when exactly one call is pending and its input is complete: only then is it certain which call an answer is for. */
+  "allow": Schema.Boolean.annotate({ description: "True only when exactly one call is pending and its input is complete: only then is it certain which call an answer is for." }),
+  /** The answers `prompt.respond` takes, from action_parameters. */
+  "answers": Schema.Array(Schema.String).annotate({ description: "The answers `prompt.respond` takes, from action_parameters." }),
+  /** The tool calls without a result in the seat's conversation at the observation, oldest first; null when st cannot read the timeline (see unknown_reason). */
+  "calls": Schema.OptionFromNullOr(Schema.Array(AttentionPromptCall).check(Schema.isMaxLength(5))).annotate({ description: "The tool calls without a result in the seat's conversation at the observation, oldest first; null when st cannot read the timeline (see unknown_reason)." }),
+  /** Why `calls` is null; the card then says to answer in the terminal. */
+  "unknown_reason": optionalKey(Schema.String).annotate({ description: "Why `calls` is null; the card then says to answer in the terminal." })
+}).annotate({ identifier: "AttentionPrompt" }))()
+export type AttentionPrompt = typeof AttentionPrompt.Type
+export type AttentionPromptEncoded = typeof AttentionPrompt.Encoded
+
 export const AttentionRevisionLine = /*#__PURE__*/ (() => Schema.Struct({
   /** + adds a step, - removes one, ~ changes the mission or a step. */
   "op": Schema.Literals(["+","-","~"]).annotate({ description: "+ adds a step, - removes one, ~ changes the mission or a step." }),
@@ -1824,6 +1927,10 @@ export const AttentionPresentation = /*#__PURE__*/ (() => Schema.Struct({
   "login",
   "fault"
 ])).annotate({ description: "The card; null for a row that is no card (an unread message stays in its conversation)." }),
+  /** On a launch card: the newest variant's mission, or why st cannot preview it. Absent elsewhere. */
+  "launch": optionalKey(Schema.Union([AttentionLaunchPreview, AttentionLaunchUnavailable], { mode: "oneOf" })).annotate({ description: "On a launch card: the newest variant's mission, or why st cannot preview it. Absent elsewhere." }),
+  /** On a harness-prompt card: the tool calls the prompt can be about and the answers it takes. Absent elsewhere. */
+  "prompt": optionalKey(AttentionPrompt),
   /** Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission. */
   "raised_by": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." }),
   /** On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision. */
@@ -3177,10 +3284,10 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonAnswer = typeof PersonAnswer.Type
 export type PersonAnswerEncoded = typeof PersonAnswer.Encoded
 
-/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
-export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
-export type SenderRef = typeof SenderRef.Type
-export type SenderRefEncoded = typeof SenderRef.Encoded
+/** Who resolved a person ask: a sender, or daemon/runtime when its deadline or its requester ending resolved it. */
+export const RespondentRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|daemon|person|step)/[^\\s]+$", "u"), "agent", "assistant", "daemon", "person", "step").annotate({ identifier: "RespondentRef", description: "Who resolved a person ask: a sender, or daemon/runtime when its deadline or its requester ending resolved it." }))()
+export type RespondentRef = typeof RespondentRef.Type
+export type RespondentRefEncoded = typeof RespondentRef.Encoded
 
 export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** The person whose prior instruction the agent respondent recorded. */
@@ -3195,8 +3302,10 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** Server-owned grant-bound assistant session audit actor, separate from the answering principal. */
   "assistant_session_actor": optionalKey(Schema.String).annotate({ description: "Server-owned grant-bound assistant session audit actor, separate from the answering principal." }),
   "evidence": optionalKey(Schema.Array(Id)),
-  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. */
-  "respondent": SenderRef,
+  /** The ask resolved by itself at its deadline, not by the person. */
+  "resolved_by": optionalKey(Schema.Literals(["deadline"])).annotate({ description: "The ask resolved by itself at its deadline, not by the person." }),
+  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it. */
+  "respondent": RespondentRef,
   /** External assistant attribution when the response was submitted through an assistant grant. */
   "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
   "status": Schema.Literals(["completed","cancelled"]),
@@ -3877,6 +3986,11 @@ export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "MessageProvenance", description: "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not." }))()
 export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
+
+/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
+export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
+export type SenderRef = typeof SenderRef.Type
+export type SenderRefEncoded = typeof SenderRef.Encoded
 
 /** Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority. */
 export const TimelineRecipientRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "TimelineRecipientRef", description: "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority." }))()

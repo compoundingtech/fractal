@@ -4182,6 +4182,63 @@ async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
 }
 
 #[tokio::test]
+async fn event_pages_hand_out_no_cursor_past_the_published_index() {
+    // `agents new` consumed its seat's readiness events from a page, then read the seat at a
+    // snapshot taken from the published index, still before them ("starting"), and waited 30 s
+    // for events after a cursor it had already passed. The order it relies on: whatever cursor
+    // a page hands out, the next client snapshot is at least that new.
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let append = |number: usize| {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: "custom/test/published".into(),
+                kind: "custom.test.recorded".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("published-{number}")),
+            })
+            .unwrap()
+            .store_index
+    };
+    let first = append(0);
+    let second = append(1);
+    // As between a commit and its writer publishing the index under load: SQL readers already
+    // see the second claim, and a client snapshot is still taken at the first.
+    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    let app = router(state.clone());
+    let page = |after: u64| {
+        let app = app.clone();
+        async move {
+            let (status, page) = get_request(
+                app,
+                &format!("/v1/events/page?after={after}&subject=custom%2Ftest%2Fpublished&wait=false"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            page.get("value").cloned().unwrap_or(page)
+        }
+    };
+    // Consume, then read: the read must not be older than what was consumed.
+    let consumed = page(first).await;
+    let read = new_client_snapshot(&state).store_index;
+    assert_eq!(read, first);
+    assert_eq!(consumed["items"], json!([]), "an event the next read cannot show: {consumed}");
+    assert_eq!(consumed["next_after"], Value::Null, "a cursor past the next read at {read}: {consumed}");
+    assert_eq!(consumed["frontier"], json!(first), "{consumed}");
+
+    // Once the writer publishes the index, the cursor the client kept reads the event.
+    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    let consumed = page(first).await;
+    assert_eq!(consumed["items"][0]["store_index"], json!(second), "{consumed}");
+    assert_eq!(consumed["next_after"], json!(second), "{consumed}");
+    assert!(new_client_snapshot(&state).store_index >= second);
+}
+
+#[tokio::test]
 async fn retention_event_pages_advance_by_scanned_rows_and_refuse_stale_cursors() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -4482,7 +4539,10 @@ async fn retention_event_timeout_rereads_a_new_unsignaled_floor() {
 #[tokio::test]
 async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
     let root = tempfile::tempdir().unwrap();
-    let state = state(root.path());
+    let mut state = state(root.path());
+    // A file store, as the daemon runs: the waiter reads while this test appends, and in
+    // shared-cache memory that read fails at once with "database table is locked".
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let waiter_state = state.clone();
     let waiter = tokio::spawn(async move {
         let response = events(
@@ -6182,6 +6242,125 @@ mission "planned/direct" state="ready" {
         store.selected_desired_kind(&planner).unwrap().as_deref(),
         Some("stop")
     );
+}
+
+#[tokio::test]
+async fn a_launch_card_previews_its_newest_variant_once_it_has_one() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let request = store
+        .put_document("doc/planning/card/request", b"Inspect the release.", &None, "card-request")
+        .unwrap();
+    let session = "planning/card/one";
+    let source = format!(
+        r#"version 2
+planning-session {session:?} {{
+  mission "planned/card"
+  request {:?}
+  workspace {:?}
+  requester "person/operator"
+  planner "codex" {{ model "gpt-5.6-sol"; effort "medium" }}
+}}
+"#,
+        format!("{}@{}", request.name, request.hash),
+        workspace.display().to_string(),
+    );
+    let intent = parse_intent(&source, "node").unwrap();
+    let applied = store
+        .mission(&intent, crate::model::IntentInput { kdl: source, source_name: None })
+        .unwrap();
+    store
+        .apply_as(&intent, &applied.subject_tokens, "card-session", Some("person/operator"))
+        .unwrap();
+    let card = |store: &Store| {
+        launch_card::launch_card(store, &json!({"launch_id": format!("launch/{session}")}), |_| None)
+            .unwrap()
+            .expect("st has the launch")
+    };
+    // Nothing proposed yet: the card says so.
+    assert_eq!(card(&store)["unavailable"]["reason"], "The planner has not proposed a mission yet.");
+    assert!(
+        launch_card::launch_card(&store, &json!({"launch_id": "launch/planning/card/gone"}), |_| None)
+            .unwrap()
+            .is_none(),
+        "a launch st no longer has names nothing"
+    );
+
+    let planner = crate::graph::planning_planner_subject(&format!("planning-session/{session}"));
+    let app = router(state);
+    let encoded = urlencoding::encode(session);
+    let candidate = br#"version 2
+mission "planned/card" state="ready" {
+  goal "Inspect the release."
+  step "inspect" { goal "Inspect the release input." }
+}
+"#;
+    let (status, submitted) = json_request(
+        app.clone(),
+        &format!("/v1/launches/{encoded}/submit"),
+        serde_json::to_value(PlanningCandidateSubmitRequest {
+            actor: planner.clone(),
+            markdown: b"# Mission\n\nInspect the release input.\n".to_vec(),
+            kdl: candidate.to_vec(),
+            idempotency_key: "card-candidate".into(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{submitted}");
+    let (status, previewed) =
+        json_request(app.clone(), &format!("/v1/launches/{encoded}/preview"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{previewed}");
+    // Once previewed, the card shows the newest variant's mission.
+    let launch = card(&store);
+    assert!(launch.get("unavailable").is_none(), "{launch}");
+    assert_eq!(launch["goals"], json!(["Inspect the release."]));
+    assert_eq!(launch["steps"][0]["path"], "inspect");
+    assert_eq!(launch["steps"][0]["assignee"]["kind"], "none");
+    assert_eq!(launch["asks_you"], 0);
+    assert_eq!(launch["variant"], "default");
+    serde_json::from_value::<fractal_client::AttentionLaunch>(launch).unwrap();
+
+    // A newer variant whose name sorts first is the newest, and a new candidate for an older
+    // variant makes it the newest again.
+    let submit = async |variant: &str, step: &str, key: &str| {
+        // A later submission is accepted at a later millisecond.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let kdl = format!(
+            "version 2\nmission \"planned/card\" state=\"ready\" {{\n  goal \"Inspect the release.\"\n  step {step:?} {{ goal \"Inspect the release input.\" }}\n}}\n"
+        );
+        let (status, submitted) = json_request(
+            app.clone(),
+            &format!("/v1/launches/{encoded}/variants/{variant}/submit"),
+            serde_json::to_value(PlanningCandidateSubmitRequest {
+                actor: planner.clone(),
+                markdown: format!("# {variant}\n").into_bytes(),
+                kdl: kdl.into_bytes(),
+                idempotency_key: key.into(),
+            })
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{submitted}");
+        let (status, previewed) = json_request(
+            app.clone(),
+            &format!("/v1/launches/{encoded}/variants/{variant}/preview"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{previewed}");
+    };
+    submit("alpha", "survey", "card-alpha").await;
+    let launch = card(&store);
+    assert_eq!(launch["variant"], "alpha", "{launch}");
+    assert_eq!(launch["steps"][0]["path"], "survey");
+    submit("default", "recheck", "card-default-2").await;
+    let launch = card(&store);
+    assert_eq!(launch["variant"], "default", "{launch}");
+    assert_eq!(launch["steps"][0]["path"], "recheck");
 }
 
 #[test]

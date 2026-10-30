@@ -218,6 +218,7 @@ pub mod revision_seats;
 pub mod delegation;
 pub mod limits;
 pub mod database_size;
+pub mod answers_check;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
@@ -242,6 +243,10 @@ pub mod terminal_gate_evidence;
 pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod checkpoint_identity_reuse_tests;
+#[cfg(test)]
+mod newest_claim_index_tests;
+#[cfg(test)]
+mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
@@ -669,6 +674,33 @@ impl UsageFold {
     }
 }
 
+
+/// The newest crash-loop raise of each subject in the JSON array ?1 at store index ?2 since its
+/// newest running observation. One seek per subject on (subject, kind, store_index), and only
+/// past that observation: a seat that ran since it was parked has nothing to find. The index is
+/// named because the planner otherwise ranges over every subject's reconcile decisions by kind.
+pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, claims.body, claims.accepted_at_unix_ms
+     FROM json_each(?1) subjects
+     JOIN claims ON claims.id=(
+         SELECT id FROM claims INDEXED BY claims_subject_kind_index WHERE subject=subjects.value
+            AND kind='runtime.reconcile-decision' AND store_index<=?2
+            AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                WHERE subject=subjects.value AND kind='runtime.observed'
+                  AND store_index<=?2
+                  AND json_extract(body, '$.fields.status')='running'), 0)
+            AND json_extract(body, '$.fields.decision')='raise'
+            AND (json_extract(body, '$.fields.key') GLOB 'runtime-crash-loop:*'
+              OR json_extract(body, '$.fields.key') GLOB 'codex-crash-loop:*')
+          ORDER BY store_index DESC LIMIT 1)";
+
+/// A seat st stopped restarting after it failed to start: why, and when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParkedSeat {
+    /// The crash-loop decision that parked it.
+    pub decision: String,
+    pub reason: String,
+    pub parked_at_unix_ms: u128,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentWorkQueue {
@@ -2123,6 +2155,13 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
+    pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
+    /// Whether asks get deadlines: `[asks] deadlines`, off by default.
+    pub ask_deadlines: std::sync::atomic::AtomicBool,
+    /// The store index up to which person answers were checked for overriding a deadline's
+    /// default; in memory, so a restart checks them again and the notice's key keeps it once.
+    pub person_answers_checked: std::sync::atomic::AtomicU64,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2491,7 +2530,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2511,7 +2551,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2523,7 +2564,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -4014,12 +4056,23 @@ impl Store {
     /// Local observations written after `after`, oldest first. The records carry the
     /// `store_index` of the claim each one follows.
     pub fn local_observations_after(&self, after: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_after_through(after, i64::MAX as u64, limit)
+    }
+
+    /// [`Self::local_observations_after`], leaving out observations that follow a claim past
+    /// `through` (an event feed passes the published index, as `events_page` does).
+    pub fn local_observations_after_through(
+        &self,
+        after: u64,
+        through: u64,
+        limit: usize,
+    ) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4f521b72fe3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 ORDER BY id LIMIT ?2"
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6fff3783c9f8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+            "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 AND after_store_index <= ?3 ORDER BY id LIMIT ?2"
         ))?;
         let rows = statement.query_map(
-            params![after as i64, limit.min(i64::MAX as usize) as i64],
+            params![after as i64, limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64) as i64],
             |row| local_observation_from_row(&self.origin, row),
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4068,13 +4121,19 @@ impl Store {
 
     /// The newest local observations, oldest first.
     pub fn local_observations_tail(&self, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_tail_through(i64::MAX as u64, limit)
+    }
+
+    /// The newest local observations that follow a claim at or before `through`, oldest first.
+    pub fn local_observations_tail_through(&self, through: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbe0f6965fe14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} ORDER BY id DESC LIMIT ?1) ORDER BY id"
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd1501a4b8d3a owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+            "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} WHERE after_store_index <= ?2 ORDER BY id DESC LIMIT ?1) ORDER BY id"
         ))?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], |row| {
-            local_observation_from_row(&self.origin, row)
-        })?;
+        let rows = statement.query_map(
+            params![limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64) as i64],
+            |row| local_observation_from_row(&self.origin, row),
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -5054,9 +5113,13 @@ impl Store {
     /// One keyset page at the caller's pinned snapshot. Owner filtering never expands the
     /// indexed scan; the continuation records the last inspected event even for an empty answer.
     /// Both subject and owner filters run after the bounded global membership scan.
+    /// The events after `after`, up to and including `through`: a caller passes the published
+    /// index (`index()`) so that no cursor it hands out runs ahead of what a read snapshot taken
+    /// from that index shows. A commit is visible to SQL readers before the writer publishes it.
     pub fn events_page(
         &self,
         after: u64,
+        through: u64,
         subject: Option<&str>,
         owner_run: Option<&str>,
         limit: usize,
@@ -5065,10 +5128,10 @@ impl Store {
         let connection = self.readers.get();
         // Keep the global last-scanned-event contract without adding a subject index.
         let sql = "SELECT store_index,kind,subject,body FROM events
-             WHERE store_index>?1 ORDER BY store_index LIMIT ?2";
+             WHERE store_index>?1 AND store_index<=?3 ORDER BY store_index LIMIT ?2";
         let raw = connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3051ca7c80f3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)?
-            .query_map(params![after, limit.saturating_add(1)], |row| {
+            .query_map(params![after, limit.saturating_add(1), through], |row| {
                 let body = row.get::<_, String>(3)?;
                 Ok(EventRecord {
                     store_index: row.get(0)?,
@@ -5111,14 +5174,15 @@ impl Store {
         self.events_after_filtered(after, subject, None)
     }
 
-    pub fn events_after_bounded(&self, after: u64, limit: usize) -> Result<Vec<EventRecord>> {
+    /// The events after `after`, up to and including `through` (see `events_page`).
+    pub fn events_after_bounded(&self, after: u64, through: u64, limit: usize) -> Result<Vec<EventRecord>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "SELECT store_index, kind, subject, body FROM events
-             WHERE store_index > ?1 ORDER BY store_index LIMIT ?2",
+             WHERE store_index > ?1 AND store_index <= ?3 ORDER BY store_index LIMIT ?2",
         )?;
         let rows =
-            statement.query_map(params![after, limit.min(i64::MAX as usize) as i64], |row| {
+            statement.query_map(params![after, limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64)], |row| {
                 let body = row.get::<_, String>(3)?;
                 Ok(EventRecord {
                     store_index: row.get(0)?,
@@ -5130,13 +5194,14 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn events_tail_bounded(&self, limit: usize) -> Result<Vec<EventRecord>> {
+    /// The newest `limit` events at or before `through`, oldest first (see `events_page`).
+    pub fn events_tail_bounded(&self, through: u64, limit: usize) -> Result<Vec<EventRecord>> {
         let connection = self.readers.get();
         // Bound membership before fetching bodies. Ordering the joined view can make SQLite
         // visit every canonical claim, even when the response has a LIMIT.
         let sql = event_tail_sql(self.event_payload_migration_pending()?);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h09ab98dbcf94 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], |row| {
+        let rows = statement.query_map(params![limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64)], |row| {
             let body = row.get::<_, String>(3)?;
             Ok(EventRecord {
                 store_index: row.get(0)?,
@@ -5437,6 +5502,58 @@ impl Store {
         kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
         times.extend(read);
         Ok(times)
+    }
+
+    /// Each of `subjects` that st parked at `at_index` and that has not run since: its newest
+    /// crash-loop raise (after repeated failed starts, or a failed explicit restart) for its
+    /// current launch, with no running observation after it. A new declaration launches afresh,
+    /// so a raise for an earlier launch parks nothing.
+    pub fn parked_seats_for(
+        &self,
+        subjects: &[String],
+        at_index: u64,
+    ) -> Result<BTreeMap<String, ParkedSeat>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he0201008ecc8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ PARKED_SEATS_SQL)?;
+        let mut parked = BTreeMap::new();
+        for chunk in subjects.chunks(256) {
+            let rows = statement
+                .query_map(params![serde_json::to_string(chunk)?, at_index], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (subject, id, body, accepted_at) in rows {
+                let body: Value = serde_json::from_str(&body)?;
+                let fields = body.get("fields").unwrap_or(&body);
+                let token = fields
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| key.split_once(':'))
+                    .map(|(_, token)| token.to_owned())
+                    .unwrap_or_default();
+                if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
+                    continue;
+                }
+                parked.insert(
+                    subject,
+                    ParkedSeat {
+                        decision: id,
+                        reason: fields
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("st stopped restarting it after repeated failures")
+                            .to_owned(),
+                        parked_at_unix_ms: accepted_at.parse().unwrap_or_default(),
+                    },
+                );
+            }
+        }
+        Ok(parked)
     }
 
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
@@ -10400,16 +10517,18 @@ fn event_tail_sql(migrating: bool) -> &'static str {
     if migrating {
         "SELECT p.store_index,c.kind,p.subject,c.body FROM (
                  SELECT store_index,subject FROM (
-                     SELECT store_index,subject FROM event_positions ORDER BY store_index DESC LIMIT ?1
+                     SELECT store_index,subject FROM event_positions WHERE store_index<=?2
+                     ORDER BY store_index DESC LIMIT ?1
                  ) UNION ALL SELECT store_index,subject FROM (
-                     SELECT store_index,subject FROM local_event_payloads
+                     SELECT store_index,subject FROM local_event_payloads WHERE store_index<=?2
                      ORDER BY store_index DESC LIMIT ?1
                  ) legacy WHERE NOT EXISTS(SELECT 1 FROM event_positions n WHERE n.store_index=legacy.store_index)
                  ORDER BY store_index DESC LIMIT ?1
              ) p CROSS JOIN claims c ON c.store_index=p.store_index ORDER BY p.store_index"
     } else {
         "SELECT p.store_index,c.kind,p.subject,c.body FROM (
-                 SELECT store_index,subject FROM event_positions ORDER BY store_index DESC LIMIT ?1
+                 SELECT store_index,subject FROM event_positions WHERE store_index<=?2
+                 ORDER BY store_index DESC LIMIT ?1
              ) p CROSS JOIN claims c ON c.store_index=p.store_index ORDER BY p.store_index"
     }
 }
@@ -15793,6 +15912,18 @@ pub fn try_project_simple_replication_tx(
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
         };
+        // A claim a repair replaced decides no operation (`expected_operations`); its repair
+        // already brought the operation's row to the claims that remain.
+        let repaired: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
+                [&claim.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
+        if repaired {
+            continue;
+        }
         if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
             continue;
         }

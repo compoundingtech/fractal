@@ -5424,6 +5424,68 @@ fn a_replicated_repair_replaces_a_record_that_the_source_had_accepted() {
     assert_eq!(source_status.graph_digest, target_status.graph_digest);
 }
 
+/// A node that projected at startup accepts its own claim, which carries an operation, and then
+/// receives a peer's repair replacing that claim before projecting it. Its incremental pass
+/// leaves the operation as a full replay of the same claims does: decided by the replacement,
+/// not by the claim the repair replaced.
+#[test]
+fn incremental_projection_matches_a_replay_after_a_repair_of_a_claim_it_holds() {
+    let source = Store::open_memory("source").unwrap();
+    let target = Store::open_memory("target").unwrap();
+    // Each node projects as it starts, so later claims project incrementally.
+    source.project_replication_backlog().unwrap();
+    target.project_replication_backlog().unwrap();
+    let publish = |name: &str, command: &str| {
+        let intent = simple(command);
+        let preview = source
+            .mission(&intent, IntentInput { kdl: name.into(), source_name: None })
+            .unwrap();
+        source.apply(&intent, &preview.subject_tokens, name).unwrap();
+        source.selected_desired_token("exec/work").unwrap().unwrap()
+    };
+    let replacement = publish("initial", "true");
+    let original = publish("changed", "printf changed");
+    receive_and_project(&target, "source", &exchange_from(&source, &target.replication_inventory().unwrap()));
+    let record_ref: String = target
+        .readers
+        .get()
+        .query_row("SELECT record_ref FROM replica_records WHERE claim_id=?1", [&original], |row| row.get(0))
+        .unwrap();
+    // The target's build rejects the original, so an operator repairs it.
+    target
+        .connection
+        .lock()
+        .unwrap()
+        .execute(/* sqlite-large-value: allow-for-now lv-h8d3d16dd0a2e owner=fractal_store::store::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record_ref])
+        .unwrap();
+    target
+        .repair_replica_record(&record_ref, &replacement, "a test repair", "person/operator", "repair-held-claim")
+        .unwrap();
+    let operation_of = |store: &Store| -> Option<String> {
+        store
+            .readers
+            .get()
+            .query_row(
+                "SELECT id FROM operations WHERE canonical_claim_id=?1",
+                [&original],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+    };
+    assert!(operation_of(&source).is_some(), "the original decides its operation before the repair");
+
+    FULL_REPLAYS.with(|replays| replays.set(0));
+    receive_and_project(&source, "target", &exchange_from(&target, &source.replication_inventory().unwrap()));
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0, "the repair projected incrementally");
+    assert_eq!(source.selected_desired_token("exec/work").unwrap().unwrap(), replacement);
+    assert_eq!(operation_of(&source), None, "no operation is decided by a repaired claim");
+    let incremental = graph_digest_of(&source);
+    source.replay_replication_graph().unwrap();
+    assert_eq!(incremental, graph_digest_of(&source), "the incremental projection matches a replay");
+    assert_eq!(incremental, graph_digest_of(&target));
+}
+
 /// Every delivery of four envelopes: either order, each sent once to three times, split into two
 /// exchanges at every point, and then the complete exchange. Thirty cases, all of them.
 #[test]
@@ -8717,7 +8779,7 @@ fn retention_event_tail_work_is_bounded_during_and_after_migration() {
         for migrating in [true, false] {
             let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfb3818e1a39a owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ event_tail_sql(migrating)).unwrap();
             let indices = statement
-                .query_map([3], |row| row.get::<_, u64>(0))
+                .query_map([3, i64::MAX], |row| row.get::<_, u64>(0))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
@@ -11800,4 +11862,14 @@ fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
     assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-capacity")]);
     assert_eq!(reads(), before + 3, "a trimmed diagnostic stayed");
     assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
+}
+
+#[test]
+fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
+    let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(&store, crate::store::PARKED_SEATS_SQL, params![r#"["agent/node.worker"]"#, 10]);
+    // Both the raise and the running observation it must follow are seeks on the seat's own
+    // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
+    assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
+    assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
 }

@@ -45,5 +45,5 @@ pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
     Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable,
     ProcfsHidesProcesses, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
-    PtySpawnTimeoutPhase, TerminalSize,
+    PtySpawnTimeoutPhase, TerminalSize, mailbox_legacy_admissions_total,
 };
