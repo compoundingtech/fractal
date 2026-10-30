@@ -395,3 +395,57 @@ fn readers_compare_only_between_members_that_both_run_them() {
     assert_eq!(differing_kinds(&newer, &other, true)[0].kind, "reader/status_history");
 }
 
+
+#[test]
+fn a_restarted_member_serves_the_summary_it_kept_at_the_cut() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    let store = Arc::new(Store::open(&path, "alder", Arc::new(Plain)).unwrap());
+    state(&store, "item/a", "one");
+    let summary = AnswersRequest { cut_unix_ms: cut(), ..AnswersRequest::default() };
+    let first = settled(&Arc::new(AnswersCache::default()), &store, &summary).summary.unwrap();
+    assert_eq!(first.kinds["example.state"].keys, 1);
+
+    // A claim written since, still older than the cut, would change a summary computed now; a
+    // restarted daemon starts with an empty cache and still answers with the kept one.
+    state(&store, "item/b", "one");
+    let restarted = settled(&Arc::new(AnswersCache::default()), &store, &summary).summary.unwrap();
+    assert_eq!(restarted, first);
+
+    // A store that now trims differently counts claims differently, so it computes again, as it
+    // does at any other cut.
+    store.trim_locally(true).unwrap();
+    let trimming = settled(&Arc::new(AnswersCache::default()), &store, &summary).summary.unwrap();
+    assert_eq!(trimming.kinds["example.state"].keys, 2);
+    let tomorrow = AnswersRequest { cut_unix_ms: cut() + 86_400_000, ..AnswersRequest::default() };
+    let later = settled(&Arc::new(AnswersCache::default()), &store, &tomorrow).summary.unwrap();
+    assert_eq!(later.kinds["example.state"].keys, 2);
+}
+
+#[test]
+fn claims_compare_only_between_members_that_finished_the_same_trim() {
+    let alder = node("alder");
+    let birch = node("birch");
+    state(&alder, "item/a", "one");
+    push(&alder, &birch);
+    let day = 86_400_000;
+    let trim = |store: &Store, trimmed: u128, state: &str| {
+        store.set_checkpoint_state(&format!("checkpoint/{trimmed}"), trimmed, state).unwrap();
+        store.answers_summary(cut()).unwrap()
+    };
+    let alder_summary = trim(&alder, day, "trimmed");
+    let birch_summary = trim(&birch, day, "trimmed");
+    assert!(claims_compare(&alder_summary, &birch_summary));
+
+    // birch is part way through the next day's trim, then finishes it: until alder has too, the
+    // members hold different claims older than the cut and still answer the same.
+    let birch_summary = trim(&birch, 2 * day, "trimming");
+    assert!(birch_summary.trim_unfinished);
+    assert!(!claims_compare(&alder_summary, &birch_summary));
+    let birch_summary = trim(&birch, 2 * day, "trimmed");
+    assert_eq!(birch_summary.trimmed_cut_unix_ms, 2 * day);
+    assert!(!claims_compare(&alder_summary, &birch_summary));
+    let alder_summary = trim(&alder, 2 * day, "trimmed");
+    assert!(claims_compare(&alder_summary, &birch_summary));
+    assert!(differing_kinds(&alder_summary, &birch_summary, true).is_empty());
+}
