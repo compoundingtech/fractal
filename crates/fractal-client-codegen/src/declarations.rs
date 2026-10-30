@@ -1,0 +1,386 @@
+//! Authoring vocabulary, deliberately separate from normalized store models.
+//! Each field's TypeScript shape lives beside its Rust authoring field. Adding
+//! vocabulary requires changing this source and the parser-backed guards.
+use std::fmt::Write as _;
+
+macro_rules! model {
+    ($name:ident { $($field:ident: $rust:ty => $typescript:literal),* $(,)? } $(=> $constraint:literal)?) => {
+        // Production consumes the field metadata; parser-backed tests consume the values.
+        #[cfg_attr(not(test), allow(dead_code))]
+        #[derive(Clone, Debug)]
+        pub struct $name { $(pub $field: $rust),* }
+        impl $name {
+            fn typescript() -> String {
+                let mut result = model!(@header $name $(, $constraint)?).to_owned();
+                $(if !$typescript.is_empty() { writeln!(result, "  {}", $typescript).unwrap(); })*
+                result.push('}');
+                $(result.push_str(concat!(" & ", $constraint));)?
+                result.push_str("\n\n");
+                result
+            }
+        }
+    };
+    (@header $name:ident) => { concat!("export interface ", stringify!($name), " {\n") };
+    (@header $name:ident, $constraint:literal) => { concat!("export type ", stringify!($name), " = {\n") };
+}
+
+model!(Agent {
+    id: String => "readonly id: AgentId",
+    workspace: String => "readonly workspace: string",
+    launch: Launch => "readonly launch: Launch",
+    under: Option<Under> => "readonly under?: Under",
+});
+model!(Under {
+    agent: AgentReference => "readonly agent: AgentReference",
+    reason: String => "readonly reason: string",
+});
+model!(Step {
+    id: String => "readonly id: string",
+    assigned_to: AgentReference => "readonly assignedTo: AgentReference",
+    goals: Vec<String> => "readonly goals: readonly [] | readonly [string] | readonly [string, string] | readonly [string, string, string]",
+});
+model!(Mission {
+    id: String => "readonly id: string",
+    state: MissionState => "readonly state: MissionState",
+    report_to: AgentReference => "readonly reportTo: AgentReference",
+    goals: Vec<String> => "readonly goals: readonly [string] | readonly [string, string] | readonly [string, string, string]",
+    completion: Completion => "readonly completion: Completion",
+    steps: Vec<Step> => "readonly steps: readonly Step[]",
+});
+model!(Schedule {
+    id: String => "readonly id: string",
+    host: String => "readonly host: string",
+    every: String => "readonly every: string",
+    anchor: String => "readonly anchor: string",
+    // These fields are emitted together in the discriminated union below.
+    catch_up: CatchUp => "",
+    max_catch_up: Option<u32> => "",
+    work: ScheduledWork => "readonly work: ScheduledWork",
+} => "({ readonly catchUp: 'all'; readonly maxCatchUp: number } | { readonly catchUp: 'latest' | 'skip'; readonly maxCatchUp?: never })");
+model!(ScheduledWork {
+    mission: MissionReference => "readonly mission: Mission | string",
+    revision: String => "readonly revision: string",
+    workspace: String => "readonly workspace: string",
+});
+model!(Declarations {
+    agents: Vec<Agent> => "readonly agents?: readonly Agent[]",
+    missions: Vec<Mission> => "readonly missions?: readonly Mission[]",
+    schedules: Vec<Schedule> => "readonly schedules?: readonly Schedule[]",
+} => "({ readonly agents: readonly [Agent, ...Agent[]] } | { readonly missions: readonly [Mission, ...Mission[]] } | { readonly schedules: readonly [Schedule, ...Schedule[]] })");
+
+macro_rules! choices {
+    ($name:ident { $($variant:ident => $value:literal),* $(,)? }) => {
+        #[cfg_attr(not(test), allow(dead_code))]
+        #[derive(Clone, Copy, Debug)]
+        pub enum $name { $($variant),* }
+        impl $name {
+            #[cfg(test)]
+            fn kdl(self) -> &'static str { match self { $(Self::$variant => $value),* } }
+            fn typescript() -> String {
+                let values = [$($value),*].map(|value| format!("\"{value}\""));
+                format!("export type {} = {}\n\n", stringify!($name), values.join(" | "))
+            }
+        }
+    };
+}
+choices!(MissionState { Draft => "draft", Ready => "ready", Retired => "retired" });
+choices!(Completion { AllStepsExhausted => "all-steps-exhausted" });
+choices!(CatchUp { All => "all", Latest => "latest", Skip => "skip" });
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub enum Launch {
+    Command(String),
+    /// A separate first argument makes an empty argv unrepresentable.
+    Argv {
+        first: String,
+        rest: Vec<String>,
+    },
+}
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub enum AgentReference {
+    Subject(String),
+    Declaration(Box<Agent>),
+}
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug)]
+pub enum MissionReference {
+    Id(String),
+    Declaration(Box<Mission>),
+}
+
+pub fn typescript() -> String {
+    let mut result = "// @generated by fractal-client-codegen; do not edit.\n\n".to_owned();
+    result.push_str("export type Launch = { readonly command: string; readonly argv?: never } | { readonly argv: readonly [string, ...string[]]; readonly command?: never }\n\nexport type AgentId = `${string}.${string}` | `${string}/${string}`\n\nexport type AgentReference = Agent | `agent/${AgentId}`\n\n");
+    for model in [
+        Agent::typescript(),
+        Under::typescript(),
+        Step::typescript(),
+        Mission::typescript(),
+        Schedule::typescript(),
+        ScheduledWork::typescript(),
+        Declarations::typescript(),
+        MissionState::typescript(),
+        Completion::typescript(),
+        CatchUp::typescript(),
+    ] {
+        result.push_str(&model);
+    }
+    result.push_str(include_str!("../templates/declarations.ts.in"));
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quote(value: &str) -> String {
+        let mut result = String::from("\"");
+        for character in value.chars() {
+            match character {
+                '"' => result.push_str("\\\""),
+                '\\' => result.push_str("\\\\"),
+                '\n' => result.push_str("\\n"),
+                '\r' => result.push_str("\\r"),
+                '\t' => result.push_str("\\t"),
+                c if c.is_control()
+                    || matches!(c, '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}') =>
+                {
+                    write!(result, "\\u{{{:x}}}", u32::from(c)).unwrap();
+                }
+                c => result.push(c),
+            }
+        }
+        result.push('"');
+        result
+    }
+    fn agent_reference(reference: &AgentReference) -> String {
+        match reference {
+            AgentReference::Subject(subject) => subject.clone(),
+            AgentReference::Declaration(agent) => format!("agent/{}", agent.id),
+        }
+    }
+    fn render(document: &Declarations) -> String {
+        let mut out = "version 2\n".to_owned();
+        for agent in &document.agents {
+            writeln!(
+                out,
+                "\nagent {} {{\n  workspace {}",
+                quote(&agent.id),
+                quote(&agent.workspace)
+            )
+            .unwrap();
+            if let Some(under) = &agent.under {
+                writeln!(
+                    out,
+                    "  under {} reason={}",
+                    quote(&agent_reference(&under.agent)),
+                    quote(&under.reason)
+                )
+                .unwrap();
+            }
+            match &agent.launch {
+                Launch::Command(command) => writeln!(out, "  command {}", quote(command)).unwrap(),
+                Launch::Argv { first, rest } => {
+                    write!(out, "  argv {}", quote(first)).unwrap();
+                    for argument in rest {
+                        write!(out, " {}", quote(argument)).unwrap();
+                    }
+                    out.push('\n');
+                }
+            }
+            out.push_str("}\n");
+        }
+        for mission in &document.missions {
+            writeln!(
+                out,
+                "\nmission {} state={} report-to={} {{",
+                quote(&mission.id),
+                quote(mission.state.kdl()),
+                quote(&agent_reference(&mission.report_to))
+            )
+            .unwrap();
+            for goal in &mission.goals {
+                writeln!(out, "  goal {}", quote(goal)).unwrap();
+            }
+            writeln!(
+                out,
+                "  completion {{\n    when {}\n  }}",
+                quote(mission.completion.kdl())
+            )
+            .unwrap();
+            for step in &mission.steps {
+                writeln!(
+                    out,
+                    "  step {} {{\n    assigned-to {}",
+                    quote(&step.id),
+                    quote(&agent_reference(&step.assigned_to))
+                )
+                .unwrap();
+                for goal in &step.goals {
+                    writeln!(out, "    goal {}", quote(goal)).unwrap();
+                }
+                out.push_str("  }\n");
+            }
+            out.push_str("}\n");
+        }
+        for schedule in &document.schedules {
+            writeln!(out, "\nschedule {} {{", quote(&schedule.id)).unwrap();
+            for (name, value) in [
+                ("host", schedule.host.as_str()),
+                ("every", &schedule.every),
+                ("anchor", &schedule.anchor),
+                ("catch-up", schedule.catch_up.kdl()),
+            ] {
+                writeln!(out, "  {name} {}", quote(value)).unwrap();
+            }
+            if let Some(max) = schedule.max_catch_up {
+                writeln!(out, "  max-catch-up {max}").unwrap();
+            }
+            let id = match &schedule.work.mission {
+                MissionReference::Id(id) => id,
+                MissionReference::Declaration(mission) => &mission.id,
+            };
+            writeln!(
+                out,
+                "  work {{\n    mission {}\n    workspace {}\n  }}\n}}",
+                quote(&format!("mission/{id}@{}", schedule.work.revision)),
+                quote(&schedule.work.workspace)
+            )
+            .unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn authoring_structs_render_parser_accepted_intent() {
+        let editor = Agent {
+            id: "docs/editor".into(),
+            workspace: ".".into(),
+            launch: Launch::Command("true".into()),
+            under: None,
+        };
+        let writer = Agent {
+            id: "docs/writer".into(),
+            workspace: ".".into(),
+            launch: Launch::Command("true".into()),
+            under: Some(Under {
+                agent: AgentReference::Declaration(Box::new(editor.clone())),
+                reason: "The editor reviews the writer's work.".into(),
+            }),
+        };
+        let mission = Mission {
+            id: "docs/daily-review".into(),
+            state: MissionState::Ready,
+            report_to: AgentReference::Declaration(Box::new(editor.clone())),
+            goals: vec!["Review the documentation each day.".into()],
+            completion: Completion::AllStepsExhausted,
+            steps: vec![Step {
+                id: "review".into(),
+                assigned_to: AgentReference::Declaration(Box::new(writer.clone())),
+                goals: vec!["Review the documentation and report corrections.".into()],
+            }],
+        };
+        let schedule = Schedule {
+            id: "docs/daily-review".into(),
+            host: "local".into(),
+            every: "1d".into(),
+            anchor: "2026-01-01T09:00:00Z".into(),
+            catch_up: CatchUp::Latest,
+            max_catch_up: None,
+            work: ScheduledWork {
+                mission: MissionReference::Declaration(Box::new(mission.clone())),
+                revision: "b283ff12e887f06fbeb2da3094b10f8fd2b9b7840f7af8031445b124829f25f7".into(),
+                workspace: ".".into(),
+            },
+        };
+        let document = Declarations {
+            agents: vec![editor, writer],
+            missions: vec![mission],
+            schedules: vec![schedule],
+        };
+        let source = render(&document);
+        let parsed = fractal_store::graph::parse_intent(&source, "local").unwrap();
+        let fixture = fractal_store::graph::parse_intent(
+            include_str!("../../fractal/tests/fixtures/validate-revisions.kdl"),
+            "local",
+        )
+        .unwrap();
+        assert_eq!(parsed.subjects, fixture.subjects);
+        assert_eq!(parsed.missions, fixture.missions);
+        assert_eq!(
+            source,
+            include_str!(
+                "../../../clients/typescript/fractal-declarations/fixtures/daily-review.kdl"
+            )
+        );
+        for id in ["docs/editor", "remote.editor"] {
+            let qualified = source.replace("docs/editor", id);
+            let intent = fractal_store::graph::parse_intent(&qualified, "another-host").unwrap();
+            let subject = format!("agent/{id}");
+            assert!(intent.subjects.contains_key(&subject));
+            assert_eq!(
+                intent.missions["docs/daily-review"].report_to.as_deref(),
+                Some(subject.as_str())
+            );
+        }
+        // Mirror the parser's count boundaries, including its unrestricted step count.
+        for mission_goals in 1..=3 {
+            for step_goals in 0..=3 {
+                let mut boundary = document.clone();
+                boundary.missions[0].goals = vec!["Mission goal".into(); mission_goals];
+                boundary.missions[0].steps[0].goals = vec!["Step goal".into(); step_goals];
+                fractal_store::graph::parse_intent(&render(&boundary), "local").unwrap();
+            }
+        }
+        let mut no_steps = document.clone();
+        no_steps.missions[0].steps.clear();
+        fractal_store::graph::parse_intent(&render(&no_steps), "local").unwrap();
+    }
+
+    #[test]
+    fn other_closed_variants_and_escaping_parse() {
+        for state in [MissionState::Draft, MissionState::Retired] {
+            for catch_up in [CatchUp::All, CatchUp::Skip] {
+                let document = Declarations {
+                    agents: vec![Agent {
+                        id: "local.worker".into(),
+                        workspace: "path\\with\"quote".into(),
+                        launch: Launch::Argv {
+                            first: "echo".into(),
+                            rest: vec!["line\nnext\ttab\rreturn\u{8}\u{c}".into()],
+                        },
+                        under: None,
+                    }],
+                    missions: vec![Mission {
+                        id: "job".into(),
+                        state,
+                        report_to: AgentReference::Subject("agent/local.worker".into()),
+                        goals: vec!["Work".into()],
+                        completion: Completion::AllStepsExhausted,
+                        steps: vec![Step {
+                            id: "work".into(),
+                            assigned_to: AgentReference::Subject("agent/local.worker".into()),
+                            goals: vec!["Do work".into()],
+                        }],
+                    }],
+                    schedules: vec![Schedule {
+                        id: "job".into(),
+                        host: "local".into(),
+                        every: "1d".into(),
+                        anchor: "2026-01-01T09:00:00Z".into(),
+                        catch_up,
+                        max_catch_up: matches!(catch_up, CatchUp::All).then_some(3),
+                        work: ScheduledWork {
+                            mission: MissionReference::Id("job".into()),
+                            revision: "a".repeat(64),
+                            workspace: ".".into(),
+                        },
+                    }],
+                };
+                fractal_store::graph::parse_intent(&render(&document), "local").unwrap();
+            }
+        }
+    }
+}
