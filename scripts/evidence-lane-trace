@@ -4,7 +4,7 @@
   scripts/evidence-lane-trace --lane NAME --lanes-file FILE --root DIR --analyze RAW_STRACE
   scripts/evidence-lane-trace --lane NAME --lanes-file FILE --root DIR --raw OUT -- COMMAND...   (runs COMMAND under strace -f -y)
 
-`.st/required-lanes.json` lists, per lane, the files whose bytes decide what the lane runs (`definition_paths`), the sources it
+The explicitly selected `--lanes-file` lists, per lane, the files whose bytes decide what the lane runs (`definition_paths`), the sources it
 tests (`tree_inputs`) and the paths it looks for and does not find (`absent_paths`). Those lists are written by hand, and a file the
 lane reads but the list omits would let a change alter the lane while keeping a valid digest. This tool is the closure control:
 it reads an `strace -f` log of one real run of the lane's command and reports
@@ -168,7 +168,7 @@ def load_rules(args):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--lane', required=True)
-    parser.add_argument('--lanes-file', required=True, help='the lane file (take it from the accepted base)')
+    parser.add_argument('--lanes-file', required=True, help='explicit lane file from accepted base: .fractal/required-lanes.json, or .st only if absent (arn:lmig:smalltalk:2026-10-27-dot-fractal-config)')
     parser.add_argument('--root', required=True, help='the checkout the lane ran in')
     parser.add_argument('--analyze', metavar='RAW', help='an strace -f log to analyze instead of running a command')
     parser.add_argument('--raw', metavar='OUT', help='with a command: where to write the strace log')

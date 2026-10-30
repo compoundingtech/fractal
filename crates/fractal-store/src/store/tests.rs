@@ -7783,6 +7783,34 @@ fn agent_usage_legacy_response_cost_requires_every_delta_priced_in_one_currency(
 }
 
 #[test]
+fn a_local_step_state_write_takes_its_claims_time_as_replay_does() {
+    let store = Store::open_memory("host-one").unwrap();
+    let step = "step-run/example/build";
+    let mut connection = store.connection.lock().unwrap();
+    connection.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    // The writer stamped the row from its clock before it appended the claim.
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h219b471e3472 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO step_runs(subject, run_id, generation_id, step_path, definition_hash, status, attempt,
+                goals, activated_at_unix_ms, created_at_unix_ms, updated_at_unix_ms)
+             VALUES (?1, 'example', 'example', 'build', 'hash', 'blocked', 1, '[]', '1', '1', '1')",
+        [step],
+    ).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let times = |transaction: &Transaction<'_>| -> (String, String) {
+        transaction.query_row(
+            "SELECT updated_at_unix_ms, activated_at_unix_ms FROM step_runs WHERE subject=?1",
+            [step],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap()
+    };
+    let state = |status: &str| json!({"fields": {"status": status, "reason": null, "readiness_epoch": 1}});
+    normalize_local_projection_timestamps_tx(&transaction, step, "step-run.state", &state("blocked"), 5).unwrap();
+    assert_eq!(times(&transaction), ("5".into(), "1".into()), "only a ready step is activated");
+    normalize_local_projection_timestamps_tx(&transaction, step, "step-run.state", &state("ready"), 7).unwrap();
+    assert_eq!(times(&transaction), ("7".into(), "7".into()));
+}
+
+#[test]
 fn response_usage_binds_to_the_step_held_when_the_harness_recorded_it() {
     let store = Store::open_memory("host-one").unwrap();
     let subject = "agent/example.worker";
