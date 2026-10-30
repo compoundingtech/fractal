@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "prompt.respond refuses an answer other than deny to a prompt that names its call unless the call waits in the seat's conversation, read on the member that receives the answer or relayed from the host that runs the seat: with stale-fence once it has a result (\"that prompt is no longer waiting: ...\") or when the conversation cannot be read (\"that prompt can only be answered in the seat's terminal: ...\"), and with remote-unavailable when that host cannot be reached. The answer is recorded where it lands, as before. Prompt cards read the newest 200 entries, a page, instead of 256. Clients already show stale-fence prompt refusals."
+    "detail": "prompt.respond refuses an answer other than deny to a prompt that names its call, when the seat runs on the member that receives it, unless the call waits in the seat's conversation there: with stale-fence once it has a result (\"that prompt is no longer waiting: ...\") or when the conversation cannot be read (\"that prompt can only be answered in the seat's terminal: ...\"). An answer for a seat another member runs is recorded where it lands, as before, with no live read of that member. Prompt cards read the newest 200 entries, a page, instead of 256. Clients already show stale-fence prompt refusals."
   },
   "downtime": {
     "status": "none",

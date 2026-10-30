@@ -1425,31 +1425,38 @@ async fn open_conversation_subscription(
     .map_err(ApiError::internal)?
 }
 
-/// Whether `call` waits in `seat`'s conversation: among its newest page, read here or relayed
-/// from the host that owns its session, made with no result. A host that cannot be reached is
-/// `remote-unavailable`.
+/// Whether `call` waits in `seat`'s conversation on this member: among its newest page, made
+/// with no result. `None` when the seat's session is owned by another member: an answer then
+/// waits on no live read of it.
 async fn prompt_call_waits(
     state: &AppState,
     session: &ClientSession,
     seat: &str,
     call: &str,
-) -> Result<bool, ApiError> {
-    let (reader, target, asking) = (state.clone(), seat.to_owned(), session.clone());
-    let (session_id, remote) = super::read_deadline::store_read(&state.store, move || {
+) -> Result<Option<bool>, ApiError> {
+    let (reader, target) = (state.clone(), seat.to_owned());
+    let (session_id, elsewhere) = super::read_deadline::store_read(&state.store, move || {
         let (session_id, resolved) = resolve_conversation(&reader, &target)?;
-        let remote = conversation_owner_host(&reader, &asking, resolved.routing_owner.as_ref())?;
-        Ok::<_, ApiError>((session_id, remote))
+        let elsewhere = resolved
+            .routing_owner
+            .as_ref()
+            .and_then(|(_, _, origin)| origin.as_deref())
+            .is_some_and(|origin| origin != reader.store.origin());
+        Ok::<_, ApiError>((session_id, elsewhere))
     })
     .await
     .map_err(ApiError::internal)??;
+    if elsewhere {
+        return Ok(None);
+    }
     // The entries as the conversation keeps them, whatever this session's own reads negotiate.
     let mut entries = session.clone();
     entries.conversation_blocks = false;
-    let page = conversation_page(state, &entries, &session_id, remote.as_deref(), CLIENT_MAX_PAGE_ITEMS).await?;
-    Ok(crate::api::prompt_card::call_waits_among(
+    let page = conversation_page(state, &entries, &session_id, None, CLIENT_MAX_PAGE_ITEMS).await?;
+    Ok(Some(crate::api::prompt_card::call_waits_among(
         page["items"].as_array().map_or(&[][..], Vec::as_slice),
         call,
-    ))
+    )))
 }
 
 /// A conversation's newest page, read here or relayed from its owner. The limit is the
@@ -7890,21 +7897,21 @@ async fn dispatch_action(
                 parameter_string(p, "episode")?,
                 parameter_string(p, "answer")?,
             );
-            // A card may have offered allow from a read before its call's result. Whatever lets
-            // the named call through goes on only while the seat's conversation, read here or
-            // relayed from the host that runs it, shows that call waiting: not once it has its
-            // result, and not when the conversation cannot be read (a host that cannot be reached
-            // says so). The answer is then recorded here, as before, and reaches the seat's hook
-            // as its claim replicates. Only the seat's person is told: anyone else is refused by
-            // the store as before.
+            // A card may have offered allow from a read before its call's result. When the seat
+            // runs on this member, whatever lets the named call through goes on only while its
+            // conversation here shows that call waiting: not once it has its result, and not when
+            // the conversation cannot be read. When it runs elsewhere the answer is recorded here
+            // with no live read of another member: the seat's hook releases only the answer to the
+            // very observation it published, while its harness is blocked on that call, so an
+            // answer to a prompt the seat has moved past releases nothing. Only the seat's person
+            // is told: anyone else is refused by the store as before.
             let person = state.store.agent_person(&seat).map_err(ApiError::internal)?;
             if delegation.is_none() && answer != "deny" && person.as_deref() == Some(authority_actor.as_str()) {
                 let call = state.store.native_prompt_call(&seat, &episode).map_err(ApiError::internal)?;
                 if let Some(call) = call {
                     let refused = match prompt_call_waits(state, session, &seat, &call).await {
-                        Ok(true) => None,
-                        Ok(false) => Some("is no longer waiting: the call it asks about already has a result, or Fractal does not see it waiting in the seat's conversation".to_owned()),
-                        Err(error) if error.code == "remote-unavailable" => return Err(error),
+                        Ok(None | Some(true)) => None,
+                        Ok(Some(false)) => Some("is no longer waiting: the call it asks about already has a result, or Fractal does not see it waiting in the seat's conversation".to_owned()),
                         Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
                     };
                     if let Some(refused) = refused {

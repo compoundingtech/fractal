@@ -230,50 +230,59 @@ async fn an_allow_for_a_call_that_already_has_a_result_is_refused() {
     assert!(state.store.index().unwrap() > before, "the answer was recorded");
 }
 
-/// Nathan answers prompts through one member for seats on every member. An allow that lands on
-/// a member other than the seat's host reads the seat's conversation through the client-read
-/// relay to that host, and is recorded where it lands once the named call waits there; a call
-/// with its result is refused, and so is any allow when the host cannot be reached.
+/// Nathan answers prompts through one member for seats on every member. An allow for a seat
+/// another member runs is recorded where it lands, with no live read of that member, even one
+/// that cannot be reached; the seat's hook releases it only for the very prompt it published.
+/// Recorded for the current prompt it releases it once it replicates; recorded for a prompt the
+/// seat has moved past (the member had not heard yet), it releases nothing.
 #[tokio::test]
-async fn an_allow_for_a_remote_seat_checks_its_call_on_the_seats_host() {
+async fn a_remote_allow_is_recorded_where_it_lands_and_released_only_for_its_prompt() {
     let owner_root = tempfile::tempdir().unwrap();
-    let gateway_root = tempfile::tempdir().unwrap();
-    let (owner, seat, episode, _) = prompted_codex_seat(owner_root.path(), "conversation-owner");
-    let replicate = |gateway: &AppState| {
-        gateway.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    let (owner, seat, episode, _) = prompted_codex_seat(owner_root.path(), "prompt-owner");
+    let member = |name: &str, root: &Path| {
+        let state = tests::test_state_named(root, name);
+        state.store.import_replication("prompt-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+        state
     };
-    let mut gateway = tests::test_state_named(gateway_root.path(), "conversation-gateway");
-    replicate(&gateway);
-    let owner_socket = owner_root.path().join("owner-st3.sock");
-    let served = owner_socket.clone();
-    let owner_app = crate::api::router(owner.clone());
-    tokio::spawn(async move { crate::api::serve_unix(&served, owner_app).await });
-    for _ in 0..200 {
-        if tokio::net::UnixStream::connect(&owner_socket).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    gateway.client_relay =
-        crate::peer::conversation_gateway_relay(&owner_socket, crate::api::raw_terminal_owner_splice, gateway_root.path())
-            .await
-            .unwrap();
-    // A member that reaches no peer.
-    let unreachable_root = tempfile::tempdir().unwrap();
-    let unreachable = tests::test_state_named(unreachable_root.path(), "prompt-island");
-    unreachable.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    let to_owner = |from: &AppState, name: &str| {
+        owner.store.import_replication(name, &from.store.export_replication(0).unwrap()).unwrap();
+    };
+    let (gateway_root, late_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
 
-    // The named call has its result on the seat's host: refused.
-    name_prompt_call(&owner, &seat, "call-done");
-    replicate(&gateway);
-    allow_refused(&gateway, &seat, &episode, "remote-answered", "stale-fence", "already has a result").await;
-    // The named call waits on the seat's host, but this member cannot reach it: refused, saying so.
+    // The named call even has its result on the seat's host: the member cannot see that and
+    // reads nothing there, so it records the allow.
     name_prompt_call(&owner, &seat, "call-waiting");
-    replicate(&gateway);
-    unreachable.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
-    allow_refused(&unreachable, &seat, &episode, "remote-unreachable", "remote-unavailable", "").await;
-    // It waits, and the host is reached: the answer is recorded here.
+    let gateway = member("prompt-gateway", gateway_root.path());
+    assert!(gateway.client_relay.is_none(), "this member reaches no other");
     let before = gateway.store.index().unwrap();
-    allow_prompt(&gateway, &seat, &episode, "remote-waiting").await.unwrap();
-    assert!(gateway.store.index().unwrap() > before, "the answer was recorded where it landed");
+    allow_prompt(&gateway, &seat, &episode, "remote-current").await.unwrap();
+    assert!(gateway.store.index().unwrap() > before, "recorded where it landed");
+    // Replicated to the seat's host, it is the answer its hook waits for.
+    assert_eq!(owner.store.native_prompt_state(&seat, 1, 3).unwrap(), crate::store::NativePromptState::Open);
+    to_owner(&gateway, "prompt-gateway");
+    assert_eq!(
+        owner.store.native_prompt_state(&seat, 1, 3).unwrap(),
+        crate::store::NativePromptState::Answered { answer: "allow".into() }
+    );
+
+    // A member that last heard of the seat at an earlier prompt allows it, while the seat has
+    // moved on to another: the hook waiting on the new prompt is not answered by it.
+    let (late_owner_root, late_seat_root) = (tempfile::tempdir().unwrap(), late_root);
+    let (owner, seat, episode, _) = prompted_codex_seat(late_owner_root.path(), "prompt-owner");
+    name_prompt_call(&owner, &seat, "call-waiting");
+    let late = tests::test_state_named(late_seat_root.path(), "prompt-late");
+    late.store.import_replication("prompt-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    append_seat_claim(&owner, &seat, "harness.observed", json!({"state":"working","driver":"codex","incarnation_id":"native-pty:one",
+        "evidence_incarnation":"provider-one","blocked_on":null,"ask":null,"ownership_sequence":1,"transition_sequence":4}));
+    append_seat_claim(&owner, &seat, "harness.observed", json!({"state":"blocked","driver":"codex","incarnation_id":"native-pty:one",
+        "evidence_incarnation":"provider-one","blocked_on":"human","ask":"permission","reason":"commandExecution",
+        "ownership_sequence":1,"transition_sequence":5}));
+    allow_prompt(&late, &seat, &episode, "remote-moved-past").await.unwrap();
+    owner.store.import_replication("prompt-late", &late.store.export_replication(0).unwrap()).unwrap();
+    assert_eq!(
+        owner.store.native_prompt_state(&seat, 1, 3).unwrap(),
+        crate::store::NativePromptState::Gone,
+        "the earlier prompt is gone: its hook releases nothing"
+    );
+    assert_eq!(owner.store.native_prompt_state(&seat, 1, 5).unwrap(), crate::store::NativePromptState::Open, "the new prompt still waits");
 }
