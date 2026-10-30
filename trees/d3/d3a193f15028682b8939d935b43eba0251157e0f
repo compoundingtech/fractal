@@ -2,3 +2,4 @@ record 4f2cbf18de83cec7a9bdafb13070e7de9fba98e1 typescript-client 0 host/spindle
 record 88e6162a0da5b07589f64a7551d108d2dbce688a genie-freshness 0 host/spindle 2026-10-30T12:21:50Z
 record 0df8b9439b8ab50c4a4f35d2d71246e29ea119e5 ci-script-tests 0 host/spindle 2026-10-30T12:26:21Z
 record 0675d5147c874ad4235e1c1a1d9de226d7e4894d linux-gate 0 host/spindle 2026-10-30T12:40:20Z
+record a9195b3699337f177927e7ed2f11f0ad875388d9 fractal-web 0 host/spindle 2026-10-30T13:05:13Z
