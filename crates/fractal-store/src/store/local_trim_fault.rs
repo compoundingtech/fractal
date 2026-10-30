@@ -56,6 +56,13 @@ impl Store {
         Ok(())
     }
 
+    /// Resume stopped checkpoints and end every open local trim stop. A person may, and on a
+    /// member that trims locally so may the agent `[trim] notify` names, and no other agent.
+    pub fn resume_stopped_trims(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+        self.resume_checkpoints_allowing(actor, reason, self.trim_notify().as_deref())?;
+        self.recover_local_trim_stops(actor, reason)
+    }
+
     /// End every open local trim stop, after a resume.
     pub fn recover_local_trim_stops(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
         let subject = format!("daemon/{}", self.origin());
