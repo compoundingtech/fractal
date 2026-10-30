@@ -498,7 +498,7 @@
           inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
-            "fractal"
+            "st3"
             "-p"
             "fractal-migrate"
           ];
@@ -509,6 +509,8 @@
             "smallclaims"
             "-p"
             "fractal-runtime"
+            "-p"
+            "st3"
             "-p"
             "fractal"
             "-p"

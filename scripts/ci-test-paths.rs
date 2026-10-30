@@ -77,6 +77,38 @@ macro_rules! test_bin {
     };
 }
 
+/// st3 beside `fixture`, where the st3 package puts it in the same target directory (`cargo test
+/// --workspace`, `-p st3`, or a nextest archive of both). A plain `cargo test -p fractal` does not
+/// build it: a missing st3 fails, and one older than the fixture may be stale and is warned about.
+#[allow(dead_code)]
+pub(crate) fn st3_beside(fixture: &std::path::Path) -> String {
+    let st3 = fixture.with_file_name("st3");
+    let modified = |path: &std::path::Path| path.metadata().and_then(|metadata| metadata.modified());
+    match (modified(&st3), modified(fixture)) {
+        (Err(error), _) => panic!(
+            "{} is missing ({error}): the st3 package builds it; run these tests with -p st3 or --workspace",
+            st3.display()
+        ),
+        (Ok(st3_time), Ok(fixture_time)) if st3_time < fixture_time => eprintln!(
+            "warning: {} is older than fractal-fixture and may be stale; build it too with -p st3",
+            st3.display()
+        ),
+        _ => {}
+    }
+    st3.to_str().expect("test target path is UTF-8").to_owned()
+}
+
+/// The st3 executable, another package's binary, as a path string (see `st3_beside`).
+#[allow(unused_macros)]
+macro_rules! st3_bin {
+    () => {{
+        static VALUE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        VALUE
+            .get_or_init(|| crate::ci_test_paths::st3_beside(test_bin!("fractal-fixture")))
+            .as_str()
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve;

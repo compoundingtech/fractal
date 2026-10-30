@@ -32,6 +32,8 @@
     "AGENTS.md",
     "CLAUDE.md",
     "clients",
+    "crates/fractal-build-stamp",
+    "crates/st3",
     "docs/st3/action-coverage.json",
     "docs/st3/actor-contract.json",
     "docs/st3/client-v0",
@@ -398,6 +400,11 @@
   },
   "smallclaims": {
    "extra": []
+  },
+  "st3": {
+   "extra": [
+    "scripts/ci-test-paths.rs"
+   ]
   }
  },
  "no_tests": [

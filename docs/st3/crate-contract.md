@@ -110,7 +110,7 @@ macros. Other crates use a part of it:
   <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-state-dirs-fractal -->
 - **fractal-telemetry names nothing above the kernel.** Its modules reach `st3_kernel` and `smallclaims` only.
   Two tests read source files through `include_str!`: `startup_telemetry` reads `crates/fractal/src/main.rs`
-  (`../../st3/src/main.rs`) and `slo` reads `crates/fractal-api-core/src/api.rs` (`../../fractal-api-core/src/api.rs`).
+  (`../../fractal/src/main.rs`) and `slo` reads `crates/fractal-api-core/src/api.rs` (`../../fractal-api-core/src/api.rs`).
   <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-state-dirs-fractal — DELETE at contraction — #3032 -->
   The sole R11 exception is `fractal_client::product_dirs`, for the same standalone
   resolver ownership reason. `scripts/check-module-layers` enforces this exact
