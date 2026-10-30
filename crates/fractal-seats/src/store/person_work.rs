@@ -1047,12 +1047,10 @@ mission "person-work" state="ready" {{
             item.default_answer,
             Some(json!({"id": "keep-open", "label": "Keep it open"}))
         );
+        // The stored attention projection does not read the deadline policy, so a policy change
+        // cannot leave its rows stale: the published list adds the deadline at each fold.
         let row = fractal_store::store::attention_ivm::resource(&item).unwrap();
-        assert_eq!(
-            row["deadline_at"],
-            json!(fractal_store::client_values::client_timestamp(deadline))
-        );
-        assert_eq!(row["default_answer"]["label"], "Keep it open");
+        assert!(row.get("deadline_at").is_none() && row.get("default_answer").is_none(), "{row}");
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
         assert!(
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),

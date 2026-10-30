@@ -427,6 +427,60 @@ assert!(after.evaluated_at_unix_ms > stale);
 assert_eq!(store.attention_list_folds().get("clock"), Some(&1));
 }
 
+/// The publication again, as if it had been evaluated one clock period ago.
+fn age(store: &Store) {
+let before = newest(store);
+let (generation, _) = store.newest_attention_list();
+store.publish_attention_list(
+    generation,
+    AttentionPublication {
+        cut: before.cut,
+        projection: before.projection.clone(),
+        evaluated_at_unix_ms: before.evaluated_at_unix_ms - 31_000,
+        due_at_unix_ms: None,
+        future_after: None,
+        published_at_unix_ms: before.published_at_unix_ms,
+        owners: before.owners.clone(),
+        rows: Arc::clone(&before.rows),
+        fleet: before.fleet.clone(),
+    },
+    false,
+);
+}
+
+/// The deadline policy lives in `meta`, not in claims: turning deadlines on or off or changing
+/// the fleet default changes the served rows at the next clock fold, with no claim written.
+#[test]
+fn the_published_list_follows_the_deadline_policy_without_a_claim() {
+let (store, _, request) = fixture();
+store.start_attention_list_refresher().unwrap();
+// Asked while deadlines are off, so the claim records no deadline of its own.
+let ask = store.ask_person(&request).unwrap();
+let served = |publication: &AttentionPublication| {
+    publication
+        .rows
+        .iter()
+        .find(|row| row["source_id"] == ask.subject)
+        .expect("the ask is on the home")["deadline_at"]
+        .clone()
+};
+let at = |ms: u128| json!(fractal_store::client_values::client_timestamp(ms));
+assert_eq!(served(&refresh_and_check(&store)), Value::Null);
+store.set_ask_deadlines(true);
+let on = now_ms();
+store.reconcile_person_asks_at(on).unwrap();
+age(&store);
+let day = fractal_store::store::person_work::DEFAULT_ASK_DEADLINE_MS as u128;
+assert_eq!(served(&refresh_and_check(&store)), at(on + day), "counted from the turn-on");
+store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
+age(&store);
+assert_eq!(served(&refresh_and_check(&store)), at(on + 2 * 3_600_000), "the new fleet default");
+store.set_ask_deadlines(false);
+store.reconcile_person_asks_at(now_ms()).unwrap();
+age(&store);
+assert_eq!(served(&refresh_and_check(&store)), Value::Null, "no deadline while off");
+}
+
 #[test]
 fn delta_reads_only_claims_since_the_cut() {
 let (store, _, request) = fixture();
