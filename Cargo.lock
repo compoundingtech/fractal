@@ -1576,6 +1576,7 @@ dependencies = [
  "libc",
  "notify",
  "opentelemetry",
+ "parking_lot",
  "pty-client",
  "pty-core",
  "reqwest",
@@ -1585,6 +1586,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smallclaims",
+ "socket2",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.27.0",
@@ -2030,6 +2032,7 @@ name = "fractal-feed"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "fractal-client",
  "fractal-conversation-ui",
  "serde",
@@ -2341,6 +2344,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -2409,6 +2413,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "sha2 0.10.9",
+ "smallclaims",
  "tempfile",
  "tokio",
  "uuid",
@@ -2522,6 +2527,7 @@ dependencies = [
  "fractal-client",
  "fractal-drivers",
  "fractal-kernel",
+ "fractal-runtime",
  "futures-util",
  "hex",
  "libc",
@@ -2611,6 +2617,7 @@ name = "fractal-ui-model"
 version = "0.1.0"
 dependencies = [
  "fractal-client",
+ "fractal-schema",
  "serde",
  "serde_json",
 ]

@@ -1435,10 +1435,12 @@ mod tests {
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
         seat_priority: None,
+        lanes: None,
         person: None,
         fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
         shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
         state_dir: "/var/lib/st3".into(),
+        store_dir: None,
         pty_root: Some("/var/lib/pty".into()),
         socket: "/run/user/1000/st3.sock".into(),
         client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
@@ -1455,6 +1457,7 @@ mod tests {
         trim: crate::config::TrimConfig::default(),
         limits: crate::config::LimitsConfig::default(),
         reconcile: crate::config::ReconcileConfig::default(),
+        asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;

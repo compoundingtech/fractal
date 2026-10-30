@@ -365,14 +365,16 @@ class Seats:
 
 
 def driver_processes(node):
-    """The seat's long-lived st3 processes (driver and channels), by pid and the inode they execute."""
+    """The seat's long-lived st processes (driver and channels), by pid and the inode they execute."""
     rows = {}
     for pid, argv in node.seat_processes():
         if " driver-hook " in argv:
             continue
         try:
             exe = Path(f"/proc/{pid}/exe").resolve()
-            if exe.name.startswith("st3"):
+            # The test binary is fractal-fixture, an install's is fractal or st3, and the reexec
+            # canary's copy is st3-replacement.
+            if exe.name.startswith(("fractal", "st3")):
                 rows[pid] = (argv, os.stat(f"/proc/{pid}/exe").st_ino)
         except OSError:
             pass

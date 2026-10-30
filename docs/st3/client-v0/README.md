@@ -6,8 +6,6 @@ in [`schemas`](schemas) and [`fixtures`](fixtures) are the normative wire exampl
 clients consume the same JSON; no client parses CLI output, Markdown, KDL, claim envelopes, or
 harness transcript files.
 
-Proposed changes extensions (not implemented): [per-turn files, patches, and branch Changes scope](turn-diff-design.md).
-
 The reusable Rust package is [`crates/fractal-client`](../../../crates/fractal-client) and supports both the
 local Unix socket and authenticated paired HTTP over Tailscale or optional Fabric. The Swift package is
 [`clients/swift/FractalClient`](../../../clients/swift/FractalClient). The Expo TypeScript client is
@@ -1383,8 +1381,8 @@ contains only stale-fence/rate-limited. Swift preserves unknown codes and `retry
 
 Legacy `custom.client.action-result` receipts cannot prove server authorship, even
 with a local origin and absent/null actor. A retry whose key has any such receipt
-fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
-side effects. This covers both actor-bearing old server receipts and old
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` and `retryable: false`
+before dispatch or side effects. This covers both actor-bearing old server receipts and old
 client-forged receipts; neither is silently upgraded or replayed. Inspect the
 original outcome before choosing a new key. New typed receipts replay normally.
 No stored claims are rewritten and no migration is required.
@@ -1499,7 +1497,8 @@ submits the runtime resource ID as `target_id` and copies its `incarnation_id` a
 same authority as `agent.create`: the session's concrete person, or a local agent acting as
 itself (free mode).
 Stop publishes the same desired stop as `st agents stop`, even if no runtime is live, and
-preserves the immutable declaration. Start restores the unambiguous preceding agent
+preserves the immutable declaration. A nonblank `reason` is kept in that stop and returns in
+the agent's `end_reason` with the actor once the seat has stopped. Start restores the unambiguous preceding agent
 declaration with its original identity and host, like `st agents start` without overrides.
 Mission-owned agents must instead be changed through their mission. Both actions copy the
 selected desired claim ID into `fence.runtime_desired_revision`, reject stale fences, and
@@ -2250,7 +2249,7 @@ Member daemons replicate the claims; paired clients read them through a member g
 ## Person arrangements
 
 An arrangement is shared sidebar organization, not a private pane workspace. Discover
-`arrangements` capability version 1 and the `read.arrangements` / `control.arrangements`
+`arrangements` capability version 2 and the `read.arrangements` / `control.arrangements`
 scopes. Glass identity, pane bodies, and privacy are unchanged. Authenticated persons and
 trusted fleet agents read and write in today's free mode as their **real actor**; an agent
 never impersonates the owner. Ownership is permanently the person in
@@ -2416,7 +2415,7 @@ typed operation unions, not arbitrary JSON bodies. Regenerate all clients with
 `cargo run -p fractal-client-codegen`; verify freshness with
 `cargo run -p fractal-client-codegen -- --check`.
 
-Fractal migration is client-owned: discover capability, pause legacy writers, fold old
+Legacy custom-to-v1 Fractal migration is client-owned: discover capability, pause legacy writers, fold old
 `custom.fractal.sidebar` HLC history once, and durably stage the snapshot, target ID,
 exact typed operations and idempotency key. Preserve stable IDs, import order (keys are
 re-derived), tombstones and placements. Fractal sorts legacy siblings by `(key, ID)` and
@@ -2425,6 +2424,68 @@ Retry that exact staged request until acknowledged and readable, then switch
 exclusively to arrangements. Old stamps remain provenance, not live ordering. Keep staged
 state on failure, leave immutable custom history, and never dual-write. There is no
 upstream Fractal-specific importer.
+
+### Ordered memberships and new version-2 layouts
+
+New arrangements opt into a folder-only body with `arrangement.edit` parameters
+`{subject, owner, version: 2, operations: [{op: "create", name}]}`. Version is accepted only
+on creation; omission creates v1. A v2 body retains the versioned name and folder registers
+but has no `placements`. Existing v1 bodies and `subject.place` behavior remain supported:
+this primitive does not migrate historical winners or convert an existing arrangement.
+If offline v1 and v2 creates collide on one identity, retained unrepaired v1 creation or
+placement authority preserves the v1 layout; the v2 pair records remain retained but inactive.
+
+**Lock-step reader rollout:** upgrade every client that reads an owner's arrangement list
+or collection stream to a version-2-aware decoder **before creating that owner's first v2
+layout**. The list is not filtered by a reader-negotiated body version: an older decoder
+that requires `placements` cannot decode a list containing a v2 body. The advertised
+`arrangements` capability version 2 discovers server support; it does not negotiate an
+older response shape. Keeping v1 layouts supported does not make old list readers
+compatible with v2 layouts. Coordinate these reader upgrades before enabling v2 writers.
+
+Read `GET /v1/client/arrangements/{person_name}/{uuid}/memberships?person=person%2FNAME`.
+The response is an `OrderedMembershipPage`, with `collection: "ordered-memberships"` and
+rows `{id, container, member, position: {bucket, key}, revision}`. `id` equals the member's
+stable subject; root is an explicit null bucket. Indexed order is `(effective bucket, key,
+member)`, with root first. Cursors bind the person, container, limit and snapshot; repeat those
+filters and reread after `page-cursor-expired`. Retired or unknown members are hidden, not
+deleted. Where a family's lifecycle permits same-ID redeclaration, it restores the retained
+position. An ordinary declared `stop`, and runtime stopped or suspended observations,
+do not retire a declaration; a terminal retirement remains hidden under that family's rules.
+
+Submit `arrangement.membership.edit` with `{subject, owner, operations}`. Each operation is
+either `{op: "place", member, bucket: null | FolderId, key}` or `{op: "remove", member}`.
+The bucket field is mandatory even for root; bucket and key win atomically in canonical
+claim order. Removal retains an absent winner. These are claim-backed pair records, not
+new graph subjects. Real actors, owner checks, idempotency receipts and subject fences use
+the ordinary action protocol; a supplied container fence must match in the writer transaction.
+Local admission allows 4,096 live members, not 4,096 lifetime pairs, and never truncates a
+replicated union. If a union is already over the limit, removal and reordering remain allowed;
+only a positive net increase that leaves it over the limit is refused. An edit has at most
+1,024 unique operations and a 1 MiB serialized bound.
+
+Subscribe with `{kind: "subscribe", id, collection: "ordered-memberships", person,
+subject: ArrangementId, limit}`. This bounded held window emits typed membership snapshots
+and changes, complete order and refill after removals/lifecycle changes. Membership rows are
+not `Resource` values; the schema uses separate frame variants and Rust emits
+`MembershipSnapshot`/`MembershipChanges` events. Generated clients expose typed membership
+page, action and subscription helpers. V1 membership reads/actions refuse rather than
+pretending legacy placements are an empty v2 collection. No new checkpoint rule drops
+hidden pairs, absent winners or their lifecycle dependencies.
+
+Every membership `snapshot` and `changes` frame also carries a required
+`membership: {container, live_count, changed_index}` describing the whole container, not
+only the held window. `live_count` counts live members. `changed_index` is an opaque,
+host-local, monotonic invalidation frontier scoped by the frame's `snapshot.host_id`: when
+it moves, the container may have changed, possibly outside the window, and a consumer that needs the
+complete set rereads it. A `changes` frame may therefore repeat the window's rows, order and
+`has_more` while reporting new state. `changed_index` is not a canonical revision, a count of
+global history or a winner; it never compares across hosts and stays out of shared digests and
+checkpoint answers. A frame without `membership`, or with any of its fields missing, is
+refused. Resource collection frames carry no membership state.
+Projection rebuild and heal retain a local rebuild frontier, so replaying older canonical
+claims cannot move a lifecycle-updated frontier backwards. This watermark survives on the
+same host without becoming shared projection or checkpoint authority.
 
 ## Agent and plain-shell creation
 
@@ -2609,7 +2670,7 @@ cut-not-ready message/error as a barrier timeout if the publication is older. Th
 in-repo CLI mutation-following roster read; existing mutation commands' point-detail reads
 stay unchanged.
 
-Without an explicit cut, a read returns a retryable 503 (the stream sends `resync`) only before
+Without an explicit cut, a read returns a retryable 503 `agent-roster-not-ready` (the stream sends `resync`) only before
 a usable roster of the requested mode has been published, or after a full projection reset
 clears it. Current and history rosters remain separate: a history read never substitutes
 current-only membership.
@@ -2621,7 +2682,9 @@ continuation is already pinned to its first page's cut.
 A card-faults read that reaches its deadline does not stop publication. Other card fields
 are current; each affected card keeps its previous `fault`, including a known null value.
 A card with no previous value reports `"fault status unknown"` in that same field. The next
-refresh retries those faults even if no claim changed.
+refresh retries those faults even if no claim changed. The refresher's card-faults read is
+bounded by 25 ms of query CPU time, with a one-second wall backstop for a stalled page read,
+so a scheduling pause on a loaded host does not reach its deadline.
 
 ### Immutable current publications
 

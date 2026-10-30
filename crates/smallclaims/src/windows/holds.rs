@@ -53,8 +53,8 @@ struct Asked {
     at: &'static Location<'static>,
     /// When it asked, so a hold can say how long its holder waited for the writer.
     asked: Instant,
-    /// The `longest_during` scope this thread was in when it asked.
-    observer: Option<Arc<AtomicU64>>,
+    /// The `longest_during` or `holds_during` scope this thread was in when it asked.
+    observer: Option<Arc<Observed>>,
     /// The `Stages` scope this thread was in when it asked.
     stages: Option<Arc<Mutex<StageClock>>>,
 }
@@ -455,7 +455,7 @@ impl Drop for WriterHold {
             }
         }
         if let Some(observer) = &self.holder().0.observer {
-            observer.fetch_max(us(held), Ordering::Relaxed);
+            observer.longest.fetch_max(us(held), Ordering::Relaxed);
         }
         self.log_if_long(held);
         let over = super::record_store(StoreWork::WriterHold, held);
@@ -497,23 +497,67 @@ impl Drop for ReadHold {
     }
 }
 
-thread_local! {static OBSERVER: RefCell<Option<Arc<AtomicU64>>> = const {RefCell::new(None)};}
+thread_local! {static OBSERVER: RefCell<Option<Arc<Observed>>> = const {RefCell::new(None)};}
+
+/// What a `holds_during` scope saw.
+#[derive(Debug, Default)]
+pub struct Observed {
+    /// The longest writer hold, in microseconds.
+    longest: AtomicU64,
+    /// What each paged writer hold covered, in the order the holds ended (`covered`).
+    pages: Mutex<Vec<(&'static str, usize)>>,
+}
+
+/// The writer holds work this thread asked for during a `holds_during` scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holds {
+    /// The longest one, on the wall clock.
+    pub longest: Duration,
+    /// What each hold of a paged bulk path covered, as that path reported it: the unit (claims
+    /// sealed, envelopes received or admitted, claims projected, repairs applied) and how many.
+    pub pages: Vec<(&'static str, usize)>,
+}
+
+impl Holds {
+    /// The counts the holds reported in `unit`, one per hold.
+    pub fn pages_of(&self, unit: &str) -> Vec<usize> {
+        self.pages.iter().filter(|(of, _)| *of == unit).map(|(_, count)| *count).collect()
+    }
+}
 
 /// Run `work`, and return with its result the longest writer hold charged to work this thread
 /// asked for during it. Unlike the report, it does not depend on how many other holders the
 /// process has, so a test can bound one path while others run beside it.
 pub fn longest_during<T>(work: impl FnOnce() -> T) -> (T, Duration) {
-    struct Restore(Option<Arc<AtomicU64>>);
+    let (result, holds) = holds_during(work);
+    (result, holds.longest)
+}
+
+/// `longest_during`, with what each paged hold covered.
+pub fn holds_during<T>(work: impl FnOnce() -> T) -> (T, Holds) {
+    struct Restore(Option<Arc<Observed>>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let previous = self.0.take();
             OBSERVER.with(|observer| *observer.borrow_mut() = previous);
         }
     }
-    let observed = Arc::new(AtomicU64::new(0));
+    let observed = Arc::new(Observed::default());
     let _restore = Restore(OBSERVER.with(|observer| observer.borrow_mut().replace(observed.clone())));
     let result = work();
-    (result, Duration::from_micros(observed.load(Ordering::Relaxed)))
+    let pages = std::mem::take(&mut *observed.pages.lock().unwrap_or_else(PoisonError::into_inner));
+    (result, Holds { longest: Duration::from_micros(observed.longest.load(Ordering::Relaxed)), pages })
+}
+
+/// A paged bulk path says what one writer hold covered: `count` of `unit`. It reports once per
+/// hold, from the thread that asked for the hold. Kept only inside a `holds_during` scope;
+/// anywhere else it is one thread-local read.
+pub fn covered(unit: &'static str, count: usize) {
+    OBSERVER.with(|observer| {
+        if let Some(observed) = observer.borrow().as_ref() {
+            observed.pages.lock().unwrap_or_else(PoisonError::into_inner).push((unit, count));
+        }
+    });
 }
 
 /// Stages a lend keeps; a later stage adds to `other`, the last.
@@ -917,6 +961,23 @@ mod tests {
         assert!(Holder::current().0.observer.is_none());
         let ((), unasked) = longest_during(|| {});
         assert_eq!(unasked, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_scope_keeps_what_each_paged_hold_covered_and_nothing_outside_it() {
+        covered("claims", 9);
+        let ((), holds) = holds_during(|| {
+            for page in [64, 64, 12] {
+                let hold = WriterHold::start(HoldKind::Lend, &Holder::current());
+                covered("claims", page);
+                drop(hold);
+            }
+            covered("envelopes", 8);
+        });
+        assert_eq!(holds.pages_of("claims"), vec![64, 64, 12]);
+        assert_eq!(holds.pages_of("envelopes"), vec![8]);
+        let ((), unasked) = holds_during(|| {});
+        assert!(unasked.pages.is_empty());
     }
 
     #[test]

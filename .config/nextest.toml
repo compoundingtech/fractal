@@ -132,6 +132,10 @@ priority = 50
 test-threads = 8
 fail-fast = false
 retries = { count = 2, backoff = "fixed", delay = "30s", jitter = false }
+# A test still running after 10 minutes is killed and fails (TIMEOUT), and is retried like any other failure, so a hung
+# test fails its run instead of holding it until the job's timeout-minutes in CI or forever in a local scripts/st-test.
+# The longest tests take under 2 minutes. scripts/ci-linux (nextest_timeout_check) holds this bound and shows a hang is killed.
+slow-timeout = { period = "60s", terminate-after = 10 }
 status-level = "fail"
 final-status-level = "flaky"
 # The gate covers the current workspace. It leaves out the retained fractal-drivers

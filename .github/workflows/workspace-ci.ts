@@ -238,7 +238,7 @@ export const nixCacheStep = {
   if: "env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'",
   uses: 'actions/cache/restore@v4',
   with: {
-    path: '${{ runner.temp }}/st-ci-cache',
+    path: '${{ runner.temp }}/fractal-ci-cache',
     key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}",
     'restore-keys': 'nix5-${{ github.job }}-${{ runner.os }}-\nnix4-${{ github.job }}-${{ runner.os }}-',
   },
@@ -277,11 +277,11 @@ export const commonSetupSteps = [
   {
     name: 'Use the runner\'s own caches',
     run: `if [ -n "\${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"`,
+printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"`,
   },
   // actions/cache is served by Namespace's accelerated cache backend and is keyed, not tied to a node.
   // Namespace cache volumes are per node and replicate in the background, so a job on another node
-  // starts empty. /nix itself cannot be cached (see scripts/ci-nix-cache); RUNNER_TEMP/st-ci-cache holds a
+  // starts empty. /nix itself cannot be cached (see scripts/ci-nix-cache); RUNNER_TEMP/fractal-ci-cache holds a
   // local Nix binary cache instead. Linux only: the key names the job, so each stage keeps its own.
   buildSnapshotRestore,
   cargoCacheStep,
@@ -292,7 +292,7 @@ printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEM
     name: 'Isolate test home and XDG state',
     run: `# Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
 # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+printf 'CARGO_HOME=%s\\nCI_CACHE_DIR=%s\\n' "\${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
 home="$RUNNER_TEMP/test-home"
 mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
 printf 'HOME=%s\\nXDG_CONFIG_HOME=%s/.config\\nXDG_CACHE_HOME=%s/.cache\\nXDG_STATE_HOME=%s/.local/state\\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"`,
