@@ -81,6 +81,10 @@ aggregate their agents' current question prompts; Inbox aggregates all of them.
 Titles retain 26 cells. A narrow strip drops counts first, then the attention suffix,
 while keeping activity at the left, even if padding and the title no longer fit.
 Overflow markers reach hidden tabs.
+Wheel right/down over a strip browses one whole tab right; wheel left/up browses left.
+This does not select a tab. Each split keeps its own temporary view; selecting another
+tab reveals it again if necessary. `‹N` / `N›` count the tabs outside that view.
+Overflow budgets keep a cell for activity, showing fewer whole tabs when needed.
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
