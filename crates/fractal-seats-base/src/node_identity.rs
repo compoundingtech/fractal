@@ -257,11 +257,11 @@ pub fn resolve(config: &mut Config) -> Result<()> {
 /// An explicit path is an operator-selected existing directory, never a mkdir request.
 /// Inspect both locations before opening SQLite or persisting a node pin.
 fn validate_store_location(config: &Config) -> Result<bool> {
-    reject_store_database_symlinks(&store_dir(config))?;
+    let directory = store_dir(config);
     if config.store_dir.is_none() {
+        reject_store_database_symlinks(&directory)?;
         return Ok(false);
     }
-    let directory = store_dir(config);
     let metadata = fs::metadata(&directory).with_context(|| {
         format!(
             "configured store directory (store_dir) {} must already exist and be a directory",
@@ -273,6 +273,7 @@ fn validate_store_location(config: &Config) -> Result<bool> {
         "configured store directory (store_dir) {} is not a directory",
         directory.display()
     );
+    reject_store_database_symlinks(&directory)?;
     let configured = fs::canonicalize(&directory)?;
     let state = match fs::canonicalize(&config.state_dir) {
         Ok(state) => Some(state),
