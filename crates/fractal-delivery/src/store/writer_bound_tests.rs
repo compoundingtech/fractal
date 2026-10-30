@@ -204,7 +204,18 @@ fn first_projection_hold_benchmark() {
     let target = Store::open(&directory.path().join("target.sqlite3"), "first-projection-target").unwrap();
     target.bind_fleet(&fleet).unwrap();
     for _ in 0..exchanges {
-        let inventory = target.replication_inventory().unwrap();
+        let mut inventory = target.export_replication_summary(&fleet).unwrap().inventory;
+        if inventory.buckets.is_empty() {
+            // An empty store's summary has no range digests, and a source answers a bucketless
+            // inventory with its whole inventory, past the metadata limit at this size (see
+            // #3440). One empty range asks for a compact answer instead.
+            inventory.buckets.push(smallclaims::replication::ReplicationInventoryBucket {
+                writer: String::new(),
+                start: 0,
+                count: 0,
+                digest: String::new(),
+            });
+        }
         let exchange = source.export_replication_exchange(&fleet, &inventory).unwrap();
         if exchange.envelopes.is_empty() {
             break;
