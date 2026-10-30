@@ -219,7 +219,9 @@ async fn an_allow_for_a_call_that_already_has_a_result_is_refused() {
     refused("allow-unreadable", "can only be answered in the seat's terminal").await;
     // Read again, it waits: the answer is recorded.
     std::fs::write(&transcript, &kept).unwrap();
-    answer("allow-waiting").await.unwrap();
+    let before = state.store.index().unwrap();
+    let _recorded = answer("allow-waiting").await.unwrap();
+    assert!(state.store.index().unwrap() > before, "the answer was recorded");
     // A result more entries back than a card reads still counts: the call no longer waits.
     let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
     let mut later = vec![json!({"type":"response_item","timestamp":"2026-10-30T12:00:04Z","payload":{"type":"function_call_output","call_id":"call-waiting","output":"released"}})];
