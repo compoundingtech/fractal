@@ -90,10 +90,10 @@ pub fn start_attention_list(state: &AppState) {
                         return Ok(());
                     }
                     // A prompt card reads its seat's conversation on this node, following it
-                    // from before the read.
+                    // from before the read; one another member keeps, its follower read last.
                     let pending = |seat: &str| {
-                        super::prompt_card::seat_pending_calls(&summary_state, seat, |transcript| {
-                            watching(&watch).follow(transcript)
+                        super::prompt_card::seat_pending_calls(&summary_state, seat, |conversation| {
+                            watching(&watch).follow_conversation(conversation)
                         })
                     };
                     watching(&watch).begin();

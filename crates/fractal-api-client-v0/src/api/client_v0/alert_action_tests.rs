@@ -286,3 +286,98 @@ async fn a_remote_allow_is_recorded_where_it_lands_and_released_only_for_its_pro
     );
     assert_eq!(owner.store.native_prompt_state(&seat, 1, 5).unwrap(), crate::store::NativePromptState::Open, "the new prompt still waits");
 }
+
+/// A prompt card on a member other than the seat's host reads the seat's conversation through
+/// the client-read relay, as the seat's person, from a follower of its own: its first read and
+/// a result written on the host each wake the card's refresher, and the card read again shows
+/// them. The fold never waits on the host: a host that never answers leaves the card unread,
+/// and a member that reaches no peer says why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_card_on_another_member_reads_and_follows_its_seat_through_the_relay() {
+    use crate::api::prompt_card::{PromptWatch, seat_pending_calls};
+    let owner_root = tempfile::tempdir().unwrap();
+    let gateway_root = tempfile::tempdir().unwrap();
+    let (owner, seat, _, transcript) = prompted_codex_seat(owner_root.path(), "conversation-owner");
+    let gateway = tests::test_state_named(gateway_root.path(), "conversation-gateway");
+    gateway.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    let owner_socket = owner_root.path().join("owner-st3.sock");
+    let served = owner_socket.clone();
+    let owner_app = crate::api::router(owner.clone());
+    tokio::spawn(async move { crate::api::serve_unix(&served, owner_app).await });
+    for _ in 0..200 {
+        if tokio::net::UnixStream::connect(&owner_socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let relayed = |socket: std::path::PathBuf, root: std::path::PathBuf| {
+        let mut gateway = gateway.clone();
+        async move {
+            gateway.client_relay =
+                crate::peer::conversation_gateway_relay(&socket, crate::api::raw_terminal_owner_splice, &root).await.unwrap();
+            gateway
+        }
+    };
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let watch = Arc::new(std::sync::Mutex::new(PromptWatch::new(Arc::clone(&wake))));
+    // As the refresher does, from its blocking fold.
+    let read = |state: AppState| {
+        let (watch, seat) = (Arc::clone(&watch), seat.clone());
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut watch = watch.lock().unwrap();
+                watch.begin();
+                let calls = seat_pending_calls(&state, &seat, |conversation| watch.follow_conversation(conversation));
+                watch.finish();
+                calls.map(|calls| calls.iter().map(|call| call["call_id"].as_str().unwrap().to_owned()).collect::<Vec<_>>())
+            })
+            .await
+            .unwrap()
+        }
+    };
+    async fn woken(watch: &std::sync::Mutex<PromptWatch>, wake: &tokio::sync::Notify) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !watch.lock().unwrap().take_changed() {
+            assert!(tokio::time::timeout_at(deadline, wake.notified()).await.is_ok(), "the follower woke the refresher");
+        }
+    }
+
+    let reaching = relayed(owner_socket.clone(), gateway_root.path().to_owned()).await;
+    let first = read(reaching.clone()).await.unwrap_err();
+    assert!(first.contains("still reading this seat's conversation on host/conversation-owner"), "{first}");
+    woken(&watch, &wake).await;
+    assert_eq!(read(reaching.clone()).await.unwrap(), ["call-waiting"]);
+    // The call gets its result on the seat's host.
+    let result = json!({"type":"response_item","timestamp":"2026-10-30T12:00:04Z","payload":{"type":"function_call_output","call_id":"call-waiting","output":"released"}});
+    let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    std::io::Write::write_all(&mut file, format!("{result}\n").as_bytes()).unwrap();
+    woken(&watch, &wake).await;
+    assert!(read(reaching).await.unwrap().is_empty());
+
+    // A host that takes the read and never answers: the card is read at once, unread.
+    let silent_socket = gateway_root.path().join("silent-st3.sock");
+    let silent = tokio::net::UnixListener::bind(&silent_socket).unwrap();
+    let held = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = silent.accept().await {
+            held.push(stream);
+        }
+    });
+    let silent_root = tempfile::tempdir().unwrap();
+    let unanswered = relayed(silent_socket, silent_root.path().to_owned()).await;
+    *watch.lock().unwrap() = PromptWatch::new(Arc::clone(&wake));
+    let started = tokio::time::Instant::now();
+    for _ in 0..3 {
+        let error = read(unanswered.clone()).await.unwrap_err();
+        assert!(error.contains("still reading"), "{error}");
+    }
+    assert!(started.elapsed() < Duration::from_secs(2), "the fold waited on the host: {:?}", started.elapsed());
+    held.abort();
+
+    // A member that reaches no peer.
+    let island_root = tempfile::tempdir().unwrap();
+    let island = tests::test_state_named(island_root.path(), "prompt-island");
+    island.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    let error = read(island).await.unwrap_err();
+    assert!(error.contains("no peer reaches host/conversation-owner"), "{error}");
+}
