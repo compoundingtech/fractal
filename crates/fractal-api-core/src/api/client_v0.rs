@@ -329,6 +329,7 @@ pub const ALL_SCOPES: &[&str] = &[
 const ACTIONS: &[&str] = &[
     "private-notes.write",
     "arrangement.edit",
+    "harness.answer",
     "arrangement.membership.edit",
     "attention.resolve",
     "review.approve",
@@ -389,6 +390,7 @@ const ACTIONS: &[&str] = &[
 const AVAILABLE_ACTIONS: &[&str] = &[
     "private-notes.write",
     "custom.reply",
+    "harness.answer",
     "prompt.respond",
     "arrangement.edit",
     "arrangement.membership.edit",
@@ -633,6 +635,9 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
+        if *action == "harness.answer" {
+            return super::harness_questions::capability(state, session);
+        }
         let scope = action_scope(action).expect("registered client action has a scope");
         let state = if !AVAILABLE_ACTIONS.contains(action) {
             "unavailable"
@@ -4328,6 +4333,9 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if action == "harness.answer" {
+        return Some("terminal.control");
+    }
     if action == "private-notes.write" { return Some("control.work"); }
     if matches!(
         action,
