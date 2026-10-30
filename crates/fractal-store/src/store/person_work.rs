@@ -66,20 +66,19 @@ pub fn ask_deadline_policy(connection: &Connection) -> Result<(u128, u64)> {
     Ok((ask_deadlines_since(connection)?, default))
 }
 
-/// Records, once, that this node counts ask deadlines from `now`.
-pub fn start_counting_ask_deadlines(connection: &Connection, now: u128) -> Result<()> {
-    connection.execute(
+/// Records, once, that this node counts ask deadlines from `now`. Returns whether it had not.
+pub fn start_counting_ask_deadlines(connection: &Connection, now: u128) -> Result<bool> {
+    Ok(connection.execute(
         /* sqlite-large-value: allow-for-now lv-h3beacc1959d7 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES(?1,?2)",
         params![ASK_DEADLINES_SINCE, now.to_string()],
-    )?;
-    Ok(())
+    )? > 0)
 }
 
 /// Forgets when this node started counting, on a pass that sees deadlines off: an ask made
 /// while they were off then counts from when they are next turned on, not from the first time.
-pub fn stop_counting_ask_deadlines(connection: &Connection) -> Result<()> {
-    connection.execute(/* sqlite-large-value: allow-for-now lv-hdb4786de6904 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [ASK_DEADLINES_SINCE])?;
-    Ok(())
+/// Returns whether it had been counting.
+pub fn stop_counting_ask_deadlines(connection: &Connection) -> Result<bool> {
+    Ok(connection.execute(/* sqlite-large-value: allow-for-now lv-hdb4786de6904 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [ASK_DEADLINES_SINCE])? > 0)
 }
 
 /// Which of an ask's responses stand once a deadline has applied its default. Members resolve
@@ -151,7 +150,17 @@ impl Store {
                 .map(drop)
             })
             .map_err(anyhow::Error::msg)??;
+        self.ask_deadline_policy_changed();
         Ok(())
+    }
+
+    /// The ask deadline policy in `meta` changed. A person's home shows deadlines by it, and
+    /// no claim tells the attention list refresher, so wake it: its next refresh sees the
+    /// publication's policy differ and folds again.
+    pub fn ask_deadline_policy_changed(&self) {
+        if let Some(wake) = self.fractal.attention_list.refresher.get() {
+            wake.notify_one();
+        }
     }
 
     pub fn default_ask_deadline_ms(&self) -> u64 {

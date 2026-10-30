@@ -271,6 +271,8 @@ pub fn refresh_attention_list_with(
             },
         };
         let projection = store.attention_projection_frontier()?;
+        let ask_deadline_policy =
+            crate::store::person_work::ask_deadline_policy(&store.readers.get())?;
         let (rows, evaluated_at_unix_ms, due_at_unix_ms, future_after) = match (cause, &previous) {
             (None, Some(previous)) => {
                 // Still pending future acceptance times stand beside the new ones.
@@ -331,6 +333,7 @@ pub fn refresh_attention_list_with(
                 rows,
                 fleet,
                 owners,
+                ask_deadline_policy,
             },
             changed,
         );
