@@ -18593,7 +18593,8 @@ async fn refill_mirror(
     .await;
     // A fill that failed waits before the next, so a lasting failure does not spend the
     // observer's budget on every look.
-    // A look that moved the mirror on during the fill is no failure: the next look tries again.
+    // A look that moved the mirror on during the fill is no failure: the next look tries again,
+    // and the doubling wait starts over, since GitHub answered.
     plugin.refill_ended(&spec.resource, now_ms(), filled.is_ok());
     match filled {
         Ok((true, items)) => tracing::info!(observer, resource = %spec.resource, items, "the GitHub plugin mirror refilled from GitHub"),
