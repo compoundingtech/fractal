@@ -40,6 +40,7 @@ fn app(root: &Path, node: &str) -> crate::api::AppState {
         planner_default: crate::model::PlannerSpec::default(),
         assistant_receipts: Default::default(),
         private_notes: Default::default(),
+        harness_question_sink: None,
     }
 }
 

@@ -30947,7 +30947,7 @@ schedule "{name}" {{
             reconciler.reconcile_once().unwrap();
         }
         assert!(
-            jade.claims_for("daemon/jade", Some("daemon.diagnostic"))
+            jade.observations_for("daemon/jade", "daemon.diagnostic")
                 .unwrap()
                 .is_empty(),
             "a non-owning member attempted both failing workspaces"
@@ -31147,7 +31147,7 @@ schedule "{name}" {{
             }
         }
         let diagnostics = store
-            .claims_for("daemon/ivory", Some("daemon.diagnostic"))
+            .observations_for("daemon/ivory", "daemon.diagnostic")
             .unwrap();
         assert_eq!(
             diagnostics.len(),
@@ -31179,7 +31179,7 @@ schedule "{name}" {{
         restarted.reconcile_once().unwrap();
         assert_eq!(
             store
-                .claims_for("daemon/ivory", Some("daemon.diagnostic"))
+                .observations_for("daemon/ivory", "daemon.diagnostic")
                 .unwrap()
                 .len(),
             2
@@ -31227,7 +31227,7 @@ schedule "{name}" {{
         }
         assert_eq!(
             store
-                .claims_for("daemon/ivory", Some("daemon.diagnostic"))
+                .observations_for("daemon/ivory", "daemon.diagnostic")
                 .unwrap()
                 .len(),
             4
@@ -31267,7 +31267,7 @@ schedule "{name}" {{
                 .is_empty()
         );
         let diagnostics = store
-            .claims_for("daemon/node", Some("daemon.diagnostic"))
+            .observations_for("daemon/node", "daemon.diagnostic")
             .unwrap();
         assert!(diagnostics.iter().any(|claim| {
             claim.body.pointer("/fields/code").and_then(Value::as_str)
@@ -46062,9 +46062,10 @@ mission "task" state="ready" {
         reconciler.reconcile_once().unwrap();
         let first_wake = store.messages(Some("agent/node.worker"), true).unwrap();
         assert_eq!(first_wake.len(), 1);
-        // Another request already holds the key the close would use, so the close fails.
+        // Another request already holds the key the close would use, so the close fails. An
+        // older build's diagnostic claim holds it here.
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/node".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
