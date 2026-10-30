@@ -3,23 +3,6 @@ use super::*;
 use glass_store::StoredPlace;
 
 impl Ui {
-    pub(in crate::ui) fn prune_place_history(&mut self) {
-        let mut history = std::mem::take(&mut self.glasses.history);
-        let old_cursor = self.glasses.history_cursor;
-        let mut retained: usize = 0;
-        let mut index = 0;
-        history.retain(|place| {
-            let keep = self.place_exists(place);
-            if keep && index <= old_cursor {
-                retained += 1;
-            }
-            index += 1;
-            keep
-        });
-        self.glasses.history = history;
-        self.glasses.history_cursor = retained.saturating_sub(1);
-        self.glasses.save();
-    }
     pub(in crate::ui) fn current_place(&self) -> Option<StoredPlace> {
         let glass = self.glasses.all.get(self.glasses.shown)?;
         let groups = glass.layout.groups();
@@ -69,26 +52,6 @@ impl Ui {
         glasses.history_cursor = glasses.history.len() - 1;
         glasses.save();
     }
-    fn place_location(&self, place: &StoredPlace) -> Option<(usize, usize, Option<usize>)> {
-        let space = self
-            .glasses
-            .all
-            .iter()
-            .position(|glass| glass.id == place.space)?;
-        let groups = self.glasses.all[space].layout.groups();
-        let group = groups.iter().position(|group| group.id == place.group_id)?;
-        let tab = match &place.tab_id {
-            Some(id) => Some(groups[group].tabs.iter().position(|tab| &tab.id == id)?),
-            None if place.pane == Pane::List(0).key() => None,
-            None => return None,
-        };
-        Some((space, group, tab))
-    }
-
-    pub(in crate::ui) fn place_exists(&self, place: &StoredPlace) -> bool {
-        self.place_location(place).is_some()
-    }
-
 }
 
 #[cfg(test)]
@@ -113,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_history_persists_and_closed_tabs_are_pruned() {
+    fn automatic_history_persists_with_its_cursor() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("glasses.json");
         let mut ui = Ui::new(demo::test_world());
@@ -123,9 +86,6 @@ mod tests {
         let reopened = Glasses::open(None, Some(path));
         assert_eq!(reopened.history, ui.glasses.history);
         assert_eq!(reopened.history_cursor, ui.glasses.history_cursor);
-        let closed = ui.current_place().unwrap().tab_id;
-        ui.close_tab();
-        assert!(ui.glasses.history.iter().all(|place| place.tab_id != closed));
     }
 
     #[test]
@@ -138,7 +98,6 @@ mod tests {
         let mut layout = glass.layout.clone();
         layout.split_first(0, Side::Right, Group::of(Tab::pane("document:doc/c")));
         glass.take(GlassBody { name: glass.name.clone(), layout: to_wire(&layout) }, None);
-        assert!(ui.place_exists(&before));
         assert_eq!(ui.current_place().unwrap().tab_id, before.tab_id);
         assert_eq!(ui.focused_pane(), Some(Pane::Document("doc/b".into())));
     }

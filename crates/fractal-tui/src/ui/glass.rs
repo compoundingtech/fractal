@@ -4159,7 +4159,6 @@ impl Ui {
         }
         self.glass_changed(&id);
         self.show_focused();
-        self.prune_place_history();
         self.record_place_change(None);
     }
 
