@@ -703,6 +703,14 @@ pub(crate) mod tests {
         changed_by(|| watch.take_changed(), wake, within).await
     }
 
+    /// Take every change already on its way, until none comes for a while.
+    pub(crate) async fn settle(watch: &PromptWatch, wake: &tokio::sync::Notify) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while changed(watch, wake, Duration::from_millis(300)).await {
+            assert!(tokio::time::Instant::now() < deadline, "the watch never went quiet");
+        }
+    }
+
     /// `changed`, asking `take` whether a followed conversation changed.
     pub(crate) async fn changed_by(take: impl Fn() -> bool, wake: &tokio::sync::Notify, within: Duration) -> bool {
         // A wake left from an earlier event returns at once: wait on until the flag is set.
@@ -739,7 +747,9 @@ pub(crate) mod tests {
         assert!(watch.take_changed());
         append(&oak);
         assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
-        assert!(!watch.take_changed(), "asked once");
+        // One append can come as more than one event, and under load the next one lands after
+        // the wake was taken: let them all land before asking about elm.
+        settle(&watch, &wake).await;
 
         // Another seat's transcript beside it changes nothing here.
         append(&elm);
@@ -748,8 +758,7 @@ pub(crate) mod tests {
         // No card read it at the last refresh: it is no longer followed.
         watch.begin();
         watch.finish();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        watch.take_changed();
+        settle(&watch, &wake).await;
         append(&oak);
         assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
     }
