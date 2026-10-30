@@ -6062,6 +6062,17 @@ impl MissionsStore for Store {
                     .clone()
                     .or_else(|| Some(requested_incarnation.to_owned()));
                 let actor_incarnation = effective_incarnation.clone();
+                // Only a claimed or working step's wait is shown and watched, so a declared wait
+                // on a step in any other state would hide.
+                if wait_target.is_some() && !matches!(current.status.as_str(), "claimed" | "working") {
+                    return Err(St3Error::new(
+                        "invalid-wait",
+                        format!(
+                            "step run `{subject}` is {}; a wait on a target needs a claimed or working step",
+                            current.status
+                        ),
+                    ));
+                }
                 if let Some(WaitTarget::Step(target)) = &wait_target {
                     if *target == subject {
                         return Err(St3Error::new(

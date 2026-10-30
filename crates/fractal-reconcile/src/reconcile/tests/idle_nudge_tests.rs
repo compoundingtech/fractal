@@ -938,6 +938,33 @@ fn a_declared_wait_on_a_pull_request_ends_with_its_watch_without_a_second_wake()
 }
 
 #[test]
+fn a_pull_request_wait_whose_watch_ended_before_it_began_wakes_the_seat() {
+    let idle = fixture();
+    let step = idle.hold("queued", "waits-on-gone-watch");
+    let watch = idle.watch();
+    idle.at(2 * MINUTE);
+    idle.observe(json!({"merge_queue": {"position": 1, "state": "queued"}}));
+    idle.seat.reconciler.reconcile_once().unwrap();
+    idle.at(5 * MINUTE);
+    idle.observe(json!({"merge_queue": null, "state": "closed", "merged": true}));
+    idle.seat.reconciler.reconcile_once().unwrap();
+    assert!(idle.seat.store.live_watch(&watch).unwrap().is_none(), "the merge ended the watch");
+
+    // The watch's merged wake came before the wait, so it told the seat nothing about it.
+    idle.at(10 * MINUTE);
+    idle.wait_on(&step, THREAD);
+    idle.seat.reconciler.reconcile_once().unwrap();
+    let ended = idle.wait_ends(&step);
+    assert_eq!(ended.len(), 1);
+    let reason = ended[0].body["fields"]["reason"].as_str().unwrap();
+    assert!(reason.contains("is gone"), "{reason}");
+    let woken = idle.wait_over();
+    assert_eq!(woken.len(), 1);
+    assert!(woken[0].content.contains(&format!("pull request {THREAD}")), "{}", woken[0].content);
+    assert_eq!(idle.view(&step).waiting_on, None);
+}
+
+#[test]
 fn a_wait_with_only_a_reason_is_a_note_and_does_not_hold_the_nudge() {
     let idle = fixture();
     let step = idle.hold("queued", "note-only");
@@ -999,4 +1026,8 @@ fn a_wait_names_a_target_it_can_watch() {
     idle.wait_on(&step, "1h");
     idle.seat.work(&step, "resume", "resume-after-target").unwrap();
     assert_eq!(idle.view(&step).waiting_on, None);
+
+    // A held step in any other state would neither show nor watch the wait, so it is refused.
+    idle.seat.store.set_step_state(&step, "blocked", None).unwrap();
+    assert_eq!(attempt("wait", "1h"), "invalid-wait");
 }
