@@ -25,7 +25,6 @@ mod documents;
 pub mod checklist;
 mod edit;
 mod glass;
-mod triage;
 mod hover;
 mod hyperlinks;
 #[cfg(test)]
@@ -4295,10 +4294,14 @@ impl Ui {
         }
         if !self.terminal_focused()
             && key.modifiers.contains(KeyModifiers::CONTROL)
-            && !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
             && matches!(key.code, KeyCode::Char('l' | 'L'))
         {
-            self.triage_next(!(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)));
+            self.triage_next(
+                !(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)),
+            );
             return;
         }
         // Retrying a failed initial attach uses the same path as opening its terminal.
