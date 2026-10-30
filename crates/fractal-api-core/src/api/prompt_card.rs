@@ -384,14 +384,19 @@ pub(crate) mod tests {
 
     /// Wait for a followed conversation to change, or say it did not within `within`.
     pub(crate) async fn changed(watch: &PromptWatch, wake: &tokio::sync::Notify, within: Duration) -> bool {
+        changed_by(|| watch.take_changed(), wake, within).await
+    }
+
+    /// `changed`, asking `take` whether a followed conversation changed.
+    pub(crate) async fn changed_by(take: impl Fn() -> bool, wake: &tokio::sync::Notify, within: Duration) -> bool {
         // A wake left from an earlier event returns at once: wait on until the flag is set.
         let deadline = tokio::time::Instant::now() + within;
         loop {
-            if watch.take_changed() {
+            if take() {
                 return true;
             }
             if tokio::time::timeout_at(deadline, wake.notified()).await.is_err() {
-                return watch.take_changed();
+                return take();
             }
         }
     }

@@ -742,7 +742,8 @@ mod tests {
             presented
         };
         let woken = || async {
-            assert!(super::super::prompt_card::tests::changed(&watching(&prompts), &wake, Duration::from_secs(5)).await);
+            let take = || watching(&prompts).take_changed();
+            assert!(super::super::prompt_card::tests::changed_by(take, &wake, Duration::from_secs(5)).await);
         };
 
         // Nothing changed: nothing is read.
@@ -808,7 +809,8 @@ mod tests {
             }
         };
         let woken = || async {
-            assert!(super::super::prompt_card::tests::changed(&watching(&prompts), &wake, Duration::from_secs(5)).await);
+            let take = || watching(&prompts).take_changed();
+            assert!(super::super::prompt_card::tests::changed_by(take, &wake, Duration::from_secs(5)).await);
         };
         let part = |state: Value| json!({"type": "tool", "callID": "call_oak", "tool": "bash", "state": state}).to_string();
 

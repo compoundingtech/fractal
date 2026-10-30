@@ -13045,7 +13045,7 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
         calls,
         [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]},"complete":true})]
     );
-    assert_eq!(*followed.borrow(), [transcript.clone()]);
+    assert_eq!(*followed.borrow(), std::slice::from_ref(&transcript));
     // A conversation st cannot follow is not read: the card says why.
     let unfollowed = prompt_card::seat_pending_calls(&state, owner, |_| Err("st cannot follow this seat's conversation: no watcher".into()));
     assert_eq!(unfollowed.unwrap_err(), "st cannot follow this seat's conversation: no watcher");
