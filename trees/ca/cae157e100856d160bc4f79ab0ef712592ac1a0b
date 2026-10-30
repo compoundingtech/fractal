@@ -62,3 +62,4 @@ record 7d894d5adf3afd60a6faff8a3de3564e39973d82 linux-tests-shard-3 0 fleet/ci 2
 record 8df55066e7b90cdad9a4117152350618413db30e linux-gate 0 fleet/ci 2026-10-26T17:38:40Z
 record c8d0d67bf6ec2332efba701ed6e11e7bdcb364d0 genie-freshness 0 fleet/ci 2026-10-26T17:17:42Z
 record f8714ba01972d087469dc5cec9f0a389b12d85e9 fractal-web 1 fleet/ci 2026-10-26T17:37:19Z
+gc 2026-10-30T03:56:25+00:00 e29b2fb60f7ab2d01c330b40feea309cc3e4ef05c1f89c7a5341d8fd038a5275
