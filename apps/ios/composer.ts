@@ -85,8 +85,8 @@ const REFUSALS: Record<string, string> = {
 };
 // A Fractal version from before long messages: sendReason says what to do about it.
 const LEGACY_LIMIT = /cannot exceed 4 ?KiB|post a document first/i;
-// The fault an internal refusal names before its detail (`signature-state-corrupt: …`).
-const FAULT = /\b([a-z]+(?:-[a-z]+)+):/;
+// The fault an internal refusal names first, before its detail (`signature-state-corrupt: …`).
+const FAULT = /^\s*([a-z]+(?:-[a-z]+)+):/;
 
 /**
  * Why Fractal did not take a message, in words for the person, by the refusal's code. A refusal

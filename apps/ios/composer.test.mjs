@@ -53,6 +53,8 @@ assert.equal(sendReason('the full text is too large', false), 'the full text is 
   // An internal refusal names the fault it reports, so the person can say which.
   assert.equal(said('internal', 'signature-state-corrupt: bootstrap job stopped: Err(database is locked)'),
     'Not sent: Fractal ran into a problem on its side; look in the conversation before sending it again (signature-state-corrupt). Your text is kept.');
+  // Only a leading fault counts: a name later in the sentence is not one.
+  assert.equal(sendRefusal(refused('internal', 'failed to reach host/example-box: connection reset')), 'Fractal ran into a problem on its side; look in the conversation before sending it again (internal)');
   // The signature refusals the pairing screens already word.
   assert.match(sendRefusal(refused('device-signature-stale', 'the device signed this message more than 15 minutes from this daemon\'s clock')), /this phone's clock is more than 15 minutes off/);
   assert.match(sendRefusal(refused('device-key-not-enrolled', 'the signing key is not enrolled')), /pair the phone again/);
