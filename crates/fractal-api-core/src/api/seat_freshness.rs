@@ -75,10 +75,19 @@ pub fn fleet_hears_seats(store: &Store, node: &str, members: &[String], dial_out
     Ok(true)
 }
 
-/// What this node last pushed to each member, and to which of its starts.
+/// Each seat's incarnation and the time it was heard, by seat.
+type HeardBySeat = BTreeMap<String, (String, u128)>;
+
+/// What this node last pushed to one member, and to which of its starts.
+struct PushedTo {
+    start: String,
+    seats: HeardBySeat,
+}
+
+/// What this node last pushed to each member.
 #[derive(Default)]
 pub struct SeatFreshnessPushed {
-    members: BTreeMap<String, (String, BTreeMap<String, (String, u128)>)>,
+    members: BTreeMap<String, PushedTo>,
 }
 
 /// One round's outcome: the seats pushed to each member, and the members a push failed for.
@@ -130,8 +139,8 @@ pub async fn push_seat_freshness(
         let previous = pushed
             .members
             .get(member)
-            .filter(|(pushed_start, _)| pushed_start == start)
-            .map(|(_, seats)| seats);
+            .filter(|to| to.start == *start)
+            .map(|to| &to.seats);
         let seats = newest
             .iter()
             .filter(|(agent, heard)| previous.and_then(|seats| seats.get(*agent)) != Some(*heard))
@@ -162,12 +171,15 @@ pub async fn push_seat_freshness(
         match result {
             Ok(Some(_)) => {
                 let start = starts[&member].clone();
-                let entry = pushed.members.entry(member.clone()).or_insert_with(|| (start.clone(), BTreeMap::new()));
-                if entry.0 != start {
-                    *entry = (start, BTreeMap::new());
+                let to = pushed
+                    .members
+                    .entry(member.clone())
+                    .or_insert_with(|| PushedTo { start: start.clone(), seats: BTreeMap::new() });
+                if to.start != start {
+                    *to = PushedTo { start, seats: BTreeMap::new() };
                 }
                 for seat in &seats {
-                    entry.1.insert(seat.agent.clone(), (seat.incarnation_id.clone(), u128::from(seat.heard_at_unix_ms)));
+                    to.seats.insert(seat.agent.clone(), (seat.incarnation_id.clone(), u128::from(seat.heard_at_unix_ms)));
                 }
                 round.pushed.insert(member, seats.len());
             }
