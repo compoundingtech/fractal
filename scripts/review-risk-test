@@ -224,6 +224,24 @@ class ReviewRisk(unittest.TestCase):
         self.assertIn("concurrency", self.areas(result))
         self.assertTrue(result["needs_factory_read"], result)
 
+    def test_shards_principals_and_plugin_store_files_are_factory_read_areas(self):
+        cases = (
+            ("crates/smallclaims/src/shards.rs", "replication-and-sync"),
+            ("crates/smallclaims/src/shards_breakup/plan.rs", "replication-and-sync"),
+            ("crates/smallclaims/src/store/principals.rs", "store-schema-trim-checkpoints"),
+            ("crates/smallclaims/src/store/principals/verdicts.rs", "store-schema-trim-checkpoints"),
+            ("crates/fractal-reconcile/src/reconcile/github_plugin_store.rs", "store-schema-trim-checkpoints"),
+        )
+        for path, area in cases:
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write(".github/workflows/x.yml", "name: x\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "medium")
+                self.assertIn(area, self.areas(result))
+                self.assertTrue(result["needs_factory_read"], result)
+
     def test_a_plain_medium_change_does_not_need_a_factory_read(self):
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
         result = self.risk()
