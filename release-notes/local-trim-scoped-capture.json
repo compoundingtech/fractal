@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A member that trims locally captures only what judging the kinds it drops reads, instead of the whole store, and plans the same drop",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No store table, index or claim schema change. A local cut's staging file has its own name and identity, and a scoped_envelopes table; full captures keep theirs."},
+  "rules": {"status": "none", "detail": "No retention rule change. The scoped capture's plan equals a full capture's restricted to LOCAL_TRIM_KINDS (property test)."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. A citer is assumed accepted no more than an hour before what it cites."},
+  "downtime": {"status": "none", "detail": "None. A local cut's capture reads and writes a fraction of what it did."},
+  "manual": {"status": "none", "detail": "No manual step. A local staging file left by an older build is removed and captured again, scoped."},
+  "recovery": {"status": "none", "detail": "Revert the build: local cuts capture the whole store again."}
+}

@@ -93,14 +93,14 @@ impl StagedSet {
             return Ok(transaction.commit()?);
         };
         {
-            let mut insert = transaction.prepare_cached("INSERT OR IGNORE INTO envelopes VALUES (?1, ?2, ?3, ?4, ?5, 1)")?;
+            let mut insert = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6907f5361ba9 owner=smallclaims::store::checkpoint_staging::scoped TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO envelopes VALUES (?1, ?2, ?3, ?4, ?5, 1)")?;
             let mut number = transaction.prepare_cached(
-                "INSERT OR IGNORE INTO scoped_envelopes(writer, sequence, envelope_hash) VALUES (?1, ?2, ?3)",
+                /* sqlite-large-value: allow-for-now lv-hc9f6acb432b0 owner=smallclaims::store::checkpoint_staging::scoped TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO scoped_envelopes(writer, sequence, envelope_hash) VALUES (?1, ?2, ?3)",
             )?;
             for (key, accepted_at, records) in page.into_iter().flat_map(|(_, envelopes)| envelopes) {
                 if accepted_at < self.cut_unix_ms {
-                    insert.execute(params![key.writer, key.sequence, key.envelope_hash, accepted(accepted_at)?, records])?;
-                    number.execute(params![key.writer, key.sequence, key.envelope_hash])?;
+                    insert.execute(/* sqlite-large-value: allow-for-now lv-ha785421a488b owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![key.writer, key.sequence, key.envelope_hash, accepted(accepted_at)?, records])?;
+                    number.execute(/* sqlite-large-value: allow-for-now lv-h578eae135705 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![key.writer, key.sequence, key.envelope_hash])?;
                 }
             }
         }
@@ -130,7 +130,7 @@ impl StagedSet {
         let sql = sealed_envelope_records_sql();
         let page: Vec<RecordRow> = store.checkpoint_capture_page(self.epoch, || {
             let connection = store.readers.get();
-            let mut records = connection.prepare_cached(&sql)?;
+            let mut records = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hbb840ed5c2a8 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &sql)?;
             let mut page = Vec::new();
             for (_, key) in &envelopes {
                 page.extend(
@@ -170,10 +170,10 @@ impl StagedSet {
                 };
                 let named = store.checkpoint_capture_page(self.epoch, || {
                     let connection = store.readers.get();
-                    let mut named = connection.prepare_cached(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=?1)"))?;
+                    let mut named = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1cd0c334c601 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE {column}=?1)"))?;
                     let mut ids = Vec::new();
                     for (_, id) in &staged {
-                        if named.query_row([id], |row| row.get::<_, bool>(0))? {
+                        if named.query_row(/* sqlite-large-value: allow-for-now lv-h230ac67996e0 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ [id], |row| row.get::<_, bool>(0))? {
                             ids.push(id.clone());
                         }
                     }
@@ -196,7 +196,7 @@ impl StagedSet {
             Ok(store
                 .readers
                 .get()
-                .prepare_cached(sql)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf33fcb46317c owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ sql)?
                 .query_map(params![after, STAGING_PAGE], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         })?;
@@ -235,7 +235,7 @@ impl StagedSet {
                        AND CAST(claims.accepted_at_unix_ms AS INTEGER) >= ?3)
                  ORDER BY sequence DESC LIMIT 1",
             )?;
-            let mut tombstoned = connection.prepare_cached(&format!(
+            let mut tombstoned = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h316cb5ff1a74 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT sequence, envelope_hash, accepted_at_unix_ms, 0 FROM checkpoint_envelopes
                  WHERE writer=?1 AND ?2 IS NOT NULL AND {RECORDED_TOMBSTONE_FILTER}
                  ORDER BY sequence DESC LIMIT 1"
@@ -246,8 +246,8 @@ impl StagedSet {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 };
                 let newest = [
-                    sealed.query_row(params![writer, self.seal_rowid, cut], read).optional()?,
-                    tombstoned.query_row(params![writer, self.seal_rowid, cut], read).optional()?,
+                    sealed.query_row(/* sqlite-large-value: allow-for-now lv-h2a96f5eac6fd owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![writer, self.seal_rowid, cut], read).optional()?,
+                    tombstoned.query_row(/* sqlite-large-value: allow-for-now lv-h30ba373ba026 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![writer, self.seal_rowid, cut], read).optional()?,
                 ]
                 .into_iter()
                 .flatten()
@@ -261,9 +261,9 @@ impl StagedSet {
         })?;
         let transaction = self.staging.unchecked_transaction()?;
         {
-            let mut insert = transaction.prepare_cached("INSERT OR IGNORE INTO envelopes VALUES (?1, ?2, ?3, ?4, ?5, 1)")?;
+            let mut insert = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf6107b65de89 owner=smallclaims::store::checkpoint_staging::scoped TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO envelopes VALUES (?1, ?2, ?3, ?4, ?5, 1)")?;
             for (key, accepted_at, records) in heads {
-                insert.execute(params![key.writer, key.sequence, key.envelope_hash, accepted(accepted_at)?, records])?;
+                insert.execute(/* sqlite-large-value: allow-for-now lv-h1a23eb0b9c1b owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![key.writer, key.sequence, key.envelope_hash, accepted(accepted_at)?, records])?;
             }
         }
         Self::advance(&transaction, EARLIER_CLAIMS, 0, None)?;
@@ -280,7 +280,7 @@ impl StagedSet {
             None => {
                 let kinds = self.scope_kinds();
                 let oldest: Option<i64> = self.staging.query_row(
-                    &format!(
+                    /* sqlite-large-value: allow-for-now lv-h6a717a686690 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &format!(
                         "SELECT MIN(accepted_at) FROM claims AS claim
                          WHERE first=1 AND slot IS NOT NULL AND kind IN ({})
                            AND EXISTS(SELECT 1 FROM claims AS newer WHERE newer.slot=claim.slot AND newer.pos>claim.pos)",
@@ -316,7 +316,7 @@ impl StagedSet {
                 connection.query_row("SELECT accepted_at_unix_ms FROM claims WHERE store_index=?1", [after], |row| row.get(0))?
             };
             let claims = connection
-                .prepare_cached(&sql)?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-hee747c2d6453 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ &sql)?
                 .query_map(params![from, after, cut, STAGING_PAGE], claim_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             // Sealed as a full capture stages it: a record, not repaired, in an envelope before
@@ -339,7 +339,7 @@ impl StagedSet {
             let mut citers = Vec::new();
             for claim in claims {
                 let index = i64::try_from(claim.store_index)?;
-                if sealed.query_row(params![claim.id, self.seal_rowid, cut, claim.batch_id], |row| row.get::<_, bool>(0))? {
+                if sealed.query_row(/* sqlite-large-value: allow-for-now lv-h1495d16054a5 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ params![claim.id, self.seal_rowid, cut, claim.batch_id], |row| row.get::<_, bool>(0))? {
                     citers.push((index, Some(claim)));
                 } else {
                     citers.push((index, None));
@@ -354,13 +354,13 @@ impl StagedSet {
         };
         {
             let mut staged = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)")?;
-            let mut cite = transaction.prepare_cached("INSERT OR IGNORE INTO cited(id) VALUES (?1)")?;
+            let mut cite = transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h8d9eebe1e289 owner=smallclaims::store::checkpoint_staging::scoped TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO cited(id) VALUES (?1)")?;
             for claim in page.into_iter().filter_map(|(_, claim)| claim) {
-                if staged.query_row([&claim.id], |row| row.get::<_, bool>(0))? {
+                if staged.query_row(/* sqlite-large-value: allow-for-now lv-hc4acc58690a5 owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ [&claim.id], |row| row.get::<_, bool>(0))? {
                     continue;
                 }
                 for id in &store.runtime.checkpoint_claim_facts(&claim).cites {
-                    cite.execute([id])?;
+                    cite.execute(/* sqlite-large-value: allow-for-now lv-h7257d86e40ef owner=smallclaims::store::checkpoint_staging::scoped TODO=trace-statement-and-value-representation */ [id])?;
                 }
             }
         }

@@ -426,7 +426,7 @@ fn take_step(store: &Store, step: &Step, n: usize) {
                 .connection
                 .write()
                 .execute(
-                    "INSERT OR REPLACE INTO mission_definitions(mission_id, revision, state, claim_id)
+                    /* sqlite-large-value: allow-for-now lv-h044f482464e7 owner=fractal_store::store::local_trim_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO mission_definitions(mission_id, revision, state, claim_id)
                      VALUES (?1, 'r', 'active', ?2)",
                     params![format!("mission/protects-{n}"), id],
                 )
@@ -456,7 +456,7 @@ fn take_step(store: &Store, step: &Step, n: usize) {
                 .connection
                 .write()
                 .execute(
-                    "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
+                    /* sqlite-large-value: allow-for-now lv-h0ad6d7859fc0 owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref, writer, sequence, envelope_hash, position, raw,
                          state, claim_id, replacement_claim_id, updated_at_unix_ms)
                      VALUES (?1, 'node.elsewhere', ?2, 'repaired', 0, X'', 'repaired', ?3, ?4, '1')",
                     params![format!("record/repaired-{n}"), n as i64, format!("claim/original-{n}"), id],

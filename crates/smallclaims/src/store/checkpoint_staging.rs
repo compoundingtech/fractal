@@ -27,7 +27,7 @@ pub const STAGING_PAGE: i64 = 64;
 /// SQLite's page cache for the staging file, in KiB. Its sorter spills past it to disk.
 const STAGING_CACHE_KIB: i64 = 2_048;
 
-pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb1622b55b32a owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha255beb4781e owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS meta(
     id INTEGER PRIMARY KEY CHECK(id=1),
     identity TEXT NOT NULL,
@@ -671,7 +671,7 @@ impl StagedSet {
             /* sqlite-large-value: allow-for-now lv-h33ed5804f30f owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO records VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         let mut late = transaction.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h13e038eb95a2 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "UPDATE envelopes SET included=0
+            /* sqlite-large-value: allow-for-now lv-h763eee6bae52 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "UPDATE envelopes SET included=0
              WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
         )?;
         for row in page {
@@ -1184,7 +1184,7 @@ impl StagedSet {
     pub fn guard_answers(&self, kinds: &[&str]) -> Result<Vec<String>> {
         Ok(self
             .staging
-            .prepare(&format!(
+            .prepare(/* sqlite-large-value: allow-for-now lv-h23ef8a32a40b owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &format!(
                 "SELECT claim.id || ' protected=' || claim.protected || ' valid=' || claim.valid
                      || ' cited=' || (claim.id IN (SELECT id FROM cited))
                      || ' duplicate=' || (claim.id IN (SELECT id FROM claims GROUP BY id HAVING COUNT(*) > 1))
