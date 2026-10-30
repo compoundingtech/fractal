@@ -7865,6 +7865,18 @@ async fn dispatch_action(
             let result = state
                 .store
                 .ask_person(&PersonAskRequest {
+                    deadline_ms: p
+                        .get("deadline_ms")
+                        .map(|deadline| {
+                            deadline
+                                .as_u64()
+                                .ok_or_else(|| validation("deadline_ms must be a whole number of milliseconds"))
+                        })
+                        .transpose()?,
+                    default_answer: p
+                        .get("default_answer")
+                        .map(|_| parameter_string(p, "default_answer"))
+                        .transpose()?,
                     legacy_request: None,
                     person: parameter_string(p, "person_id")?,
                     title: parameter_string(p, "title")?,
@@ -8441,9 +8453,12 @@ async fn dispatch_action(
         action @ ("agent.stop" | "agent.start") => {
             require_creation_actor(session)?;
             let agent = client_detail_id("agent", &parameter_string(p, "agent")?);
+            let mut stop_reason = None;
             if action == "agent.stop" {
-                serde_json::from_value::<fractal_client::AgentStopParameters>(p.clone())
-                    .map_err(|error| validation(error.to_string()))?;
+                stop_reason = serde_json::from_value::<fractal_client::AgentStopParameters>(p.clone())
+                    .map_err(|error| validation(error.to_string()))?
+                    .reason
+                    .filter(|reason| !reason.trim().is_empty());
             } else {
                 serde_json::from_value::<fractal_client::AgentStartParameters>(p.clone())
                     .map_err(|error| validation(error.to_string()))?;
@@ -8504,10 +8519,16 @@ async fn dispatch_action(
                     .ok_or_else(|| ApiError::internal("prior declaration is missing"))?;
             };
             let kdl = if action == "agent.stop" {
-                format!(
-                    "version 2\nstop {}\n",
-                    serde_json::to_string(&agent).map_err(ApiError::internal)?
-                )
+                let mut stop = kdl::KdlNode::new("stop");
+                stop.entries_mut().push(kdl::KdlEntry::new(agent.clone()));
+                if let Some(reason) = stop_reason {
+                    let mut reason_node = kdl::KdlNode::new("reason");
+                    reason_node.entries_mut().push(kdl::KdlEntry::new(reason));
+                    let mut children = kdl::KdlDocument::new();
+                    children.nodes_mut().push(reason_node);
+                    stop.set_children(children);
+                }
+                format!("version 2\n{stop}\n")
             } else {
                 let uris = state
                     .store
@@ -14718,7 +14739,7 @@ subscription "watch/source" {
                 },
             )
             .unwrap();
-        let records = state.store.events_after_bounded(before, 10).unwrap();
+        let records = state.store.events_after_bounded(before, u64::MAX, 10).unwrap();
         let record = records
             .iter()
             .find(|record| record.subject == "attention/sync-demo")

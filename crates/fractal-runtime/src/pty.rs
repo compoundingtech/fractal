@@ -6,6 +6,8 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -1199,6 +1201,36 @@ fn observation_is_live(observation: &PtyObservation) -> bool {
     })
 }
 
+static MAILBOX_LEGACY_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
+static MAILBOX_LEGACY_LAST_LOG: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Successful start-token-only admissions, including repeated observations of the same PTY.
+/// Sampled by the daemon's process-wide OpenTelemetry observable counter.
+pub fn mailbox_legacy_admissions_total() -> u64 {
+    MAILBOX_LEGACY_ADMISSIONS.load(Ordering::Relaxed)
+}
+
+fn record_mailbox_legacy_admission(session: &SessionInfo) {
+    MAILBOX_LEGACY_ADMISSIONS.fetch_add(1, Ordering::Relaxed);
+    // Bound both journal volume and memory: at most one legacy admission log per minute
+    // across the process. The counter still records every admission.
+    let mut last = MAILBOX_LEGACY_LAST_LOG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    if last.is_some_and(|previous| now.duration_since(previous) < Duration::from_secs(60)) {
+        return;
+    }
+    *last = Some(now);
+    drop(last);
+    let seat = session.metadata.as_ref()
+        .and_then(|metadata| metadata.tags.as_ref())
+        .and_then(|tags| tags.get("st3.agent"));
+    tracing::warn!(
+        fractal_pty_id = %session.name,
+        fractal_seat = seat.map_or("<unattributed>", String::as_str),
+        "Fractal mailbox admitted legacy PTY identity without daemonBootId"
+    );
+}
+
 // LEGACY(remove after host pty writes daemonBootId; tracked by the st→fractal migration).
 // Authorized 2026-10-28: keyed mailbox authority must also admit older host PTY writers.
 fn keyed_daemon_identity(session: &SessionInfo) -> DaemonIdentityCheck {
@@ -1224,7 +1256,10 @@ fn keyed_daemon_identity(session: &SessionInfo) -> DaemonIdentityCheck {
         return session.identity;
     };
     match pty_core::registry::read_process_start_token(pid) {
-        Some(live) if live == expected => DaemonIdentityCheck::Match,
+        Some(live) if live == expected => {
+            record_mailbox_legacy_admission(session);
+            DaemonIdentityCheck::Match
+        }
         Some(_) => DaemonIdentityCheck::Mismatch,
         None => session.identity,
     }
@@ -1318,16 +1353,34 @@ mod tests {
 
     #[test]
     fn legacy_keyed_identity_accepts_a_matching_live_start_token() {
+        // Isolate the process-wide counter from other runtime tests running in parallel.
+        const CHILD: &str = "FRACTAL_LEGACY_ADMISSION_COUNTER_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "pty::tests::legacy_keyed_identity_accepts_a_matching_live_start_token", "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            return;
+        }
         let pid = i32::try_from(std::process::id()).unwrap();
         let token = pty_core::registry::read_process_start_token(pid).unwrap();
         let mut record = legacy_identity_record(pid, token);
+        let before = mailbox_legacy_admissions_total();
+        record.identity = DaemonIdentityCheck::Match;
         assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Match);
+        assert_eq!(mailbox_legacy_admissions_total(), before);
+        record.identity = DaemonIdentityCheck::Unknown;
+        assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Match);
+        assert_eq!(mailbox_legacy_admissions_total(), before + 1);
 
         // Even unknown boot evidence must not use the legacy path when a boot ID exists.
         record.metadata.as_mut().unwrap().daemon_boot_id = Some("other-boot".into());
         assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Unknown);
         record.identity = DaemonIdentityCheck::Mismatch;
         assert_eq!(keyed_daemon_identity(&record), DaemonIdentityCheck::Mismatch);
+        assert_eq!(mailbox_legacy_admissions_total(), before + 1);
     }
 
     #[test]

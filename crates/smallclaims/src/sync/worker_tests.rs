@@ -6118,23 +6118,28 @@ fn claim_walk_note(store: &Store, subject: &str) -> String {
 /// nothing to move, so only the walk can bring a claim over. Returns the queries sent.
 fn walk_to_the_end(source: &Store, target: &Store, fleet: &str) -> Vec<crate::replication::ClaimRangeQuery> {
     let first = target
-        .receive_replication_exchange("source", fleet, &source.export_replication_summary(fleet).unwrap())
+        .receive_replication_exchange(&source.origin, fleet, &source.export_replication_summary(fleet).unwrap())
         .unwrap();
-    let Some(comparison) = first.claim_ranges.filter(|comparison| !comparison.same) else {
+    let Some(comparison) = first.claim_ranges.filter(|comparison| !all_same(comparison)) else {
         return Vec::new();
     };
-    let mut walk = ClaimWalk::new(&comparison.pair);
+    let mut walk = if comparison.same {
+        ClaimWalk::finished(&comparison.pair)
+    } else {
+        ClaimWalk::new(&comparison.pair)
+    };
+    walk.follow_retired(&comparison);
     let mut queries = Vec::new();
     while let Some(query) = walk.next_query() {
-        assert!(queries.len() < 32, "a walk ends");
+        assert!(queries.len() < 64, "a walk ends");
         queries.push(query.clone());
         let mut inventory = source.export_replication_summary(fleet).unwrap().inventory;
-        inventory.claim_range_query = Some(query);
+        inventory.claim_range_query = Some(query.clone());
         let answer = source.export_replication_exchange(fleet, &inventory).unwrap();
-        let receipt = target.receive_replication_exchange("source", fleet, &answer).unwrap();
+        let receipt = target.receive_replication_exchange(&source.origin, fleet, &answer).unwrap();
         target.validate_replication_backlog().unwrap();
         if let Some(comparison) = &receipt.claim_ranges {
-            walk.absorb(comparison);
+            walk.absorb(query, comparison);
         }
     }
     queries
@@ -6208,8 +6213,9 @@ fn a_claim_walk_asks_for_nothing_this_node_holds_or_retired() {
 #[test]
 fn a_finished_claim_walk_is_not_repeated_for_the_same_claims() {
     let mut walk = ClaimWalk::new("ours/theirs");
-    assert!(walk.next_query().unwrap().tops);
-    walk.absorb(&crate::replication::ClaimRangeComparison {
+    let tops = walk.next_query().unwrap();
+    assert!(tops.tops);
+    walk.absorb(tops, &crate::replication::ClaimRangeComparison {
         pair: "ours/theirs".into(),
         tops: vec![3],
         ..Default::default()
@@ -6284,4 +6290,322 @@ async fn a_claim_walk_runs_over_the_signed_peer_route() {
     assert!(fetched, "tops, leaves, IDs and the claim fit in one exchange's round trips");
     assert!(target.claim_by_id(&lacking).unwrap().is_some());
     server.abort();
+}
+
+fn retire_claim_ids(store: &Store, ids: &[String]) {
+    let connection = store.connection.write();
+    for id in ids {
+        connection
+            .execute(
+                &format!(
+                    /* sqlite-large-value: allow-for-now lv-hbdb013909404 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})",
+                    crate::store::retired::identity_sql("?1")
+                ),
+                [id],
+            )
+            .unwrap();
+    }
+}
+
+fn local_trim_member(origin: &str, fleet: &str) -> Store {
+    let store = plain_memory(origin).unwrap();
+    store.bind_fleet(fleet).unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store
+}
+
+/// Push everything `from` holds to `to`, as an older build or a first sync does, whatever
+/// `to`'s inventory lists.
+fn push_all(from: &Store, from_name: &str, to: &Store, fleet: &str) {
+    let push = from.export_replication_exchange(fleet, &ReplicationInventory::default()).unwrap();
+    to.receive_replication_exchange(from_name, fleet, &push).unwrap();
+    to.validate_replication_backlog().unwrap();
+}
+
+fn retired_summary(store: &Store) -> Option<crate::replication::ClaimRangeDigest> {
+    store.claim_range_summary().unwrap().retired.and_then(|retired| retired.retained)
+}
+
+#[test]
+fn members_that_trim_locally_learn_each_others_retired_claims_by_walking_ranges() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d1";
+    let source = local_trim_member("source", fleet);
+    let target = local_trim_member("target", fleet);
+    // Retired IDs spread over many leaves, and one claim the target still holds.
+    let held = claim_walk_note(&target, "note/held-at-target");
+    let mut retired: Vec<String> = (0..100u32)
+        .map(|n| {
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(n.to_be_bytes()))
+        })
+        .collect();
+    retired.push(held.clone());
+    retire_claim_ids(&source, &retired);
+    fold_claim_ranges(&[&source, &target]);
+    assert!(retired_summary(&source).is_some(), "a member that trims locally summarizes its retired IDs");
+
+    let queries = walk_to_the_end(&source, &target, fleet);
+    assert!(queries.iter().any(|query| query.retired.is_some()), "{queries:?}");
+    assert!(queries.iter().all(|query| query.claims.is_empty()), "a retired ID is recorded, never fetched");
+    let connection = target.readers.get();
+    for id in &retired {
+        assert!(crate::store::retired::claim_retired(&connection, id).unwrap(), "{id}");
+    }
+    drop(connection);
+    fold_claim_ranges(&[&target]);
+    assert_eq!(retired_summary(&target), retired_summary(&source));
+    // What it learned it neither serves nor takes back.
+    assert!(target.envelopes_carrying_claims(std::slice::from_ref(&held)).unwrap().is_empty());
+
+    // An ordinary member neither sends its retired IDs nor learns a peer's.
+    let ordinary = plain_memory("ordinary").unwrap();
+    ordinary.bind_fleet(fleet).unwrap();
+    ordinary.import_retired_identities_paced(|_| {}).unwrap();
+    fold_claim_ranges(&[&ordinary]);
+    assert!(retired_summary(&ordinary).is_none());
+    walk_to_the_end(&source, &ordinary, fleet);
+    assert!(!crate::store::retired::claim_retired(&ordinary.readers.get(), &retired[0]).unwrap());
+}
+
+#[test]
+fn a_fresh_member_joining_from_trimmed_members_ends_with_the_same_answers() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d2";
+    // A member on an older build, or one that has not trimmed: it still holds what the others
+    // deleted, and pushes everything it holds.
+    let holder = plain_memory("holder").unwrap();
+    holder.bind_fleet(fleet).unwrap();
+    let kept: Vec<String> = (0..12).map(|n| claim_walk_note(&holder, &format!("note/kept-{n}"))).collect();
+    let deleted: Vec<String> = (0..4).map(|n| claim_walk_note(&holder, &format!("note/superseded-{n}"))).collect();
+
+    // The first trimmed member deleted them, and with them their envelopes, which carried
+    // nothing else; the second learns that only from the first.
+    let oak = local_trim_member("oak", fleet);
+    retire_claim_ids(&oak, &deleted);
+    holder.seal_local_batches().unwrap();
+    for id in &deleted {
+        let (writer, sequence, hash): (String, u64, String) = holder
+            .readers
+            .get()
+            .query_row(
+                "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+                 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 WHERE claims.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        crate::store::retired::retire_envelope_tx(&oak.connection.write(), &writer, sequence, &hash).unwrap();
+    }
+    push_all(&holder, "holder", &oak, fleet);
+    let elm = local_trim_member("elm", fleet);
+    push_all(&oak, "oak", &elm, fleet);
+    fold_claim_ranges(&[&oak, &elm]);
+    walk_to_the_end(&oak, &elm, fleet);
+    for id in &deleted {
+        assert!(crate::store::retired::claim_retired(&elm.readers.get(), id).unwrap(), "elm learned {id}");
+    }
+    push_all(&holder, "holder", &elm, fleet);
+
+    // A fresh member joins from the trimmed members, then meets the holder.
+    let fresh = local_trim_member("fresh", fleet);
+    push_all(&elm, "elm", &fresh, fleet);
+    fold_claim_ranges(&[&elm, &fresh]);
+    walk_to_the_end(&elm, &fresh, fleet);
+    push_all(&holder, "holder", &fresh, fleet);
+    fold_claim_ranges(&[&holder, &oak, &elm, &fresh]);
+    walk_to_the_end(&holder, &fresh, fleet);
+
+    for member in [&oak, &elm, &fresh] {
+        for id in &kept {
+            assert!(member.claim_by_id(id).unwrap().is_some(), "{id}");
+        }
+        for id in &deleted {
+            assert!(member.claim_by_id(id).unwrap().is_none(), "{} re-admitted {id}", member.origin);
+        }
+    }
+    let answers = |store: &Store| store.claim_range_summary().unwrap();
+    assert_eq!(answers(&fresh).retained, answers(&oak).retained, "the same claims");
+    assert_eq!(answers(&elm).retained, answers(&oak).retained);
+    assert_eq!(retired_summary(&fresh), retired_summary(&oak), "the same deletions");
+    assert_ne!(answers(&holder).retained, answers(&oak).retained, "control: the holder differs");
+}
+
+/// The tombstones a cut on `store` records for these claims and the envelopes that carry them.
+fn tombstones_of(
+    store: &Store,
+    ids: &[String],
+) -> (Vec<crate::store::checkpoint::EnvelopeTombstone>, Vec<crate::store::checkpoint::ClaimTombstone>) {
+    let connection = store.readers.get();
+    let mut envelopes = Vec::new();
+    let mut claims = Vec::new();
+    for id in ids {
+        let (writer, sequence, hash, subject, kind): (String, u64, String, String, String) = connection
+            .query_row(
+                "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash, claims.subject, claims.kind
+                 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 WHERE claims.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        let envelope = crate::store::checkpoint::EnvelopeTombstone {
+            writer: writer.clone(),
+            sequence,
+            envelope_hash: hash.clone(),
+            accepted_at_unix_ms: 1,
+        };
+        if !envelopes.contains(&envelope) {
+            envelopes.push(envelope);
+        }
+        claims.push(crate::store::checkpoint::ClaimTombstone {
+            id: id.clone(),
+            writer,
+            sequence,
+            envelope_hash: hash,
+            subject,
+            kind,
+            actor: None,
+            predecessors: Vec::new(),
+            operation_id: None,
+            request_digest: None,
+            accepted_at_unix_ms: 1,
+        });
+    }
+    (envelopes, claims)
+}
+
+/// A cut that records its tombstones and then stops before trimming, as a graph-changed stop,
+/// the drop-newest abort or a crash leaves it, deleted nothing, so it retires nothing a peer could
+/// learn, and a fresh member still gets its claims. What a cut deletes enters the ledger in the
+/// deleting transaction, so a chunk that rolls back retires nothing either.
+#[test]
+fn a_cut_that_records_and_stops_teaches_no_peer_to_refuse_its_claims() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d3";
+    let holder = plain_memory("holder").unwrap();
+    holder.bind_fleet(fleet).unwrap();
+    let recorded: Vec<String> = (0..3).map(|n| claim_walk_note(&holder, &format!("note/recorded-{n}"))).collect();
+    holder.seal_local_batches().unwrap();
+    let oak = local_trim_member("oak", fleet);
+    push_all(&holder, "holder", &oak, fleet);
+    let (envelopes, claims) = tombstones_of(&oak, &recorded);
+    {
+        let mut connection = oak.connection.write();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h87aeaa1b47d9 owner=smallclaims::sync::worker_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+                 VALUES('checkpoint/stopped', 1, 'recording', 1)",
+                [],
+            )
+            .unwrap();
+        crate::store::checkpoint::record_checkpoint_tombstones_tx(&transaction, "checkpoint/stopped", &envelopes, &claims)
+            .unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h302a4fb16aef owner=smallclaims::sync::worker_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='graph-changed' WHERE id='checkpoint/stopped'", []).unwrap();
+        transaction.commit().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::store::checkpoint::delete_dropped_rows_tx(&transaction, &envelopes, &claims).unwrap();
+        transaction.rollback().unwrap();
+    }
+    for id in &recorded {
+        assert!(!crate::store::retired::claim_retired(&oak.readers.get(), id).unwrap(), "oak retired {id}");
+        assert!(oak.claim_by_id(id).unwrap().is_some(), "oak still holds {id}");
+    }
+
+    // A peer that walks oak's retired ranges learns nothing, and a fresh member that joins from
+    // both and then meets the holder takes the claims.
+    let elm = local_trim_member("elm", fleet);
+    fold_claim_ranges(&[&oak, &elm]);
+    walk_to_the_end(&oak, &elm, fleet);
+    let fresh = local_trim_member("fresh", fleet);
+    fold_claim_ranges(&[&fresh]);
+    walk_to_the_end(&oak, &fresh, fleet);
+    walk_to_the_end(&elm, &fresh, fleet);
+    push_all(&holder, "holder", &fresh, fleet);
+    push_all(&holder, "holder", &elm, fleet);
+    for id in &recorded {
+        assert!(!crate::store::retired::claim_retired(&elm.readers.get(), id).unwrap(), "elm learned {id}");
+        assert!(fresh.claim_by_id(id).unwrap().is_some(), "fresh refused {id}");
+        assert!(elm.claim_by_id(id).unwrap().is_some(), "elm refused {id}");
+    }
+
+    // Deleting commits the ledger rows with it.
+    {
+        let mut connection = oak.connection.write();
+        let transaction = connection.transaction().unwrap();
+        crate::store::checkpoint::delete_dropped_rows_tx(&transaction, &envelopes, &claims).unwrap();
+        transaction.commit().unwrap();
+    }
+    let connection = oak.readers.get();
+    for id in &recorded {
+        assert!(crate::store::retired::claim_retired(&connection, id).unwrap(), "{id}");
+    }
+    for envelope in &envelopes {
+        assert!(
+            crate::store::retired::envelope_retired(&connection, &envelope.writer, envelope.sequence, &envelope.envelope_hash)
+                .unwrap()
+        );
+    }
+}
+
+/// An older build's claim-range summary, query and answer carry no `retired` part. Each decodes,
+/// and the summary compares exactly as before; what an ordinary member sends has no such field.
+#[test]
+fn an_older_peers_claim_range_messages_decode_and_compare_as_before() {
+    use crate::replication::{ClaimRangeComparison, ClaimRangeQuery, ClaimRangeSummary};
+    fn older<T: serde::Serialize + serde::de::DeserializeOwned>(message: &T) -> T {
+        let mut value = serde_json::to_value(message).unwrap();
+        value.as_object_mut().unwrap().remove("retired").expect("the newer message has a retired part");
+        serde_json::from_value(value).unwrap()
+    }
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d4";
+    let source = local_trim_member("source", fleet);
+    let target = local_trim_member("target", fleet);
+    claim_walk_note(&source, "note/only-source");
+    retire_claim_ids(&source, &[format!("{:064x}", 7)]);
+    fold_claim_ranges(&[&source, &target]);
+
+    let summary = source.claim_range_summary().unwrap();
+    let from_older = older(&summary);
+    assert_eq!(from_older, ClaimRangeSummary { retired: None, ..summary.clone() });
+    let compared = target.compare_claim_ranges(&from_older).unwrap().unwrap();
+    assert!(compared.retired.is_none(), "nothing is compared that the peer did not send");
+    let mut newer = target.compare_claim_ranges(&summary).unwrap().unwrap();
+    assert!(newer.retired.is_some());
+    newer.retired = None;
+    assert_eq!(compared, newer, "the retained comparison is the same");
+
+    let query = ClaimRangeQuery {
+        tops: true,
+        retired: Some(Box::new(ClaimRangeQuery { tops: true, ..Default::default() })),
+        ..Default::default()
+    };
+    assert_eq!(older(&query), ClaimRangeQuery { retired: None, ..query.clone() });
+    let answer = ClaimRangeComparison { retired: Some(Box::default()), ..compared.clone() };
+    assert_eq!(older(&answer), compared);
+    for sent in [
+        serde_json::to_string(&from_older).unwrap(),
+        serde_json::to_string(&older(&query)).unwrap(),
+        serde_json::to_string(&compared).unwrap(),
+    ] {
+        assert!(!sent.contains("retired"), "{sent}");
+    }
+}
+
+#[test]
+fn a_retired_step_the_answer_left_out_is_asked_again() {
+    use crate::replication::ClaimRangeComparison;
+    let mut walk = ClaimWalk::finished("ours/theirs");
+    walk.follow_retired(&ClaimRangeComparison {
+        pair: "ours/theirs".into(),
+        same: true,
+        retired: Some(Box::new(ClaimRangeComparison { pair: "retired".into(), ..Default::default() })),
+        ..Default::default()
+    });
+    let query = walk.next_query().unwrap();
+    let asked = query.retired.clone().expect("the retired walk asks its tops");
+    assert!(asked.tops);
+    // The peer's retired ranges were folding, so its answer has no retired part.
+    walk.absorb(query, &ClaimRangeComparison { pair: "ours/theirs".into(), same: true, ..Default::default() });
+    assert_eq!(walk.next_query().and_then(|query| query.retired), Some(asked));
 }
