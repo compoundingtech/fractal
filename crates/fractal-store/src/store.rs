@@ -8468,6 +8468,44 @@ fn usage_rollup_hour(fields: &BTreeMap<String, Value>, fallback: u128) -> u128 {
     fields.get("observed_at_unix_ms").and_then(Value::as_u64).map_or(fallback, u128::from) / USAGE_ROLLUP_HOUR_MS
 }
 
+/// Every unreplicated `response_rollup` reading this node holds, for each series that has one
+/// pending, as (subject, body): the readings after the series' replicated snapshot, newest
+/// first. A period boundary inside the hour then finds the reading it ended on, not only the
+/// newest. Only the seat's host has them.
+pub fn unreplicated_usage_rollups(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let held = connection
+        .prepare_cached(
+            "SELECT subject, slot, published_at_unix_ms, pending_local_id FROM local_latest_slots
+             WHERE kind='harness.usage' AND pending_local_id IS NOT NULL
+               AND json_extract(slot, '$[1]')='response_rollup'",
+        )?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut readings = connection.prepare_cached(
+        "SELECT body, observed_at_unix_ms FROM local_observations INDEXED BY local_observations_subject_kind_index
+         WHERE subject=?1 AND kind='harness.usage' AND id<=?2 ORDER BY id DESC",
+    )?;
+    let mut rows = Vec::new();
+    for (subject, slot, published_at, pending) in held {
+        let mut found = readings.query(params![subject, pending])?;
+        while let Some(row) = found.next()? {
+            let (body, observed_at) = (row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
+            // Each reading is recorded when it arrives, on the clock that stamped the slot's last
+            // publication: one recorded before it has replicated or been superseded.
+            if observed_at < published_at {
+                break;
+            }
+            let fields = serde_json::from_str::<Value>(&body).ok().and_then(|body| {
+                body.get("fields").and_then(Value::as_object).map(|fields| fields.clone().into_iter().collect::<BTreeMap<_, _>>())
+            });
+            if fields.as_ref().is_some_and(|fields| usage_slot(fields) == slot) {
+                rows.push((subject.clone(), body));
+            }
+        }
+    }
+    Ok(rows)
+}
+
 /// The newest unreplicated `response_rollup` reading of each series of `subject` (of every
 /// subject when `None`) that this node holds, as (subject, body). Only the seat's host has them.
 pub fn pending_usage_rollups(connection: &Connection, subject: Option<&str>) -> rusqlite::Result<Vec<(String, String)>> {
@@ -9434,7 +9472,9 @@ fn publish_pending_usage_tx(
         return Ok(published);
     }
     // Even a single response can have published before its native binding arrived, leaving
-    // no pending token change. Capture that binding in the normal stop flush as well.
+    // no pending token change. Capture that binding in the normal stop flush as well. A slot
+    // still holding a newer reading (a rollup waiting for its hour) gets the binding when
+    // that reading replicates; republishing the older one here would drop it.
     let unbound = {
         let mut statement = transaction
             .prepare(
@@ -9442,7 +9482,8 @@ fn publish_pending_usage_tx(
              WHERE subject=?1 AND kind='harness.usage'
                AND json_extract(published_fields, '$.semantics')='response_rollup'
                AND json_extract(published_fields, '$.incarnation_id')=?2
-               AND json_extract(published_fields, '$.native_session_id') IS NULL",
+               AND json_extract(published_fields, '$.native_session_id') IS NULL
+               AND pending_local_id IS NULL",
             )
             .map_err(internal)?;
         let rows = statement

@@ -8618,6 +8618,66 @@ fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
     assert_eq!(host_total(), tokens);
 }
 
+/// A native binding that arrives while a newer rollup waits for its hour binds that reading when
+/// it replicates. The stop flush that binds an older, already replicated rollup must not drop it.
+#[test]
+fn a_late_native_binding_keeps_the_rollup_waiting_for_its_hour() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |tokens: u64, at: u128| {
+        let reading = ClaimInput {
+            subject: subject.into(),
+            kind: "harness.usage".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-1")),
+                ("semantics".into(), json!("response_rollup")),
+                ("model".into(), json!("example-model")),
+                ("total_tokens".into(), json!(tokens)),
+                ("observed_at_unix_ms".into(), json!(at as u64)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("rollup:{tokens}")),
+        };
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| (claim.body["fields"]["total_tokens"].as_u64().unwrap(),
+                claim.body["fields"]["native_session_id"].as_str().map(str::to_owned)))
+            .collect::<Vec<_>>()
+    };
+    state("working", start);
+    rollup(10, start + 1_000);
+    rollup(20, start + 60_000);
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status": "running", "incarnation_id": "inc-1"})),
+        ("harness.session-file", json!({"harness": "codex", "session_id": "native-example", "incarnation_id": "inc-1"})),
+    ] {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state("idle", start + 120_000);
+    assert_eq!(replicated(), [(10, None)], "the turn end binds nothing that would drop the waiting reading");
+    assert_eq!(store.usage_summaries_at(&[subject.to_owned()], None).unwrap()[subject].total_tokens, 20);
+    state("ended", start + 180_000);
+    assert_eq!(replicated(), [(10, None), (20, Some("native-example".to_owned()))], "the end replicates it, bound");
+}
+
 /// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
 /// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
 /// reading every minute replicates once, and a reading that changes still replicates.

@@ -2099,6 +2099,53 @@ fn usage_provenance_survives_resume_replay_periods_and_reopen() {
     );
 }
 
+/// Rollups replicate hourly, and a period that ends inside the hour reads, on the seat's host, the
+/// reading it ended on, not only the newest one waiting.
+#[test]
+fn a_host_period_ending_inside_the_hour_reads_the_rollup_it_ended_on() {
+    let local = Store::open_memory("host-one").unwrap();
+    let subject = "agent/example.hourly";
+    let hour = 3_600_000_u64;
+    let start = (now_ms() as u64 / hour + 1) * hour;
+    let minute = 60_000_u64;
+    local
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("state".into(), json!("working")),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!("inc-one")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some("hourly-working".into()),
+        })
+        .unwrap();
+    for (at, total) in [(start, 1), (start + 15 * minute, 10), (start + 30 * minute, 20)] {
+        local
+            .append_client_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.usage".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({
+                    "semantics":"response_rollup","driver":"codex","incarnation_id":"inc-one",
+                    "model":"example-model","observed_at_unix_ms":at,"total_tokens":total,
+                }))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    assert_eq!(local.claims_for(subject, Some("harness.usage")).unwrap().len(), 1, "the later two wait for the hour");
+    let total = |until: u64| local.usage_period_rows(start - 1, until).unwrap()[0]["total_tokens"].as_u64();
+    assert_eq!(total(start + 20 * minute), Some(10), "the reading the period ended on");
+    assert_eq!(total(start + 40 * minute), Some(20));
+}
+
 #[test]
 fn usage_period_keeps_price_versions_separate_without_repricing_the_baseline() {
     let local = Store::open_memory("host-one").unwrap();
