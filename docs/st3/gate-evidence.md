@@ -29,8 +29,10 @@ before computing the per-crate keys it must retain.
 For keyed Clippy, the workflow source/generated `linux-clippy` environment and
 `scripts/ci-clippy-keyed` use `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`:
 the keyed caller supplies the policy path, and the stage resolves its checkout
-layout at execution time under this migration ARN. Ordinary linux-gate/rust-tests
-do not name or read the policy. An explicit
+layout at execution time under this migration ARN. The linux-gate/rust-tests
+static script closures contain no policy-file literal. This does not imply
+hosted dependency isolation: as on main, the hosted linux-clippy job still
+supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explicit
 policy path remains explicit; malformed or unreadable preferred configuration
 never selects the legacy file. The generated workflow environment is a bridge
 site documented here because its comments come from generator output.

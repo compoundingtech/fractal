@@ -423,8 +423,10 @@ class CommandLine(Fixture):
 
 
 class CommittedLanes(unittest.TestCase):
-    def test_unkeyed_linux_and_rust_lanes_do_not_read_the_keyed_clippy_policy(self):
-        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — only keyed callers supply the optional policy argument.
+    def test_linux_and_rust_static_script_closures_contain_no_policy_file_literal(self):
+        """Static script-closure isolation only, not hosted workflow dependency isolation."""
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — policy paths come from keyed callers, not these script literals.
+        # As on main, hosted linux-clippy still supplies the policy via CI_KEYED_CLIPPY_POLICY and feeds linux-gate.
         lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
         repo = ldc.Repo(ROOT)
         for name in ('linux-gate', 'rust-tests'):
