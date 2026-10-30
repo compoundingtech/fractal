@@ -49,6 +49,40 @@ fn push(from: &Store, to: &Store) {
 }
 
 #[test]
+fn a_claim_a_repair_replaced_counts_on_no_member() {
+    let alder = node("alder");
+    let birch = node("birch");
+    let original = state(&alder, "item/a", "one");
+    let replacement = state(&alder, "item/a", "two");
+    push(&alder, &birch);
+    // birch found the original's record invalid and repaired it with the newer claim. birch had
+    // admitted the original already, and alder wrote it, so both keep its claim row; a member
+    // that received the repair first never admits the original at all.
+    let record = {
+        let connection = birch.connection.write();
+        let record: String = connection
+            .query_row("SELECT record_ref FROM replica_records WHERE claim_id=?1", [&original], |row| row.get(0))
+            .unwrap();
+        connection.execute("UPDATE replica_records SET state='invalid' WHERE record_ref=?1", [&record]).unwrap();
+        record
+    };
+    birch.repair_replica_record(&record, &replacement, "replace the original", "person/example", "repair-1").unwrap();
+    let back = birch.export_replication_exchange(FLEET, &alder.replication_inventory().unwrap()).unwrap();
+    alder.receive_replication_exchange("birch", FLEET, &back).unwrap();
+    alder.validate_replication_backlog().unwrap();
+    alder.project_replication_backlog().unwrap();
+    alder.apply_replication_repairs().unwrap();
+
+    let cut = cut();
+    for store in [&alder, &birch] {
+        assert!(store.claim_by_id(&original).unwrap().is_some(), "{} keeps the original's row", store.origin);
+        let answers = store.answers_summary(cut).unwrap().kinds["example.state"].clone();
+        assert_eq!((answers.keys, answers.claims), (1, 1), "{} counts only the replacement", store.origin);
+    }
+    assert_eq!(alder.answers_summary(cut).unwrap().kinds, birch.answers_summary(cut).unwrap().kinds);
+}
+
+#[test]
 fn members_with_the_same_claims_answer_the_same_and_a_missing_claim_is_named() {
     let source = node("alder");
     let target = node("birch");
@@ -95,7 +129,8 @@ fn fixture() -> Connection {
              CREATE INDEX claims_kind_index ON claims(kind, store_index);
              CREATE INDEX claims_batch_index ON claims(batch_id, store_index);
              CREATE TABLE claim_positions(claim_id TEXT PRIMARY KEY, position INTEGER);
-             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);",
+             CREATE TABLE replica_records(claim_id TEXT, position INTEGER);
+             CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);",
         )
         .unwrap();
     connection

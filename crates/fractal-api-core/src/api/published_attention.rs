@@ -90,10 +90,10 @@ pub fn start_attention_list(state: &AppState) {
                         return Ok(());
                     }
                     // A prompt card reads its seat's conversation on this node, following it
-                    // from before the read.
+                    // from before the read; one another member keeps, its follower read last.
                     let pending = |seat: &str| {
-                        super::prompt_card::seat_pending_calls(&summary_state, seat, |transcript| {
-                            watching(&watch).follow(transcript)
+                        super::prompt_card::seat_pending_calls(&summary_state, seat, |conversation| {
+                            watching(&watch).follow_conversation(conversation)
                         })
                     };
                     watching(&watch).begin();
@@ -143,6 +143,10 @@ pub fn start_attention_list(state: &AppState) {
                     }
                 }
                 Err(error) => {
+                    // The refresh panicked: what woke it for the prompts is still unread.
+                    if prompts_changed {
+                        watching(&prompts).keep_changed();
+                    }
                     eprintln!("st3: published view refresh stopped: {error}");
                     for view in crate::store::attention_list::PUBLISHED_VIEWS {
                         store.note_view_refreshed(view, false);
@@ -816,12 +820,12 @@ mod tests {
 
         refresh();
         assert_eq!(published_prompt(&store)["calls"], json!([]));
-        let size = std::fs::metadata(&database).unwrap().len();
         db.execute(
             "INSERT INTO part VALUES ('part_1', 'msg_1', 'ses_oak', 3, 3, ?1)",
             [part(json!({"status": "running", "input": {"command": "make release"}}))],
         )
         .unwrap();
+        assert!(super::super::prompt_card::tests::wal_holds_a_commit(&database), "the call is in the log");
         woken().await;
         refresh();
         assert_eq!(published_prompt(&store)["calls"][0]["call_id"], "call_oak");
@@ -835,7 +839,6 @@ mod tests {
         woken().await;
         refresh();
         assert_eq!(published_prompt(&store), json!({"calls": [], "answers": ["allow", "deny"], "allow": false}));
-        assert_eq!(std::fs::metadata(&database).unwrap().len(), size, "every commit is in the log alone");
         assert_eq!(published_cut(&store), cut, "no claim was read");
     }
 

@@ -1173,6 +1173,9 @@ summarizes that per claim kind, at a cut, so members can compare it:
   and a key moving on either member is no difference.
 - Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
   keys and answers. `claims` is compared only between members that trim the same way.
+- A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
+  depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
+  leaves out every claim in `projection_digest_repaired_claims`.
 - Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
   difference narrows to a bucket and then to its keys without listing a whole kind.
 
@@ -1352,7 +1355,28 @@ checkpoint agreement. It is off by default. The member then seals, verifies and 
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
 and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
-members until a person excuses it. No claim family is trimmed locally yet.
+members until a person excuses it.
+
+Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
+it captures the set before the cut, plans the drop with the same audited rules and guards a shared
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
+and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+rules stay out because a reader reads the history they drop, which no projection digest covers.
+`harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
+needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
+and a watch walks those observations back to find when the pull request left the merge queue. Two checks stand in for the
+proof. A plan that would drop the newest claim of any subject and kind is refused before anything
+is recorded. While deleting, every chunk compares the projection digests before and after and
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
+an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
+trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
+disk cannot hold.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges

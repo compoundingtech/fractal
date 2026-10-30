@@ -37,6 +37,7 @@ pub mod directive_notes;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
+pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
 #[cfg(test)]
@@ -219,6 +220,7 @@ pub mod delegation;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
+pub mod local_trim_fault;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
@@ -237,6 +239,8 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
+#[cfg(test)]
+mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]
@@ -287,6 +291,8 @@ pub mod tombstones_tests;
 pub mod step_wait_tests;
 #[cfg(test)]
 pub mod work_renew_tests;
+#[cfg(test)]
+mod observation_write_amp_tests;
 pub use runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
@@ -698,6 +704,8 @@ pub(crate) const PARKED_SEATS_SQL: &str = "SELECT subjects.value, claims.id, cla
 pub struct ParkedSeat {
     /// The crash-loop decision that parked it.
     pub decision: String,
+    /// The first raise since the seat last ran: one park, however many retries failed in it.
+    pub episode: String,
     pub reason: String,
     pub parked_at_unix_ms: u128,
 }
@@ -2511,6 +2519,20 @@ impl Store {
     pub fn open(path: &Path, origin: impl Into<String>) -> Result<Self> {
         let fractal = Arc::new(FractalRuntime::default());
         let graph = GraphStore::open(path, origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    /// Open only through the directory descriptor retained by explicit-store admission.
+    pub fn open_admitted(
+        admitted: Arc<smallclaims::store::AdmittedStore>,
+        origin: impl Into<String>,
+    ) -> Result<Self> {
+        let fractal = Arc::new(FractalRuntime::default());
+        let graph = GraphStore::open_admitted(admitted, origin, fractal.clone())?;
+        Self::finish_open(graph, fractal)
+    }
+
+    fn finish_open(graph: GraphStore, fractal: Arc<FractalRuntime>) -> Result<Self> {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
@@ -3864,6 +3886,7 @@ impl Store {
                 if receipt_attached { repair_operations_tx(transaction,&[opaque_cache_key(idempotency_key)]).map_err(internal)?; }
                 owned_sets::project_tx(transaction)?;
                 identities::flush(transaction).map_err(internal)?;
+                ordered_membership::flush(transaction).map_err(internal)?;
                 let store_index = current_index_tx(transaction).map_err(internal)?;
                 let response = ApplyResponse {
                     changed: true,
@@ -4132,15 +4155,45 @@ impl Store {
     /// subject and kind stays. Deletes run in short transactions of at most `chunk` rows, so
     /// a crash leaves a consistent table that the next pass finishes. Each chunk borrows the
     /// background writer so queued foreground requests can run between chunks.
+    /// Replicate the held usage rollups whose hour is over, for seats that stopped re-stamping
+    /// (one that died without `ended`). The hourly local trim runs it first, so no rollup waits
+    /// more than about an hour past its own, and none is trimmed while it waits.
+    pub fn flush_overdue_usage_rollups(&self, now: u128) -> Result<usize> {
+        let subjects = self
+            .readers
+            .get()
+            .prepare_cached(
+                "SELECT DISTINCT s.subject FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                 WHERE s.kind='harness.usage' AND json_extract(s.slot, '$[1]')='response_rollup'
+                   AND o.observed_at_unix_ms < ?1",
+            )?
+            .query_map([(now / USAGE_ROLLUP_HOUR_MS * USAGE_ROLLUP_HOUR_MS).min(i64::MAX as u128) as i64], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut published = 0;
+        for subject in subjects {
+            published += self
+                .connection
+                .batched(|transaction| {
+                    publish_pending_usage_tx(transaction, &self.origin, &subject, "", now, Some(0), false)
+                        .map(|claims| claims.len())
+                })
+                .map_err(|error| anyhow::anyhow!("{error}"))?
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+        }
+        Ok(published)
+    }
+
     pub fn trim_local_observations(
         &self,
         older_than_unix_ms: u128,
         max_per_subject_kind: usize,
         chunk: usize,
     ) -> Result<usize> {
+        self.flush_overdue_usage_rollups(now_ms())?;
         let chunk = chunk.max(1).min(i64::MAX as usize) as i64;
         let max_per_subject_kind = max_per_subject_kind.max(1).min(i64::MAX as usize) as i64;
         let mut deleted = 0;
+        // A reading a usage slot still waits to replicate is never trimmed (below).
         // The newest observation of a subject and kind always stays. Rows past retention go
         // through the time index, and a row is "not the newest" when a later id exists for its
         // subject and kind, one seek in `local_observations_subject_kind_index`. This used to
@@ -4149,11 +4202,12 @@ impl Store {
         loop {
             let connection = self.connection.write_background();
             let removed = connection.execute(
-                /* sqlite-large-value: allow-for-now lv-ha799bfe026cb owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                /* sqlite-large-value: allow-for-now lv-h315fe07938f4 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                     SELECT id FROM local_observations AS old
                     WHERE observed_at_unix_ms < ?1
                       AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                       AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=old.id)
+                      AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=old.id)
                       AND EXISTS (SELECT 1 FROM local_observations AS newer
                                   WHERE newer.subject=old.subject AND newer.kind=old.kind
                                     AND newer.id>old.id)
@@ -4201,11 +4255,12 @@ impl Store {
                     break;
                 };
                 let removed = connection.execute(
-                    /* sqlite-large-value: allow-for-now lv-h7762c849fb0b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
+                    /* sqlite-large-value: allow-for-now lv-ha3460e7a5f9d owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_observations WHERE id IN (
                         SELECT id FROM local_observations
                         WHERE subject=?1 AND kind=?2 AND id<=?3
                           AND kind NOT IN ('agent.launcher-bound', 'agent.helper-launched')
                           AND NOT EXISTS (SELECT 1 FROM local_runtime_start_evidence WHERE observation_id=local_observations.id)
+                          AND NOT EXISTS (SELECT 1 FROM local_latest_slots WHERE pending_local_id=local_observations.id)
                         ORDER BY id LIMIT ?4
                      )",
                     params![subject, kind, boundary, chunk],
@@ -5529,9 +5584,25 @@ impl Store {
                 if !launch_lineage_tx(&connection, &subject)?.contains(&token) {
                     continue;
                 }
+                // Each failed retry raises again; the episode is the first raise since the seat
+                // last ran, so one park is one fault however many retries fail.
+                let episode: String = connection.query_row(
+                    "SELECT id FROM claims INDEXED BY claims_subject_kind_index
+                      WHERE subject=?1 AND kind='runtime.reconcile-decision'
+                        AND store_index<=?2
+                        AND store_index>COALESCE((SELECT MAX(store_index) FROM claims INDEXED BY claims_subject_kind_index
+                            WHERE subject=?1 AND kind='runtime.observed' AND store_index<=?2
+                              AND json_extract(body, '$.fields.status')='running'), 0)
+                        AND json_extract(body, '$.fields.decision')='raise'
+                        AND json_extract(body, '$.fields.key')=?3
+                      ORDER BY store_index LIMIT 1",
+                    params![subject, at_index, fields.get("key").and_then(Value::as_str)],
+                    |row| row.get(0),
+                )?;
                 parked.insert(
                     subject,
                     ParkedSeat {
+                        episode,
                         decision: id,
                         reason: fields
                             .get("reason")
@@ -6418,6 +6489,7 @@ impl Store {
             "slo.breach-transition"
                 | "lane.approved"
                 | "arrangement.edited"
+                | "ordered-membership.edited"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -8457,6 +8529,107 @@ pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
 /// compaction or model change, and the end of a turn.
 const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 
+/// A `response_rollup` series replicates its first reading, then the last reading of each UTC
+/// hour once that hour is over, and its final totals when its seat ends. Periods and retention
+/// are exact to the hour ([`checkpoint_rules`]), and every response goes to OTLP, so a rollup per
+/// turn bought nothing a reader keeps. The seat's own host folds its pending rollups into its
+/// usage reads ([`pending_usage`]), so only other members lag, by up to an hour.
+const USAGE_ROLLUP_HOUR_MS: u128 = 60 * 60 * 1000;
+
+fn usage_rollup_hour(fields: &BTreeMap<String, Value>, fallback: u128) -> u128 {
+    fields.get("observed_at_unix_ms").and_then(Value::as_u64).map_or(fallback, u128::from) / USAGE_ROLLUP_HOUR_MS
+}
+
+/// A `context_occupancy` reading replicates when it moves at least this many points of the
+/// context window from the replicated one, on a compaction or model change, or when its seat
+/// ends: a card's number stays within these points, and writes follow change, not turns.
+const USAGE_OCCUPANCY_POINTS: f64 = 5.0;
+
+/// The share of the context window an occupancy reading uses, in percent, when it says.
+fn usage_occupancy_percent(fields: &BTreeMap<String, Value>) -> Option<f64> {
+    fields.get("context_used_percent").and_then(Value::as_f64).or_else(|| {
+        let used = fields.get("context_used_tokens").and_then(Value::as_u64)?;
+        let window = fields.get("context_window_tokens").and_then(Value::as_u64).filter(|window| *window > 0)?;
+        Some(used as f64 * 100.0 / window as f64)
+    })
+}
+
+/// Replicate every usage reading `subject` holds back, whatever its hour: its step ended, and
+/// the run is judged on its origin, maybe another member, as soon as the receipt arrives.
+pub fn flush_held_usage_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    subject: &str,
+    now: u128,
+) -> Result<Vec<ClaimRecord>, St3Error> {
+    publish_pending_usage_tx(transaction, origin, subject, "", now, Some(0), true)
+}
+
+/// Every unreplicated `response_rollup` reading this node holds, for each series that has one
+/// pending, as (subject, body): the readings after the series' replicated snapshot, newest
+/// first. A period boundary inside the hour then finds the reading it ended on, not only the
+/// newest. Only the seat's host has them.
+pub fn unreplicated_usage_rollups(connection: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let held = connection
+        .prepare_cached(
+            "SELECT subject, slot, published_at_unix_ms, pending_local_id FROM local_latest_slots
+             WHERE kind='harness.usage' AND pending_local_id IS NOT NULL
+               AND json_extract(slot, '$[1]')='response_rollup'",
+        )?
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut readings = connection.prepare_cached(
+        "SELECT body, observed_at_unix_ms FROM local_observations INDEXED BY local_observations_subject_kind_index
+         WHERE subject=?1 AND kind='harness.usage' AND id<=?2 ORDER BY id DESC",
+    )?;
+    let mut rows = Vec::new();
+    for (subject, slot, published_at, pending) in held {
+        let mut found = readings.query(params![subject, pending])?;
+        while let Some(row) = found.next()? {
+            let (body, observed_at) = (row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
+            // Each reading is recorded when it arrives, on the clock that stamped the slot's last
+            // publication: one recorded before it has replicated or been superseded.
+            if observed_at < published_at {
+                break;
+            }
+            let fields = serde_json::from_str::<Value>(&body).ok().and_then(|body| {
+                body.get("fields").and_then(Value::as_object).map(|fields| fields.clone().into_iter().collect::<BTreeMap<_, _>>())
+            });
+            if fields.as_ref().is_some_and(|fields| usage_slot(fields) == slot) {
+                rows.push((subject.clone(), body));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// The newest unreplicated reading of each held usage series of `subject` (of every subject when
+/// `None`) that this node holds, as (subject, body, observed at): rollups, and occupancy too
+/// unless `rollups_only`. Only the seat's host has them.
+pub fn pending_usage(
+    connection: &Connection,
+    subject: Option<&str>,
+    rollups_only: bool,
+) -> rusqlite::Result<Vec<(String, String, u128)>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT o.subject, o.body, o.observed_at_unix_ms FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+         WHERE (?1 IS NULL OR s.subject=?1) AND s.kind='harness.usage' AND s.pending_local_id IS NOT NULL
+           AND (json_extract(s.slot, '$[1]')='response_rollup'
+             OR (NOT ?2 AND json_extract(s.slot, '$[1]')='context_occupancy'
+                 -- Only the live incarnation's: a restart leaves the replaced one's held reading,
+                 -- older than the new incarnation's context.
+                 AND json_extract(s.slot, '$[0]')=(
+                     SELECT json_extract(state.body, '$.fields.incarnation_id') FROM local_observations AS state
+                     WHERE state.subject=s.subject AND state.kind='harness.observed'
+                     ORDER BY state.id DESC LIMIT 1)))
+         ORDER BY o.id",
+    )?;
+    let rows = statement.query_map(params![subject, rollups_only], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?.max(0) as u128))
+    })?;
+    rows.collect()
+}
+
 pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
     let action_receipt_cas = input.kind == "client.action-result"
         && input.actor.is_none()
@@ -9004,6 +9177,7 @@ fn publish_changed_harness_state_tx(
             })
     });
     let resting = input.fields.get("state").and_then(Value::as_str) != Some("working");
+    let ended = matches!(input.fields.get("state").and_then(Value::as_str), Some("ended" | "indeterminate"));
     let incarnation = fields.get("incarnation_id").and_then(Value::as_str).unwrap_or("").to_owned();
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
@@ -9024,7 +9198,7 @@ fn publish_changed_harness_state_tx(
                 }))
     {
         if resting {
-            publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
+            publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage), ended)?;
         }
         return Ok(None);
     }
@@ -9072,7 +9246,7 @@ fn publish_changed_harness_state_tx(
     if resting {
         publish_pending_usage_tx(
             transaction, origin, &input.subject, &incarnation, now,
-            same_state.then_some(due_usage),
+            same_state.then_some(due_usage), ended,
         )?;
     }
     Ok(Some(claim))
@@ -9191,7 +9365,14 @@ fn publish_due_usage_tx(
         .map_err(internal)?;
     // When the harness is not working: since when, as its replicated state says. A harness
     // that never reported a state has no turn end to wait for, so each reading replicates.
-    let resting_since = match latest_claim_of_kind_tx(transaction, &input.subject, "harness.observed")? {
+    let state = latest_claim_of_kind_tx(transaction, &input.subject, "harness.observed")?;
+    // A rollup waits for its hour only while its own incarnation is the seat's live one: after
+    // `ended` or `indeterminate`, or once a restart replaced it, nothing would flush it.
+    let live_incarnation = state.as_ref().is_some_and(|claim| {
+        !matches!(claim.body.pointer("/fields/state").and_then(Value::as_str), Some("ended" | "indeterminate"))
+            && claim.body.pointer("/fields/incarnation_id") == input.fields.get("incarnation_id")
+    });
+    let resting_since = match state {
         None => Some(u128::MAX),
         Some(claim) if claim.body.pointer("/fields/state").and_then(Value::as_str) == Some("working") => None,
         Some(claim) => Some(
@@ -9202,8 +9383,65 @@ fn publish_due_usage_tx(
                 .map_or(claim.accepted_at_unix_ms, u128::from),
         ),
     };
+    let rollup = input.fields.get("semantics").and_then(Value::as_str) == Some("response_rollup");
+    let published_fields = |text: &str| {
+        let mut published: BTreeMap<String, Value> = serde_json::from_str(text).unwrap_or_default();
+        // The publication may have added the native binding the reading lacks.
+        if !input.fields.contains_key("native_session_id") {
+            published.remove("native_session_id");
+        }
+        published
+    };
+    // Occupancy is held on its points only when both readings say how full the window is.
+    let occupancy = input.fields.get("semantics").and_then(Value::as_str) == Some("context_occupancy");
+    let held_occupancy = occupancy
+        && resting_since != Some(u128::MAX)
+        && live_incarnation
+        && usage_occupancy_percent(&input.fields).is_some()
+        && last.as_ref().is_some_and(|(_, text)| usage_occupancy_percent(&published_fields(text)).is_some());
     let (due, repeat) = match &last {
         None => (true, false),
+        // A harness that never reported a state never ends or rests, so nothing would flush a
+        // held rollup: its readings keep replicating as before.
+        Some((_, text)) if held_occupancy => {
+            let published = published_fields(text);
+            let moved = usage_occupancy_percent(&input.fields)
+                .zip(usage_occupancy_percent(&published))
+                .is_some_and(|(now, then)| (now - then).abs() >= USAGE_OCCUPANCY_POINTS);
+            let changed = ["compactions", "model"]
+                .iter()
+                .any(|name| published.get(*name) != input.fields.get(*name));
+            let repeat = published == input.fields;
+            ((moved || changed) && !repeat, repeat)
+        }
+        // Held semantics replicate at once once their incarnation ended or was replaced.
+        Some((_, text)) if (rollup || occupancy) && resting_since != Some(u128::MAX) && !live_incarnation => {
+            let repeat = published_fields(text) == input.fields;
+            (!repeat, repeat)
+        }
+        Some((_, text)) if rollup && resting_since != Some(u128::MAX) => {
+            let published = published_fields(text);
+            // The pending reading of an hour that is over was that hour's last: replicate it
+            // now, and hold this one until its own hour ends.
+            let hour = usage_rollup_hour(&input.fields, local.accepted_at_unix_ms);
+            let previous = transaction
+                .query_row(
+                    "SELECT o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                     WHERE s.subject=?1 AND s.kind='harness.usage' AND s.slot=?2",
+                    params![input.subject, slot],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(internal)?;
+            if let Some(previous) = previous {
+                let previous: Value = serde_json::from_str(&previous).map_err(internal)?;
+                let fields = schema_fields_for_body("harness.usage", &previous).map_err(internal)?;
+                if usage_rollup_hour(&fields, 0) < hour {
+                    publish_usage_slot_tx(transaction, origin, &input.subject, input.actor.as_deref(), &fields, now)?;
+                }
+            }
+            (false, published == input.fields)
+        }
         Some((published_at, published_fields)) => {
             let mut published: BTreeMap<String, Value> =
                 serde_json::from_str(published_fields).unwrap_or_default();
@@ -9236,6 +9474,28 @@ fn publish_due_usage_tx(
             )
             .map_err(internal)?;
         return Ok(None);
+    }
+    // A context reading replaces the one before it in the fold, whatever its incarnation. Another
+    // incarnation's held occupancy replicates first, so a later end or flush can't put it over
+    // this one.
+    if occupancy {
+        let held = transaction
+            .prepare(
+                "SELECT o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                 WHERE s.subject=?1 AND s.kind='harness.usage' AND s.slot<>?2
+                   AND json_extract(s.slot, '$[1]')='context_occupancy'
+                 ORDER BY o.id",
+            )
+            .map_err(internal)?
+            .query_map(params![input.subject, slot], |row| row.get::<_, String>(0))
+            .map_err(internal)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(internal)?;
+        for body in held {
+            let body: Value = serde_json::from_str(&body).map_err(internal)?;
+            let fields = schema_fields_for_body("harness.usage", &body).map_err(internal)?;
+            publish_usage_slot_tx(transaction, origin, &input.subject, input.actor.as_deref(), &fields, now)?;
+        }
     }
     publish_usage_slot_tx(
         transaction,
@@ -9294,7 +9554,9 @@ fn publish_usage_slot_tx(
 }
 
 /// Replicate the newest local usage of each pending slot of `subject`: every one when the
-/// harness stops working, or only the slots last replicated at or before `published_by`.
+/// harness stops working, or only the slots last replicated at or before `published_by`. A
+/// `response_rollup` waits for neither: it replicates once its hour is over, or when the seat
+/// has `ended`.
 fn publish_pending_usage_tx(
     transaction: &Transaction<'_>,
     origin: &str,
@@ -9302,6 +9564,7 @@ fn publish_pending_usage_tx(
     incarnation: &str,
     now: u128,
     published_by: Option<u128>,
+    ended: bool,
 ) -> Result<Vec<ClaimRecord>, St3Error> {
     let mut pending = {
         let mut statement = transaction
@@ -9317,6 +9580,20 @@ fn publish_pending_usage_tx(
             .map_err(internal)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(internal)?
+    };
+    // For a held rollup or occupancy reading, whether it replicates now; `None` for the rest,
+    // which follow `published_by`.
+    let usage_rollup_due = |observation: &ClaimRecord| {
+        let fields: BTreeMap<String, Value> =
+            observation.body["fields"].as_object().cloned().unwrap_or_default().into_iter().collect();
+        match fields.get("semantics").and_then(Value::as_str) {
+            Some("response_rollup") => Some(
+                ended || usage_rollup_hour(&fields, observation.accepted_at_unix_ms) < now / USAGE_ROLLUP_HOUR_MS,
+            ),
+            // A held occupancy reading moved fewer points than replicate it: it waits for the end.
+            Some("context_occupancy") if usage_occupancy_percent(&fields).is_some() => Some(ended),
+            _ => None,
+        }
     };
     if let Some(published_by) = published_by {
         // Publishing a slot clears its pending reading; the rest keep waiting.
@@ -9335,13 +9612,18 @@ fn publish_pending_usage_tx(
             .collect::<rusqlite::Result<BTreeSet<_>>>()
             .map_err(internal)?;
         pending.retain(|observation| {
-            local_observation_position(observation).is_some_and(|id| due.contains(&(id as i64)))
+            usage_rollup_due(observation).unwrap_or_else(|| {
+                local_observation_position(observation).is_some_and(|id| due.contains(&(id as i64)))
+            })
         });
     } else {
+        pending.retain(|observation| usage_rollup_due(observation).unwrap_or(true));
+        // A rollup that waits keeps its pending reading; publishing clears the others.
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h1629790977a3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
-             WHERE subject=?1 AND kind='harness.usage'",
+                /* sqlite-large-value: allow-for-now lv-hc52177269f65 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
+             WHERE subject=?1 AND kind='harness.usage'
+               AND json_extract(slot, '$[1]') NOT IN ('response_rollup', 'context_occupancy')",
                 [subject],
             )
             .map_err(internal)?;
@@ -9365,7 +9647,9 @@ fn publish_pending_usage_tx(
         return Ok(published);
     }
     // Even a single response can have published before its native binding arrived, leaving
-    // no pending token change. Capture that binding in the normal stop flush as well.
+    // no pending token change. Capture that binding in the normal stop flush as well. A slot
+    // still holding a newer reading (a rollup waiting for its hour) gets the binding when
+    // that reading replicates; republishing the older one here would drop it.
     let unbound = {
         let mut statement = transaction
             .prepare(
@@ -9373,7 +9657,8 @@ fn publish_pending_usage_tx(
              WHERE subject=?1 AND kind='harness.usage'
                AND json_extract(published_fields, '$.semantics')='response_rollup'
                AND json_extract(published_fields, '$.incarnation_id')=?2
-               AND json_extract(published_fields, '$.native_session_id') IS NULL",
+               AND json_extract(published_fields, '$.native_session_id') IS NULL
+               AND pending_local_id IS NULL",
             )
             .map_err(internal)?;
         let rows = statement
@@ -10394,10 +10679,12 @@ fn normalize_local_projection_timestamps_tx(
                 ],
             )?;
         }
-        "step-run.state" if fields.get("status").and_then(Value::as_str) == Some("ready") => {
+        "step-run.state" => {
             transaction.execute(
-                /* sqlite-large-value: allow-for-now lv-h4d599b3326b1 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET activated_at_unix_ms=?2 WHERE subject=?1",
-                params![subject, at],
+                /* sqlite-large-value: allow-for-now lv-h26214094cec7 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET updated_at_unix_ms=?2,
+                    activated_at_unix_ms=CASE WHEN ?3='ready' THEN ?2 ELSE activated_at_unix_ms END
+                 WHERE subject=?1",
+                params![subject, at, fields.get("status").and_then(Value::as_str)],
             )?;
         }
         "planning-session.started" => {
@@ -21127,6 +21414,7 @@ pub fn append_claim_with_commit_context(
                     // Layout edits merge, but retiring a folded duplicate must not lose
                     // an edit accepted after the client read it.
                     if subject == &input.subject
+                        && input.kind != "ordered-membership.edited"
                         && !(input.kind == "arrangement.edited"
                             && input.fields.get("operations").and_then(Value::as_array)
                                 .is_some_and(|operations| operations.iter().any(|operation| operation["op"] == "retire")))
@@ -21175,7 +21463,7 @@ pub fn append_claim_with_commit_context(
                 }
             }
             if let Some(expected) = &input.expected_subject {
-                let actual = if input.kind == "arrangement.edited" {
+                let actual = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                     transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_,String>(0)).optional().map_err(internal)?
                 } else {
                     latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
@@ -21236,6 +21524,7 @@ pub fn append_claim_with_commit_context(
                 stored_fields = Some(fields);
             }
             arrangements::prepare(transaction, input)?;
+            ordered_membership::prepare(transaction, input)?;
             // A leave names its own batch as the last sequence of its window. The sequence is only
             // known here, under the writer lock, so a zero high water stands for "this batch".
             if input.kind == "fleet.member-left"
@@ -21271,7 +21560,7 @@ pub fn append_claim_with_commit_context(
                     })?;
                 return Ok((latest, false));
             }
-            let predecessor = if input.kind == "arrangement.edited" {
+            let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                 transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
             } else {
                 latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
@@ -21586,6 +21875,10 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
     ("declared_resource_edges", &[]),
+    ("ordered_membership_heads", &[]),
+    ("ordered_membership_live", &[]),
+    ("ordered_membership_counts", &["changed_index"]),
+    ("ordered_membership_lifecycle", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),

@@ -46,23 +46,22 @@ CATEGORIES = ('skipped', 'lane_edit', 'merge_tree', 'not_signed', 'failed', 'pro
 
 
 def lanes_at(root, base, runner, cache):
-    """{check: definition_paths} of the lane file at `base` (fetched when missing), or at origin/main when the base cannot be read."""
+    """{check: definition_paths} from the selected revision only; retry fetching an unavailable base."""
     if base in cache:
         return cache[base]
-    lanes = None
-    for revision in ([base] if base else []) + ['origin/main']:
-        done = runner(['git', '-C', str(root), 'show', f'{revision}:{LANES}'])
-        if done.returncode != 0 and revision == base:
-            runner(['git', '-C', str(root), 'fetch', '-q', 'origin', base])
-            done = runner(['git', '-C', str(root), 'show', f'{revision}:{LANES}'])
-        if done.returncode == 0:
-            try:
-                data = json.loads(done.stdout)
-                lanes = {name: list(lane.get('definition_paths') or []) for name, lane in (data.get('lanes') or data).items()}
-                break
-            except (ValueError, AttributeError):
-                continue
-    cache[base] = lanes or {}
+    revision = base or 'origin/main'
+    try:
+        path = flip.config_path(root, LANES, revision, runner)
+        text = flip.git(root, 'show', f'{revision}:{path}', runner=runner)
+    except RuntimeError:
+        if not base:
+            raise
+        flip.git(root, 'fetch', '-q', 'origin', base, runner=runner)
+        path = flip.config_path(root, LANES, revision, runner)
+        text = flip.git(root, 'show', f'{revision}:{path}', runner=runner)
+    data = json.loads(text)
+    lanes = {name: list(lane.get('definition_paths') or []) for name, lane in (data.get('lanes') or data).items()}
+    cache[base] = lanes
     return cache[base]
 
 
@@ -194,8 +193,8 @@ def main(argv, runner=flip.default_runner, now=None, root=ROOT):
     github = flip.GitHub(args.repo, runner, args.cache)
     try:
         result = report(github, root, runner, now - datetime.timedelta(hours=args.hours), now, set(args.actor), args.receipts)
-    except (flip.Unreadable, ValueError, KeyError) as error:
-        print(f'could not read GitHub: {error}', file=sys.stderr)
+    except (flip.Unreadable, RuntimeError, ValueError, KeyError) as error:
+        print(f'could not read GitHub or selected base: {error}', file=sys.stderr)
         return 2
     print(markdown(result) if args.markdown else json.dumps(result, indent=2))
     return 0
