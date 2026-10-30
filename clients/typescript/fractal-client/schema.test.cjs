@@ -3,6 +3,52 @@ const assert = require('node:assert/strict');
 
 // Node 24 loads the generated TypeScript directly, without a transpilation copy.
 const modules = Promise.all([import('effect'), import('./Schema.generated.ts')]);
+
+test('revisioned agents opt-in and frames are strict disjoint branches with lossless provenance', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const command = require('../../../docs/st3/client-v0/fixtures/agents-publication-subscribe.json');
+    const chunk = require('../../../docs/st3/client-v0/fixtures/agents-publication-chunk.json');
+    const delta = require('../../../docs/st3/client-v0/fixtures/agents-publication-changes.json');
+    const error = require('../../../docs/st3/client-v0/fixtures/agents-publication-row-too-large.json');
+    const decodeCommand = Rich.decodeUnknownSync(Rich.CollectionCommand, 'strict');
+    const decodeFrame = Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict');
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionCommand)(decodeCommand(command)), command);
+    for (const field of ['limit', 'window', 'person', 'actor', 'agent', 'status', 'filters']) {
+        assert.throws(() => decodeCommand({ ...command, [field]: field === 'limit' ? 100 : null }));
+    }
+    assert.throws(() => decodeCommand({ ...command, agents_publication_version: 2 }));
+    assert.throws(() => decodeCommand({ ...command, collection: 'work' }));
+    const legacyCommand = { kind: 'subscribe', id: 'legacy', collection: 'agents', limit: 100 };
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionCommand)(decodeCommand(legacyCommand)),
+        { ...legacyCommand, actor: null, person: null, agent: null, status: null });
+    // Existing nullable Agent fields encode omitted values as null; frame provenance stays exact.
+    const normalizedRows = Schema.encodeSync(Schema.Array(Rich.Agent))(
+        Rich.decodeUnknownSync(Schema.Array(Rich.Agent), 'strict')(chunk.items));
+    const normalizedChunk = { ...chunk, items: normalizedRows };
+    for (const wire of [normalizedChunk, delta, error]) {
+        assert.deepEqual(Schema.encodeSync(Rich.CollectionFrame)(decodeFrame(wire)), wire);
+    }
+    assert.equal(Rich.decodeUnknownSync(Rich.ErrorCode, 'strict')(error.code), error.code);
+    const { publication, chunk_index, chunk_count, ...legacy } = normalizedChunk;
+    assert.deepEqual(Schema.encodeSync(Rich.CollectionFrame)(decodeFrame(legacy)), legacy);
+    for (const field of ['publication', 'chunk_index', 'chunk_count']) {
+        const invalid = { ...chunk };
+        delete invalid[field];
+        assert.throws(() => decodeFrame(invalid));
+    }
+    assert.throws(() => decodeFrame({ ...chunk, chunk_count: 0 }));
+    assert.throws(() => decodeFrame({ ...chunk, base_revision: 42 }));
+    assert.throws(() => decodeFrame({ ...chunk, has_more: true }));
+    assert.throws(() => decodeFrame({ ...chunk, collection: 'missions' }));
+    assert.throws(() => decodeFrame({ ...delta, chunk_index: 0 }));
+    assert.throws(() => decodeFrame({ ...delta, base_revision: 0 }));
+    const unpublished = structuredClone(chunk);
+    delete unpublished.snapshot.published_at;
+    assert.throws(() => decodeFrame(unpublished));
+    for (const field of ['chunk_index', 'chunk_count', 'base_revision']) {
+        assert.throws(() => decodeFrame({ ...legacy, [field]: 1 }));
+    }
+});
 test('push registration schema bounds secret input and exposes only safe device status', async () => {
     const [{ Schema }, Rich] = await modules;
     const decode = Rich.decodeUnknownSync(Rich.PushRegistration, 'strict');
@@ -846,4 +892,42 @@ test('optional author and recipients retain closed legacy scalar types', async (
         {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
         assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
     }
+});
+
+test('an ask resolved at its deadline decodes, and what the decoder from before deadlines refuses', async () => {
+    const [{ Schema }, Rich] = await modules;
+    // The answer record before deadlines: no resolved_by, and a respondent that is a sender only.
+    const { resolved_by, ...before } = Rich.PersonAnswerRecord.fields;
+    assert.ok(resolved_by);
+    const previous = Schema.Struct({ ...before, respondent: Rich.SenderRef });
+    const record = {
+        ask: 'step-run/run-generation-1/ask-1', status: 'completed', respondent: 'daemon/runtime',
+        answered_at_unix_ms: 1, resolved_by: 'deadline',
+    };
+    const withDefault = {
+        ...record, summary: 'Timed out without an answer; the default applied: Keep it open (keep-open)',
+        answer: { type: 'decision', outcome: 'decline', id: 'keep-open', label: 'Keep it open' },
+    };
+    const withoutAnswer = { ...record, summary: 'Timed out without an answer' };
+    for (const wire of [withDefault, withoutAnswer]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const current = Rich.decodeUnknownSync(Rich.PersonAnswerRecord, mode)(wire);
+            assert.equal(current.respondent, 'daemon/runtime');
+            assert.equal(current.resolved_by, 'deadline');
+            assert.deepEqual(current.answer, wire.answer);
+        }
+        // An older client reads the answer itself as it always did: its outcome is one it knows
+        // and it ignores resolved_by. It refuses daemon/runtime as a respondent, as it already
+        // does for an ask its requester's end cancelled, so [asks] deadlines comes on only once
+        // the web clients run this build.
+        const old = Rich.decodeUnknownSync(previous, 'tolerant');
+        assert.throws(() => old(wire));
+        const read = old({ ...wire, respondent: 'person/avery' });
+        assert.deepEqual(read.answer, wire.answer);
+        assert.equal('resolved_by' in read, false);
+    }
+    // No outcome was added: the one a deadline would otherwise have needed is still refused.
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAnswerRecord, 'strict')({
+        ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
+    }));
 });

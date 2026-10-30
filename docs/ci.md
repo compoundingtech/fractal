@@ -198,6 +198,11 @@ real Cargo and benign stand-in commands; it compiles no Rust.
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
   previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
   metadata before running it; it does not rebuild the baseline or its PTY dependency.
+  It also runs the production mailbox bind handler against a pinned PTY 0.13.0
+  (`063ff7f`) metadata fixture without `daemonBootId`, with a live matching process
+  start token. The previous-release fleet test uses a stub PTY and covers replication,
+  not native channel admission; the metadata fixture independently covers the deployed
+  writer contract even when the devShell PTY advances.
 
 The primary test job proves that the two actual nextest inventories are disjoint and their union
 equals the full selected suite. The explicit zero-retry mail canaries run in a parallel job. The primary also
@@ -254,11 +259,16 @@ remains available for a full run. Release and deployment workflows keep their ow
 Each stage restores a job-keyed `actions/cache` entry (Namespace serves it from its accelerated
 backend) holding Cargo's registry and the workspace `target/` directory, keyed on `Cargo.lock` and
 `flake.lock`, workspace manifests and linker configuration. A second keyed entry (`nix5-<job>-...`) holds a signed local Nix binary cache in
-`$RUNNER_TEMP/st-ci-cache`. Its key includes `flake.lock`, the flake, Nix expressions and both compatibility baseline pins.
+`$RUNNER_TEMP/fractal-ci-cache`. Its key includes `flake.lock`, the flake, Nix expressions and both compatibility baseline pins.
 `scripts/ci-nix-cache use` makes it a preferred substituter. After a successful stage, `save`
 copies reference-free downloads and sources fetched by the run, plus the closures of the
 previous-release messaging package and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
+Complete build and performance snapshots using only the known previous cache-directory layout
+are clean cache misses: the reader skips them without extracting or installing outputs.
+Unexpected roots, mixed directory generations and incomplete archives remain hard validation errors.
+New signing keys use the name `fractal-ci-cache-1`; restored keys retain their identity, and trust
+is derived from the restored secret rather than a hardcoded signing-name prefix.
 
 Genie uses a separate `nix6-genie-closure-...` entry keyed on its locked shell and cache policy.
 It retains the complete `nix print-dev-env .#genie` profile closure, including upstream-signed

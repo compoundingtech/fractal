@@ -151,7 +151,17 @@
       "additionalProperties": false,
       "required": ["kind", "ended_at"],
       "properties": {
-        "kind": {"enum": ["completed", "stopped-by-person", "stopped-by-agent", "crashed", "harness-exited", "host-lost", "retired"]},
+        "kind": {"anyOf": [{"enum": [
+          "completed",
+          "stopped-by-person",
+          "stopped-by-agent",
+          "stopped-by-mission",
+          "parked",
+          "crashed",
+          "harness-exited",
+          "host-lost",
+          "retired"
+        ]}, {"type": "string"}]},
         "actor": {"type": "string"},
         "reason": {"type": "string"},
         "exit_code": {"type": "integer"},
@@ -220,6 +230,7 @@
     "ActorRef": {"type": "string", "pattern": "^(?:agent|daemon|person)/[^\\s]+$", "x-st-ref": ["agent", "daemon", "person"]},
     "ParticipantRef": {"type": "string", "pattern": "^(?:agent|person|step)/[^\\s]+$", "x-st-ref": ["agent", "person", "step"]},
     "SenderRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Message sender, including an authorized external assistant principal. Not a recipient or actor."},
+    "RespondentRef": {"type": "string", "pattern": "^(?:agent|assistant|daemon|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "daemon", "person", "step"], "description": "Who resolved a person ask: a sender, or daemon/runtime when its deadline or its requester ending resolved it."},
     "TimelineRecipientRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority."},
     "MissionState": {"anyOf": [{"enum": [
       "draft",
@@ -249,6 +260,7 @@
     "TimelineStatus": {"anyOf": [{"enum": ["queued", "running", "waiting", "completed", "failed", "cancelled"]}, {"type": "string"}], "description": "Run status reported in a timeline `status` entry."},
     "ErrorCode": {"anyOf": [{"enum": [
       "recipient-retired",
+      "agents-publication-row-too-large",
       "identity-cycle",
       "identity-occupied",
       "identity-retired-source",
@@ -2952,7 +2964,7 @@
     "TerminalCreateParameters": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1}, "host": {"type": "string", "minLength": 1}, "cwd": {"type": "string", "minLength": 1}}},
     "PersonAskParameters": {
       "type": "object", "additionalProperties": false, "required": ["person_id", "title", "reason"],
-      "properties": {"person_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string"}, "reason": {"type": "string"}, "step_id": {"$ref": "#/$defs/Id"}, "new_run": {"type": "string"}, "request": {"$ref": "#/$defs/StructuredRequest"}}
+      "properties": {"person_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string"}, "reason": {"type": "string"}, "step_id": {"$ref": "#/$defs/Id"}, "new_run": {"type": "string"}, "request": {"$ref": "#/$defs/StructuredRequest"}, "deadline_ms": {"type": "integer", "minimum": 60000, "maximum": 2592000000, "description": "How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). Refused with ask-deadlines-off while the fleet has not turned on ask deadlines."}, "default_answer": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}$", "description": "The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. Refused with ask-deadlines-off while the fleet has not turned on ask deadlines."}}
     },
     "PersonStepParameters": {
       "type": "object", "additionalProperties": false, "required": ["target_id", "summary", "episode"],
@@ -3047,7 +3059,7 @@
         "ask": {"$ref": "#/$defs/Id"},
         "status": {"enum": ["completed", "cancelled"]},
         "summary": {"type": "string"},
-        "respondent": {"$ref": "#/$defs/SenderRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner."},
+        "respondent": {"$ref": "#/$defs/RespondentRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it."},
         "acted_for": {"$ref": "#/$defs/Id", "description": "The person whose prior instruction the agent respondent recorded."},
         "sender_class": {"type": "string", "description": "External assistant attribution when the response was submitted through an assistant grant."},
         "assistant_grant_id": {"$ref": "#/$defs/Id", "description": "The assistant grant that authorized the response."},
@@ -3055,6 +3067,7 @@
         "assistant_session_actor": {"type": "string", "description": "Server-owned grant-bound assistant session audit actor, separate from the answering principal."},
         "answered_at_unix_ms": {"type": "integer", "minimum": 0},
         "answer": {"$ref": "#/$defs/PersonAnswer"},
+        "resolved_by": {"enum": ["deadline"], "description": "The ask resolved by itself at its deadline, not by the person."},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/Id"}}
       }
     },
@@ -3977,8 +3990,58 @@
       "sessions",
       "terminals"
     ] },
+    "AgentsPublicationSubscribe": {
+      "description": "Opt into complete revisioned agents publications, without a limit, window or filters. Legacy subscribe commands remain unchanged.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "collection", "agents_publication_version"],
+      "properties": {
+        "kind": { "const": "subscribe" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "collection": { "const": "agents" },
+        "agents_publication_version": { "const": 1 },
+        "trace": { "$ref": "#/$defs/SubscribeTraceContext" }
+      }
+    },
+    "AgentsSnapshotChunk": {
+      "description": "One contiguous whole-row chunk. Every chunk repeats identical snapshot/publication/count. Order contains only this chunk's item IDs. Install only after the final chunk; an empty roster has one empty chunk.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "collection", "snapshot", "publication", "chunk_index", "chunk_count", "items", "order", "has_more"],
+      "properties": {
+        "kind": { "const": "snapshot" },
+        "id": { "type": "string" },
+        "collection": { "const": "agents" },
+        "snapshot": { "allOf": [{ "$ref": "#/$defs/Snapshot" }, { "type": "object", "required": ["published_at"], "properties": { "published_at": { "$ref": "#/$defs/Timestamp" } } }] },
+        "publication": { "$ref": "#/$defs/AgentsPublicationMetadata" },
+        "chunk_index": { "type": "integer", "minimum": 0 },
+        "chunk_count": { "type": "integer", "minimum": 1 },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/Agent" } },
+        "order": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
+        "has_more": { "const": false }
+      }
+    },
+    "AgentsChanges": {
+      "description": "One atomic complete-target delta. Apply only with matching node_epoch and applied base_revision. Oversized deltas are replaced by a full chunked snapshot, never split.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "collection", "snapshot", "publication", "base_revision", "upserts", "removes", "order", "has_more"],
+      "properties": {
+        "kind": { "const": "changes" },
+        "id": { "type": "string" },
+        "collection": { "const": "agents" },
+        "snapshot": { "allOf": [{ "$ref": "#/$defs/Snapshot" }, { "type": "object", "required": ["published_at"], "properties": { "published_at": { "$ref": "#/$defs/Timestamp" } } }] },
+        "publication": { "$ref": "#/$defs/AgentsPublicationMetadata" },
+        "base_revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "upserts": { "type": "array", "items": { "$ref": "#/$defs/Agent" } },
+        "removes": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
+        "order": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
+        "has_more": { "const": false }
+      }
+    },
     "CollectionCommand": {
       "oneOf": [
+        { "$ref": "#/$defs/AgentsPublicationSubscribe" },
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
           "type": "object",
@@ -4163,6 +4226,8 @@
     },
     "CollectionFrame": {
       "oneOf": [
+        { "$ref": "#/$defs/AgentsSnapshotChunk" },
+        { "$ref": "#/$defs/AgentsChanges" },
         {
           "type": "object",
           "additionalProperties": false,
@@ -4230,7 +4295,7 @@
             "kind": { "const": "resync" },
             "id": { "type": "string" },
             "collection": { "type": "string" },
-            "code": { "type": "string" },
+            "code": { "$ref": "#/$defs/ErrorCode" },
             "message": { "type": "string" },
             "retryable": { "type": "boolean" }
           }
@@ -4243,7 +4308,7 @@
             "kind": { "const": "error" },
             "id": { "type": "string" },
             "collection": { "type": "string" },
-            "code": { "type": "string" },
+            "code": { "$ref": "#/$defs/ErrorCode" },
             "message": { "type": "string" },
             "retryable": { "type": "boolean" }
           }

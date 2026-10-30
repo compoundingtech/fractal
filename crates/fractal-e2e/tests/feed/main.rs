@@ -11,7 +11,7 @@ use tokio::sync::{Notify, watch};
 
 mod inventory;
 pub fn test_state(root: &Path) -> fractal_daemon::api::AppState {
-    fractal_daemon::api::AppState { owning_person: None,
+    let state = fractal_daemon::api::AppState { owning_person: None,
     // Socket reads overlap graph writes, as on a real WAL-backed member.
     store: Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "stui-feed").unwrap()),
     notify: Arc::new(Notify::new()),
@@ -24,7 +24,10 @@ pub fn test_state(root: &Path) -> fractal_daemon::api::AppState {
     configured_peers: Vec::new(),
     client_relay: None,
     native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    // Like run_up, own roster publications before a real feed can subscribe.
+    fractal_daemon::api::start_agent_roster(&state);
+    state
 }
 
 pub async fn next_window(updates: &mpsc::Receiver<Update>, wanted: Window) -> Vec<Resource> {
