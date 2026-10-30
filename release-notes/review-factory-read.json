@@ -10,8 +10,8 @@
     "detail": "The review verdict schema gains two optional fields (risk.deterministic.factory_read, risk.needs_factory_read); older verdicts still validate and the runner leaves the fields out when the base's review-risk does not report them."
   },
   "rules": {
-    "status": "none",
-    "detail": "Review tooling and documentation only (.st/review-risk.json, .st/review-verdict.schema.json, scripts/review, scripts/review-risk, scripts/review-validate, their tests and docs/review.md); no protocol, schema, policy, workflow or note change outside the review's own files."
+    "status": "changed",
+    "detail": "The review rules gain a factory_read list in .st/review-risk.json (five risky areas) and docs/review.md states the lane rule it encodes: a MEDIUM change in one of those areas does not self-queue and goes to Factory for one read. Nathan approved it through ask step-run/ask-781daf9db23755ab7edfc6a63eb13950/ask. The risk levels, risky-classes.json and the low/high routing are unchanged."
   },
   "compatibility": {
     "status": "none",
@@ -22,8 +22,8 @@
     "detail": "None."
   },
   "manual": {
-    "status": "none",
-    "detail": "None."
+    "status": "changed",
+    "detail": "An author whose MEDIUM change touches one of the factory_read areas sends the signed head to Factory for one read before queueing; nothing else to do at deploy."
   },
   "recovery": {
     "status": "none",
