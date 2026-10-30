@@ -19428,7 +19428,9 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
                 continue;
             }
             result => {
-                if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
+                // An inventory page persists its own fault; keep that text rather than wrap it.
+                let persisted = store.signature_migration().is_ok_and(|migration| migration.fault.is_some());
+                if !persisted && let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
                     stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
                 }
                 stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));

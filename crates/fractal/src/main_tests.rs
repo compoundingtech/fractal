@@ -8707,3 +8707,18 @@ async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
     assert!(!rendered.contains("Renew it with:"));
     assert!(!rendered.contains("The lease expires at"));
 }
+
+#[tokio::test]
+async fn the_signature_job_keeps_a_persisted_fault_whole_and_goes_on_after_a_resume() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-job").unwrap());
+    let fault = "inventory page: fixture defect";
+    store.fail_signature_migration(fault).unwrap();
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Each start used to wrap the stored fault in `bootstrap job stopped: …` again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(store.signature_migration().unwrap().fault.as_deref(), Some(fault));
+    assert!(!job.is_finished(), "a stopped job waits for a resume");
+    assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault));
+    tokio::time::timeout(Duration::from_secs(10), job).await.expect("the resumed job finishes").unwrap();
+    assert!(store.signature_migration().unwrap().done());
+}
