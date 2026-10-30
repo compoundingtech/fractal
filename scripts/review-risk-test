@@ -192,6 +192,20 @@ class ReviewRisk(unittest.TestCase):
         self.assertIn("concurrency", self.areas(result))
         self.assertTrue(result["needs_factory_read"], result)
 
+    def test_a_file_under_a_checkpoint_retired_or_trim_directory_is_the_store_area(self):
+        for path in ("crates/smallclaims/src/store/checkpoint/tombstones.rs",
+                     "crates/fractal-store/src/store/checkpoint_rules/staged.rs",
+                     "crates/smallclaims/src/store/retired/rows.rs",
+                     "crates/smallclaims/src/store/checkpoint_trim/plan.rs"):
+            with self.subTest(path=path):
+                self.setUp()
+                self.write(path, "fn a() {}\n")
+                self.write(".github/workflows/x.yml", "name: x\n")
+                result = self.risk()
+                self.assertEqual(result["level"], "medium")
+                self.assertIn("store-schema-trim-checkpoints", self.areas(result))
+                self.assertTrue(result["needs_factory_read"], result)
+
     def test_a_plain_medium_change_does_not_need_a_factory_read(self):
         self.write("crates/fractal-api-core/src/api/routes.rs", "pub fn route() {}\npub struct Reply;\npub fn another() {}\n")
         result = self.risk()
