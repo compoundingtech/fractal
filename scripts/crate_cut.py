@@ -7,9 +7,13 @@ The functions, types and constants the fold, the schema and the open path reach 
 depends on) must stay in the lower crate; everything else only calls down and can move up. This tool
 computes that partition and applies it:
 
-    crate_cut.py plan  --src crates/fractal-store/src --config .st/crate-cut.json [--pins FILE] [--json OUT]
-    crate_cut.py apply --src crates/fractal-store/src --config .st/crate-cut.json --layer evidence \\
+    crate_cut.py plan  --src crates/fractal-store/src --config CONFIG.json [--pins FILE] [--json OUT]
+    crate_cut.py apply --src crates/fractal-store/src --config CONFIG.json --layer evidence \\
                        --crate fractal-evidence --lower fractal-store [--pins FILE]
+
+CONFIG.json is explicit: select .fractal/crate-cut.json when present, otherwise .st/crate-cut.json.
+An unreadable/malformed new config must not be replaced with the old one.
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config
 
 Items are the unit: free fns, types, consts, statics, traits, macros and inline modules; the fns of
 an `impl Store` block (each moves on its own and becomes a method of an extension trait implemented for

@@ -158,6 +158,7 @@
         ".github",
         ".gitignore",
         ".st",
+        ".fractal",
         "apps/fractal-web/.gitignore",
         "apps/fractal-web/src/changelog/seen.ts",
         "crates/fractal/tests/daemon_load.rs",

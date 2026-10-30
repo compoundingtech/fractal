@@ -89,7 +89,13 @@ class Wiring(unittest.TestCase):
 
     def test_the_lane_definition_names_the_check_and_what_it_builds(self):
         # A definition path that differs from the base makes the tree a lane edit, so the lane runs for it.
-        lane = json.loads((root / '.st/required-lanes.json').read_text())['lanes']['typescript-client']
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — missing-only checkout bridge.
+        path = root / '.fractal/required-lanes.json'
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            path = root / '.st/required-lanes.json'
+        lane = json.loads(path.read_text())['lanes']['typescript-client']
         for path in ('scripts/ci-nix-fixed-outputs', 'nix/typescript-client.nix', 'nix/typescript-client-deps.hash'):
             self.assertIn(path, lane['definition_paths'])
 
