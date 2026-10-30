@@ -1872,6 +1872,9 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
+          # The pty this flake pins, for crates/fractal/tests/pinned_pty.rs: a host whose PATH puts
+          # its own pty first would otherwise test that one instead.
+          FRACTAL_PINNED_PTY_BIN = "${ptyPackage}/bin/pty";
           RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           shellHook = ''
             source ${./scripts/sccache-read-cache-env} || exit $?
