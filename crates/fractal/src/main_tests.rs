@@ -8737,10 +8737,10 @@ async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() 
         let mut connection = store.connection.write();
         let tx = connection.transaction().unwrap();
         for i in 0..3_000 {
-            tx.execute("INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [format!("claim/{i:05}")]).unwrap();
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h9837292e813d owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [format!("claim/{i:05}")]).unwrap();
         }
         // The trust roots these verdicts relied on have since changed.
-        tx.execute("INSERT INTO meta(key,value) VALUES ('claim_candidate_verdict_roots','earlier-roots')", []).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h03aebe910c9e owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES ('claim_candidate_verdict_roots','earlier-roots')", []).unwrap();
         tx.commit().unwrap();
     }
     let job = tokio::spawn(migrate_signature_candidates(store.clone()));
