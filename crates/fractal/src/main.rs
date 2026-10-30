@@ -19863,7 +19863,14 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
             ..context.clone()
         };
         match store.connection.write_workers().spawn_blocking(move || {
-            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || store.checkpoint_step(&context))
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.checkpoint", || {
+                let actions = store.checkpoint_step(&context)?;
+                // A local trim that stopped alerts the `[trim] notify` agent.
+                store
+                    .record_local_trim_stops(&actions)
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+                anyhow::Ok(actions)
+            })
         })
         .await
         {
