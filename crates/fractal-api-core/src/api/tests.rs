@@ -13036,7 +13036,10 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
     }
     // The refresher follows the transcript before it is read.
     let followed = std::cell::RefCell::new(Vec::new());
-    let calls = prompt_card::seat_pending_calls(&state, owner, |path| {
+    let calls = prompt_card::seat_pending_calls(&state, owner, |conversation| {
+        let prompt_card::Follow::Transcript(path) = conversation else {
+            panic!("the seat runs here");
+        };
         followed.borrow_mut().push(path.to_owned());
         Ok(())
     })

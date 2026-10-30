@@ -92,8 +92,8 @@ pub fn start_attention_list(state: &AppState) {
                     // A prompt card reads its seat's conversation on this node, following it
                     // from before the read.
                     let pending = |seat: &str| {
-                        super::prompt_card::seat_pending_calls(&summary_state, seat, |transcript| {
-                            watching(&watch).follow(transcript)
+                        super::prompt_card::seat_pending_calls(&summary_state, seat, |conversation| {
+                            watching(&watch).follow_conversation(conversation)
                         })
                     };
                     watching(&watch).begin();

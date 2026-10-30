@@ -286,3 +286,70 @@ async fn a_remote_allow_is_recorded_where_it_lands_and_released_only_for_its_pro
     );
     assert_eq!(owner.store.native_prompt_state(&seat, 1, 5).unwrap(), crate::store::NativePromptState::Open, "the new prompt still waits");
 }
+
+/// A prompt card on a member other than the seat's host reads the seat's conversation through
+/// the client-read relay, as the seat's person, and follows it there: a result written on the
+/// host wakes the card's refresher, and the card read again no longer shows the call. A member
+/// that reaches no peer says why it cannot read it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_card_on_another_member_reads_and_follows_its_seat_through_the_relay() {
+    use crate::api::prompt_card::{PromptWatch, seat_pending_calls};
+    let owner_root = tempfile::tempdir().unwrap();
+    let gateway_root = tempfile::tempdir().unwrap();
+    let (owner, seat, _, transcript) = prompted_codex_seat(owner_root.path(), "conversation-owner");
+    let mut gateway = tests::test_state_named(gateway_root.path(), "conversation-gateway");
+    gateway.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    let owner_socket = owner_root.path().join("owner-st3.sock");
+    let served = owner_socket.clone();
+    let owner_app = crate::api::router(owner.clone());
+    tokio::spawn(async move { crate::api::serve_unix(&served, owner_app).await });
+    for _ in 0..200 {
+        if tokio::net::UnixStream::connect(&owner_socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    gateway.client_relay =
+        crate::peer::conversation_gateway_relay(&owner_socket, crate::api::raw_terminal_owner_splice, gateway_root.path())
+            .await
+            .unwrap();
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let watch = Arc::new(std::sync::Mutex::new(PromptWatch::new(Arc::clone(&wake))));
+    // As the refresher does, from its blocking fold.
+    let read = |state: AppState| {
+        let (watch, seat) = (Arc::clone(&watch), seat.clone());
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut watch = watch.lock().unwrap();
+                watch.begin();
+                let calls = seat_pending_calls(&state, &seat, |conversation| watch.follow_conversation(conversation));
+                watch.finish();
+                calls.map(|calls| calls.iter().map(|call| call["call_id"].as_str().unwrap().to_owned()).collect::<Vec<_>>())
+            })
+            .await
+            .unwrap()
+        }
+    };
+
+    assert_eq!(read(gateway.clone()).await.unwrap(), ["call-waiting"]);
+    watch.lock().unwrap().take_changed();
+    // The call gets its result on the seat's host.
+    let result = json!({"type":"response_item","timestamp":"2026-10-30T12:00:04Z","payload":{"type":"function_call_output","call_id":"call-waiting","output":"released"}});
+    let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    std::io::Write::write_all(&mut file, format!("{result}\n").as_bytes()).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !watch.lock().unwrap().take_changed() {
+        assert!(
+            tokio::time::timeout_at(deadline, wake.notified()).await.is_ok(),
+            "the host's change woke the refresher"
+        );
+    }
+    assert!(read(gateway.clone()).await.unwrap().is_empty());
+
+    // A member that reaches no peer.
+    let island_root = tempfile::tempdir().unwrap();
+    let island = tests::test_state_named(island_root.path(), "prompt-island");
+    island.store.import_replication("conversation-owner", &owner.store.export_replication(0).unwrap()).unwrap();
+    let error = read(island).await.unwrap_err();
+    assert!(error.contains("no peer reaches host/conversation-owner"), "{error}");
+}
