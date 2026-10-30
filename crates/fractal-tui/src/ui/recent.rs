@@ -456,9 +456,10 @@ mod tests {
             "the agent and Inbox both show the question"
         );
         assert!(
-            popup.matches.iter().any(|index| {
-                popup.entries[*index].place.pane == Pane::List(0).key()
-            })
+            popup
+                .matches
+                .iter()
+                .any(|index| { popup.entries[*index].place.pane == Pane::List(0).key() })
         );
         assert_eq!(selected_place(&ui).pane, "agent:agent/recent-b");
         let mut world = ui.world.clone();
