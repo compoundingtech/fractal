@@ -114,6 +114,7 @@ async fn a_store_joins_a_fleet_and_claims_sync_both_ways() {
     let joined = join::join(&JoinOptions {
         state_dir: grace_dir.path().to_path_buf(),
         store_path: grace_dir.path().join("claims.sqlite3"),
+        admitted_store: None,
         configured_node: "grace".into(),
         code: invitation.code,
         name: None,

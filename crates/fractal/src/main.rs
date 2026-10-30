@@ -6336,6 +6336,23 @@ fn daemon_start_version(machine_version: &str) -> Result<&str> {
     )
 }
 
+fn open_daemon_store(
+    config: &Config,
+    identity: &fractal_daemon::node_identity::StateLock,
+) -> Result<Store> {
+    let admitted = identity.admitted_store();
+    let store = match &admitted {
+        Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
+        None => Store::open(&config.store_path(), &config.node)?,
+    };
+    if admitted.is_some() {
+        fractal_daemon::node_identity::record_store_writer(
+            config, admitted.as_deref(), &config.node,
+        )?;
+    }
+    Ok(store)
+}
+
 fn begin_admitted_startup(
     config: &Config,
     identity: &fractal_daemon::node_identity::StateLock,
@@ -6365,6 +6382,50 @@ fn admitted_explicit_state_alias_is_not_recreated_at_startup_boundary() {
     assert!(begin_admitted_startup(&config, &identity).is_err());
     assert!(!state.exists());
     assert!(!config.socket.exists());
+}
+
+#[cfg(test)]
+#[test]
+fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_write() {
+    let snapshot = |directory: &Path| {
+        fractal_daemon::config::STORE_DATABASE_FILES.map(|name| fs::read(directory.join(name)).ok())
+    };
+    for replace in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        let other = root.path().join("other");
+        let moved = root.path().join("moved");
+        fs::create_dir(&directory).unwrap();
+        fs::create_dir(&other).unwrap();
+        let mut config = Config {
+            node: "orchid".into(),
+            state_dir: root.path().join("state"),
+            store_dir: Some(directory.clone()),
+            ..Config::default()
+        };
+        let identity = fractal_daemon::node_identity::acquire(&mut config).unwrap();
+        drop(open_daemon_store(&config, &identity).unwrap());
+        drop(Store::open(&other.join("claims.sqlite3"), "fern").unwrap());
+        let original_bytes = snapshot(&directory);
+        let other_bytes = snapshot(&other);
+        let swapped_directory = directory.clone();
+        let swapped_other = other.clone();
+        let moved_directory = moved.clone();
+        identity.admitted_store().unwrap().set_before_open_hook_for_test(move || {
+            fs::rename(&swapped_directory, &moved_directory).unwrap();
+            if replace {
+                fs::rename(&swapped_other, &swapped_directory).unwrap();
+            }
+        });
+        assert!(open_daemon_store(&config, &identity).is_err());
+        assert_eq!(snapshot(&moved), original_bytes);
+        if replace {
+            assert_eq!(snapshot(&directory), other_bytes);
+        } else {
+            assert!(!directory.exists(), "explicit directory must not be recreated");
+            assert_eq!(snapshot(&other), other_bytes);
+        }
+    }
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
@@ -6481,19 +6542,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup_telemetry.phase("open-store");
     let store = Arc::new(startup_telemetry.task("startup.open_store", || {
         fractal_daemon::task_cpu::blocking("startup.open_store", || {
-            let database = config.store_path();
-            state_identity.verify_store_directory(&config)?;
-            let store = if config.store_dir.is_some() {
-                Store::open_existing_directory(&database, &config.node)?
-            } else {
-                Store::open(&database, &config.node)?
-            };
-            state_identity.verify_store_directory(&config)?;
-            if config.store_dir.is_some() {
-                fractal_daemon::node_identity::record_store_writer(&database, &config.node)?;
-                state_identity.verify_store_directory(&config)?;
-            }
-            Ok::<_, anyhow::Error>(store)
+            open_daemon_store(&config, &state_identity)
         })
     })?);
     if let Some(fleet_id) = &config.fleet_id {

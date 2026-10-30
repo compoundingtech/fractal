@@ -6,9 +6,11 @@ use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
+use smallclaims::store::AdmittedStore;
 
 use crate::config::{Config, STORE_DATABASE_FILES, store_dir};
 
@@ -18,22 +20,32 @@ const FILE: &str = "node-identity.json";
 pub struct StateLock {
     _file: File,
     _state_directory_lock: File,
-    _store_lock: Option<File>,
+    admitted_store: Option<Arc<AdmittedStore>>,
     state_dir: PathBuf,
 }
 
 impl StateLock {
+    pub fn admitted_store(&self) -> Option<Arc<AdmittedStore>> {
+        self.admitted_store.clone()
+    }
+
+    /// Inspect writer provenance under this guard without persisting a node pin.
+    /// Explicit stores must first be admitted with `lock_store_directory`.
+    pub fn resolve_identity(&self, config: &mut Config) -> Result<()> {
+        self.verify_store_directory(config)?;
+        resolve_with_admitted(config, self.admitted_store.as_deref())?;
+        self.verify_store_directory(config)
+    }
+
     /// Refuse a pathname that no longer names the directory fenced by this guard.
-    /// Call immediately before and after opening the configured store.
     pub fn verify_store_directory(&self, config: &Config) -> Result<()> {
+        if let Some(admitted) = &self.admitted_store {
+            return admitted.verify_directory();
+        }
         let directory = store_dir(config);
         let current = fs::metadata(&directory)
             .with_context(|| format!("inspect locked store directory {}", directory.display()))?;
-        let held = self
-            ._store_lock
-            .as_ref()
-            .unwrap_or(&self._state_directory_lock)
-            .metadata()?;
+        let held = self._state_directory_lock.metadata()?;
         anyhow::ensure!(
             current.is_dir() && current.dev() == held.dev() && current.ino() == held.ino(),
             "configured store directory {} no longer names the locked directory; refusing replacement or symlink retarget",
@@ -110,7 +122,7 @@ pub fn lock(state_dir: &Path) -> Result<StateLock> {
     Ok(StateLock {
         _file: lock,
         _state_directory_lock: directory_lock,
-        _store_lock: None,
+        admitted_store: None,
         state_dir: state_dir.into(),
     })
 }
@@ -139,12 +151,20 @@ pub fn lock_store_directory(guard: &mut StateLock, config: &Config) -> Result<()
         fs::canonicalize(&guard.state_dir)? == fs::canonicalize(&config.state_dir)?,
         "store directory lock requires ownership of the configured state directory"
     );
-    if validate_store_location(config)? {
+    let separate_store = validate_store_location(config)?;
+    if config.store_dir.is_some() {
         anyhow::ensure!(
-            guard._store_lock.is_none(),
+            guard.admitted_store.is_none(),
             "configured store directory is already locked by this state guard"
         );
-        guard._store_lock = Some(lock_directory(&store_dir(config))?);
+        let directory = store_dir(config);
+        let locked = if separate_store {
+            lock_directory(&directory)?
+        } else {
+            // A duplicate descriptor shares the existing open-file-description lock.
+            guard._state_directory_lock.try_clone()?
+        };
+        guard.admitted_store = Some(AdmittedStore::from_locked_directory(&directory, locked)?);
     }
     guard.verify_store_directory(config)?;
     Ok(())
@@ -172,9 +192,11 @@ pub fn acquire(config: &mut Config) -> Result<StateLock> {
     validate_store_location(config)?;
     let mut lock = lock(&config.state_dir)?;
     lock_store_directory(&mut lock, config)?;
-    lock.verify_store_directory(config)?;
-    resolve(config)?;
-    lock.verify_store_directory(config)?;
+    finish_acquire(config, lock)
+}
+
+fn finish_acquire(config: &mut Config, lock: StateLock) -> Result<StateLock> {
+    lock.resolve_identity(config)?;
     config.validate()?;
     let path = config.state_dir.join(FILE);
     if !path.exists() {
@@ -183,27 +205,45 @@ pub fn acquire(config: &mut Config) -> Result<StateLock> {
     Ok(lock)
 }
 
-/// Read only: used by the worker and service generator as well as daemon startup.
+/// Read-only identity lookup for workers, service generation, and fleet commands.
+/// Explicit stores use only the durable pin here: database provenance is admitted
+/// under the exclusive directory fence during daemon startup.
 pub fn resolve(config: &mut Config) -> Result<()> {
-    let separate_store = validate_store_location(config)?;
-    let database = config.store_path();
+    if config.store_dir.is_some() {
+        validate_store_location(config)?;
+        let node = read_pin(config)?.context(
+            "explicit store has no stable node identity; run guarded daemon startup or fleet admission before resolving its identity",
+        )?;
+        return apply_node(config, node);
+    }
+    resolve_with_admitted(config, None)
+}
+
+fn read_pin(config: &Config) -> Result<Option<String>> {
     let path = config.state_dir.join(FILE);
-    let pinned = match fs::read(&path) {
-        Ok(bytes) => Some(
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Some(
             serde_json::from_slice::<String>(&bytes)
                 .with_context(|| format!("read stable node identity {}", path.display()))?,
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("read stable node identity"),
-    };
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("read stable node identity"),
+    }
+}
+
+fn resolve_with_admitted(config: &mut Config, admitted: Option<&AdmittedStore>) -> Result<()> {
+    let separate_store = validate_store_location(config)?;
+    let database = config.store_path();
+    let pinned = read_pin(config)?;
     // The daemon records owner-local metadata even before it launches any seats.
     // Older stores can prove their writer through local receipts or a restore marker,
     // never through arbitrary replicated claim origins.
-    if config.store_dir.is_some() && database.try_exists()? {
+    let connection = inspect_database(config, admitted)?;
+    if config.store_dir.is_some()
+        && let Some(connection) = connection.as_ref()
+    {
         let expected = pinned.as_deref().unwrap_or(&config.node);
-        let connection =
-            Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let writer = configured_writer_from(&connection, expected)?;
+        let writer = configured_writer_from(connection, expected)?;
         anyhow::ensure!(
             !separate_store || writer.is_some(),
             "cannot establish the local writer of configured store {}; preserve its database and restore the matching state directory and node identity",
@@ -220,7 +260,12 @@ pub fn resolve(config: &mut Config) -> Result<()> {
     }
     let node = match pinned {
         Some(node) => {
-            if let Some(writer) = restored_writer(&database)? {
+            if let Some(writer) = connection
+                .as_ref()
+                .map(restored_writer_from)
+                .transpose()?
+                .flatten()
+            {
                 anyhow::ensure!(
                     writer == node,
                     "restored database requires writer `{writer}`, but this directory is pinned to `{node}`; restore into a fresh state directory without an existing node pin, then configure the restored writer"
@@ -228,28 +273,37 @@ pub fn resolve(config: &mut Config) -> Result<()> {
             }
             Some(node)
         }
-        None => previous_local_node(&database, &config.node)?,
+        None => connection
+            .as_ref()
+            .map(|connection| previous_local_node(connection, &config.node))
+            .transpose()?
+            .flatten(),
     };
     if let Some(node) = node {
+        apply_node(config, node)?;
+    }
+    Ok(())
+}
+
+fn apply_node(config: &mut Config, node: String) -> Result<()> {
+    anyhow::ensure!(
+        !node.trim().is_empty() && node.trim() == node,
+        "invalid stable node identity in {}",
+        config.state_dir.display()
+    );
+    if let Some(member) = config.fleet.as_ref().and_then(|file| file.node.as_deref()) {
         anyhow::ensure!(
-            !node.trim().is_empty() && node.trim() == node,
-            "invalid stable node identity in {}",
-            config.state_dir.display()
+            member == node,
+            "state belongs to node `{node}`, but fleet membership pins `{member}`; restore the matching configuration and keys before starting, without editing membership or deleting state"
         );
-        if let Some(member) = config.fleet.as_ref().and_then(|file| file.node.as_deref()) {
-            anyhow::ensure!(
-                member == node,
-                "state belongs to node `{node}`, but fleet membership pins `{member}`; restore the matching configuration and keys before starting, without editing membership or deleting state"
-            );
-        }
-        if config.node != node {
-            eprintln!(
-                "st: retaining stable node `{node}` for {}; configured name `{}` does not rename its writer or live seats",
-                config.state_dir.display(),
-                config.node
-            );
-            config.node = node;
-        }
+    }
+    if config.node != node {
+        eprintln!(
+            "st: retaining stable node `{node}` for {}; configured name `{}` does not rename its writer or live seats",
+            config.state_dir.display(),
+            config.node
+        );
+        config.node = node;
     }
     Ok(())
 }
@@ -343,25 +397,46 @@ fn restored_writer_from(connection: &Connection) -> Result<Option<String>> {
         .optional()?)
 }
 
-fn restored_writer(database: &Path) -> Result<Option<String>> {
-    if !database.exists() {
+fn inspect_database(
+    config: &Config,
+    admitted: Option<&AdmittedStore>,
+) -> Result<Option<Connection>> {
+    if let Some(admitted) = admitted {
+        admitted.verify_directory()?;
+        if !admitted.database_path().try_exists()? {
+            admitted.verify_directory()?;
+            return Ok(None);
+        }
+        return admitted
+            .open_connection(OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map(Some);
+    }
+    anyhow::ensure!(
+        config.store_dir.is_none(),
+        "explicit store requires its admitted directory"
+    );
+    if !config.store_path().try_exists()? {
         return Ok(None);
     }
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    restored_writer_from(&connection)
+    Ok(Some(Connection::open_with_flags(
+        config.store_path(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?))
 }
 
 /// Read-only admission preflight, before a fleet handshake can mutate membership.
-pub fn check_store_writer_transition(config: &Config, requested_node_id: &str) -> Result<()> {
+pub fn check_store_writer_transition(
+    config: &Config,
+    admitted: Option<&AdmittedStore>,
+    requested_node_id: &str,
+) -> Result<()> {
     if config.store_dir.is_none() {
         return Ok(());
     }
     validate_store_location(config)?;
-    let database = config.store_path();
-    if !database.try_exists()? {
+    let Some(connection) = inspect_database(config, admitted)? else {
         return Ok(());
-    }
-    let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    };
     if let Some(writer) = configured_writer_from(&connection, requested_node_id)? {
         anyhow::ensure!(
             writer == requested_node_id,
@@ -373,13 +448,24 @@ pub fn check_store_writer_transition(config: &Config, requested_node_id: &str) -
 
 /// Record the daemon's local writer only after read-only startup identity admission
 /// and normal store initialization. This permits restarting a store with no seats.
-pub fn record_store_writer(database: &Path, node: &str) -> Result<()> {
+pub fn record_store_writer(
+    config: &Config,
+    admitted: Option<&AdmittedStore>,
+    node: &str,
+) -> Result<()> {
     anyhow::ensure!(
         !node.trim().is_empty() && node.trim() == node,
         "invalid local store writer"
     );
-    let mut connection =
-        Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let mut connection = if let Some(admitted) = admitted {
+        admitted.open_connection(OpenFlags::SQLITE_OPEN_READ_WRITE)?
+    } else {
+        anyhow::ensure!(
+            config.store_dir.is_none(),
+            "explicit store requires its admitted directory"
+        );
+        Connection::open_with_flags(config.store_path(), OpenFlags::SQLITE_OPEN_READ_WRITE)?
+    };
     let transaction = connection.transaction()?;
     if let Some(writer) = configured_writer_from(&transaction, node)? {
         anyhow::ensure!(
@@ -429,20 +515,15 @@ fn configured_writer_from(connection: &Connection, requested: &str) -> Result<Op
     Ok(marker.or(restored).or(receipt))
 }
 
-fn previous_local_node(database: &Path, requested: &str) -> Result<Option<String>> {
-    if !database.exists() {
-        return Ok(None);
-    }
-    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .context("inspect previous local daemon identity without migrating the database")?;
-    if let Some(writer) = restored_writer_from(&connection)? {
+fn previous_local_node(connection: &Connection, requested: &str) -> Result<Option<String>> {
+    if let Some(writer) = restored_writer_from(connection)? {
         anyhow::ensure!(
             requested == writer,
             "restored database requires fresh writer `{writer}`; configure node to that identity before starting"
         );
         return Ok(Some(writer));
     }
-    previous_local_receipts(&connection)
+    previous_local_receipts(connection)
 }
 
 fn previous_local_receipts(connection: &Connection) -> Result<Option<String>> {
@@ -491,6 +572,97 @@ fn previous_local_receipts(connection: &Connection) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn admitted(config: &Config) -> Arc<AdmittedStore> {
+        let directory = store_dir(config);
+        AdmittedStore::from_locked_directory(&directory, lock_directory(&directory).unwrap())
+            .unwrap()
+    }
+
+    #[test]
+    fn explicit_pinned_resolution_succeeds_while_daemon_owns_store() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = configured_store(root.path());
+        let guard = acquire(&mut config).unwrap();
+        fs::write(config.store_path(), b"not a SQLite database").unwrap();
+        let admitted = guard.admitted_store().unwrap();
+        // Public lookup must not open SQLite or attempt a second exclusive flock.
+        admitted.set_before_open_hook_for_test(|| panic!("public resolution opened SQLite"));
+        let mut worker = config.clone();
+        worker.node = "new-computer-name".into();
+        resolve(&mut worker).unwrap();
+        assert_eq!(worker.node, "orchid");
+        assert_eq!(fs::read(config.store_path()).unwrap(), b"not a SQLite database");
+        worker.fleet = Some(crate::config::FleetFile {
+            node: Some("fern".into()),
+            ..crate::config::FleetFile::default()
+        });
+        assert!(
+            resolve(&mut worker)
+                .unwrap_err()
+                .to_string()
+                .contains("fleet membership pins")
+        );
+    }
+
+    #[test]
+    fn explicit_unpinned_resolution_requires_guarded_startup() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = configured_store(root.path());
+        assert!(
+            resolve(&mut config)
+                .unwrap_err()
+                .to_string()
+                .contains("run guarded daemon startup or fleet admission")
+        );
+        let mut guard = lock(&config.state_dir).unwrap();
+        lock_store_directory(&mut guard, &config).unwrap();
+        guard.resolve_identity(&mut config).unwrap();
+        assert_eq!(config.node, "orchid");
+        assert!(!config.store_path().exists());
+        assert!(!config.state_dir.join(FILE).exists());
+    }
+
+    #[test]
+    fn startup_refuses_store_swap_or_removal_during_sqlite_open_without_writes() {
+        for replacement in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = configured_store(root.path());
+            local_writer_database(&config.store_path(), "orchid");
+            let original = fs::read(config.store_path()).unwrap();
+            let directory = store_dir(&config);
+            let moved = root.path().join("moved-store");
+            let incoming = root.path().join("incoming-store");
+            fs::create_dir(&incoming).unwrap();
+            local_writer_database(&incoming.join("claims.sqlite3"), "orchid");
+            let incoming_bytes = fs::read(incoming.join("claims.sqlite3")).unwrap();
+            let mut guard = lock(&config.state_dir).unwrap();
+            lock_store_directory(&mut guard, &config).unwrap();
+            let admitted = guard.admitted_store().unwrap();
+            let hook_directory = directory.clone();
+            let hook_moved = moved.clone();
+            let hook_incoming = incoming.clone();
+            admitted.set_before_open_hook_for_test(move || {
+                fs::rename(&hook_directory, &hook_moved).unwrap();
+                if replacement {
+                    fs::rename(&hook_incoming, &hook_directory).unwrap();
+                }
+            });
+            assert!(finish_acquire(&mut config, guard).is_err());
+            assert!(!config.state_dir.join(FILE).exists());
+            assert_eq!(fs::read(moved.join("claims.sqlite3")).unwrap(), original);
+            let untouched = if replacement { &directory } else { &incoming };
+            assert_eq!(
+                fs::read(untouched.join("claims.sqlite3")).unwrap(),
+                incoming_bytes
+            );
+            assert_eq!(directory.exists(), replacement);
+            for path in [&moved, untouched] {
+                assert!(!path.join("claims.sqlite3-wal").exists());
+                assert!(!path.join("claims.sqlite3-shm").exists());
+            }
+        }
+    }
 
     #[test]
     fn configured_database_trio_symlinks_cannot_bypass_default_owner() {
@@ -597,7 +769,8 @@ mod tests {
     fn writer_transition_preflight_is_read_only_and_rejects_existing_writer_changes() {
         let root = tempfile::tempdir().unwrap();
         let config = configured_store(root.path());
-        check_store_writer_transition(&config, "fern").unwrap();
+        let admitted = admitted(&config);
+        check_store_writer_transition(&config, Some(&admitted), "fern").unwrap();
         assert!(!config.store_path().exists());
         let connection = Connection::open(config.store_path()).unwrap();
         connection
@@ -607,9 +780,9 @@ mod tests {
             )
             .unwrap();
         let before = fs::read(config.store_path()).unwrap();
-        check_store_writer_transition(&config, "orchid").unwrap();
+        check_store_writer_transition(&config, Some(&admitted), "orchid").unwrap();
         assert!(
-            check_store_writer_transition(&config, "fern")
+            check_store_writer_transition(&config, Some(&admitted), "fern")
                 .unwrap_err()
                 .to_string()
                 .contains("does not match admitted node")
@@ -643,7 +816,7 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);")
             .unwrap();
-        record_store_writer(&config.store_path(), &joined.name).unwrap();
+        record_store_writer(&config, guard.admitted_store().as_deref(), &joined.name).unwrap();
         guard.record_fleet_join(&joined).unwrap();
         drop(guard);
         config.fleet = Some(membership);
@@ -719,13 +892,13 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);")
             .unwrap();
-        record_store_writer(&config.store_path(), "orchid").unwrap();
+        record_store_writer(&config, Some(&admitted(&config)), "orchid").unwrap();
         let before = fs::read(config.store_path()).unwrap();
         config.node = "new-computer-name".into();
         drop(acquire(&mut config).unwrap());
         assert_eq!(config.node, "orchid");
         assert_eq!(fs::read(config.store_path()).unwrap(), before);
-        record_store_writer(&config.store_path(), "orchid").unwrap();
+        record_store_writer(&config, Some(&admitted(&config)), "orchid").unwrap();
         assert_eq!(
             connection
                 .query_row(
@@ -736,7 +909,7 @@ mod tests {
                 .unwrap(),
             "orchid"
         );
-        assert!(record_store_writer(&config.store_path(), "fern").is_err());
+        assert!(record_store_writer(&config, Some(&admitted(&config)), "fern").is_err());
         connection
             .execute("UPDATE meta SET value='fern' WHERE key='local_node_writer'", [])
             .unwrap();
@@ -766,7 +939,7 @@ mod tests {
             }
             let before = fs::read(config.store_path()).unwrap();
             assert!(acquire(&mut config).is_err());
-            assert!(record_store_writer(&config.store_path(), "orchid").is_err());
+            assert!(record_store_writer(&config, Some(&admitted(&config)), "orchid").is_err());
             assert_eq!(fs::read(config.store_path()).unwrap(), before);
         }
     }
@@ -898,7 +1071,7 @@ mod tests {
         }
         let guard = acquire(&mut explicit).unwrap();
         guard.verify_store_directory(&explicit).unwrap();
-        assert!(guard._store_lock.is_none());
+        assert!(guard.admitted_store().is_some());
         let mut default = Config {
             node: "orchid".into(),
             state_dir: directory,
