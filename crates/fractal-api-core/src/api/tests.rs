@@ -12754,6 +12754,52 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
 }
 
 #[tokio::test]
+async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    let original = "agent/example-subject-original/worker";
+    let renamed = "agent/example-subject-renamed/worker";
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-subject-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "subject-declare").unwrap();
+    roster_fixture_append(&owner.store, original, "runtime.observed", json!({
+        "status":"running", "runtime_id":original, "host":owner.node,
+        "incarnation_id":"subject-incarnation"
+    }));
+    let app = router(owner.clone());
+    let (_, before) = get_request(app.clone(), &format!("/v1/status?subject={original}")).await;
+    assert!(!before["subjects"][0]["actual"].is_null(), "{before}");
+    let (status, receipt) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":original, "to":renamed, "actor":"person/robin",
+        "reason":"Clarify responsibility", "idempotency_key":"subject-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let replica_root = tempfile::tempdir().unwrap();
+    let replica = state(replica_root.path());
+    replica.store.import_replication(owner.store.origin(), &owner.store.export_replication(0).unwrap()).unwrap();
+    for app in [app, router(replica)] {
+        let mut previous_claims = None;
+        for requested in [renamed, original] {
+            let (status, shown) = get_request(app.clone(), &format!("/v1/status?subject={requested}")).await;
+            assert_eq!(status, StatusCode::OK, "{shown}");
+            assert_eq!(shown["subjects"][0]["actual"], before["subjects"][0]["actual"]);
+            let (status, claims) = get_request(app.clone(), &format!("/v1/claims?subject={requested}&order=desc&limit=20")).await;
+            assert_eq!(status, StatusCode::OK, "{claims}");
+            assert!(!claims["claims"].as_array().unwrap().is_empty(), "{claims}");
+            assert!(claims["claims"].as_array().unwrap().iter().any(|claim| claim["kind"] == "runtime.observed"));
+            if let Some(previous) = previous_claims.replace(claims["claims"].clone()) {
+                assert_eq!(previous, claims["claims"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
