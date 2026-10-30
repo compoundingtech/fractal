@@ -24,8 +24,8 @@ export const selectionParts = ({ owner, subject }: Selection): { person: string;
   return { person: owner.slice('person/'.length), uuid: match[2] }
 }
 export const requireArrangements = (capabilities: Capabilities): void => {
-  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && item.version === 1))
-    throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && (item.version === 1 || item.version === 2)))
+    throw new TypeError('Granted arrangements capability version 1 or 2 is required; older pairings may need renewal')
 }
 
 /** Online only: immutable action IDs/keys belong to the caller, not a hidden retry queue. */
@@ -58,7 +58,7 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
     edit: async (identity: Pick<ArrangementEdit, 'id' | 'idempotency_key' | 'fence'>, operations: ArrangementOperation[]) => {
       await discover()
       const parameters = { subject: selection.subject, owner: selection.owner, operations }
-      if (!isEdit(parameters)) throw new TypeError('Invalid generated arrangements operations')
+      if (!isEdit(parameters as unknown)) throw new TypeError('Invalid generated arrangements operations')
       return gateway.arrangementEdit({ ...identity, parameters })
     },
   }
@@ -94,8 +94,10 @@ export const arrangementSidebarDoc = (arrangement: Arrangement): FolderDoc => {
       position: { ...folder.position.value, at: at(folder.position.revision) },
       ...(folder.tombstone === null ? {} : { deleted: at(folder.tombstone.revision) }),
     }])),
-    placements: Object.fromEntries(Object.entries(arrangement.body.placements).map(([subject, placement]) =>
-      [subject, { ...placement.value, at: at(placement.revision) }])),
+    placements: arrangement.body.version === 1
+      ? Object.fromEntries(Object.entries(arrangement.body.placements).map(([subject, placement]) =>
+          [subject, { ...placement.value, at: at(placement.revision) }]))
+      : {},
   }
 }
 export type SidebarGateway = ArrangementInventoryGateway & Pick<FractalClient, 'discover'> & {
