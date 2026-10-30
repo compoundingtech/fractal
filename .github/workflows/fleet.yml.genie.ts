@@ -384,8 +384,9 @@ export default githubWorkflow(scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(au
     // GitHub's merge queue runs the required checks on each queued entry; without this trigger the
     // queue never receives them and merges freeze.
     merge_group: {},
-    // The queue's successful checks belong to the exact commit that lands on main. Main upkeep
-    // preserves perf-cost and fills missing default-branch caches without repeating this gate.
+    // Main upkeep calls the same hosted lanes only when this exact queue entry reused evidence.
+    // The caller retains its push event, which the evidence gate never allows to skip.
+    workflow_call: {},
     workflow_dispatch: {},
   },
   permissions: { contents: 'read', actions: 'read' },

@@ -78,11 +78,9 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
-  // Fill caches for current main; keep pinned manual runs independent. Main pushes share one group
-  // without cancelling: a started cache fill finishes, and GitHub keeps only the newest pending run, so
-  // a burst of merges coalesces into one more run instead of cancelling each one half way.
+  // Every landed tree that skipped queue work needs hosted proof; never coalesce pending main pushes.
   concurrency: {
-    group: "main-upkeep-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}",
+    group: 'main-upkeep-${{ github.run_id }}',
     'cancel-in-progress': false,
   },
   actionlint: {
@@ -95,10 +93,33 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       permissions: { contents: 'read', actions: 'read', checks: 'read' },
+      outputs: { 'evidence-skipped': '${{ steps.queue.outputs.evidence-skipped }}' },
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
-        { name: 'Confirm main retains the queue checks', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
+        { name: 'Confirm main retains the queue checks', id: 'queue', env: { GH_TOKEN: '${{ github.token }}' }, run: 'python3 scripts/check-main-ci' },
       ],
+    },
+    'hosted-proof': {
+      name: 'post-merge hosted proof',
+      needs: ['main-checks'],
+      if: "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'",
+      // Reuse the complete fleet, including its signing jobs, at this push's exact SHA.
+      permissions: { contents: 'write', actions: 'write', 'pull-requests': 'read' },
+      uses: './.github/workflows/fleet.yml',
+      secrets: 'inherit',
+    },
+    'hosted-proof-failure': {
+      name: 'report red main',
+      needs: ['hosted-proof'],
+      if: "always() && (needs.hosted-proof.result == 'failure' || needs.hosted-proof.result == 'cancelled')",
+      'runs-on': 'ubuntu-latest',
+      permissions: {},
+      steps: [{
+        name: 'Signal revert needed',
+        run: `echo "::error::Post-merge hosted proof failed for $GITHUB_SHA: main is red; revert the merged change."
+echo "## Revert needed: hosted proof failed for $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+exit 1`,
+      }],
     },
     'cache-maintenance': {
       name: 'cache-maintenance',
@@ -195,4 +216,4 @@ fi`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
+}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))

@@ -19,22 +19,32 @@ loader.exec_module(module)
 
 run = dict(head_sha='a' * 40, event='merge_group', path='.github/workflows/fleet.yml',
            status='completed', conclusion='success', head_branch='gh-readonly-queue/main/pr-1-example',
-           check_suite_id=1, html_url='https://github.com/example/project/actions/runs/1')
+           id=1, run_attempt=2, check_suite_id=1, html_url='https://github.com/example/project/actions/runs/1')
 checks = [dict(name=name, conclusion='success') for name in module.REQUIRED]
+jobs = [dict(name=name, head_sha='a' * 40, steps=[
+    dict(name='evidence skip taken', conclusion='skipped')]) for name in sorted(module.GATES)]
 
 
-def check(name, runs, results, expected):
+def check(name, runs, results, expected, job_results=None, skipped=False):
     def api(path):
         if '/actions/workflows/' in path:
             assert 'event=merge_group&head_sha=' + 'a' * 40 in path
             return [{'workflow_runs': []}, {'workflow_runs': runs}]
+        if '/actions/runs/' in path:
+            assert '/runs/1/attempts/2/jobs?per_page=100' in path
+            selected = jobs if job_results is None else job_results
+            return [{'jobs': selected[:3]}, {'jobs': selected[3:]}]
         assert '/check-suites/1/check-runs' in path
         return [{'check_runs': results[:2]}, {'check_runs': results[2:]}]
     module.api = api
     with tempfile.TemporaryDirectory() as tmp:
         os.environ.update(GITHUB_REPOSITORY='example/project', GITHUB_SHA='a' * 40,
-                          GITHUB_STEP_SUMMARY=str(Path(tmp) / 'summary'))
+                          GITHUB_STEP_SUMMARY=str(Path(tmp) / 'summary'), GITHUB_OUTPUT=str(Path(tmp) / 'outputs'))
         assert module.main() == expected, name
+        if expected == 0:
+            assert Path(os.environ['GITHUB_OUTPUT']).read_text() == f'evidence-skipped={str(skipped).lower()}\n'
+        else:
+            assert not Path(os.environ['GITHUB_OUTPUT']).exists()
     print('passed:', name)
 
 
@@ -57,6 +67,22 @@ for status in ['failure', 'skipped', 'neutral', 'cancelled', None]:
     check('reject required check ' + str(status), [run], failed, 1)
 check('missing required check', [run], checks[:-1], 1)
 
+for conclusion in ('success', 'failure', 'skipped', 'cancelled'):
+    marked = copy.deepcopy(jobs)
+    marked[0]['steps'][0]['conclusion'] = conclusion
+    check('exact attempt skip marker ' + conclusion, [run], checks, 0,
+          job_results=marked, skipped=conclusion == 'success')
+wrong_sha = copy.deepcopy(jobs)
+wrong_sha[0]['head_sha'] = 'b' * 40
+for invalid in ([], jobs[:-1], wrong_sha):
+    try:
+        check('incomplete or wrong-SHA jobs', [run], checks, 0, job_results=invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('ambiguous jobs must not suppress hosted proof')
+
+
 # The merge queue's required checks are six since fractal-web joined the main ruleset; the queue watcher
 # waits for the same set, so a red fractal-web on main counts here and a queue run is not finished without it.
 queue_loader = importlib.machinery.SourceFileLoader('ci_queue_watch', str(ROOT / 'scripts/ci-queue-watch'))
@@ -71,6 +97,13 @@ check('reject a red fractal-web', [run], fractal_red, 1)
 fleet = (ROOT / '.github/workflows/fleet.yml').read_text()
 trigger = fleet.split('\non:\n', 1)[1].split('\npermissions:', 1)[0]
 assert 'push:' not in trigger and 'merge_group:' in trigger and 'pull_request:' in trigger
+assert 'workflow_call:' in trigger
+upkeep = (ROOT / '.github/workflows/main-upkeep.yml').read_text()
+assert "needs.main-checks.outputs.evidence-skipped == 'true'" in upkeep
+assert 'uses: ./.github/workflows/fleet.yml' in upkeep
+assert "github.run_id" in upkeep.split('concurrency:', 1)[1].split('jobs:', 1)[0]
+assert 'main is red; revert the merged change.' in upkeep
+assert "'failure'" in upkeep and "'cancelled'" in upkeep
 
 # Any accidental test execution defeats deduplication. Exercise every cache-fill stage with
 # command stand-ins which reject cargo test without --no-run, and cargo run/nextest execution.
