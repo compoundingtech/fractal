@@ -498,3 +498,36 @@ async fn rename_identity_id(
     signal_changed(&state);
     Ok(Json(receipt))
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameProofExportRequest {
+    name: String,
+    #[serde(default)]
+    revision: Option<String>,
+}
+
+pub async fn export_agent_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Agent, request).await
+}
+
+pub async fn export_mission_rename_proof(
+    State(state): State<AppState>,
+    Json(request): Json<RenameProofExportRequest>,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    export_identity_rename_proof(state, crate::store::identities::IdentityKind::Mission, request).await
+}
+
+async fn export_identity_rename_proof(
+    state: AppState,
+    kind: crate::store::identities::IdentityKind,
+    request: RenameProofExportRequest,
+) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    let store = state.store.clone();
+    blocking_action(move || {
+        store.export_rename_proof(kind, &request.name, request.revision.as_deref())
+    }).await.map(Json)
+}

@@ -15,6 +15,16 @@ pub async fn fleet_publish_endpoints(
     Ok(Json(json!({ "published": written })))
 }
 
+/// Publish the configured trust root, not an exporter's proposed replacement key.
+pub async fn fleet_anchor(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || {
+        let anchor = store.fleet_anchor()?
+            .ok_or_else(|| anyhow::anyhow!("this store has no fleet trust anchor"))?;
+        Ok(json!({ "fleet_anchor": anchor }))
+    }).await.map(Json)
+}
+
 pub async fn fleet_status(State(state): State<AppState>) -> Result<Json<FleetStatus>, ApiError> {
     let peers = replication_peer_names(&state);
     let store = state.store.clone();
