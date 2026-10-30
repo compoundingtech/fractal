@@ -2423,7 +2423,7 @@ pub fn native_prompt_answer(connection: &Connection, observation: &str) -> Resul
 /// The claim that answered the native prompt `observation`, if one is recorded.
 fn native_prompt_answer_claim(connection: &Connection, observation: &str) -> Result<Option<ClaimRecord>> {
     connection
-        .query_row(/* sqlite-large-value: allow-for-now lv-hf9df02d62f06 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+        .query_row(/* sqlite-large-value: allow-for-now lv-h8472dc4d0454 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
              FROM claims INDEXED BY claims_operation_index
              WHERE json_extract(body, '$._operation.id') IS NOT NULL
