@@ -143,6 +143,10 @@ untouched and is checked again after the exchange. An ordinary nested store move
 only with its containing root; its target path maps `st3` to `fractal` just like the
 daemon state path. Symlinked store paths and destination-root stores refuse before
 cutover. The mover never copies or separately moves database files.
+After stopping legacy services, the mover also acquires the separate store's
+directory-FD lock and holds it through the exchanges, releasing it before starting
+the target daemon. A concurrent store owner refuses the swap and restores legacy
+services; the fence creates no store files and follows a nested store's inode.
 
 To put only the database on a dataset mounted at
 `~/.local/state/fractal/store`, first complete cutover without mounts below either
