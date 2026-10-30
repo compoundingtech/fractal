@@ -2513,11 +2513,14 @@ pub async fn client_capabilities(
     // The request snapshot may predate a checkpoint or legacy conversion. Advertise the
     // frontier and floor from one current read so the SDK's first event request can resume.
     let store = state.store.clone();
-    let (oldest, newest) =
-        blocking_store(move || store.read_snapshot(|_| store.event_bounds())).await?;
+    let capability_state = state.clone();
+    let capability_session = session.clone();
+    let (oldest, newest, capabilities) = blocking_store(move || {
+        let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
+        Ok((oldest, newest, client_v0::capabilities(&capability_state, &capability_session)))
+    }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&state, &session);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({

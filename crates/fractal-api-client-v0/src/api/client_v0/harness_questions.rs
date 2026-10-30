@@ -65,25 +65,32 @@ pub async fn list(State(state): State<AppState>, Extension(snapshot): Extension<
     -> Result<ClientPageResponse, ApiError> {
     require_scope(&session, "read.projections")?;
     let query = ClientListQuery { limit: query.limit, cursor: query.cursor, ..ClientListQuery::default() };
-    let mut items = Vec::new();
-    if query.cursor.is_none() {
-        let status = state.store.status_for_claim_kind_at(
-            OBSERVED, None, false, crate::store::ClaimsReduction::Runtime,
-        ).map_err(ApiError::internal)?;
-        let now = client_now_ms();
-        for subject in status.subjects {
-            if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)? {
-                items.push(metadata(&state, &question));
+    let (snapshot, page) = tokio::task::spawn_blocking(move || {
+        let mut items = Vec::new();
+        if query.cursor.is_none() {
+            let status = state.store.status_for_claim_kind_at(
+                OBSERVED, None, false, crate::store::ClaimsReduction::Runtime,
+            ).map_err(ApiError::internal)?;
+            let now = client_now_ms();
+            for subject in status.subjects {
+                if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)? {
+                    items.push(metadata(&state, &question));
+                }
             }
         }
-    }
-    let page = client_page(&state, &snapshot, "harness-questions", items, &query)?;
+        client_page(&state, &snapshot, "harness-questions", items, &query)
+            .map(|page| (snapshot, page))
+    }).await.map_err(ApiError::internal)??;
     Ok((Extension(snapshot), Json(page)))
 }
 pub async fn get(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
-    Ok(Json(metadata(&state, &held(&state, &client_detail_id("harness-question", &id))?)))
+    let value = tokio::task::spawn_blocking(move || {
+        held(&state, &client_detail_id("harness-question", &id))
+            .map(|question| metadata(&state, &question))
+    }).await.map_err(ApiError::internal)??;
+    Ok(Json(value))
 }
 
 fn validate_answers(parameters: &Value, question: &HarnessQuestion) -> Result<BTreeMap<String, Answer>, ApiError> {
@@ -164,9 +171,12 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     validate_fence(state, &request.fence)?;
     if question.resolution.is_some() { return Ok(result(state, request, &question, "already_resolved", &digest)); }
     let sink = state.harness_question_sink.as_ref().ok_or_else(|| unavailable(HarnessQuestionAdapterError::Missing))?;
-    sink.availability(&question).map_err(unavailable)?;
-    let answers = validate_answers(&request.parameters, &question)?;
     let sink = Arc::clone(sink);
+    let (question, sink) = tokio::task::spawn_blocking(move || {
+        sink.availability(&question)?;
+        Ok::<_, HarnessQuestionAdapterError>((question, sink))
+    }).await.map_err(ApiError::internal)?.map_err(unavailable)?;
+    let answers = validate_answers(&request.parameters, &question)?;
     // A native adapter may block on its harness. Both gates remain held while it settles;
     // move the question through the worker instead of copying its metadata.
     let (question, answers) = tokio::task::spawn_blocking(move || {
@@ -647,8 +657,8 @@ mod tests {
             let row = if body["value"]["items"].is_array() { &body["value"]["items"][0] } else { &body["value"] };
             assert_eq!(row["id"], question.id);
             assert_eq!(row["answer"]["reason"], "adapter_missing");
-            assert!(row.get("text").is_none());
-            assert!(row.get("receipt").is_none());
+            assert_eq!(row["questions"], json!([{"id":"q0","options":2,"multi":false,"required":true}]));
+            assert_eq!(row["resolution"], Value::Null);
         }
         let before = state.store.index().unwrap();
         let response = app.oneshot(Request::builder().method("POST").uri("/v1/client/actions")
@@ -656,6 +666,75 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(state.store.index().unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn resolved_metadata_wire_shape_excludes_retained_receipt() {
+        let (_root, mut state, session, question, request) = fixture();
+        state.harness_question_sink = Some(Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:true }));
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
+        let resolved = held(&state, &question.id).unwrap();
+        let resolution = resolved.resolution.as_ref().unwrap();
+        assert!(resolution.receipt.is_some());
+        let expected = json!({
+            "kind":"harness-question", "id":question.id, "revision":question.revision,
+            "agent":"agent/ada", "session":"q0",
+            "native_id":fractal_schema::harness_questions::native_id_digest("q0"), "runtime_incarnation":"q0",
+            "questions":[{"id":"q0","options":2,"multi":false,"required":true}],
+            "updated_at":client_timestamp(resolution.resolved_at_unix_ms),
+            "observed_at":question.observed_at_unix_ms,
+            "resolution":{"status":"answered", "revision":question.revision,
+                "answers":{"q0":{"positions":[1],"timed_out":true}},
+                "resolved_at":resolution.resolved_at_unix_ms},
+            "answer":{"state":"unavailable","reason":"resolved"},
+        });
+        let app = super::super::super::router(state.clone());
+        for uri in ["/v1/client/harness-questions".to_owned(),
+            format!("/v1/client/harness-questions/{}", question.id)] {
+            let response = app.clone().oneshot(Request::builder().uri(uri)
+                .header(LOCAL_PERSON_HEADER, "person/alex").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+            let row = if body["value"]["items"].is_array() { &body["value"]["items"][0] } else { &body["value"] };
+            assert_eq!(row, &expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_list_clamps_limits_and_rejects_mismatched_cursors() {
+        let (_root, state, session, _question, _request) = fixture();
+        state.store.observe_harness_question(&QuestionObservation {
+            agent:"agent/ada".into(), session:"q0".into(), native_id:"second-call".into(),
+            runtime_incarnation:"q0".into(),
+            questions:vec![Question { id:"q0".into(), options:2, multi:false, required:true }],
+        }).unwrap();
+        let snapshot = new_client_snapshot(&state);
+        let (_, Json(first)) = list(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()),
+            Query(ListQuery { limit:Some(0), cursor:None })).await.unwrap();
+        assert_eq!(first.page.limit, 1);
+        assert_eq!(first.items.len(), 1);
+        let cursor = first.page.next_cursor.unwrap();
+        for (limit, cursor, expected) in [
+            (Some(1), "not-a-page-cursor".to_owned(), "validation-failed"),
+            (Some(2), cursor.clone(), "page-cursor-expired"),
+        ] {
+            assert_eq!(list(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()),
+                Query(ListQuery { limit, cursor:Some(cursor) })).await.unwrap_err().code, expected);
+        }
+        let mut other_snapshot = snapshot.clone();
+        other_snapshot.id.push_str("-different");
+        assert_eq!(list(State(state.clone()), Extension(other_snapshot), Extension(session.clone()),
+            Query(ListQuery { limit:None, cursor:Some(cursor.clone()) })).await.unwrap_err().code, "page-cursor-expired");
+        let (_, Json(continued)) = list(State(state.clone()), Extension(snapshot.clone()), Extension(session.clone()),
+            Query(ListQuery { limit:None, cursor:Some(cursor) })).await.unwrap();
+        assert_eq!(continued.page.limit, 1);
+        assert_eq!(continued.items.len(), 1);
+        assert_ne!(continued.items[0]["id"], first.items[0]["id"]);
+        let (_, Json(all)) = list(State(state.clone()), Extension(snapshot), Extension(session),
+            Query(ListQuery { limit:Some(usize::MAX), cursor:None })).await.unwrap();
+        assert_eq!(all.page.limit, CLIENT_MAX_PAGE_ITEMS);
+        assert_eq!(all.items.len(), 2);
+        assert!(!all.page.has_more);
     }
 
     #[tokio::test]
@@ -716,20 +795,102 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn concurrent_generic_and_harness_actions_exclude_the_same_key() {
+        for harness_first in [false, true] {
+            let (_root, mut state, _session, question, request) = fixture();
+            let session = ClientSession::for_tests_scoped("person/alex", "person/alex",
+                &["terminal.control", "read.projections", "control.arrangements"]);
+            let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+            state.harness_question_sink = Some(sink.clone());
+            let arrangement = "arrangement/person/alex/019a0000-0000-7000-8000-000000000001";
+            let generic = ActionRequest {
+                api_version:CLIENT_API_VERSION.into(), id:"action/concurrent".into(),
+                action_type:"arrangement.edit".into(), idempotency_key:request.idempotency_key.clone(),
+                fence:Fence { snapshot_id:new_client_snapshot(&state).id, ..Fence::default() },
+                parameters:json!({"subject":arrangement,"owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}),
+            };
+            // Queue both families behind the shared gate before allowing either to mutate.
+            let gate = action_gate(&state, &session, &request.idempotency_key);
+            let guard = gate.lock_owned().await;
+            let mut harness = Box::pin(invoke(&state, &session, &request));
+            let mut other = Box::pin(invoke(&state, &session, &generic));
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            if harness_first {
+                assert!(Future::poll(harness.as_mut(), &mut context).is_pending());
+                assert!(Future::poll(other.as_mut(), &mut context).is_pending());
+            } else {
+                assert!(Future::poll(other.as_mut(), &mut context).is_pending());
+                assert!(Future::poll(harness.as_mut(), &mut context).is_pending());
+            }
+            drop(guard);
+            let (answer, edit) = tokio::join!(harness, other);
+            let (winner, loser) = if harness_first { (answer, edit) } else { (edit, answer) };
+            let accepted = winner.unwrap().0;
+            assert_eq!(loser.unwrap_err().code, "idempotency-conflict");
+            assert_eq!(sink.calls.load(Ordering::SeqCst), usize::from(harness_first));
+            assert_eq!(held(&state, &question.id).unwrap().resolution.is_some(), harness_first);
+            assert_eq!(state.store.claims_for(arrangement, Some("arrangement.edited")).unwrap().is_empty(), harness_first);
+            let before = state.store.index().unwrap();
+            let replay = invoke(&state, &session, if harness_first { &request } else { &generic }).await.unwrap().0;
+            assert_eq!(replay["operation_id"], accepted["operation_id"]);
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_router_refuses_unix_free_mode_agent_answers() {
+        let (_root, mut state, _session, question, request) = fixture();
+        let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+        state.harness_question_sink = Some(sink.clone());
+        let local_agent = ClientSession::local(Some("agent/ada")).unwrap();
+        assert!(local_agent.allows("terminal.control"));
+        let before = state.store.index().unwrap();
+        let response = super::super::super::router(state.clone()).oneshot(
+            Request::builder().method("POST").uri("/v1/client/actions")
+                .header(LOCAL_PERSON_HEADER, "agent/ada").header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap()).unwrap();
+        assert_eq!(body["code"], "forbidden");
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+        assert!(held(&state, &question.id).unwrap().resolution.is_none());
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn native_settlement_runs_off_the_async_executor() {
-        struct WorkerOnly(std::thread::ThreadId);
+    async fn native_availability_and_settlement_run_off_the_async_executor() {
+        struct WorkerOnly(std::thread::ThreadId, AtomicUsize);
         impl HarnessQuestionSettleSink for WorkerOnly {
-            fn availability(&self, _: &HarnessQuestion) -> Result<(), HarnessQuestionAdapterError> { Ok(()) }
+            fn availability(&self, _: &HarnessQuestion) -> Result<(), HarnessQuestionAdapterError> {
+                assert_ne!(std::thread::current().id(), self.0);
+                self.1.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
             fn settle(&self, _: &HarnessQuestion, answers: &BTreeMap<String, Answer>) -> Result<BTreeMap<String, Answer>, HarnessQuestionAdapterError> {
                 assert_ne!(std::thread::current().id(), self.0);
                 Ok(answers.clone())
             }
         }
         let (_root, mut state, session, question, request) = fixture();
-        state.harness_question_sink = Some(Arc::new(WorkerOnly(std::thread::current().id())));
+        let sink = Arc::new(WorkerOnly(std::thread::current().id(), AtomicUsize::new(0)));
+        state.harness_question_sink = Some(sink.clone());
+        let Json(detail) = get(State(state.clone()), Extension(session.clone()), AxumPath(question.id.clone())).await.unwrap();
+        assert_eq!(detail["answer"], json!({"state":"available"}));
+        let (_, Json(page)) = list(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Query(ListQuery { limit:Some(1), cursor:None })).await.unwrap();
+        assert_eq!(page.items[0]["answer"], json!({"state":"available"}));
+        assert_eq!(sink.1.load(Ordering::SeqCst), 2);
+        // Capability discovery is adapter-presence based, not a native availability probe.
+        let Json(advertised) = client_capabilities(State(state.clone()),
+            Extension(new_client_snapshot(&state)), Extension(session.clone())).await.unwrap();
+        assert!(advertised["capabilities"].as_array().unwrap().iter().any(|item|
+            item == &json!({"id":"harness.answer","version":0,"state":"granted"})));
+        assert_eq!(sink.1.load(Ordering::SeqCst), 2);
         assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
         assert!(held(&state, &question.id).unwrap().resolution.is_some());
+        assert_eq!(sink.1.load(Ordering::SeqCst), 3);
     }
 }
 

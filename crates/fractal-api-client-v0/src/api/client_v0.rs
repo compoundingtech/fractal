@@ -8894,18 +8894,10 @@ fn retained_action_receipt(
     }) {
         return Err(action_idempotency_conflict());
     }
-    let resolved = state.store.status_for_claim_kind_at(
-        fractal_schema::harness_questions::RESOLVED, None, false, crate::store::ClaimsReduction::Runtime,
-    ).map_err(ApiError::internal)?;
-    let now = client_now_ms();
-    for subject in resolved.subjects {
-        if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)?
-            && let Some(receipt) = trusted_harness_receipt(state, &question)
-            && receipt.actor_key == actor_key
-            && receipt.request_digest != request_digest
-        {
-            return Err(action_idempotency_conflict());
-        }
+    if state.store.harness_question_receipt_conflicts(actor_key, request_digest)
+        .map_err(ApiError::internal)?
+    {
+        return Err(action_idempotency_conflict());
     }
     Ok((subject, receipt))
 }

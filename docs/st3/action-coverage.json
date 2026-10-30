@@ -456,19 +456,21 @@
       "description": "Read canonical native harness question metadata and answer fences",
       "tests": [
         "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person",
-        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_canonical_detail_identity_and_all_fences"
+        "crates/fractal/src/main_tests.rs::harness_question_cli_show_reads_detail_without_answering"
       ],
       "verification": "explicit-person parser and generated detail read over a private Unix socket"
     },
     {
       "command": "st harness-questions answer",
-      "description": "Submit positional answers with an explicit person, stable idempotency key and current detail fences",
+      "description": "Submit positional answers with an explicit person, stable idempotency key and explicitly reviewed revision and incarnation",
       "tests": [
-        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_canonical_detail_identity_and_all_fences",
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_supplied_fences_without_fetching_detail",
         "crates/fractal/src/main_tests.rs::harness_answer_action_identity_is_retryable_and_question_scoped",
-        "crates/fractal/src/main_tests.rs::harness_answer_cli_requires_positions_file_explicit_person_and_key"
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_requires_positions_file_explicit_person_key_and_fences",
+        "crates/fractal/src/main_tests.rs::harness_answer_clap_orders_explicit_fences_before_retry_key",
+        "crates/fractal/src/actor_contract.rs::tests::harness_question_contract_requires_an_explicit_person_for_every_command"
       ],
-      "verification": "CLI parser and handler over a private Unix socket; canonical question identity, positional file, deterministic action id and all three fences"
+      "verification": "CLI parser refuses missing revision or incarnation; handler obtains only snapshot provenance from capabilities and posts the exact supplied fences without fetching question detail"
     },
     {
       "command": "st deploy verify-go",

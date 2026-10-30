@@ -2228,6 +2228,12 @@ enum HarnessQuestionsCommand {
         person: String,
         #[arg(long)]
         answers_file: PathBuf,
+        /// Observation revision returned by `harness-questions show`.
+        #[arg(long)]
+        revision: String,
+        /// Runtime incarnation returned by `harness-questions show`.
+        #[arg(long)]
+        incarnation: String,
         /// Reuse this key and the identical answer file when retrying.
         #[arg(long)]
         idempotency_key: String,
@@ -10374,11 +10380,17 @@ async fn run_harness_questions(
             question,
             person,
             answers_file,
+            revision,
+            incarnation,
             idempotency_key,
         } => {
             let generated = generated_client(endpoint, Some(&person))?;
-            let current = generated.harness_question(&question).await?;
-            let question = current.value.header.id;
+            let capabilities = generated.capabilities().await?;
+            let question = if question.starts_with("harness-question/") {
+                question
+            } else {
+                format!("harness-question/{question}")
+            };
             let answers: BTreeMap<String, fractal_client::HarnessAnswerInput> =
                 serde_json::from_slice(&fs::read(answers_file)?)?;
             let result = generated
@@ -10386,12 +10398,9 @@ async fn run_harness_questions(
                     harness_answer_action_id(&idempotency_key, &question),
                     idempotency_key,
                     ClientFence {
-                        snapshot_id: current.snapshot.id,
-                        subject_revisions: BTreeMap::from([(
-                            question.clone(),
-                            current.value.header.revision,
-                        )]),
-                        runtime_incarnation: Some(current.value.runtime_incarnation),
+                        snapshot_id: capabilities.snapshot.id,
+                        subject_revisions: BTreeMap::from([(question.clone(), revision)]),
+                        runtime_incarnation: Some(incarnation),
                         ..ClientFence::default()
                     },
                     fractal_client::HarnessAnswerParameters { question, answers },

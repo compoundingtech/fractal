@@ -2914,6 +2914,54 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     }
     costs.insert(COLD_AGENTS.to_owned(), Cost::least(&samples));
 
+    // Compact resolutions never expire. Exercise shared action-key admission with 100 versus
+    // 1,000 unrelated answered calls at the default scales, including non-harness sends.
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            use fractal_schema::harness_questions::{Answer, Receipt, Status, actor_key};
+            for index in 0..((scale * 10_000.0).round() as usize).max(1) {
+                let question = store.observe_harness_question(
+                    &fractal_daemon::store::harness_questions::QuestionObservation {
+                        agent: "agent/ada".into(), session: "cost-resolved-session".into(),
+                        native_id: format!("cost-resolved-call-{index}"),
+                        runtime_incarnation: "cost-question-runtime".into(),
+                        questions: vec![fractal_schema::harness_questions::Question {
+                            id: "q0".into(), options: 2, multi: false, required: true,
+                        }],
+                    },
+                ).unwrap();
+                store.resolve_harness_question(
+                    &question.id, Status::Answered, &question.revision,
+                    &BTreeMap::from([("q0".into(), Answer { positions: vec![1], timed_out: false })]),
+                    Some(&Receipt {
+                        actor_key: actor_key(ARRANGEMENT_OWNER, &format!("cost-resolved-key-{index}")),
+                        request_digest: "b".repeat(64),
+                        action_id: format!("action/cost-resolved-{index}"),
+                    }),
+                ).unwrap();
+            }
+        }).await.unwrap();
+    }
+    let mut samples = Vec::new();
+    for attempt in 0..4 {
+        let capabilities = fractal_client::Client::unix_as(&socket, "person/bench-operator")
+            .capabilities().await.unwrap();
+        let request = json!({
+            "api_version": "st3.client.v0", "type": "message.send",
+            "id": format!("action/resolved-history-send-{attempt}"),
+            "idempotency_key": format!("resolved-history-send-key-{attempt}"),
+            "fence": {"snapshot_id": capabilities.snapshot.id, "subject_revisions": {}},
+            "parameters": {"to": fixture.subjects.seats[0], "content": "Invented cost probe"},
+        });
+        let cost = counted(|| async {
+            person.post::<_, Value>("/v1/client/actions", &request).await
+                .map_err(|error| error.to_string())
+        }).await;
+        if attempt > 0 { samples.push(cost); }
+    }
+    costs.insert("POST /v1/client/actions (message.send retained harness receipts)".into(), Cost::least(&samples));
+
     for (invalid, code, reason) in [
         (false, "not-answerable", "adapter_missing"),
         (true, "invalid-answer", "unknown_option"),

@@ -8693,26 +8693,72 @@ fn harness_answer_action_identity_is_retryable_and_question_scoped() {
 }
 
 #[test]
-fn harness_answer_cli_requires_positions_file_explicit_person_and_key() {
+fn harness_answer_cli_requires_positions_file_explicit_person_key_and_fences() {
     let arguments = [
         "fractal", "harness-questions", "answer",
         "harness-question/00000000000000000000000000000001",
         "--as", "person/operator", "--answers-file", "answers.json",
         "--idempotency-key", "harness-answer-retry-key",
+        "--revision", "claim/reviewed-observation", "--incarnation", "reviewed-incarnation",
     ];
     assert!(matches!(
         Cli::try_parse_from(arguments).unwrap().command,
         Command::HarnessQuestions { command: HarnessQuestionsCommand::Answer { .. } }
     ));
-    for flag in ["--as", "--answers-file", "--idempotency-key"] {
+    for flag in ["--as", "--answers-file", "--idempotency-key", "--revision", "--incarnation"] {
         let index = arguments.iter().position(|argument| *argument == flag).unwrap();
         let missing = arguments[..index].iter().chain(&arguments[index + 2..]).copied();
         assert!(Cli::try_parse_from(missing).is_err(), "{flag}");
     }
 }
 
+#[test]
+fn harness_answer_clap_orders_explicit_fences_before_retry_key() {
+    let mut command = Cli::command();
+    command.build();
+    let answer = command.find_subcommand("harness-questions").unwrap()
+        .find_subcommand("answer").unwrap();
+    let options: Vec<_> = answer.get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .filter(|name| matches!(*name, "as" | "answers-file" | "revision" | "incarnation" | "idempotency-key"))
+        .collect();
+    assert_eq!(options, ["as", "answers-file", "revision", "incarnation", "idempotency-key"]);
+    for name in ["revision", "incarnation"] {
+        let argument = answer.get_arguments().find(|argument| argument.get_long() == Some(name)).unwrap();
+        assert!(argument.is_required_set());
+        assert!(argument.get_env().is_none());
+    }
+}
+
 #[tokio::test]
-async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
+async fn harness_question_cli_show_reads_detail_without_answering() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("question.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") { break; }
+        }
+        stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let command = HarnessQuestionsCommand::Show {
+        question: "00000000000000000000000000000001".into(),
+        person: "person/operator".into(),
+    };
+    assert!(run_harness_questions(&Endpoint::Unix(socket), command, true).await.is_err());
+    let request = server.await.unwrap();
+    assert!(request.starts_with("GET /v1/client/harness-questions/00000000000000000000000000000001 "));
+}
+
+#[tokio::test]
+async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("question.sock");
@@ -8741,20 +8787,11 @@ async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
             stream.read_exact(&mut body).await.unwrap();
             requests.push((headers, body));
             let (status, response) = if index == 0 {
-                ("200 OK", json!({
-                    "api_version":"st3.client.v0", "request_id":"request/question-detail",
-                    "snapshot":{"id":"snapshot/fixture/42", "host_id":"host/fixture",
-                        "store_index":42, "projection_version":"client-projection.v0",
-                        "created_at":"2026-10-26T10:00:00.000Z"},
-                    "value":{"kind":"harness-question", "id":canonical,
-                        "revision":"claim/observation", "updated_at":"2026-10-26T10:00:00.000Z",
-                        "agent":"agent/example", "session":"fixture-session",
-                        "native_id":format!("sha256:{}", "0".repeat(64)),
-                        "runtime_incarnation":"fixture-incarnation",
-                        "questions":[{"id":"q0", "options":2, "multi":false, "required":true}],
-                        "observed_at":1793008800000_u64, "resolution":null,
-                        "answer":{"state":"unavailable", "reason":"adapter_missing"}}
-                }))
+                let mut capabilities: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc58fa3f9b3bb owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+                    "../../../docs/st3/client-v0/fixtures/capabilities.json"
+                )).unwrap();
+                capabilities["snapshot"]["id"] = json!("snapshot/fixture/42");
+                ("200 OK", capabilities)
             } else {
                 ("409 Conflict", json!({
                     "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
@@ -8780,13 +8817,15 @@ async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
             question: "00000000000000000000000000000001".into(),
             person: "person/operator".into(),
             answers_file,
+            revision: "claim/reviewed-observation".into(),
+            incarnation: "reviewed-incarnation".into(),
             idempotency_key: key.into(),
         },
         true,
     ).await.unwrap_err();
     assert!(error.to_string().contains("NotAnswerable"), "{error:#}");
     let requests = server.await.unwrap();
-    assert!(requests[0].0.starts_with("GET /v1/client/harness-questions/"));
+    assert!(requests[0].0.starts_with("GET /v1/client/capabilities "));
     assert!(requests[1].0.starts_with("POST /v1/client/actions "));
     let action: Value = serde_json::from_slice(&requests[1].1).unwrap();
     assert_eq!(action["id"], harness_answer_action_id(key, canonical));
@@ -8796,8 +8835,8 @@ async fn harness_answer_cli_uses_canonical_detail_identity_and_all_fences() {
     }));
     let expected_fence = serde_json::to_value(ClientFence {
         snapshot_id: "snapshot/fixture/42".into(),
-        subject_revisions: BTreeMap::from([(canonical.into(), "claim/observation".into())]),
-        runtime_incarnation: Some("fixture-incarnation".into()),
+        subject_revisions: BTreeMap::from([(canonical.into(), "claim/reviewed-observation".into())]),
+        runtime_incarnation: Some("reviewed-incarnation".into()),
         ..Default::default()
     }).unwrap();
     assert_eq!(action["fence"], expected_fence);
