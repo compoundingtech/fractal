@@ -25,7 +25,6 @@ mod documents;
 pub mod checklist;
 mod edit;
 mod glass;
-mod recent;
 mod hover;
 mod hyperlinks;
 #[cfg(test)]
@@ -3781,7 +3780,10 @@ impl Ui {
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
                 ("ctrl+^", "recent places; Enter opens, typing filters"),
-                ("ctrl+tab", "recent cycle (enhanced); release Ctrl if supported"),
+                (
+                    "ctrl+tab",
+                    "recent cycle (enhanced); release Ctrl if supported",
+                ),
                 ("q", "quit"),
             ],
         );
@@ -4260,9 +4262,9 @@ impl Ui {
         if !self.leader
             && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
             && (self.recent_open()
-            || !self.terminal_focused()
-            || (key.modifiers.contains(KeyModifiers::CONTROL)
-                && matches!(key.code, KeyCode::Char('6' | '^'))))
+                || !self.terminal_focused()
+                || (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('6' | '^'))))
             && self.recent_key(key)
         {
             return;

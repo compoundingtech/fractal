@@ -3065,9 +3065,7 @@ impl Ui {
             KeyCode::Char('g') if control => self.open_glasses_palette(),
             // Tabs keep Ctrl+PgDn/PgUp and quiet [ ]; Ctrl+Tab belongs to recent places.
             KeyCode::PageDown if control => self.show_tab((current + 1) % tabs),
-            KeyCode::PageUp if control => {
-                self.show_tab((current + tabs - 1) % tabs)
-            }
+            KeyCode::PageUp if control => self.show_tab((current + tabs - 1) % tabs),
             KeyCode::Char(']') if quiet && key.modifiers.is_empty() => {
                 self.show_tab((current + 1) % tabs)
             }
