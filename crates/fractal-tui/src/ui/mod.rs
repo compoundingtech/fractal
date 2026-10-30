@@ -3768,7 +3768,10 @@ impl Ui {
                     "open or focus Inbox (in a text box it is backspace)",
                 ),
                 ("ctrl+\\ [ ]", "back, forward across spaces"),
-                ("ctrl+[ ]", "back, forward (enhanced keyboard; not in terminals)"),
+                (
+                    "ctrl+[ ]",
+                    "back, forward (enhanced keyboard; not in terminals)",
+                ),
                 ("q", "quit"),
             ],
         );
