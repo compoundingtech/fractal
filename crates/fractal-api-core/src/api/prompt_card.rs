@@ -14,9 +14,10 @@ use notify::Watcher as _;
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
 
-/// How far back st looks for a call without a result: the conversation's newest entries. A
-/// harness waits on the calls it made last, so an older one without a result was abandoned.
-const TAIL: usize = 256;
+/// How far back st looks for a call without a result: the conversation's newest entries, a page
+/// as a client or a peer reads it. A harness waits on the calls it made last, so an older one
+/// without a result was abandoned.
+const TAIL: usize = super::CLIENT_MAX_PAGE_ITEMS;
 
 /// Reads the tool calls without a result in a seat's conversation, oldest first, each
 /// `{call_id, name, arguments, complete}`, or says why st cannot.
@@ -113,14 +114,35 @@ pub(crate) fn seat_pending_calls(
     seat: &str,
     follow: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<Vec<Value>, String> {
+    source_pending_calls(&seat_source(state, seat)?, follow)
+}
+
+/// `seat`'s conversation on this node, or why st cannot read it.
+fn seat_source(state: &AppState, seat: &str) -> Result<crate::external_sessions::ExternalSession, String> {
     let unreadable = |error: ApiError| format!("st cannot read this seat's conversation: {}", error.message);
     let session = super::client_v0::conversation_session_id(state, seat).map_err(unreadable)?;
     let index = state.store.index().map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
     let managed = managed_session_owner_at(&state.store, index, &session)
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
-    let source = super::client_v0::conversation_blocks::source(state, &session, managed.as_ref())
-        .map_err(unreadable)?;
-    source_pending_calls(&source, follow)
+    super::client_v0::conversation_blocks::source(state, &session, managed.as_ref()).map_err(unreadable)
+}
+
+/// The newest entries of a conversation, as a prompt card reads them.
+fn tail(source: &crate::external_sessions::ExternalSession) -> Result<Vec<Value>, String> {
+    let timeline = crate::external_sessions::LineTimeline::acquire(source);
+    let slice = timeline
+        .hold()
+        .slice(source, crate::external_sessions::TimelineOrder::Sequence, None, TAIL)
+        .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
+    Ok(slice.items)
+}
+
+/// Whether `call` waits among a conversation's newest entries `items` (a page, in either
+/// order): made, with no result. A card may have shown it as waiting from a read before its
+/// result, so an answer that lets it through checks again; a call that has its result, or that
+/// a card could not have shown, does not wait.
+pub fn call_waits_among(items: &[Value], call: &str) -> bool {
+    pending_calls(items).iter().any(|pending| pending["call_id"] == call)
 }
 
 /// The tool calls without a result in a conversation `source`, following it from before the
@@ -130,28 +152,28 @@ pub(crate) fn source_pending_calls(
     follow: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<Vec<Value>, String> {
     follow(&source.transcript)?;
-    let timeline = crate::external_sessions::LineTimeline::acquire(source);
-    let slice = timeline
-        .hold()
-        .slice(source, crate::external_sessions::TimelineOrder::Sequence, None, TAIL)
-        .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
-    Ok(pending_calls(&slice.items))
+    Ok(pending_calls(&tail(source)?))
 }
 
 /// Wakes the attention refresher when a conversation a published prompt card read changes: a
 /// seat's conversation changes no claim attention reads. It watches each transcript's
 /// directory, so a transcript created or replaced later, and a SQLite source's write-ahead log
 /// and journal beside it, are followed too. An event the watcher could not deliver in full (an
-/// error, or an overflow that asks for a rescan) means a change may have been lost and the
-/// subscriptions may no longer hold: the next refresh makes the watcher again and subscribes
-/// each card's conversation anew before reading it. A transcript it cannot watch is not
-/// followed: its card says so and offers no answer.
+/// error, an overflow that asks for a rescan, or one that names no path) or one on a watched
+/// directory itself (removed or renamed, which drops its watch) means a change may have been
+/// lost and the subscriptions may no longer hold: the next refresh makes the watcher again and
+/// subscribes each card's conversation anew before reading it. A change to what is watched
+/// counts as a change too: FSEvents (macOS) restarts its stream from now on every watch and
+/// unwatch, so an event around it can be lost. A transcript it cannot watch is not followed:
+/// its card says so and offers no answer.
 pub(crate) struct PromptWatch {
     shared: Arc<Delivery>,
     watcher: Option<notify::RecommendedWatcher>,
     /// The transcripts followed, and those the refresh in progress read.
     followed: HashSet<PathBuf>,
     read: HashSet<PathBuf>,
+    /// How many times the watcher was made again after a delivery failure.
+    rebuilds: usize,
 }
 
 /// What the watcher's callback shares with the refresher.
@@ -159,6 +181,8 @@ struct Delivery {
     wake: Arc<tokio::sync::Notify>,
     /// The files whose changes wake the refresher: each followed transcript and its siblings.
     files: Mutex<HashSet<PathBuf>>,
+    /// The directories watched: an event on one itself drops or moves its watch.
+    directories: Mutex<HashSet<PathBuf>>,
     changed: AtomicBool,
     /// The watcher reported an error or lost events: no subscription is trusted until made again.
     broken: AtomicBool,
@@ -171,7 +195,15 @@ impl Delivery {
                 self.broken.store(true, Ordering::Release);
                 true
             }
-            Ok(event) if event.need_rescan() => {
+            Ok(event)
+                if event.need_rescan()
+                    || event.paths.is_empty() && !matches!(event.kind, notify::EventKind::Access(_))
+                    || {
+                        let directories =
+                            self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        event.paths.iter().any(|path| directories.contains(path))
+                    } =>
+            {
                 self.broken.store(true, Ordering::Release);
                 true
             }
@@ -205,12 +237,14 @@ impl PromptWatch {
             shared: Arc::new(Delivery {
                 wake,
                 files: Mutex::default(),
+                directories: Mutex::default(),
                 changed: AtomicBool::new(false),
                 broken: AtomicBool::new(false),
             }),
             watcher: None,
             followed: HashSet::new(),
             read: HashSet::new(),
+            rebuilds: 0,
         };
         // A watcher that cannot be made now is made again when a card first follows a seat.
         let _ = watch.watcher();
@@ -237,6 +271,12 @@ impl PromptWatch {
         self.shared.changed.store(true, Ordering::Release);
     }
 
+    /// What is watched changed: read again soon, since an event around the change may be lost.
+    fn watched_changed(&self) {
+        self.keep_changed();
+        self.shared.wake.notify_one();
+    }
+
     /// A refresh is about to present the prompts. After a delivery failure nothing followed is
     /// trusted: the watcher is made again, and each card subscribes anew before it reads.
     pub(crate) fn begin(&mut self) {
@@ -244,7 +284,9 @@ impl PromptWatch {
         if self.shared.broken.swap(false, Ordering::AcqRel) {
             self.watcher = None;
             self.followed.clear();
+            self.rebuilds += 1;
             self.shared.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+            self.shared.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         }
     }
 
@@ -260,6 +302,12 @@ impl PromptWatch {
                 self.watcher()?
                     .watch(&directory, notify::RecursiveMode::NonRecursive)
                     .map_err(|error| format!("st cannot follow this seat's conversation: {error}"))?;
+                self.shared
+                    .directories
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(directory.clone());
+                self.watched_changed();
             }
             self.shared
                 .files
@@ -286,7 +334,13 @@ impl PromptWatch {
             if !self.followed.iter().any(|other| other.parent() == directory)
                 && let (Some(directory), Some(watcher)) = (directory, self.watcher.as_mut())
             {
-                        let _ = watcher.unwatch(directory);
+                self.shared
+                    .directories
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(directory);
+                let _ = watcher.unwatch(directory);
+                self.watched_changed();
             }
         }
     }
@@ -419,7 +473,8 @@ pub(crate) mod tests {
         watch.begin();
         watch.follow(&oak).unwrap();
         watch.finish();
-        assert!(!watch.take_changed());
+        // What is watched changed: read again, since FSEvents can lose an event around it.
+        assert!(watch.take_changed());
         append(&oak);
         assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
         assert!(!watch.take_changed(), "asked once");
@@ -452,12 +507,63 @@ pub(crate) mod tests {
         watch.begin();
         watch.follow(&database).unwrap();
         watch.finish();
-        let before = std::fs::metadata(&database).unwrap().len();
+        watch.take_changed();
         connection
             .execute("INSERT INTO part VALUES ('call-a', '{\"type\":\"tool\"}')", [])
             .unwrap();
-        assert_eq!(std::fs::metadata(&database).unwrap().len(), before, "the commit is in the log alone");
+        assert!(wal_holds_a_commit(&database), "the commit is in the log");
         assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+    }
+
+    /// Whether `database`'s write-ahead log holds a commit not yet checkpointed.
+    pub(crate) fn wal_holds_a_commit(database: &Path) -> bool {
+        let mut log = OsString::from(database.as_os_str());
+        log.push("-wal");
+        std::fs::metadata(PathBuf::from(log)).is_ok_and(|log| log.len() > 0)
+    }
+
+    /// A watched directory renamed away drops its watch with it; an overflow asks for a rescan;
+    /// an event that names no path says nothing of what changed. After each the next refresh
+    /// makes the watcher again and subscribes anew, and a transcript that is gone cannot be.
+    #[tokio::test]
+    async fn a_lost_watch_or_a_rescan_makes_the_watcher_again() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("oak");
+        std::fs::create_dir_all(&directory).unwrap();
+        let oak = directory.join("oak.jsonl");
+        std::fs::write(&oak, "{}\n").unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        let refresh = |watch: &mut PromptWatch| {
+            watch.begin();
+            let followed = watch.follow(&oak);
+            watch.finish();
+            followed
+        };
+        refresh(&mut watch).unwrap();
+        watch.take_changed();
+        assert_eq!(watch.rebuilds, 0);
+
+        std::fs::rename(&directory, root.path().join("oak-moved")).unwrap();
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+        let error = refresh(&mut watch).unwrap_err();
+        assert!(error.starts_with("st cannot follow this seat's conversation"), "{error}");
+        assert_eq!(watch.rebuilds, 1, "the renamed directory's watch was not trusted");
+
+        std::fs::rename(root.path().join("oak-moved"), &directory).unwrap();
+        refresh(&mut watch).unwrap();
+        for event in [
+            notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan),
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any)),
+        ] {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            watch.take_changed();
+            let before = watch.rebuilds;
+            watch.shared.deliver(Ok(event));
+            assert!(watch.take_changed());
+            refresh(&mut watch).unwrap();
+            assert_eq!(watch.rebuilds, before + 1);
+        }
     }
 
     /// After the watcher reports an error or lost events, no subscription it holds is trusted:
