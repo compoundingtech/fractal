@@ -176,7 +176,8 @@ impl GithubPluginStore {
                      head_sha TEXT,
                      detail TEXT NOT NULL,
                      at TEXT NOT NULL,
-                     recorded_at_unix_ms INTEGER NOT NULL
+                     recorded_at_unix_ms INTEGER NOT NULL,
+                     sequence INTEGER NOT NULL
                  ) WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS mirror_events_item ON mirror_events(repository, number, recorded_at_unix_ms);
                  CREATE INDEX IF NOT EXISTS mirror_events_recorded ON mirror_events(repository, recorded_at_unix_ms);
@@ -333,11 +334,11 @@ impl GithubPluginStore {
                 let event = github_events::Event { key, ..event };
                 transaction.execute(
                     /* sqlite-large-value: allow-for-now lv-PLACEHOLDER-EVENT-INSERT owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
-                    "INSERT OR IGNORE INTO mirror_events(subject, repository, number, key, event, head_sha, detail, at, recorded_at_unix_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT OR IGNORE INTO mirror_events(subject, repository, number, key, event, head_sha, detail, at, recorded_at_unix_ms, sequence)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         subject, repository, number as i64, event.key, event.event, event.head_sha,
-                        Value::Object(event.detail.clone()).to_string(), at_text, at as i64,
+                        Value::Object(event.detail.clone()).to_string(), at_text, at as i64, recorded.len() as i64,
                     ],
                 )?;
                 recorded.push(github_events::view(&event, &item.subject, &subject, &at_text));
@@ -470,7 +471,7 @@ impl GithubPluginStore {
         let mut statement = connection.prepare_cached(
             "SELECT subject, number, key, event, head_sha, detail, at FROM mirror_events
              WHERE repository=?1 AND (?2 IS NULL OR number=?2)
-             ORDER BY recorded_at_unix_ms DESC, subject DESC LIMIT ?3",
+             ORDER BY recorded_at_unix_ms DESC, sequence DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(
             params![repository, number.map(|number| number as i64), limit.min(MAX_READ_ROWS) as i64],

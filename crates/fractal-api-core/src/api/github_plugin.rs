@@ -363,3 +363,94 @@ fn from_graph(store: &Store, resource: &str, read: &Read) -> anyhow::Result<Valu
         Read::Events { number, limit } => json!({"events": store.github_events(resource, *number, *limit)?}),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github_watch::ThreadRef;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+
+    async fn get(state: &AppState, path: &str) -> (StatusCode, Value) {
+        let response = super::super::router(state.clone())
+            .oneshot(Request::get(path).header(client_v0::LOCAL_PERSON_HEADER, "person/ada").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body.get_mut("value").map(Value::take).unwrap_or(body))
+    }
+
+    fn observe(store: &Store, number: u64, facts: Value) -> String {
+        store.append_claim(&crate::model::ClaimInput {
+            subject: format!("resource/github/acme/garden/pull-request/{number}"),
+            kind: "resource.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("kind".into(), json!("vcs.pull-request")), ("facts".into(), facts)]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap().id
+    }
+
+    /// The member that polls a repository answers from its mirror once the mirror has taken a
+    /// look, and from its graph, saying so, before then.
+    #[tokio::test]
+    async fn the_poller_answers_from_its_mirror_and_labels_a_graph_answer() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        let store = state.store.clone();
+        let intent = crate::graph::parse_internal_intent(
+            "version 2\nagent \"example.planner\" { workspace \"/tmp\"; command \"true\" }\n",
+            "node",
+        ).unwrap();
+        store.apply_internal(&intent, "watch-seat").unwrap();
+        store.declare_watch(&ThreadRef::parse("acme/garden#7").unwrap(), "agent/example.planner", None).unwrap();
+        let facts = json!({"number": 7, "title": "Garden paths", "state": "open", "head_sha": "a",
+            "required_checks": {"state": "pass"}, "checks": [{"name": "build", "conclusion": "success"}]});
+        let claim = observe(&store, 7, facts.clone());
+        observe(&store, 8, json!({"number": 8, "title": "Old path", "state": "closed", "merged": true}));
+        let mirror = Arc::new(GithubPluginStore::memory());
+        GithubPluginStore::share(root.path(), mirror.clone());
+
+        let (status, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls").await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+        assert!(answer["source"]["reason"].as_str().unwrap().contains("has not taken a look"));
+        assert_eq!(answer["poller"], "host/node");
+        assert_eq!(answer["pulls"].as_array().unwrap().len(), 1, "open by default");
+        assert_eq!(answer["pulls"][0]["number"], 7);
+
+        let item = |number: u64, facts: Value, claim: &str| github_plugin_store::MirrorItem {
+            subject: format!("resource/github/acme/garden/pull-request/{number}"),
+            item_kind: "vcs.pull-request".into(),
+            facts: facts.as_object().unwrap().clone(),
+            claim: Some(claim.into()),
+        };
+        mirror.seed("resource/github/acme/garden", "observer/github/acme/garden", "acme/garden", &[item(7, facts.clone(), &claim)]).unwrap();
+        mirror.mirror("resource/github/acme/garden", "observer/github/acme/garden", "acme/garden", &[item(7, json!({
+            "number": 7, "title": "Garden paths", "state": "open", "head_sha": "b", "required_checks": {"state": "fail", "failed": ["build"]}}), "c2")]).unwrap();
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/ACME/garden/pulls?state=all").await;
+        assert_eq!(answer["source"]["kind"], "mirror", "{answer}");
+        assert_eq!(answer["source"]["host"], "host/node");
+        assert_eq!(answer["pulls"][0]["required_checks_state"], "fail");
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls/7").await;
+        assert_eq!(answer["pull"]["facts"]["head_sha"], "b");
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls/7/checks").await;
+        assert_eq!(answer["checks"]["heads"].as_array().unwrap().len(), 2);
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls/9").await;
+        assert!(answer["pull"].is_null());
+        let (_, answer) = get(&state, "/v1/plugins/github/repos/acme/garden/events?number=7").await;
+        let events: Vec<_> = answer["events"].as_array().unwrap().iter().map(|event| event["event"].as_str().unwrap()).collect();
+        assert_eq!(events, ["checks-failed", "head-changed"]);
+
+        let (status, _) = get(&state, "/v1/plugins/github/repos/acme/orchard/pulls").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "no member polls it");
+        let (status, _) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls?state=merged").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = get(&state, "/v1/plugins/github/repos/acme/garden/pulls?limit=0").await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}

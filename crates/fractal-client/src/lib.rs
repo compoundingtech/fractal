@@ -2560,7 +2560,9 @@ impl Client {
             return Err(ClientError::Protocol(format!("not a GitHub plugin read: {path}")));
         }
         let separator = if path.contains('?') { '&' } else { '?' };
-        self.get(&format!("{path}{separator}local=1")).await
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body.get_mut("value").map(serde_json::Value::take).unwrap_or(body))
     }
     pub async fn sessions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("sessions", id).await
