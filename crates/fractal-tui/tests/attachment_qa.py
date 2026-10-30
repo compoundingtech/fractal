@@ -15,12 +15,22 @@ def attached(value: str) -> bool:
     return HEADER in value
 
 
+def attach(session) -> None:
+    value = screen(session)
+    if attached(value):
+        return
+    value = wait_screen(session, lambda text: "Attach" in text, "Attach button")
+    row = next(index for index, line in enumerate(value.splitlines()) if "Attach" in line)
+    column = value.splitlines()[row].index("Attach")
+    click(session, column + 2, row + 1)
+
+
 def main(binary: str, name: str) -> None:
     session = start(binary, "stui-attach-qa")
     try:
         open_agent(session, name)
         for _ in range(3):
-            send(session, "\x1d")  # Ctrl+]
+            attach(session)
             try:
                 wait_screen(session, attached, "attached terminal", seconds=5)
                 break
@@ -31,7 +41,7 @@ def main(binary: str, name: str) -> None:
         send(session, "\x1c")  # Ctrl+\, the leader
         send(session, "c")     # then c: the conversation
         wait_screen(session, lambda value: not attached(value), "Ctrl+\\ c detach")
-        send(session, "\x1d")
+        attach(session)
         value = wait_screen(session, attached, "attached again")
         row = next(index for index, line in enumerate(value.splitlines()) if HEADER in line)
         column = value.splitlines()[row].index(HEADER)

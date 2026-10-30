@@ -54,7 +54,7 @@ pub(super) struct Terminal<'a> {
     pub fallback: bool,
 }
 
-pub(super) const RESTARTED: &str = "the terminal restarted; Ctrl+] attaches the new one";
+pub(super) const RESTARTED: &str = "the terminal restarted; Enter attaches the new one";
 
 pub(super) async fn open(client: &Client, terminal: &Terminal<'_>) -> Result<Opened, String> {
     if client.is_local_socket() {
