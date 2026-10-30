@@ -12754,6 +12754,125 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
 }
 
 #[tokio::test]
+async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_replicas() {
+    const OLD: &str = "agent/example-mail-original/worker";
+    const NEW: &str = "agent/example-mail-renamed/worker";
+    const FLEET: &str = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    owner.store.bind_fleet(FLEET).unwrap();
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-mail-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "mail-declare").unwrap();
+    let app = router(owner.clone());
+    let (status, before) = json_request(app.clone(), "/v1/messages", json!({
+        "from":"person/robin","to":OLD,"content":"Before rename","idempotency_key":"mail-before",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":OLD,"to":NEW,"actor":"person/robin","reason":"Clarify seat",
+        "idempotency_key":"mail-rename",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    for (index, name) in [OLD, NEW].iter().enumerate() {
+        let (status, sent) = json_request(app.clone(), "/v1/messages", json!({
+            "from":name,"to":name,"content":"After rename","subject":"rename-mail",
+            "idempotency_key":format!("mail-after-{index}"),
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["recipient_identity"], OLD);
+        assert_eq!(sent["recipient"], NEW);
+        assert_eq!(sent["message"]["from"], OLD);
+        assert_eq!(sent["message"]["to"], OLD);
+    }
+    let peer_root = tempfile::tempdir().unwrap();
+    let mut peer = state(peer_root.path());
+    peer.store = Arc::new(Store::open_memory("mail-peer").unwrap());
+    peer.node = "mail-peer".into();
+    peer.store.bind_fleet(FLEET).unwrap();
+    let exchange = owner.store.export_replication_exchange(
+        FLEET, &peer.store.replication_inventory().unwrap(),
+    ).unwrap();
+    peer.store.receive_replication_exchange(owner.store.origin(), FLEET, &exchange).unwrap();
+    peer.store.validate_replication_backlog().unwrap();
+    peer.store.project_replication_backlog().unwrap();
+    for (replica, state) in [owner, peer].into_iter().enumerate() {
+        let app = router(state);
+        for mailbox in [OLD, NEW] {
+            let (status, messages) = get_request(app.clone(), &format!(
+                "/v1/messages?to={mailbox}&include_closed=true",
+            )).await;
+            assert_eq!(status, StatusCode::OK, "{messages}");
+            assert_eq!(messages.as_array().unwrap().len(), 3);
+            for actor in [OLD, NEW] {
+                let (status, filtered) = get_request(app.clone(), &format!(
+                    "/v1/messages/page?to={mailbox}&from={actor}&acting_as={actor}&subject=rename-mail&include_closed=true",
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{filtered}");
+                assert_eq!(filtered["items"].as_array().unwrap().len(), 2);
+                let (status, first) = get_request(app.clone(), &format!(
+                    "/v1/messages/page?to={mailbox}&acting_as={actor}&include_closed=true&limit=1",
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{first}");
+                let mut subjects = vec![first["items"][0]["subject"].clone()];
+                let mut cursor = first["next_cursor"].as_str().map(str::to_owned);
+                // A cursor is bound to identity, not whichever spelling opened the page.
+                let other_mailbox = if mailbox == OLD { NEW } else { OLD };
+                let other_actor = if actor == OLD { NEW } else { OLD };
+                while let Some(next) = cursor {
+                    let (status, page) = get_request(app.clone(), &format!(
+                        "/v1/messages/page?to={other_mailbox}&acting_as={other_actor}&include_closed=true&limit=1&cursor={}",
+                        urlencoding::encode(&next),
+                    )).await;
+                    assert_eq!(status, StatusCode::OK, "{page}");
+                    subjects.extend(page["items"].as_array().unwrap().iter().map(|item| item["subject"].clone()));
+                    cursor = page["next_cursor"].as_str().map(str::to_owned);
+                }
+                assert_eq!(subjects.len(), 3);
+                assert_eq!(subjects.iter().map(|subject| subject.as_str().unwrap()).collect::<BTreeSet<_>>().len(), 3);
+                for lifecycle in ["read", "closed"] {
+                    for subject in &subjects {
+                        let (status, claim) = json_request(app.clone(), &format!(
+                            "/v1/messages/{}/claims", subject.as_str().unwrap(),
+                        ), json!({
+                            "actor":actor,"lifecycle":lifecycle,
+                            "idempotency_key":format!("mail-{replica}-{mailbox}-{actor}-{subject}-{lifecycle}"),
+                        })).await;
+                        assert_eq!(status, StatusCode::OK, "{claim}");
+                        assert_eq!(claim["actor"], OLD);
+                    }
+                }
+                let (status, closed) = get_request(app.clone(), &format!(
+                    "/v1/messages/page?to={mailbox}&acting_as={actor}",
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{closed}");
+                assert!(closed["items"].as_array().unwrap().is_empty());
+            }
+            let (status, denied) = get_request(app.clone(), &format!(
+                "/v1/messages/page?to={mailbox}&acting_as=agent/example-unrelated",
+            )).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+            assert_eq!(denied["code"], "wrong-message-recipient");
+        }
+        for lifecycle in ["read", "closed"] {
+            let (status, denied) = json_request(app.clone(), &format!(
+                "/v1/messages/{}/claims", before["message"]["subject"].as_str().unwrap(),
+            ), json!({
+                "actor":"agent/example-unrelated","lifecycle":lifecycle,
+                "idempotency_key":format!("mail-denied-{replica}-{lifecycle}"),
+            })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+            assert_eq!(denied["code"], "wrong-message-recipient");
+        }
+    }
+}
+
+#[tokio::test]
 async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
