@@ -872,7 +872,7 @@ pub struct Store {
     pub last_replication_projection_unix_ms: AtomicU64,
     /// For a shard, the default store whose fleet identity and membership it uses: a shard
     /// holds no fleet claims of its own. See `bind_fleet_authority`.
-    fleet_authority: std::sync::OnceLock<Arc<Store>>,
+    fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
     pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
@@ -3292,6 +3292,36 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
                 self.signature,
                 now
             ])?)
+    }
+}
+
+/// What a shard reads of the default store it takes its fleet from. A program that owns its
+/// default store elsewhere can hand the shard a weak handle to it.
+pub trait FleetAuthority: Send + Sync {
+    /// The fleet the default store is bound to.
+    fn fleet_id(&self) -> Result<Option<String>>;
+    /// Advances whenever the default store's membership may have changed.
+    fn fleet_generation(&self) -> Result<i64>;
+    fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
+    /// Whether this is a default store that takes its fleet from no other store.
+    fn is_default_store(&self) -> Result<bool>;
+}
+
+impl FleetAuthority for Store {
+    fn fleet_id(&self) -> Result<Option<String>> {
+        self.bound_fleet()
+    }
+
+    fn fleet_generation(&self) -> Result<i64> {
+        fleet_generation(&self.readers.get())
+    }
+
+    fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
+        Store::fleet_membership(self)
+    }
+
+    fn is_default_store(&self) -> Result<bool> {
+        Ok(self.bound_shard()?.is_none() && self.fleet_authority.get().is_none())
     }
 }
 
@@ -6635,13 +6665,13 @@ impl Store {
     /// Give a shard the default store whose fleet it belongs to. A shard holds no fleet claims:
     /// its envelopes sign for the authority's fleet, and admission checks them against the
     /// authority's membership, so a member removed there is refused here too. Set once per open.
-    pub fn bind_fleet_authority(&self, authority: Arc<Store>) -> Result<()> {
+    pub fn bind_fleet_authority(&self, authority: Arc<dyn FleetAuthority>) -> Result<()> {
         anyhow::ensure!(
             self.bound_shard()?.is_some(),
             "only a shard takes its fleet from another store"
         );
         anyhow::ensure!(
-            authority.bound_shard()?.is_none() && authority.fleet_authority.get().is_none(),
+            authority.is_default_store()?,
             "a shard's fleet authority must be the default store"
         );
         self.fleet_authority
@@ -6652,7 +6682,7 @@ impl Store {
     /// The fleet this store's envelopes sign for: its authority's, for a shard.
     fn signing_fleet_id(&self, connection: &Connection) -> Result<Option<String>> {
         match self.fleet_authority.get() {
-            Some(authority) => authority.bound_fleet(),
+            Some(authority) => authority.fleet_id(),
             None => fleet_meta(connection, "fleet_id"),
         }
     }
@@ -6662,7 +6692,7 @@ impl Store {
     /// loan, as one landing after a default store's admission commits is.
     fn admission_generation(&self, own: &Connection) -> Result<i64> {
         match self.fleet_authority.get() {
-            Some(authority) => fleet_generation(&authority.readers.get()),
+            Some(authority) => authority.fleet_generation(),
             None => fleet_generation(own),
         }
     }
@@ -7699,7 +7729,7 @@ impl Store {
         if let Some(authority) = self.fleet_authority.get() {
             // Read the generation first: a membership folded at a later one only makes the
             // next loan see the generation moved and fold again.
-            let generation = fleet_generation(&authority.readers.get())?;
+            let generation = authority.fleet_generation()?;
             return Ok((generation, authority.fleet_membership()?));
         }
         let reader = self.readers.get();
