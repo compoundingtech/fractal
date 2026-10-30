@@ -470,20 +470,7 @@ fn automatic_intake_pins_its_review_mission() {
 }
 
 #[test]
-fn migration_rehearsal_uses_an_exact_migration_document_and_no_custom_prompt() {
-    let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("evals/fractal/agent-migration-rehearsal/eval.kdl");
-    let source = fs::read_to_string(&file).unwrap();
-    let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
-    assert!(intent.document_refs.contains(
-        "doc/hosts/migration-rehearsal@7a0773a714975b4563b15638cc5b5b6608849dc6c5b1ea07e2632b0edc6a8665"
-    ));
-    assert!(!source.contains("prompt "));
-}
-
-#[test]
-fn st3_eval_inventory_has_twenty_two_model_free_and_twenty_one_model_backed_evals() {
+fn eval_inventory_matches_declared_model_free_and_model_backed_evals() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("evals/fractal");
@@ -512,7 +499,6 @@ fn st3_eval_inventory_has_twenty_two_model_free_and_twenty_one_model_backed_eval
         "runtime-readiness-recovery",
     ];
     let model_backed = [
-        "agent-migration-rehearsal",
         "automatic-github-intake",
         "claude-skill-inheritance",
         "codex-compaction-message-delivery",
