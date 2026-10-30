@@ -285,8 +285,11 @@ pub fn record_store_writer(database: &Path, node: &str) -> Result<()> {
             "database local writer `{writer}` does not match admitted node `{node}`"
         );
     }
+    // One immutable node identity uses the existing inline meta representation.
+    // Its admitted identity semantics are unchanged; bounded/reference metadata
+    // and reclamation remain the producer's representation work.
     transaction.execute(
-        "INSERT OR IGNORE INTO meta(key,value) VALUES('local_node_writer',?1)",
+        /* sqlite-large-value: allow-for-now lv-h08b5ea8feb89 owner=fractal_seats_base::node_identity TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES('local_node_writer',?1)",
         [node],
     )?;
     transaction.commit()?;

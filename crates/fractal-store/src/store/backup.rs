@@ -1368,7 +1368,7 @@ mod tests {
         }] {
             fs::write(&path, corrupted).unwrap();
             let target = root.path().join("target.db");
-            assert!(backup::restore(&path, &target).is_err());
+            assert!(backup::restore(&path, &target, root.path()).is_err());
             assert!(!target.exists());
         }
     }
@@ -1426,7 +1426,7 @@ mod tests {
             }
         });
         assert!(
-            backup::restore(&path, &root.path().join("bad-signature.db"))
+            backup::restore(&path, &root.path().join("bad-signature.db"), root.path())
                 .unwrap_err()
                 .to_string()
                 .contains("signature")
@@ -1438,7 +1438,7 @@ mod tests {
             }
         });
         assert!(
-            backup::restore(&path, &root.path().join("bad-digest.db"))
+            backup::restore(&path, &root.path().join("bad-digest.db"), root.path())
                 .unwrap_err()
                 .to_string()
                 .contains("graph digest")
