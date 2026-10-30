@@ -53,7 +53,9 @@ use crate::resource::{
 use crate::store::Store;
 
 pub mod channel_recovery;
+pub mod github_events;
 pub mod github_plugin_store;
+pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
