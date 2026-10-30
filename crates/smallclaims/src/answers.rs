@@ -158,9 +158,23 @@ fn pick(connection: &Connection, mut ids: Vec<String>) -> Result<String> {
     Ok(keyed.pop().expect("claims share the time").5)
 }
 
+/// The claims a `record.repaired` replaced. A member that admitted one before the repair arrived,
+/// or wrote it, keeps its row, and a member that received the repair first never admits it, so
+/// no member counts them; see #4282.
+fn repaired_claims(connection: &Connection) -> Result<BTreeSet<String>> {
+    let mut statement = connection.prepare_cached("SELECT id FROM projection_digest_repaired_claims")?;
+    let mut rows = statement.query([])?;
+    let mut repaired = BTreeSet::new();
+    while let Some(row) = rows.next()? {
+        repaired.insert(row.get(0)?);
+    }
+    Ok(repaired)
+}
+
 /// Call `visit` with each key of `kind` and its newest claim, in key order, marked `moving` when
 /// that claim is not older than `cut_unix_ms`, and with the key's newest claim older than the cut
-/// if it holds one. Return how many claims of the kind are older than the cut.
+/// if it holds one. Return how many claims of the kind are older than the cut. Claims a repair
+/// replaced count nowhere.
 fn each_answer(
     connection: &Connection,
     kind: &str,
@@ -171,6 +185,7 @@ fn each_answer(
         "SELECT subject, origin, id, accepted_at_unix_ms FROM claims INDEXED BY claims_kind_index
          WHERE kind=?1 ORDER BY subject, origin",
     )?;
+    let repaired = repaired_claims(connection)?;
     let mut rows = statement.query([kind])?;
     let mut claims = 0;
     // The current key, its newest claims, and its newest claims older than the cut.
@@ -188,6 +203,9 @@ fn each_answer(
         let subject: String = row.get(0)?;
         let origin: String = row.get(1)?;
         let id: String = row.get(2)?;
+        if repaired.contains(&id) {
+            continue;
+        }
         let accepted: u128 = row
             .get::<_, String>(3)?
             .parse()
