@@ -9,7 +9,7 @@ import { makeBackend, type BridgeUpdate } from './backend.ts'
 const snapshot: Snapshot = { id: 'snapshot/fixture', created_at: '2026-10-28T00:00:00Z', host_id: 'host/test', projection_version: 'client-projection.v0', store_index: 1 }
 const id = 'agent/test.acp'
 const sessionId = `fractal-acp:${encodeURIComponent(id)}`
-const entry = (sequence: number, text: string, revision = 1): TimelineEntry => ({ id: `entry/${sequence}`, sequence, revision, timestamp: '2026-10-28T00:00:00Z', role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text } })
+const entry = (sequence: number, text: string, revision = 1): Extract<TimelineEntry, { type: 'content' }> => ({ id: `entry/${sequence}`, sequence, revision, timestamp: '2026-10-28T00:00:00Z', role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text } })
 // Same records as fractal-drivers/src/codex_app_server/tests.rs
 // transcript fixtures (task_started/task_complete with exact native turn_id),
 // wrapped by fractal-store/src/external_sessions.rs push_unrecognized.

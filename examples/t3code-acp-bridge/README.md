@@ -22,7 +22,7 @@ An opt-in, out-of-tree ACP v1 stdio agent for [t3code's Local ACP command](https
    - optionally `FRACTAL_ACP_HOST`, `FRACTAL_ACP_MODEL`, `FRACTAL_ACP_EFFORT` to select the managed agent's host/model/reasoning effort.
 5. Select this provider for a project whose absolute workspace path exists on the daemon's agent host. Keep the server and daemon on the same workspace host for this experiment. Use t3code's **Supervised** permission mode when observing approval dialogs; t3code may otherwise answer permissions automatically.
 
-The executable is launched directly, **not through a shell**. Do not enter shell expressions, an `export` prefix, or a combined argument string. Dependency installation is a separate setup step; the stdio command must not print startup banners. stdout is exclusively newline-delimited JSON-RPC; failures go to stderr. The example uses the repository's existing dependencies and adds no package or lockfile entries.
+The executable is launched directly, **not through a shell**. Do not enter shell expressions, an `export` prefix, or a combined argument string. Dependency installation is a separate setup step; the stdio command must not print startup banners. stdout is exclusively newline-delimited JSON-RPC; failures go to stderr. The example uses the repository's existing dependencies and adds no dependencies or lockfile entries. Its private package manifest only selects ESM parsing.
 
 ## Supported surface and boundaries
 

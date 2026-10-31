@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path'
 import { Schema } from 'effect'
 import type { BridgeBackend, BridgePermission, BridgeUpdate } from './backend.ts'
 
-export class RpcError extends Schema.TaggedErrorClass<RpcError>()('RpcError', {
+export class RpcError extends Schema.TaggedError<RpcError>()('RpcError', {
   code: Schema.Number,
   message: Schema.String,
 }) {}

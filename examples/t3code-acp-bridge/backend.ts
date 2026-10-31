@@ -20,7 +20,7 @@ export interface BridgeBackend {
 
 export class BridgeBackendError extends Schema.TaggedError<BridgeBackendError>()('BridgeBackendError', {
   message: Schema.String,
-  cause: Schema.optional(Schema.Defect),
+  cause: Schema.optional(Schema.Unknown),
 }) {}
 
 export interface BackendOptions {
