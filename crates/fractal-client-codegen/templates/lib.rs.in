@@ -2087,7 +2087,14 @@ impl Client {
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
     /// A read of the local store; only a Unix socket serves it.
     pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
-        self.get("/v1/internal/fleet/membership").await
+        // Internal routes refuse seat callers; a daemon from before the public route answers
+        // only the internal one.
+        match self.get("/v1/fleet/membership").await {
+            Err(ClientError::Api(ErrorCode::NotFound, ..) | ClientError::Protocol(_)) => {
+                self.get("/v1/internal/fleet/membership").await
+            }
+            result => result,
+        }
     }
 
     /// Where `subject`'s running terminal lives, read from this host's daemon without any graph

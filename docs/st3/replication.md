@@ -47,7 +47,12 @@ preference and enabled transports unchanged.
 ## Local adapter membership and leave authority
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
-socket. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
+socket. Internal routes (`/v1/internal/...`) serve only the node's own processes: its
+replication worker, its adapters and its operator's CLI. They refuse seat callers, meaning a
+process running under an agent seat's harness, with `foreign-agent-actor`. A seat reads the
+fleet views it may see through public routes with the same answers: `GET /v1/fleet/status`,
+`/v1/fleet/membership`, `/v1/fleet/admission-residue` and `/v1/fleet/invites`. The CLI and the
+client use those first, and fall back to the internal route on a daemon that predates them. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
 `members`, and legacy removals. A member's `member_key` identifies its incarnation;
 names are not identity. `state = "current"` is application membership authority.
 An ended member is not authorized for ordinary replication or owner RPC, even if

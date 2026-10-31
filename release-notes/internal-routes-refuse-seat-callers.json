@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Internal routes (/v1/internal/...) now refuse seat callers; a seat reads fleet status, membership, admission residue and invites through new public /v1/fleet/... routes",
+  "replay": {
+    "status": "none",
+    "detail": "No claim is written or read differently."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "A request from a process running under an agent seat's harness to any /v1/internal/ route is refused with foreign-agent-actor, by any method. The node's own processes, which run in no harness (the replication worker, local adapters, the operator's CLI), are unaffected. New public routes answer what a seat may read, with the same handlers: GET /v1/fleet/status, /v1/fleet/membership, /v1/fleet/admission-residue and /v1/fleet/invites. st fleet status, st fleet wait, st fleet invites, remote terminal attach and the client library's fleet_membership read the public routes and fall back to the internal ones on a daemon that predates them. Fleet changes (invite, remove, leave, transports) stay internal, so a seat cannot make them."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step. A replication worker started by hand from a seat's shell is refused; run it as the service, or outside the seat."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery is needed. Reverting lets seat callers reach internal routes again."
+  }
+}

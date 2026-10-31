@@ -127,6 +127,7 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/doctor", 17.0),
     // Fleet and replication status count every replica record (9.7x).
     ("GET /v1/internal/fleet/status", 15.0),
+    ("GET /v1/fleet/status", 15.0),
     ("GET /v1/replication/status", 15.0),
     // Outcome history reads every finished step to page them (8.3x).
     ("GET /v1/outcome-history", 12.5),
@@ -158,6 +159,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/internal/fleet/admission-residue",
         "the scan doctor's fleet-admission check runs inside GET /v1/doctor, which is measured; st fleet wait reads it once as it ends",
+    ),
+    (
+        "GET /v1/fleet/admission-residue",
+        "the public route of GET /v1/internal/fleet/admission-residue, the same handler; st fleet wait reads it once as it ends",
     ),
     ("POST /v1/client/observations", "requires a current paired session; bounded diagnostic memory and blocking JSONL, no Store mutation; real paired transport/unchanged-index controls in api/client_observations.rs"),
     ("POST /v1/client/diagnostics", "requires a current paired session with write.client-diagnostics, absent from generated stores; writes node-local observations and retry receipts; paired admission, deduplication, rate-limit and receipt-reopen tests live in api/client_diagnostics.rs; ingestion cost is not measured here"),
@@ -997,6 +1002,9 @@ const PROBES: &[Probe] = &[
         "/v1/internal/fleet/membership",
     ),
     get("GET /v1/internal/fleet/status", "/v1/internal/fleet/status"),
+    get("GET /v1/fleet/status", "/v1/fleet/status"),
+    get("GET /v1/fleet/membership", "/v1/fleet/membership"),
+    get("GET /v1/fleet/invites", "/v1/fleet/invites"),
     get(
         "GET /v1/internal/fleet/invites",
         "/v1/internal/fleet/invites",
