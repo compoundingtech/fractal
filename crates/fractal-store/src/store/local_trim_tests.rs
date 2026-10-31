@@ -7,7 +7,7 @@ use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
-const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked"];
+const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
@@ -38,6 +38,8 @@ fn local_member(_name: &str) -> Store {
 enum Write {
     Observer { observer: u8, status: u8, cursor: Option<u8> },
     Resource { resource: u8, state: u8 },
+    /// One poll, as an observer seals it: its observation and a resource it saw, in one batch.
+    Poll { observer: u8, status: u8, resource: u8, state: u8 },
     Harness { seat: u8, incarnation: u8, state: u8, restamp: bool, provider_auth: Option<bool> },
 }
 
@@ -46,7 +48,9 @@ fn write() -> impl Strategy<Value = Write> {
         (0..3u8, 0..3u8, proptest::option::of(0..4u8))
             .prop_map(|(observer, status, cursor)| Write::Observer { observer, status, cursor }),
         (0..3u8, 0..3u8).prop_map(|(resource, state)| Write::Resource { resource, state }),
-        (0..2u8, 0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
+        (0..3u8, 0..3u8, 0..3u8, 0..3u8)
+            .prop_map(|(observer, status, resource, state)| Write::Poll { observer, status, resource, state }),
+        (0..2u8, 0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
             |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
                 seat,
                 incarnation,
@@ -59,6 +63,41 @@ fn write() -> impl Strategy<Value = Write> {
 }
 
 fn apply(store: &Store, write: &Write, n: usize) {
+    if let Write::Poll { observer, status, resource, state } = write {
+        let observer = format!("observer/watch-{observer}");
+        let status = ["ok", "changed", "failed"][usize::from(*status)];
+        let state = ["open", "merged", "closed"][usize::from(*state)];
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let observed = append_claim_tx(
+            &transaction,
+            &store.origin,
+            &observer,
+            "observer.observed",
+            None,
+            &json!({"fields": {"status": status}}),
+            &[],
+            None,
+        )
+        .unwrap();
+        append_claim_tx(
+            &transaction,
+            &store.origin,
+            &format!("resource/pr/{resource}"),
+            "resource.observed",
+            None,
+            &json!({"fields": {
+                "kind": "vcs.pull-request",
+                "state": state,
+                "observer": observer,
+            }}),
+            &[],
+            Some(&observed.batch_id),
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        return;
+    }
     let (subject, kind, fields) = match write {
         Write::Observer { observer, status, cursor } => {
             let mut fields = BTreeMap::from([(
@@ -110,6 +149,7 @@ fn apply(store: &Store, write: &Write, n: usize) {
             }
             (seat.to_owned(), "harness.observed", fields)
         }
+        Write::Poll { .. } => unreachable!("written above"),
     };
     store
         .append_claim(&ClaimInput {
@@ -127,7 +167,8 @@ fn apply(store: &Store, write: &Write, n: usize) {
 /// Every answer the readers of these kinds give: the whole graph, each observer's and resource's
 /// newest observation (what resources and reconcile read), each resource's observations newest
 /// first (what a GitHub watch walks back to find when a pull request left the merge queue), each
-/// seat's current harness, and each seat's status history.
+/// seat's current harness, status history, newest turn or end, and newest `working` (when its last
+/// turn began, and whether it worked after a given time).
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
@@ -154,7 +195,18 @@ fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
         let history = seat_status::history_at(&connection, seat, now, i64::MAX as u64).unwrap();
-        seats.push(format!("{seat}: {harness:?} {history}"));
+        let turn = super::attention_snapshot::last_turn_or_end(&connection, seat).unwrap();
+        let worked: Option<(String, Option<i64>)> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.observed_since_ms') FROM claims
+                 WHERE subject=?1 AND kind='harness.observed' AND json_extract(body, '$.fields.state')='working'
+                 ORDER BY store_index DESC LIMIT 1",
+                [seat],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        seats.push(format!("{seat}: {harness:?} {history} {turn:?} {worked:?}"));
     }
     (graph_digest_of(store), seats)
 }
@@ -194,6 +246,147 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     assert_eq!(std::fs::read_dir(scratch.path()).unwrap().filter(|entry| {
         entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("capture-")
     }).count(), 0);
+}
+
+/// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
+/// claim by design (see schema.md), so it is not one.
+fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
+    ["replica_records", "claim_signatures", "claim_verdicts"]
+        .into_iter()
+        .map(|table| {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE claim_id NOT IN (SELECT id FROM claims)");
+            (table, store.readers.get().query_row(/* sqlite-large-value: allow-for-now lv-he41d7d662db4 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ &sql, [], |row| row.get(0)).unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn a_member_that_trims_locally_drops_superseded_claims_from_envelopes_it_keeps() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    for n in 0..20 {
+        apply(&store, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, state: (n % 3) as u8 }, n);
+    }
+    store.seal_local_batches().unwrap();
+    let envelopes = || -> i64 {
+        store.readers.get().query_row("SELECT COUNT(*) FROM replica_envelopes", [], |row| row.get(0)).unwrap()
+    };
+    let sealed = envelopes();
+    let before = answers(&store, context.now_unix_ms);
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
+    assert_eq!(claims_of(&store, "observer.observed"), 1, "the newest observation stays");
+    assert_eq!(claims_of(&store, "resource.observed"), 20, "resource observations stay whole");
+    // Each poll's envelope stays whole, for its resource observation and for peers; only this
+    // member's own copies of the superseded observations go, and each goes into the ledger.
+    assert_eq!(envelopes(), sealed);
+    let orphaned = orphans(&store);
+    assert!(orphaned.iter().all(|(_, count)| *count == 0), "{orphaned:?}");
+    let retired: i64 = store
+        .readers
+        .get()
+        .query_row("SELECT COUNT(*) FROM retired_claim_ids", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(retired, 19);
+    // Admitting the kept envelopes again brings back neither a claim nor its record.
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h2bc6841e508b owner=fractal_store::store::local_trim_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state='pending'", []).unwrap();
+    store.validate_replication_backlog().unwrap();
+    assert_eq!(claims_of(&store, "observer.observed"), 1);
+    let orphaned = orphans(&store);
+    assert!(orphaned.iter().all(|(_, count)| *count == 0), "{orphaned:?}");
+    assert_eq!(answers(&store, context.now_unix_ms), before);
+}
+
+/// A fresh member that joins from one that dropped claims from envelopes it kept: what it
+/// joins from serves each kept envelope whole, its payload and signature as the writer sealed
+/// them, so the joiner admits every envelope with no fault, hold or degraded receipt, and its
+/// readers and projection digests agree. An ordinary joiner keeps the full history, as from any
+/// peer; one that trims locally drops the same superseded claims at its own cut. Sending back
+/// brings nothing the first member retired back to it.
+#[test]
+fn a_fresh_member_joining_from_one_that_split_envelopes_admits_them_whole_and_agrees() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let alder = local_member("alder");
+    for n in 0..20 {
+        apply(&alder, &Write::Poll { observer: 0, status: (n % 3) as u8, resource: 0, state: (n % 3) as u8 }, n);
+    }
+    alder.seal_local_batches().unwrap();
+    assert_eq!(kinds(&step(&alder, &context)), ["trimmed"]);
+    assert_eq!(claims_of(&alder, "observer.observed"), 1, "alder split its envelopes");
+    let answers_of_alder = answers(&alder, context.now_unix_ms);
+    let retired = |store: &Store| -> Vec<String> {
+        store
+            .readers
+            .get()
+            .prepare("SELECT hex(id) FROM retired_claim_ids ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let retired_by_alder = retired(&alder);
+    assert_eq!(retired_by_alder.len(), 19);
+    let receipts = |store: &Store| -> Vec<(String, i64)> {
+        store
+            .readers
+            .get()
+            .prepare("SELECT receipt_state, COUNT(*) FROM replica_envelopes GROUP BY receipt_state ORDER BY receipt_state")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let unsettled_records = |store: &Store| -> i64 {
+        store
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM replica_records WHERE state NOT IN ('valid', 'repaired')", [], |row| row.get(0))
+            .unwrap()
+    };
+    for trims_locally in [false, true] {
+        let cedar = Store::open_memory("cedar").unwrap();
+        cedar.bind_fleet(TEST_FLEET).unwrap();
+        cedar.import_retired_identities_paced(|_| {}).unwrap();
+        cedar.trim_locally(trims_locally).unwrap();
+        send(&alder, &cedar);
+        let rest = crate::store::tests_shared::exchange_from(&alder, &cedar.replication_inventory().unwrap());
+        assert!(rest.envelopes.is_empty(), "cedar holds every envelope alder serves");
+        // Every envelope arrived whole: its hash and signature checked, every record admitted.
+        assert_eq!(receipts(&cedar), receipts(&alder), "trims locally: {trims_locally}");
+        assert!(receipts(&cedar).iter().all(|(state, _)| state == "validated"), "{:?}", receipts(&cedar));
+        assert_eq!(unsettled_records(&cedar), 0);
+        assert_eq!(answers(&cedar, context.now_unix_ms), answers_of_alder, "trims locally: {trims_locally}");
+        // The projections agree: a claim alder dropped is its tombstone there and a claim here.
+        assert_eq!(
+            projection_digest::tables(&cedar.readers.get()).unwrap(),
+            projection_digest::tables(&alder.readers.get()).unwrap(),
+            "trims locally: {trims_locally}"
+        );
+        assert_eq!(graph_digest_of(&cedar), graph_digest_of(&alder));
+        // Every observation the payloads hold, as from any peer that kept them.
+        assert_eq!(claims_of(&cedar, "observer.observed"), 20);
+        if trims_locally {
+            // Its own cut drops the same superseded claims, and retires the same IDs.
+            assert_eq!(kinds(&step(&cedar, &context)), ["trimmed"]);
+            assert_eq!(claims_of(&cedar, "observer.observed"), 1);
+            assert_eq!(claims_of(&cedar, "resource.observed"), 20);
+            assert_eq!(retired(&cedar), retired_by_alder);
+            let orphaned = orphans(&cedar);
+            assert!(orphaned.iter().all(|(_, count)| *count == 0), "{orphaned:?}");
+            assert_eq!(answers(&cedar, context.now_unix_ms), answers_of_alder);
+        }
+        // What cedar sends back brings nothing alder retired back to alder.
+        send(&cedar, &alder);
+        assert_eq!(claims_of(&alder, "observer.observed"), 1);
+        let orphaned = orphans(&alder);
+        assert!(orphaned.iter().all(|(_, count)| *count == 0), "{orphaned:?}");
+        assert_eq!(answers(&alder, context.now_unix_ms), answers_of_alder);
+        assert_eq!(unsettled_records(&alder), 0);
+    }
 }
 
 #[test]
@@ -274,7 +467,8 @@ fn only_a_person_or_the_notify_agent_resumes_a_member_that_trims_locally() {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
 
-    /// For random histories of observer and harness observations, every reader answers the same
+    /// For random histories of observer, resource and harness observations, some sealed together
+    /// as one poll, every reader answers the same
     /// before and after the local trim, and the newest claim of each subject and kind stays.
     #[test]
     fn readers_answer_the_same_from_the_full_and_the_trimmed_log(
@@ -306,31 +500,70 @@ proptest! {
         for id in &newest {
             prop_assert!(store.claim_by_id(id).unwrap().is_some(), "the newest claim {} stays", id);
         }
+        let orphaned = orphans(&store);
+        prop_assert!(orphaned.iter().all(|(_, count)| *count == 0), "{:?}", orphaned);
     }
 }
 
-/// The audited `harness.observed` rule drops a credential transition whose loss moves the
-/// `since` of a needs-login seat (ready without provider auth, then with, then without again),
-/// which no projection digest covers. Until a rule keeps it, local trim leaves the kind whole.
+/// A needs-login seat keeps its `since` through local trim: the rule keeps the credential report
+/// that ended the run before the current one (see #4237), while the transitions it supersedes go.
 #[test]
-fn local_trim_leaves_harness_observations_whole() {
+fn local_trim_keeps_where_a_needs_login_run_began() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    let history = [(1, false), (0, true), (1, false)];
+    // Ready without provider auth, then starting, working and idle with it, then working, and
+    // ready and idle without it again: the starting, working and idle in between go.
+    let history = [(0, None), (1, Some(false)), (0, Some(true)), (3, Some(true)), (2, Some(true)), (3, Some(true)), (1, Some(false)), (2, Some(false))];
     for (n, (state, provider_auth)) in history.into_iter().enumerate() {
-        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth: Some(provider_auth) };
+        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth };
         apply(&store, &write, n);
     }
-    for n in 3..20 {
+    for n in history.len()..20 {
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let harness = claims_of(&store, "harness.observed");
     let before = answers(&store, context.now_unix_ms);
+    assert!(before.1.iter().any(|answer| answer.contains("needs-login") || answer.contains("NeedsLogin")), "{:?}", before.1);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
-    assert_eq!(claims_of(&store, "harness.observed"), harness);
-    assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
+    assert_eq!(claims_of(&store, "harness.observed"), harness - 3, "the superseded transitions go");
+    assert_eq!(claims_of(&store, "observer.observed"), 1);
+}
+
+fn harness_write() -> impl Strategy<Value = Write> {
+    (0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(|(incarnation, state, restamp, provider_auth)| {
+        Write::Harness { seat: 0, incarnation, state, restamp, provider_auth }
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// For random histories of one seat's harness observations, over two incarnations, the
+    /// seat's current harness and status history answer the same before and after the local
+    /// trim, and the newest observation stays.
+    #[test]
+    fn a_seat_answers_the_same_from_its_full_and_trimmed_harness_observations(
+        writes in proptest::collection::vec(harness_write(), 1..40)
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let context = context(scratch.path(), 0);
+        let store = local_member("alder");
+        for (n, write) in writes.iter().enumerate() {
+            apply(&store, write, n);
+        }
+        let newest = store.latest_claim(SEATS[0], Some("harness.observed")).unwrap().map(|claim| claim.id);
+        let before = answers(&store, context.now_unix_ms);
+        let actions = kinds(&step(&store, &context));
+        prop_assert!(!actions.contains(&"graph-changed"), "{actions:?}");
+        prop_assert_eq!(answers(&store, context.now_unix_ms), before);
+        if let Some(id) = newest {
+            prop_assert!(store.claim_by_id(&id).unwrap().is_some(), "the newest observation {} stays", id);
+        }
+        let orphaned = orphans(&store);
+        prop_assert!(orphaned.iter().all(|(_, count)| *count == 0), "{:?}", orphaned);
+    }
 }
 
 /// A GitHub watch finds when a pull request left the merge queue by walking the request's
@@ -644,6 +877,7 @@ fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> 
     let kinds = smallclaims::store::LOCAL_TRIM_KINDS;
     let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(kinds)).unwrap();
     staged.protect_all_but(kinds).unwrap();
+    staged.split_envelopes().unwrap();
     smallclaims::store::checkpoint_staging::without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
     let claims = staged.dropped_claims(0, usize::MAX >> 1).unwrap().into_iter().map(|claim| claim.id).collect();
     let envelopes = staged

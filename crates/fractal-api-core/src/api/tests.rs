@@ -3462,6 +3462,125 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
     assert!(state.store.active_mission_runs().unwrap().is_empty());
 }
 
+/// A seat freshness push names the member it came from; only the replication worker, which runs
+/// in no harness, may record one. A bound harness is refused before the handler, and nothing is
+/// recorded.
+#[tokio::test]
+async fn a_bound_harness_cannot_record_seat_freshness() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let received = crate::peer::ReceivedSeatFreshness {
+        from: "another-member".into(),
+        seats: vec![crate::peer::SeatHeard {
+            agent: "agent/another-member.seat".into(),
+            incarnation_id: "one".into(),
+            heard_at_unix_ms: 1_000,
+        }],
+    };
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(serde_json::to_vec(&received).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "foreign-agent-actor");
+    assert_eq!(
+        state.store.extension::<crate::store::RelayedFreshness>().heard_at("agent/another-member.seat", "one"),
+        None
+    );
+}
+
+/// Every internal route the daemon registers, from its router's source, so a new one is covered
+/// without editing a list.
+fn internal_routes() -> Vec<String> {
+    let source = /* sqlite-large-value: allow-for-now lv-hcb8b52f10887 owner=fractal_api_core::api::tests TODO=trace-statement-and-value-representation */ include_str!("../api.rs");
+    let mut routes = std::collections::BTreeSet::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("\"/v1/internal/") {
+        let literal = &rest[start + 1..];
+        let end = literal.find('"').unwrap();
+        routes.insert(literal[..end].to_owned());
+        rest = &literal[end..];
+    }
+    routes.insert(crate::peer::CLIENT_READ_FORWARD_PATH.to_owned());
+    routes.insert(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH.to_owned());
+    // Each path parameter (`{id}`, `{shard}`, ...) is given a concrete segment.
+    routes
+        .into_iter()
+        .map(|route| {
+            route
+                .split('/')
+                .map(|segment| if segment.starts_with('{') && segment.ends_with('}') { "example" } else { segment })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
+}
+
+/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
+/// any method, while this node's replication worker and its operator's CLI, which run in no
+/// harness, pass.
+#[tokio::test]
+async fn internal_routes_refuse_seat_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let routes = internal_routes();
+    assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
+    for route in &routes {
+        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+            let request = || {
+                Request::builder()
+                    .method(method.clone())
+                    .uri(route.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            };
+            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
+            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            assert!(
+                guard_bound_request(request(), None, &state.store).await.is_ok(),
+                "{method} {route} serves a caller in no harness"
+            );
+        }
+    }
+}
+
+/// Through the router: a seat is refused on an internal route before its handler runs, the
+/// worker is served, and a seat reads the fleet's status through its public route.
+#[tokio::test]
+async fn a_seat_reads_fleet_views_through_public_routes_only() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let call = |method: &str, route: &str, bound: bool| {
+        let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
+        if bound {
+            request = request.extension(BoundAgent("agent/own".into()));
+        }
+        app.clone().oneshot(request.body(Body::from(if method == "GET" { "" } else { "{}" })).unwrap())
+    };
+    let refused = call("POST", "/v1/internal/replication/receive", true).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+    assert_eq!(call("GET", "/v1/internal/fleet/status", true).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call("GET", "/v1/internal/fleet/status", false).await.unwrap().status(), StatusCode::OK);
+    for route in ["/v1/fleet/status", "/v1/fleet/membership", "/v1/fleet/admission-residue", "/v1/fleet/invites"] {
+        assert_eq!(call("GET", route, true).await.unwrap().status(), StatusCode::OK, "{route}");
+    }
+}
+
 #[tokio::test]
 async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     use crate::store::message_subscriptions::{PERFORMANCE_DECLARATIONS, PERFORMANCE_REGISTRATION};
@@ -13268,6 +13387,73 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     assert_eq!(fault(), None);
 }
 
+async fn checkpoint_actor_request(
+    app: Router, path: &str, bound: Option<&str>, actor: &str,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(agent) = bound {
+        request = request.extension(BoundAgent(agent.into()));
+    }
+    // Deliberately omit the identity header: the socket binding still governs the body actor.
+    let body = json!({"actor":actor, "reason":"reviewed checkpoint", "writer":"absent-writer"});
+    let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    (status, envelope.get("value").cloned().unwrap_or(envelope))
+}
+
+#[tokio::test]
+async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
+        for actor in ["person/operator", "agent/other"] {
+            let before = state.store.index().unwrap();
+            let (status, refused) = checkpoint_actor_request(
+                app.clone(), path, Some("agent/helper"), actor,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {refused}");
+            assert_eq!(refused["code"], "foreign-agent-actor", "{path}: {refused}");
+            assert_eq!(state.store.index().unwrap(), before, "{path}");
+        }
+        // The binding accepts the seat's own identity; store authorization still applies.
+        let code = if path.ends_with("/resume") {
+            "invalid-checkpoint-resume"
+        } else {
+            "invalid-checkpoint-excusal"
+        };
+        let (status, refused) = checkpoint_actor_request(
+            app.clone(), path, Some("agent/helper"), "agent/helper",
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {refused}");
+        assert_eq!(refused["code"], code, "{path}: {refused}");
+
+        let (status, accepted) = checkpoint_actor_request(
+            app.clone(), path, None, "person/operator",
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {accepted}");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.trim_locally(true).unwrap();
+    *state.store.extension::<crate::store::answers_check::TrimSettings>()
+        .notify.lock().unwrap() = Some("agent/helper".into());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let (status, resumed) = checkpoint_actor_request(
+        app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+}
+
 #[tokio::test]
 async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_replicas() {
     const OLD: &str = "agent/example-mail-original/worker";
@@ -13404,3 +13590,4 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         }
     }
 }
+

@@ -133,7 +133,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h90834f2dfb3a owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h50e1e155e04d owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hc7341ef4a6ad owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind IN ('resource.observed','vcs.item.state')", [])?;
     rebuild_preparation(transaction)?;
     flush(transaction)
 }
@@ -336,6 +336,14 @@ fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
+/// The same canonical newest-claim cursor reader used by the public store and answers check.
+pub(super) fn claimed_observer_cursor_at(connection: &Connection, observer: &str) -> Result<Option<String>> {
+    // Keys are bounded; claim body/cursor JSON remains unproven, as in the production newest-claim reader.
+    let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h00e80ee09700 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &smallclaims::store::latest_claim_of_kind_query())?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hf4694658e03c owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ params![observer, "observer.observed"], smallclaims::store::claim_from_row).optional()?;
+    Ok(claim.and_then(|claim| claim.body.pointer("/fields/cursor").and_then(Value::as_str).map(str::to_owned)))
+}
+
 impl Store {
     /// The observer that last recorded into `resource`, when that is not `observer`.
     pub fn resource_recorder(&self, resource: &str, observer: &str) -> Result<Option<String>> {
@@ -461,15 +469,7 @@ impl Store {
     /// plugin database wrote the whole cursor there; for a repository observer this build writes
     /// only how far it has read, which every member keeps.
     pub fn claimed_observer_cursor(&self, observer: &str) -> Result<Option<String>> {
-        Ok(self
-            .latest_claim(observer, Some("observer.observed"))?
-            .and_then(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/cursor")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }))
+        claimed_observer_cursor_at(&self.readers.get(), observer)
     }
 
     /// Constant-work version, independent of claims that do not change resource rows.
@@ -1059,6 +1059,25 @@ END;
         let items = store.repository_items("resource/github/acme/garden", None).unwrap();
         assert_eq!(items.iter().map(|item| item.subject.as_str()).collect::<Vec<_>>(), [subject, compact_only]);
         assert_eq!(store.repository_items("resource/github/acme/garden", Some(8)).unwrap().len(), 1);
+        assert_eq!(projection_digest::tables(&store.readers.get()).unwrap(),
+                   projection_digest::oracle(&store.readers.get()).unwrap());
+    }
+
+    /// A full rebuild, as a replay or a checkpoint proof runs, keeps the row of an item that only
+    /// compact states describe, as a node that took the same claims in another order holds it.
+    #[test]
+    fn a_rebuild_keeps_an_item_described_only_in_compact_state() {
+        let store = Store::open_memory("item-state-rebuild").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/8";
+        item_state(&store, subject, json!({"state": "open", "draft": true, "head_sha": "d"}));
+        let before = current(&store, subject);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            rebuild(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(current(&store, subject), before);
         assert_eq!(projection_digest::tables(&store.readers.get()).unwrap(),
                    projection_digest::oracle(&store.readers.get()).unwrap());
     }

@@ -22,12 +22,12 @@ use crate::replication::InventoryCheckpoint;
 
 /// The kinds a member that trims locally drops, each by its audited rule in
 /// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
-/// same from the full and the trimmed log. A kind joins only with such a test. Two audited rules
-/// stay out because a reader reads the history they drop, which no projection digest covers:
-/// `harness.observed`, where a dropped credential transition moves the `since` of a seat's
-/// needs-login state, and `resource.observed`, where a GitHub watch finds when a pull request left
-/// the merge queue by walking its observations back.
-pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed"];
+/// same from the full and the trimmed log. A kind joins only with such a test. One audited rule
+/// stays out because a reader reads the history it drops, which no projection digest covers:
+/// `resource.observed`, where a GitHub watch finds when a pull request left the merge queue by
+/// walking its observations back. `harness.observed` joined once its rule kept the credential
+/// report where a seat's needs-login run begins (see #4237).
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed"];
 
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
@@ -450,6 +450,7 @@ impl Store {
         // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
         let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
+        staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
         #[cfg(any(test, feature = "test-support"))]
         let plan = super::checkpoint_staging::without_reference_plan(|| self.plan_staged_checkpoint(&staged))?;
