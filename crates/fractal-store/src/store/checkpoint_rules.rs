@@ -43,7 +43,12 @@ pub use staged::plan_staged;
 /// redundant receipts of recovered episodes after seven days.
 /// Version 21 covers ordered membership heads, live ordering, counters and lifecycle dependencies;
 /// it adds no drop rule and retains absent/hidden membership winners.
-pub const RULES_VERSION: u32 = 21;
+/// Version 22 keeps the observation a mission request names as its discovery.
+/// Version 23 keeps the history of an observed resource its readers walk back through: the
+/// newest observation of each attribution, the earliest opener, a pull request's observations
+/// back to the newest one outside "open and out of the merge queue", and every observation of a
+/// resource described in flat facts.
+pub const RULES_VERSION: u32 = 23;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -81,7 +86,7 @@ proof=the-sealed-claims-and-the-blobs-they-reference
 graph=shared-projection-tables-including-arrangements,arrangement_registers,ordered-membership-raw/live/counts/lifecycle-and-shared-reverse-edges-even-when-empty
 replay=clear-arrangements,arrangement_registers-and-ordered-membership-projections,rebuild-from-retained-claims
 reader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas,cost-complete-single-currency
-guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
+guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,request-discovery,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot-but-harness-questions
 carriers=every-rule-but-loop.state-and-harness-questions-keeps-the-newest-carrier-of-each-field
 review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references";
@@ -119,6 +124,8 @@ pub enum Rule {
     SloEventFences,
     /// Keep pending history; after a day keep the newest observation indefinitely.
     QuestionLifecycle,
+    /// An observer's resource observations: see [`resource_observed_keep`].
+    ResourceObserved,
 }
 
 /// Whether claims of `kind` belong to a harness question.
@@ -188,6 +195,9 @@ fn planner_rule(rule: &fractal_schema::retention::RulePolicy) -> Option<Rule> {
             Rule::AccountLimits
         }
         "all-while-pending,newest-once-resolved-1d-before-cut" => Rule::QuestionLifecycle,
+        "newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts" => {
+            Rule::ResourceObserved
+        }
         _ if rule.kind == "seat.status-history" => return None,
         other => panic!("retention.toml: no planner keeps `{other}` for {}", rule.kind),
     };
@@ -519,7 +529,13 @@ impl Rule {
     pub fn reads_bodies(self) -> bool {
         matches!(
             self,
-            Rule::HarnessObserved | Rule::UsageSeries | Rule::UsageCumulative | Rule::AccountLimits | Rule::LoopState | Rule::SloEventFences
+            Rule::HarnessObserved
+                | Rule::UsageSeries
+                | Rule::UsageCumulative
+                | Rule::AccountLimits
+                | Rule::LoopState
+                | Rule::SloEventFences
+                | Rule::ResourceObserved
         )
     }
 
@@ -549,6 +565,7 @@ impl Rule {
             Rule::AccountLimits => "account-limits".into(),
             Rule::SloEventFences => "slo-event-fences".into(),
             Rule::QuestionLifecycle => "question-lifecycle".into(),
+            Rule::ResourceObserved => "resource-observed".into(),
         }
     }
 
@@ -563,6 +580,7 @@ impl Rule {
             "account-limits" => Rule::AccountLimits,
             "slo-event-fences" => Rule::SloEventFences,
             "question-lifecycle" => Rule::QuestionLifecycle,
+            "resource-observed" => Rule::ResourceObserved,
             tag => Rule::NewestAged(tag.strip_prefix("newest-aged:")?.parse().ok()?),
         })
     }
@@ -602,7 +620,65 @@ pub fn rule_keep(
         Rule::Deferral => (0..len).collect(),
         Rule::QuestionLifecycle if closed => newest,
         Rule::QuestionLifecycle => (0..len).collect(),
+        Rule::ResourceObserved => resource_observed_keep(claims),
     }
+}
+
+/// What the readers of an observer's resource observations read besides the newest, by position
+/// in the slot's canonical order:
+/// - the newest observation of each `attribution_only` value, since the projection prefers the
+///   newest full observation and falls back to receipts (`resources::refresh`);
+/// - the earliest that names an opener, which the projection and every later fold carry forward;
+/// - for a pull request, every observation from the newest back to and including the newest
+///   one that is not open outside the merge queue, or the newest `THREAD_SCAN` when there is
+///   none: the merge-queue check (`fractal_github::idle_holds`) walks back that far and no
+///   further. Observations accepted at the same time as that boundary stay too, since the
+///   check orders them by arrival;
+/// - every observation of a resource any of them describes in flat facts, which the fold merges
+///   field by field.
+///
+/// Nested facts are replaced whole by each observation, and the top-level fields stay through
+/// their newest carriers.
+pub fn resource_observed_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
+    let len = claims.len();
+    fn facts(claim: &ClaimRecord) -> Option<&Value> {
+        fields(claim).and_then(|fields| fields.get("facts")).filter(|facts| facts.is_object())
+    }
+    if claims.iter().any(|claim| facts(claim).is_none()) {
+        return (0..len).collect();
+    }
+    let attribution = |claim: &ClaimRecord| match fields(claim).and_then(|fields| fields.get("attribution_only")) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Value::from(0),
+        Some(Value::Bool(true)) => Value::from(1),
+        Some(value) => value.clone(),
+    };
+    let mut newest_of = BTreeMap::new();
+    for (position, claim) in claims.iter().enumerate() {
+        newest_of.insert(attribution(claim).to_string(), position);
+    }
+    let mut keep = newest_of.into_values().collect::<BTreeSet<_>>();
+    keep.extend(len.checked_sub(1));
+    let opens = |claim: &ClaimRecord| {
+        facts(claim).is_some_and(|facts| ["opened_by", "opened_by_run"].iter().any(|name| facts.get(*name).is_some_and(|value| !value.is_null())))
+    };
+    keep.extend(claims.iter().position(|claim| opens(claim)));
+    let pull_request = claims.first().and_then(|claim| claim.subject.rsplit_once('/')).is_some_and(|(head, number)| {
+        head.ends_with("/pull-request") && number.parse::<u64>().is_ok()
+    });
+    if pull_request {
+        // The check skips receipts, as `QUEUE_EXIT_SQL` reads them.
+        let skipped = |claim: &ClaimRecord| [Value::from(1), Value::from("true")].contains(&attribution(claim));
+        let from = (0..len)
+            .rev()
+            .find(|position| {
+                let claim = claims[*position];
+                !skipped(claim) && !fractal_github_base::github_watch::open_outside_merge_queue(facts(claim).unwrap())
+            })
+            .unwrap_or_else(|| len.saturating_sub(fractal_github_base::github_watch::THREAD_SCAN as usize));
+        let boundary = claims[from].accepted_at_unix_ms;
+        keep.extend((0..len).filter(|position| *position >= from || claims[*position].accepted_at_unix_ms == boundary));
+    }
+    keep
 }
 
 /// The minimum claim id for each event is the reducer's authority. Retain one
@@ -688,9 +764,9 @@ pub fn status_source(claim: &ClaimRecord) -> bool {
         && seat_status::history_source(claim)
 }
 
-/// The claim IDs a claim cites as evidence, pins as a mission run's input, or references as a
-/// review record (binding, withdrawal, verdict, attempt relation, predecessors). Those claims are
-/// read by their IDs, so they stay.
+/// The claim IDs a claim cites as evidence, pins as a mission run's input, names as a mission
+/// request's discovery, or references as a review record (binding, withdrawal, verdict, attempt
+/// relation, predecessors). Those claims are read by their IDs, so they stay.
 pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let body = &claim.body;
     let evidence = body
@@ -705,6 +781,12 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
         .into_iter()
         .flat_map(|inputs| inputs.values())
         .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
+    // A request's evidence need not include its discovery: mention and repository requests cite
+    // other claims, and older requests may cite none.
+    let discovery = (claim.kind == "subscription.mission-requested")
+        .then(|| body.pointer("/fields/discovery").and_then(Value::as_str))
+        .flatten()
+        .into_iter();
     let review = fractal_schema::review::claim_references(&claim.kind, body);
     let predecessors = fractal_schema::review::KINDS
         .contains(&claim.kind.as_str())
@@ -714,7 +796,7 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let lineage = (claim.kind == fractal_schema::slo_breaches::KIND)
         .then(|| body.pointer("/fields/record/previous_recovery").and_then(Value::as_str))
         .flatten().into_iter();
-    evidence.chain(inputs).chain(review).chain(predecessors).chain(lineage)
+    evidence.chain(inputs).chain(discovery).chain(review).chain(predecessors).chain(lineage)
 }
 
 /// Whether claims of `kind` are never dropped, because their validation reads them: a kind that
