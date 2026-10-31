@@ -102,9 +102,13 @@ fn retained_history_case(kind: &str) {
             "DELETE FROM claims WHERE id IN (?1,?2)", [&ids[first], &ids[1]],
         ).unwrap();
         let trimmed = summary();
+        if !matches!(kind, "observer.observed" | "resource.observed") {
+            assert!(differing_kinds(&full, &trimmed, true).iter().any(|difference| difference.kind == kind),
+                "incomplete production-reader coverage must retain {kind}'s conservative inventory check");
+            return;
+        }
         assert!(differing_kinds(&full, &trimmed, true).is_empty(), "{kind}");
         let update = match kind {
-            "harness.usage" => "UPDATE claims SET body=json_set(body,'$.fields.total_tokens',2) WHERE id=?1",
             "resource.observed" => "UPDATE claims SET body=json_set(body,'$.fields.facts.state','closed') WHERE id=?1",
             _ => "UPDATE claims SET body=json_set(body,'$.fields.state','failed') WHERE id=?1",
         };
@@ -128,36 +132,13 @@ fn retained_history_resource_1502() { retained_history_case("resource.observed")
 fn retained_history_transport() { retained_history_case("transport.observed"); }
 
 #[test]
-fn slot_readers_preserve_field_carriers_and_distinct_slots() {
+fn observer_reader_preserves_field_carriers() {
     let store = Store::open_memory("alder").unwrap();
-    let mut carriers = Vec::new();
-    for (kind, subject, values) in [
-        ("observer.observed", "observer/example", [json!({"cursor": "first"}), json!({"state": "healthy"})]),
-        ("daemon.diagnostic", "daemon/example", [json!({"code": "a"}), json!({"code": "b"})]),
-        ("harness.observed", "agent/example", [json!({"incarnation_id": "a"}), json!({"incarnation_id": "b"})]),
-        ("harness.usage", "agent/example", [
-            json!({"semantics": "session_cumulative", "incarnation_id": "a", "total_tokens": 1}),
-            json!({"semantics": "session_cumulative", "incarnation_id": "b", "total_tokens": 1}),
-        ]),
-    ] {
-        for (index, fields) in values.into_iter().enumerate() {
-            store.set_write_clock_at(100 + index as u128).unwrap();
-            let mut connection = store.connection.write();
-            let transaction = connection.transaction().unwrap();
-            let claim = append_claim_tx(
-                &transaction, "alder", subject, kind, None, &json!({"fields": fields}), &[], None,
-            ).unwrap();
-            if kind == "observer.observed" && index == 0 { carriers.push(claim.id); }
-            transaction.commit().unwrap();
-        }
-    }
+    let original = observation(&store, "observer/example", "observer.observed", "alder", 100, json!({"cursor":"first"}));
+    observation(&store, "observer/example", "observer.observed", "alder", 200, json!({"state":"healthy"}));
     let full = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
-    for kind in ["daemon.diagnostic", "harness.observed", "harness.usage"] {
-        assert_eq!(full[&format!("slots/{kind}")].len(), 2, "{kind}");
-    }
-    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&carriers[0]]).unwrap();
-    let lost = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
-    assert_ne!(full["slots/observer.observed"], lost["slots/observer.observed"]);
+    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
+    assert_ne!(full, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
 }
 
 fn observation(store: &Store, subject: &str, kind: &str, writer: &str, at: u128, fields: Value) -> String {
@@ -187,37 +168,30 @@ fn resource_reader_includes_compact_overlay_timing() {
 #[test]
 fn slot_readers_exclude_repaired_originals() {
     let store = Store::open_memory("alder").unwrap();
-    let subject = "observer/example";
-    let original = observation(&store, subject, "observer.observed", "alder", 100, json!({"cursor":"repaired"}));
-    observation(&store, subject, "observer.observed", "alder", 200, json!({"state":"healthy"}));
+    let subject = "resource/example/issue/1502";
+    let original = observation(&store, subject, "resource.observed", "alder", 100,
+        json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
     store.connection.write().execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&original]).unwrap();
+    // The production repair projection excludes the original; only its admitted row remains.
+    store.connection.write().execute("DELETE FROM resource_observations WHERE subject=?1", [subject]).unwrap();
     let retained = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
     store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
     assert_eq!(retained, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
 }
 
 #[test]
-fn served_cache_moves_only_the_written_transport_slot() {
+fn served_cache_keeps_stable_resource_when_an_unrelated_claim_moves() {
     use smallclaims::answers::AnswersCache;
     let store = Arc::new(Store::open_memory("alder").unwrap());
-    observation(&store, "host/example", "transport.observed", "a", 100, json!({"status":"up"}));
-    observation(&store, "host/example", "transport.observed", "b", 100, json!({"status":"up"}));
+    let subject = "resource/example/issue/1502";
+    observation(&store, subject, "resource.observed", "alder", 100,
+        json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
     let cache = Arc::new(AnswersCache::default());
     cache.set_readers(Arc::new(fold_reader_answers));
     cache.set_reader_movement(Arc::new(slot_reader_movement));
-    let answer = served_summary;
-    assert_eq!(answer(&cache, &store).kinds["reader/slots/transport.observed"].keys, 2);
-    observation(&store, "host/example", "transport.observed", "b", 2_000, json!({"status":"down"}));
-    assert_eq!(answer(&cache, &store).kinds["reader/slots/transport.observed"].keys, 1,
-        "writer A remains counted when writer B moves");
-    let other = Arc::new(Store::open_memory("birch").unwrap());
-    observation(&other, "host/example", "transport.observed", "a", 100, json!({"status":"down"}));
-    observation(&other, "host/example", "transport.observed", "b", 2_000, json!({"status":"down"}));
-    let late = Arc::new(AnswersCache::default());
-    late.set_readers(Arc::new(fold_reader_answers));
-    late.set_reader_movement(Arc::new(slot_reader_movement));
-    assert!(smallclaims::answers::differing_kinds(&answer(&cache, &store), &answer(&late, &other), true)
-        .iter().any(|difference| difference.kind == "reader/slots/transport.observed"));
+    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 1);
+    observation(&store, subject, "custom.unrelated", "alder", 2_000, json!({"status":"changed"}));
+    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 1);
 }
 
 fn served_summary(
@@ -270,4 +244,47 @@ fn resource_reader_covers_the_winning_recorder() {
         slot_reader_answers(&store.readers.get(), 1_000).unwrap()
     };
     assert_ne!(answer("observer/a"), answer("observer/b"));
+}
+
+#[test]
+fn observer_reader_covers_newest_cursor_not_only_merged_fields() {
+    let mut answers = Vec::new();
+    for cursor in [None, Some("first")] {
+        let store = Store::open_memory("alder").unwrap();
+        observation(&store, "observer/example", "observer.observed", "alder", 100, json!({"cursor":"first"}));
+        let mut fields = json!({"state":"healthy"});
+        if let Some(cursor) = cursor { fields["cursor"] = json!(cursor); }
+        observation(&store, "observer/example", "observer.observed", "alder", 200, fields);
+        assert_eq!(store.claimed_observer_cursor("observer/example").unwrap().as_deref(), cursor);
+        answers.push(slot_reader_answers(&store.readers.get(), 1_000).unwrap());
+    }
+    assert_ne!(answers[0], answers[1], "merged fields agree but the newest cursor differs");
+}
+
+#[test]
+fn conservative_usage_inventory_keeps_required_hourly_boundaries_visible() {
+    let store = Store::open_memory("alder").unwrap();
+    let mut ids = Vec::new();
+    for hour in 1..=3u128 {
+        ids.push(observation(&store, "agent/example", "harness.usage", "alder", hour * 3_600_000,
+            json!({"semantics":"response_rollup","incarnation_id":"one","model":"example","total_tokens":hour * 10})));
+    }
+    let full = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
+    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&ids[1]]).unwrap();
+    let missing = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
+    assert!(smallclaims::answers::differing_kinds(&full, &missing, true).iter()
+        .any(|difference| difference.kind == "harness.usage"));
+}
+
+#[test]
+fn conservative_transport_inventory_keeps_legacy_recency_visible() {
+    let stores = [Store::open_memory("alder").unwrap(), Store::open_memory("alder").unwrap()];
+    for (store, at) in stores.iter().zip([100, 86_400_000]) {
+        observation(store, "host/example", "transport.observed", "alder", at, json!({"status":"up"}));
+    }
+    assert_ne!(stores[0].transport_links_at(86_400_001).unwrap(), stores[1].transport_links_at(86_400_001).unwrap());
+    let summaries = stores.iter().map(|store| smallclaims::answers::summary(&store.readers.get(), 100_000_000).unwrap())
+        .collect::<Vec<_>>();
+    assert!(smallclaims::answers::differing_kinds(&summaries[0], &summaries[1], true).iter()
+        .any(|difference| difference.kind == "transport.observed"));
 }

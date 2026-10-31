@@ -31,19 +31,13 @@ pub fn episode(local: &str, peer: &str) -> String {
 /// history, working since) and steps (timing).
 const FOLDED_SUBJECTS: [&str; 2] = ["agent/", "step-run/"];
 
-/// Claim kinds whose retention slots are the unit of observation, not the originating writer.
-const SLOT_READERS: [&str; 7] = [
-    "daemon.diagnostic", "harness.observed", "harness.todo.observed", "harness.usage",
-    "observer.observed", "resource.observed", "transport.observed",
-];
+/// Only production-reader-complete replacements may suppress a kind's inventory comparison.
+/// Other kinds keep their conservative inventory check, even when history counts can differ.
+const SLOT_READERS: [&str; 2] = ["observer.observed", "resource.observed"];
 
-fn observation_slot(claim: &ClaimRecord) -> Vec<String> {
-    // Resource receipts and poller observations feed one subject-level projection and recorder.
-    if claim.kind == "resource.observed" { return vec![claim.subject.clone(), claim.kind.clone()]; }
-    checkpoint_rules::slot_of(claim).map_or_else(
-        || vec![claim.subject.clone(), claim.kind.clone(), claim.origin.clone()],
-        |(_, slot)| slot,
-    )
+fn observation_slot(subject: &str, kind: &str) -> Result<String> {
+    // Both supported production readers are subject-level, spanning every writer.
+    Ok(serde_json::to_string(&[subject, kind])?)
 }
 
 /// Only slots touched by post-cut claims move; another writer must not hide a stable slot.
@@ -51,21 +45,19 @@ pub fn slot_reader_movement(
     connection: &Connection, subjects: &BTreeSet<String>, cut: u128,
 ) -> Result<smallclaims::answers::ReaderMoves> {
     let mut moved = smallclaims::answers::ReaderMoves::new();
-    let mut query = connection.prepare_cached(&format!(
-        "SELECT {} FROM claims WHERE subject=?1 AND CAST(accepted_at_unix_ms AS INTEGER)>=?2
-         AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)",
-        smallclaims::store::CLAIM_COLUMNS,
-    ))?;
+    let mut query = connection.prepare_cached(
+        "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND CAST(accepted_at_unix_ms AS INTEGER)>=?2
+         AND (kind='observer.observed' OR NOT EXISTS(
+             SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
+    )?;
     for subject in subjects {
-        for claim in query.query_map(params![subject, i64::try_from(cut)?], smallclaims::store::claim_from_row)? {
-            let claim = claim?;
-            let (kind, slot) = if claim.kind == "vcs.item.state" {
-                ("resource.observed", vec![subject.clone(), "resource.observed".into()])
-            } else if SLOT_READERS.contains(&claim.kind.as_str()) {
-                (claim.kind.as_str(), observation_slot(&claim))
-            } else { continue };
+        for kind in query.query_map(params![subject, i64::try_from(cut)?], |row| row.get::<_, String>(0))? {
+            let kind = kind?;
+            let kind = if kind == "vcs.item.state" { "resource.observed" }
+                else if SLOT_READERS.contains(&kind.as_str()) { kind.as_str() }
+                else { continue };
             moved.entry(format!("reader/slots/{kind}")).or_default()
-                .entry(subject.clone()).or_default().insert(serde_json::to_string(&slot)?);
+                .entry(subject.clone()).or_default().insert(observation_slot(subject, kind)?);
         }
     }
     Ok(moved)
@@ -85,22 +77,15 @@ fn slot_reader_answers(
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut keys = Vec::new();
         for subject in subjects {
-            let claims = claims_of_kind_in_order(connection, &subject, kind)?;
-            let mut slots: BTreeMap<Vec<String>, Vec<&ClaimRecord>> = BTreeMap::new();
-            for claim in claims.iter().filter(|claim| !repaired.contains(&claim.id)) {
-                let slot = observation_slot(claim);
-                slots.entry(slot).or_default().push(claim);
-            }
-            for (slot, claims) in slots {
-                let moving = claims.iter().any(|claim| claim.accepted_at_unix_ms >= cut)
-                    || (kind == "resource.observed" && resources::newest_item_state(connection, &subject)?
-                        .is_some_and(|(_, _, at)| at.parse::<u128>().map_or(true, |at| at >= cut)));
-                let answer = if kind == "harness.usage" {
-                    json!(Store::usage_summary_from_rows(claims.iter().map(|claim| Ok((
-                        claim.store_index, serde_json::to_string(&claim.body).unwrap_or_default(),
-                        claim.accepted_at_unix_ms.to_string(),
-                    ))), None)?)
-                } else if kind == "resource.observed" {
+            let history = claims_of_kind_in_order(connection, &subject, kind)?;
+            let cursor_moving = kind == "observer.observed"
+                && history.last().is_some_and(|claim| claim.accepted_at_unix_ms >= cut);
+            let claims = history.iter().filter(|claim| !repaired.contains(&claim.id)).collect::<Vec<_>>();
+            if claims.is_empty() && kind == "resource.observed" { continue; }
+            let moving = cursor_moving || claims.iter().any(|claim| claim.accepted_at_unix_ms >= cut)
+                || (kind == "resource.observed" && resources::newest_item_state(connection, &subject)?
+                    .is_some_and(|(_, _, at)| at.parse::<u128>().map_or(true, |at| at >= cut)));
+                let answer = if kind == "resource.observed" {
                     // Read the production projection: its first opener, attribution-only rows
                     // and compact item-state overlays depend on observation acceptance times.
                     let row: Option<String> = connection.query_row(
@@ -112,19 +97,18 @@ fn slot_reader_answers(
                     ).optional()?;
                     row.map(|row| serde_json::from_str(&row)).transpose()?.unwrap_or(Value::Null)
                 } else {
-                    fold_latest_values(claims.iter().map(|claim| (kind.to_owned(), claim.body.clone())))?
-                        .unwrap_or(Value::Null)
+                    json!({
+                        "state": fold_latest_values(claims.iter().map(|claim| (kind.to_owned(), claim.body.clone())))?,
+                        "cursor": resources::claimed_observer_cursor_at(connection, &subject)?,
+                    })
                 };
                 let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
                 keys.push(smallclaims::answers::AnswerKey {
                     subject: subject.clone(),
-                    // The wire's secondary key carries the explicit retention slot, not an
-                    // invented writer dimension. Include the rule's full slot to avoid collisions.
-                    origin: serde_json::to_string(&slot)?,
+                    origin: observation_slot(&subject, kind)?,
                     claim: hex::encode(Sha256::digest(canonical.as_bytes())),
                     moving,
                 });
-            }
         }
         keys.sort();
         // Empty entries advertise coverage, including when one member has no claims of the kind.
