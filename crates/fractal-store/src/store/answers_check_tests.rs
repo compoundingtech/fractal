@@ -205,7 +205,7 @@ fn served_cache_tracks_resource_actual_state_dependencies() {
     cache.set_readers(Arc::new(fold_reader_answers));
     cache.set_reader_movement(Arc::new(slot_reader_movement));
     assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 1);
-    observation(&store, subject, "custom.unrelated", "alder", 2_000, json!({"status":"changed"}));
+    observation(&store, subject, "custom.example.unrelated", "alder", 2_000, json!({"status":"changed"}));
     assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 0);
 }
 
