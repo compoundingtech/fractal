@@ -195,19 +195,24 @@ assert!(fixture.dispatch().unwrap());
 let operation = fixture.assert_open();
 assert!(fixture.runtime.snapshot_ptys().unwrap().is_empty());
 let state = fixture.root.path().join("state");
-let app = crate::api::router(crate::api::AppState { owning_person: None,
-store: fixture.store.clone(),
-notify: Arc::new(Notify::new()),
-event_notify: tokio::sync::watch::channel(0).0,
-node: "node".into(),
-pty_root: state.join("pty"),
-state_dir: state,
-pty_binary: fixture.real_pty.clone(),
-fleet_id: None,
-configured_peers: Vec::new(),
-client_relay: None,
-native_session_home: None,
-planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  });
+let app = crate::api::router(crate::api::AppState {
+    owning_person: None,
+    store: fixture.store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "node".into(),
+    pty_root: state.join("pty"),
+    state_dir: state,
+    pty_binary: fixture.real_pty.clone(),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: crate::model::PlannerSpec::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
+});
 let response = app
     .oneshot(
         axum::http::Request::builder()

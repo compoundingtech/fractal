@@ -275,19 +275,24 @@ async fn delivery_recovery_control(
     runtime_claim(&store, &runtime_id, "starting", None);
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "bootstrap".into(),
-    state_dir: root.into(),
-    pty_root: pty_root.clone(),
-    pty_binary: pty.clone(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "bootstrap".into(),
+        state_dir: root.into(),
+        pty_root: pty_root.clone(),
+        pty_binary: pty.clone(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let delay = delayed.clone();
     let read_count = reads.clone();
     let bootstrap_custody = Arc::new(std::sync::Mutex::new(None));
@@ -493,7 +498,7 @@ async fn delivery_recovery_control(
         until(|| root.join("driver-returned").exists(),
             "Codex preflight failure was hidden waiting for a harness event").await;
         assert_eq!(std::fs::read_to_string(root.join("driver-returned")).unwrap(), "2");
-        let diagnostic = store.latest_claim(SUBJECT, Some("harness.diagnostic")).unwrap().unwrap();
+        let diagnostic = store.latest_observation(SUBJECT, "harness.diagnostic").unwrap().unwrap();
         assert_eq!(diagnostic.body["fields"]["code"], "codex-launch-failed");
         assert!(diagnostic.body["fields"]["reason"].as_str().unwrap()
             .contains("synthetic app-server schema failure"));
@@ -877,7 +882,7 @@ async fn delivery_recovery_control(
         );
         if let Some(control) = completion {
             if control.failure {
-                assert!(store.claims_for(SUBJECT, Some("harness.diagnostic")).unwrap().iter()
+                assert!(store.observations_for(SUBJECT, "harness.diagnostic").unwrap().iter()
                     .any(|claim| claim.body["fields"]["code"] == "codex-driver-failed"));
             }
             assert_eq!(offers(), 1, "terminal disposition must not replay native mail");
@@ -963,19 +968,24 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     runtime_claim(&store, &runtime_id, status, previous);
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "bootstrap".into(),
-    state_dir: root.path().into(),
-    pty_root: pty_root.clone(),
-    pty_binary: pty.clone(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "bootstrap".into(),
+        state_dir: root.path().into(),
+        pty_root: pty_root.clone(),
+        pty_binary: pty.clone(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let pending_count = pending.clone();
     let bound_count = bound.clone();
     let bound_store = state.store.clone();
