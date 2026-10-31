@@ -3,21 +3,25 @@
 ## GitHub Actions on Namespace
 
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
-exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
-does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which pull requests and the queue do not run; the daily long lanes run it too), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
+exact commit that lands on `main`; its successful checks stay attached to that SHA.
+`Main upkeep` verifies the four required queue checks. If the queue took an evidence skip,
+or its metadata cannot prove hosted execution, upkeep runs the merge-group proof jobs for
+that exact landed source. Otherwise it retains the hosted queue proof without repeating it.
+Upkeep also runs `perf-cost` (which pull requests and the queue do not run; the daily long
+lanes run it too) and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI and the
-public-content guard. Main upkeep and public checks keep only the latest main push;
-older pushes must not keep consuming runners after their source is superseded. Manual dispatch
+public-content guard. Public checks keep only the latest main push. Main upkeep retains
+each landed source for any required post-merge proof. Manual dispatch
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
-The five required queue checks and complete test partitions are retained.
+The four required queue checks and complete test partitions are retained.
 
-When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
-level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
-only for a pull request with an explicit evidence decision and successful change detection;
-failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
-and the queue retains complete shard receipts.
+When a trusted note covers a pull request or merge group's web check,
+`fractal-web-execution` skips at job level and allocates no runner. The always-emitted
+`fractal-web` collector accepts the skip only with an explicit evidence decision and
+successful change detection; failure and cancellation still fail. Main and manual runs
+require execution when web inputs changed. Evidence-skipped queue work is followed by
+the exact-source hosted proof described above.
 
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
@@ -34,7 +38,7 @@ TypeScript client check and the web lane. Draft PRs allocate no CI runners: ever
 release validation, Nix validation and optional macOS CI has a draft guard. This includes metadata
 jobs and `always()` collectors. `ready_for_review` starts checks; `converted_to_draft` enters the
 existing PR concurrency group and cancels obsolete ready-head work while skipping every new job.
-Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
+Keep a PR draft while iterating and testing locally, then mark its final head ready for exact-head review.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
 A stacked PR can retain workflow files from an older base that lacks these job guards.
@@ -47,8 +51,8 @@ and scheduling can start a legacy job before the observer runs. The one-day obse
 records actual build/test job starts as well as accepted requests and final cancellations.
 GitHub does not emit the requested activity for reruns; do not rerun drafts.
 
-GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
-final safety gate and runs every required stage regardless of PR draft payload. Do not arm
+GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run retains
+all required checks and applies the exact-source evidence policy regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
 old draft event and stays skipped; use the ready transition or a new push for fresh checks.
  `Workspace CI` also runs on the `merge_group` event, so GitHub's merge queue receives
@@ -163,12 +167,13 @@ the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 - `conversation-model`: tests `fractal-conversation-ui` without default features
   and verifies that its normal dependencies do not include `ratatui`.
 
-The normal Rust test suite separately covers the deployed PTY writer contract in
-`deployed_pty_0_13_0_record_without_boot_id_binds_mailbox`. It calls the production
+The `fleet-compat` stage also runs
+`deployed_pty_0_13_0_record_without_boot_id_binds_mailbox` through the production
 mailbox bind handler with a pinned PTY 0.13.0 (`063ff7f`) metadata fixture without
-`daemonBootId` and a matching live process start token. The previous-release
-fleet test uses a stub PTY and covers replication; the metadata fixture covers
-native channel admission even when the devShell PTY advances.
+`daemonBootId` and a matching live process start token. The same test belongs to the
+normal Rust suite. The previous-release fleet test uses a stub PTY and covers
+replication; the metadata fixture covers native channel admission even when the
+devShell PTY advances.
 
 The workflow verifies that its configured partition inventories are disjoint and
 cover the complete selected suite. The generated `fleet.yml` declares the
@@ -213,12 +218,14 @@ file. Keep the original fixture, executable, arguments and assertions. Run
 `python3 scripts/check-ci-test-paths` and the affected test before pushing. Apply the same
 fix if a merge group finds a raw path introduced by another PR; do not bypass the guard.
 
-Main upkeep probes the exact Cargo and Nix cache keys for each stage before provisioning Nix
-or restoring build archives. When both entries exist it stops after the probes. A miss is flagged
-as P0 and fills the missing entries with builds only: selected test executables, Clippy artifacts,
-the integration binary, the Genie shell, or the isolation archive and VM driver. The published
-fleet baseline is downloaded rather than compiled. Workspace tests and the isolation VM are not
-repeated on main. The TypeScript dependency cache is also kept on main without repeating its tests.
+Main upkeep's cache jobs probe the exact Cargo and Nix keys before provisioning Nix
+or restoring build archives. When both entries exist, the cache job stops after the probes.
+A miss is flagged as P0 and fills the missing entries with builds only: selected test
+executables, Clippy artifacts, the integration binary, the Genie shell, or the isolation
+archive and VM driver. The published fleet baseline is downloaded rather than compiled.
+These cache jobs do not repeat workspace tests or the isolation VM; the separately selected
+post-merge proof jobs provide hosted execution when queue evidence requires it. The
+TypeScript dependency cache is also kept on main without repeating its tests.
 Merge-group and PR caches have their own ref scope; they cannot replace these main-scope saves,
 which all PRs and Namespace overflow runs can restore. Manual Workspace CI dispatch on main
 remains available for a full run. Release and deployment workflows keep their own push triggers.
@@ -514,8 +521,9 @@ killed with SIGKILL leaves its directory in RAM until reboot; sweep with
 `find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`. Set
 `ST_NEXTEST_TMPDIR=disk` to keep the disk. CI never takes this branch, so the hosted runs keep real
 disks and every test that syncs to one; a local tmpfs pass does not exercise fsync or disk behavior
-and is not evidence for those tests, and nothing a local run produces stands in for the hosted
-required checks.
+and is not evidence for those on-disk properties. Local signed notes may satisfy queue
+checks under the configured evidence policy; evidence-skipped queue execution still requires
+exact-source hosted proof on protected main.
 
 The old trusted fleet runner and st merge train are retired; there is no operations installation
 handoff. Namespace workflows use this script from the checkout and land through GitHub's merge
@@ -724,8 +732,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   `scripts/ci-fractal-web-kit-graph` fails the lane when any bundled repository file is
   outside the kit patterns, so a new import cannot make a change skip the plays that
   render it.
-  This selection is the same for PRs, merge groups and pushes. Main pushes currently
-  run Main upkeep's dependency-cache warmer, not a duplicate Workspace CI execution.
+  This selection is the same for PRs, merge groups and pushes. Main upkeep runs the
+  dependency-cache warmer and, when queue evidence requires it, exact-source hosted proof.
 - The web shell closure. A fresh GitHub-hosted runner needs about 120 s to fetch and evaluate
   the flake inputs, build the Buck root, capability projection and Genie import (none is in a
   public cache) and substitute ~1.5 GB for `nix develop .#web`. `scripts/ci-web-shell fill`
@@ -767,9 +775,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   A new web identity uses the cold-shell fallback until main upkeep has populated its entry.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
-  either no relevant paths changed and execution was skipped, or execution succeeded.
-  Failure, timeout, cancellation and unexpected skips fail the gate. It is not a required
-  check; the ruleset adds it only after successful PR and merge-group emissions.
+  either no relevant paths changed and execution was skipped, execution succeeded, or
+  a trusted evidence decision explicitly covers the skipped execution on a pull request
+  or merge group. Failure, timeout, cancellation and unexpected skips fail the gate.
+  It is one of the four required checks in the generated ruleset.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
@@ -1544,12 +1553,11 @@ for the distinction between build concurrency and merge batch size.
 
 ## Superseded merge groups
 
-Push concurrency in Main upkeep and the public guard is scoped to protected main.
-In the public guard a new main push cancels obsolete automatic work. Main upkeep never cancels a
-started run: main pushes share one group, GitHub keeps only the newest pending run, so a burst of
-merges coalesces into one more upkeep that probes and fills the current main's exact cache
-entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
-replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
+The public guard scopes push concurrency to protected main; a new main push cancels
+its obsolete automatic work. Main upkeep instead uses a distinct run-ID concurrency group
+and never cancels a started run or coalesces pending main pushes: every landed tree that
+skipped queue execution needs its own hosted proof. PR groups use the PR number, rather
+than the head SHA, so a new head replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
 immutable workflow revisions can remain queued: before cancelling a backlog entry, compare its
 event, source and PR state with current main or the PR's latest head, retain its original timing
 and cancellation, and leave manual controls and merge groups to their owners.
@@ -1558,7 +1566,7 @@ The `namespace-capacity` job also watches `merge_group` events on a GitHub-hoste
 independent of ci1 and Namespace availability. It polls the group's ref and required check statuses
 every 15 seconds. A missing ref or a changed SHA on two consecutive successful lookups force-cancels
 its own workflow, including queued Linux jobs and always-run summaries. Lookup failures retain work.
-Once all five required checks finish, the watcher exits normally; a ref removed by a successful
+Once all four required checks finish, the watcher exits normally; a ref removed by a successful
 merge therefore retains the completed workflow result used by main upkeep. It executes embedded
 workflow code without checking out queued PR code. Capacity reports run separately in
 `namespace-capacity.yml` on Namespace.
