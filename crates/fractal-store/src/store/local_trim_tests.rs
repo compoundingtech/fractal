@@ -392,6 +392,80 @@ fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
     assert!(retired_exactly(&store, &all.difference(&left).cloned().collect()));
 }
 
+/// Delete the middle of three observations of `resource` as a trim of that kind would: recorded
+/// as a tombstone first, so its preparation rebuild is deferred.
+fn defer_a_resource_delete(store: &Store, resource: u8) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    for phase in ["first", "middle", "newest"] {
+        let body = json!({"fields": {"kind": "vcs.pull-request", "state": "open", "observer": "observer/watch-0", "facts": {"phase": phase}}});
+        append_claim_tx(&transaction, &store.origin, &format!("resource/pr/{resource}"), "resource.observed", None, &body, &[], None).unwrap();
+    }
+    let middle: String = transaction
+        .query_row(
+            "SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY store_index DESC LIMIT 1 OFFSET 1",
+            [format!("resource/pr/{resource}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h4eb31bda17fb owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+             VALUES ('checkpoint/example-resource', 0, 'trimmed', 0) ON CONFLICT(id) DO NOTHING",
+            [],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h2d276ff3d187 owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor,
+                 predecessors, operation_id, request_digest, accepted_at_unix_ms, checkpoint)
+             SELECT id, 'example-writer', 1, 'example-hash', subject, kind, actor, '[]', NULL, NULL, 0,
+                 'checkpoint/example-resource' FROM claims WHERE id=?1",
+            [&middle],
+        )
+        .unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf46030d1c556 owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.commit().unwrap();
+}
+
+/// What preparation answers for `subject`, and what a rebuild from every claim present answers.
+fn prepared_and_rebuilt(store: &Store, subject: &str) -> (String, String) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let prepared = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    super::resources::rebuild_preparation(&transaction).unwrap();
+    let rebuilt = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    transaction.rollback().unwrap();
+    (prepared, rebuilt)
+}
+
+/// Over a capped cut's days, what a trim's deletes deferred is rebuilt by the end of each day's
+/// run: nothing stays deferred past it, and preparation answers what a rebuild answers.
+#[test]
+fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    for (day, context) in contexts.iter().enumerate() {
+        defer_a_resource_delete(&store, day as u8);
+        let deferred = |store: &Store| -> i64 {
+            store.readers.get().query_row("SELECT COUNT(*) FROM local_resource_preparation_deferred", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(deferred(&store), 1, "day {day}: one subject waits");
+        let before = answers(&store, context.now_unix_ms);
+        step(&store, context);
+        assert_eq!(deferred(&store), 0, "day {day}: rebuilt by the end of the day's run");
+        let (prepared, rebuilt) = prepared_and_rebuilt(&store, &format!("resource/pr/{day}"));
+        assert_eq!(prepared, rebuilt, "day {day}");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}");
+    }
+    assert_eq!(cut_states(&store).last().map(String::as_str), Some("trimmed"));
+}
+
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
 /// claim by design (see schema.md), so it is not one.
 fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
