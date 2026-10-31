@@ -342,9 +342,19 @@ pub async fn tailscale_addresses(tailscale: &Path) -> Result<Vec<IpAddr>> {
     Ok(parse_tailscale_ips(&run(tailscale, &["ip"]).await?))
 }
 
+pub const LEGACY_FLEET_PROTOCOL_PREFIX: &str = "st3/fleet/";
+pub const FRACTAL_FLEET_PROTOCOL_PREFIX: &str = "fractal/fleet/";
+
+/// Accept only either fleet protocol name bound to this exact fleet.
+pub fn is_fleet_fabric_protocol(protocol: &str, fleet_id: &str) -> bool {
+    [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX]
+        .into_iter()
+        .any(|prefix| protocol.strip_prefix(prefix) == Some(fleet_id))
+}
+
 /// The default Fabric protocol for a fleet, so a throwaway fleet never collides with another.
 pub fn default_fabric_protocol(fleet_id: &str) -> String {
-    format!("st3/fleet/{fleet_id}")
+    format!("{LEGACY_FLEET_PROTOCOL_PREFIX}{fleet_id}")
 }
 
 /// The `fabric` command, which talks to the local Fabric daemon.
@@ -701,6 +711,53 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn fleet_protocol_names_are_bound_to_the_exact_fleet() {
+        for prefix in [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX] {
+            assert!(is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-a"),
+                "fleet-a"
+            ));
+            assert!(!is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-b"),
+                "fleet-a"
+            ));
+            assert!(!is_fleet_fabric_protocol(
+                &format!("{prefix}fleet-a/extra"),
+                "fleet-a"
+            ));
+        }
+        for protocol in ["other/fleet/fleet-a", "fractal/pty/fleet-a", "st3/fleet-a"] {
+            assert!(!is_fleet_fabric_protocol(protocol, "fleet-a"));
+        }
+        assert_eq!(default_fabric_protocol("fleet-a"), "st3/fleet/fleet-a");
+    }
+
+    #[test]
+    fn advertised_fleet_protocol_names_are_read_without_rewriting_routes() {
+        for prefix in [LEGACY_FLEET_PROTOCOL_PREFIX, FRACTAL_FLEET_PROTOCOL_PREFIX] {
+            let protocol = format!("{prefix}fleet-a");
+            let route = Route::Fabric {
+                node: "node-a".into(),
+                protocol: protocol.clone(),
+            };
+            assert_eq!(
+                parse_route(&format!("fabric://node-a/{protocol}")),
+                Some(route.clone())
+            );
+            assert_eq!(
+                routes_from_endpoints(
+                    &[json!({"transport": "fabric", "node": "node-a", "protocol": protocol})],
+                    LocalTransports {
+                        fabric: true,
+                        ..LocalTransports::default()
+                    },
+                ),
+                vec![route],
+            );
+        }
+    }
 
     #[test]
     fn carrier_comes_from_the_dial_route_including_overrides() {

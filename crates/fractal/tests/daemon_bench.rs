@@ -481,6 +481,7 @@ async fn bench(name: &str, source: &Path, settings: &Settings) -> Run {
                 notify.clone(),
                 event_notify.clone(),
                 None,
+                None,
             )
             .unwrap(),
         );
@@ -805,6 +806,7 @@ async fn held_seats_can_reclaim_after_orphan_repair() {
         root.path().join("st3.sock").display().to_string(),
         Arc::new(Notify::new()),
         events,
+        None,
         None,
     )
     .unwrap();

@@ -2490,6 +2490,26 @@ impl Client {
         ))
         .await
     }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path
+            .split(['/', '?'])
+            .any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!(
+                "not a GitHub plugin read: {path}"
+            )));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body
+            .get_mut("value")
+            .map(serde_json::Value::take)
+            .unwrap_or(body))
+    }
     pub async fn runtimes_list(
         &self,
         cursor: Option<&str>,

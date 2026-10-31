@@ -1243,6 +1243,19 @@ pub struct ResourceObservationOutcome {
     #[serde(default)]
     pub observation_claim: Option<String>,
     pub message_subjects: Vec<String>,
+    /// The item resources this observation recorded, for the poller's plugin mirror. Never
+    /// serialized: an idempotent replay returns none, and the first call already mirrored them.
+    #[serde(skip)]
+    pub recorded_items: Vec<RecordedItem>,
+}
+
+/// One item resource an observation recorded: its subject, item kind, facts and claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedItem {
+    pub subject: String,
+    pub kind: String,
+    pub facts: Value,
+    pub claim: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

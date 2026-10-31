@@ -1429,8 +1429,7 @@
     "write_policy": "system-only",
     "cardinality": "append",
     "projection": "daemons",
-    "wakes_reconciler": true,
-    "retention": "local"
+    "wakes_reconciler": true
   },
   "daemon.started": {
     "kind": "daemon.started",
@@ -3043,6 +3042,82 @@
     "source_kdl": [
       "gate"
     ]
+  },
+  "github.event": {
+    "kind": "github.event",
+    "subjects": [
+      "github-event"
+    ],
+    "fields": {
+      "at": {
+        "value_type": "string",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      },
+      "detail": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "event": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "opened",
+          "closed",
+          "merged",
+          "reopened",
+          "head-changed",
+          "became-draft",
+          "became-ready",
+          "merge-queue-entered",
+          "merge-queue-left",
+          "checks-passed",
+          "checks-failed",
+          "comment",
+          "review"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "head_sha": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "item": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "resource"
+        ]
+      },
+      "observer": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "observer"
+        ]
+      },
+      "version": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "once",
+    "projection": "resources",
+    "wakes_reconciler": true
   },
   "github.posted": {
     "kind": "github.posted",
@@ -9206,6 +9281,96 @@
     "projection": "transport",
     "wakes_reconciler": true
   },
+  "vcs.item.state": {
+    "kind": "vcs.item.state",
+    "subjects": [
+      "resource"
+    ],
+    "fields": {
+      "checks_state": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "draft": {
+        "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "head_sha": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "item_kind": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "vcs.pull-request",
+          "vcs.issue"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "merge_queue": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "merged": {
+        "value_type": "boolean",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "observer": {
+        "value_type": "subject-reference",
+        "required": true,
+        "immutable": false,
+        "reference": true,
+        "reference_families": [
+          "observer"
+        ]
+      },
+      "required_checks": {
+        "value_type": "object",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "review_decision": {
+        "value_type": "string",
+        "required": false,
+        "immutable": false,
+        "reference": false
+      },
+      "state": {
+        "value_type": "string",
+        "required": true,
+        "values": [
+          "open",
+          "closed"
+        ],
+        "immutable": false,
+        "reference": false
+      },
+      "version": {
+        "value_type": "integer",
+        "required": true,
+        "immutable": false,
+        "reference": false
+      }
+    },
+    "additional_fields": false,
+    "write_policy": "system-only",
+    "cardinality": "append",
+    "projection": "resources",
+    "wakes_reconciler": true
+  },
   "work.claimed": {
     "kind": "work.claimed",
     "subjects": [
@@ -9302,12 +9467,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -9431,12 +9590,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -9552,12 +9705,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10067,12 +10214,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10192,12 +10333,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10313,12 +10448,6 @@
       },
       "summary": {
         "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait_on": {
-        "value_type": "object",
         "required": false,
         "immutable": false,
         "reference": false
@@ -10448,12 +10577,6 @@
         "immutable": false,
         "reference": false
       },
-      "wait_on": {
-        "value_type": "object",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
       "wait_until_unix_ms": {
         "value_type": "integer",
         "required": false,
@@ -10472,43 +10595,6 @@
     "cardinality": "once-per-attempt",
     "projection": "work",
     "wakes_reconciler": true
-  },
-  "work.wait-ended": {
-    "kind": "work.wait-ended",
-    "subjects": [
-      "step-run"
-    ],
-    "fields": {
-      "attempt": {
-        "value_type": "integer",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "message": {
-        "value_type": "subject-reference",
-        "required": false,
-        "immutable": false,
-        "reference": true
-      },
-      "reason": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      },
-      "wait": {
-        "value_type": "string",
-        "required": false,
-        "immutable": false,
-        "reference": false
-      }
-    },
-    "additional_fields": false,
-    "write_policy": "system-only",
-    "cardinality": "append",
-    "projection": null,
-    "wakes_reconciler": false
   },
   "workspace.observed": {
     "kind": "workspace.observed",

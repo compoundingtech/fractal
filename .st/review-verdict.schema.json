@@ -47,6 +47,19 @@
                   "lines": {"type": "array", "items": {"type": "string"}}
                 }
               }
+            },
+            "factory_read": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["area", "paths", "lines"],
+                "properties": {
+                  "area": {"type": "string", "minLength": 1},
+                  "paths": {"$ref": "#/definitions/paths"},
+                  "lines": {"type": "array", "items": {"type": "string"}}
+                }
+              }
             }
           }
         },
@@ -59,7 +72,8 @@
             "reasons": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
           }
         },
-        "final": {"$ref": "#/definitions/level"}
+        "final": {"$ref": "#/definitions/level"},
+        "needs_factory_read": {"type": "boolean"}
       }
     },
     "findings": {
