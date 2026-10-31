@@ -2,6 +2,8 @@
 //!
 //! These run while the local daemon is stopped (or before it ever ran). The daemon then applies
 //! the result at start with [`super::activate`].
+//! Membership configuration and signing keys stay in the state directory; callers supply
+//! the database path separately when joining or migrating an existing store.
 
 use std::fs;
 use std::io::Write as _;
@@ -17,18 +19,13 @@ use super::file::{FleetFile, FleetMode};
 use super::handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response};
 use super::keys::MemberKey;
 use super::transport::{
-    Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_tool,
-    tailscale_addresses,
+    Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_fabric_adapter,
+    resolve_tool, tailscale_addresses,
 };
 use crate::error::Error;
-use crate::store::{Runtime, Store, valid_fleet_node_name};
+use crate::store::{AdmittedStore, Runtime, Store, valid_fleet_node_name};
 
 pub const DEFAULT_PORT: u16 = 31313;
-
-/// The claim store inside a state directory.
-pub fn store_path(state_dir: &Path) -> PathBuf {
-    state_dir.join("claims.sqlite3")
-}
 
 /// Where a node keeps the keys it signs claims with: its own node key while it is in no fleet,
 /// and the keys it holds for people and agents.
@@ -200,7 +197,12 @@ fn checkpoint_path(state_dir: &Path) -> PathBuf {
 
 #[derive(Clone)]
 pub struct JoinOptions {
+    /// The product state directory holding membership configuration and signing keys.
     pub state_dir: PathBuf,
+    /// The claim database, independently located from membership configuration and keys.
+    pub store_path: PathBuf,
+    /// The locked directory capability for an explicitly located store.
+    pub admitted_store: Option<Arc<AdmittedStore>>,
     /// The configured node name, used when neither `--name` nor the code names one.
     pub configured_node: String,
     pub code: String,
@@ -216,6 +218,15 @@ pub struct JoinOptions {
     pub runtime: Arc<dyn Runtime>,
     /// The joining build's version, which the handshake tells the sponsor.
     pub version: String,
+}
+
+impl JoinOptions {
+    fn open_store(&self, name: &str) -> Result<Store> {
+        match &self.admitted_store {
+            Some(admitted) => Store::open_admitted(admitted.clone(), name, self.runtime.clone()),
+            None => Store::open(&self.store_path, name, self.runtime.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -517,15 +528,11 @@ impl PairingHelper {
     fn launch(command: &str, executable: Option<&Path>) -> Result<Self> {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt as _;
-        let executable = executable.map(Path::to_path_buf)
-            .or_else(|| std::env::var_os("ST_FABRIC_ADAPTER").map(PathBuf::from))
-            .or_else(|| {
-                std::env::current_exe().ok()
-                    .and_then(|exe| exe.parent().map(|parent| parent.join("st-fabric-adapter")))
-                    .filter(|path| path.is_file())
-            })
-            .or_else(|| resolve_tool(None, "st-fabric-adapter"))
-            .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
+        let executable = match executable {
+            Some(path) => Some(path.to_path_buf()),
+            None => resolve_fabric_adapter()?,
+        }
+        .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
         let mut child = tokio::process::Command::new(executable)
             .arg(command)
             .stdin(Stdio::piped())
@@ -595,9 +602,25 @@ pub async fn join(options: &JoinOptions) -> Result<Joined> {
     join_inner(options, None).await
 }
 
-async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
-    let code = JoinCode::decode(&options.code)?;
-    let state_dir = &options.state_dir;
+/// Resolve the writer a join will admit, including an already-saved checkpoint.
+/// This performs no key creation, store mutation, or invitation redemption.
+pub fn admission_name(
+    state_dir: &Path,
+    code: &JoinCode,
+    requested: Option<&str>,
+    configured: &str,
+) -> Result<String> {
+    Ok(match resumed_join(state_dir, code)? {
+        Some(joined) => joined.name,
+        None => fresh_join_name(code, requested, configured).to_owned(),
+    })
+}
+
+fn fresh_join_name<'a>(code: &'a JoinCode, requested: Option<&'a str>, configured: &'a str) -> &'a str {
+    requested.or(code.name.as_deref()).unwrap_or(configured)
+}
+
+fn resumed_join(state_dir: &Path, code: &JoinCode) -> Result<Option<Joined>> {
     if let Some(existing) = FleetFile::load(state_dir)? {
         anyhow::ensure!(
             existing.fleet_id == code.fleet_id.to_string(),
@@ -610,29 +633,37 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         if let Some(checkpoint) = checkpoint
             && !code.migrate
         {
-            if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
-                fs::remove_file(pairing_recovery_path(state_dir))?;
-                fs::File::open(fleet_dir(state_dir))?.sync_all()?;
-            }
-            return Ok(Joined {
+            return Ok(Some(Joined {
                 fleet_id: checkpoint.fleet_id,
                 name: checkpoint.name,
                 sponsor: checkpoint.sponsor,
                 writer_floor: existing.writer_floor,
                 migrate: false,
                 resumed: true,
-            });
+            }));
         }
         anyhow::ensure!(
             code.migrate || (code.pairing.is_some() && pairing_recovery_path(state_dir).exists()),
             "this machine is already a member of this fleet"
         );
     }
-    let name = options
-        .name
-        .clone()
-        .or_else(|| code.name.clone())
-        .unwrap_or_else(|| options.configured_node.clone());
+    Ok(None)
+}
+
+async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joined> {
+    let code = JoinCode::decode(&options.code)?;
+    let state_dir = &options.state_dir;
+    if let Some(admitted) = &options.admitted_store {
+        admitted.verify_directory()?;
+    }
+    if let Some(joined) = resumed_join(state_dir, &code)? {
+        if code.pairing.is_some() && pairing_recovery_path(state_dir).exists() {
+            fs::remove_file(pairing_recovery_path(state_dir))?;
+            fs::File::open(fleet_dir(state_dir))?.sync_all()?;
+        }
+        return Ok(joined);
+    }
+    let name = fresh_join_name(&code, options.name.as_deref(), &options.configured_node).to_owned();
     anyhow::ensure!(
         valid_fleet_node_name(&name),
         "`{name}` cannot name a fleet member; use --name"
@@ -644,7 +675,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     let key = member_key(state_dir)?;
     let writer_head = {
         fs::create_dir_all(state_dir)?;
-        let store = Store::open(&store_path(state_dir), &name, options.runtime.clone())?;
+        let store = options.open_store(&name)?;
         if let Some(bound) = store.bound_fleet()? {
             anyhow::ensure!(
                 bound == code.fleet_id.to_string(),
@@ -724,7 +755,8 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
                 && sealed.sponsor_endpoints.iter().any(|endpoint|
                     endpoint["transport"] == "fabric"
                         && endpoint["node"] == pairing.gateway
-                        && endpoint["protocol"] == format!("st3/fleet/{}", code.fleet_id)),
+                        && endpoint["protocol"].as_str().is_some_and(|protocol|
+                            super::transport::is_fleet_fabric_protocol(protocol, &sealed.fleet_id))),
             "the authenticated sponsor answer does not bind the pairing gateway"
         );
         let saved = PairingRecovery {
@@ -739,6 +771,11 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         };
         write_private(&pairing_recovery_path(state_dir), &serde_json::to_vec(&saved)?)?;
         helper.context("pairing helper is missing")?.confirm(&sealed, &sponsor_key).await?;
+    }
+    // The sponsor wait can outlive a pathname replacement. Refuse before saving
+    // membership or opening the database for the first-sync write.
+    if let Some(admitted) = &options.admitted_store {
+        admitted.verify_directory()?;
     }
     let secret_file = match (&sealed.secret, &options.legacy_secret_file) {
         (Some(secret), _) => {
@@ -774,7 +811,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     .save(state_dir)?;
     // A new member's first sync ends by checking that it projects the same graph as a peer.
     if !code.migrate {
-        Store::open(&store_path(state_dir), &name, options.runtime.clone())?
+        options.open_store(&name)?
             .begin_first_sync(&sealed.sponsor)?;
     }
     write_private(
@@ -800,18 +837,27 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
     })
 }
 
+/// Inputs for promoting an existing config-peer store into a fleet anchor.
+pub struct MigrateAnchorOptions<'a> {
+    pub state_dir: &'a Path,
+    pub store_path: &'a Path,
+    pub admitted_store: Option<Arc<AdmittedStore>>,
+    pub node: &'a str,
+    pub fleet_id: &'a str,
+    pub secret_file: &'a Path,
+    pub settings: &'a MemberSettings,
+    pub fabric_protocol: Option<String>,
+    pub runtime: Arc<dyn Runtime>,
+}
+
 /// Make this config-peer node the anchor of its existing fleet: it keeps its fleet ID, secret,
 /// store, and history, gets a member key, and admits itself when the daemon next starts.
 /// Legacy exchanges stay accepted until `st fleet migrate --finish`.
-pub fn migrate_anchor(
-    state_dir: &Path,
-    node: &str,
-    fleet_id: &str,
-    secret_file: &Path,
-    settings: &MemberSettings,
-    fabric_protocol: Option<String>,
-    runtime: Arc<dyn Runtime>,
-) -> Result<Founded> {
+pub fn migrate_anchor(options: MigrateAnchorOptions<'_>) -> Result<Founded> {
+    let MigrateAnchorOptions {
+        state_dir, store_path, admitted_store, node, fleet_id, secret_file,
+        settings, fabric_protocol, runtime,
+    } = options;
     anyhow::ensure!(
         FleetFile::load(state_dir)?.is_none(),
         "this machine already has fleet membership settings"
@@ -821,7 +867,10 @@ pub fn migrate_anchor(
         "`{node}` cannot name a fleet member"
     );
     {
-        let store = Store::open(&store_path(state_dir), node, runtime)?;
+        let store = match admitted_store {
+            Some(admitted) => Store::open_admitted(admitted, node, runtime)?,
+            None => Store::open(store_path, node, runtime)?,
+        };
         match store.bound_fleet()? {
             Some(bound) => anyhow::ensure!(
                 bound == fleet_id,
@@ -865,8 +914,162 @@ mod tests {
     use crate::fleet::code::PairingData;
     use crate::sync::Backend as _;
 
+    #[test]
+    fn migrate_anchor_options_preserve_default_and_admitted_stores() {
+        let fleet_id = uuid::Uuid::parse_str("6f1c2a7e-0b4d-4c55-9a1e-2d3f4b5c6d7e").unwrap().to_string();
+        for explicit in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = root.path().join("state");
+            fs::create_dir(&state).unwrap();
+            let directory = if explicit { root.path().join("store") } else { state.clone() };
+            fs::create_dir_all(&directory).unwrap();
+            let database = directory.join("claims.sqlite3");
+            let runtime: Arc<dyn Runtime> = Arc::new(crate::store::runtime::Plain);
+            {
+                let store = Store::open(&database, "anchor", runtime.clone()).unwrap();
+                store.bind_fleet(&fleet_id).unwrap();
+            }
+            let admitted = explicit.then(|| AdmittedStore::from_locked_directory(
+                &directory, fs::File::open(&directory).unwrap(),
+            ).unwrap());
+            let settings = MemberSettings {
+                transports: Some(vec!["fabric".into()]),
+                ..MemberSettings::default()
+            };
+            let secret = state.join("legacy-secret");
+            let founded = migrate_anchor(MigrateAnchorOptions {
+                state_dir: &state, store_path: &database, admitted_store: admitted.clone(),
+                node: "anchor", fleet_id: &fleet_id, secret_file: &secret,
+                settings: &settings, fabric_protocol: Some("fixture-protocol".into()), runtime,
+            }).unwrap();
+            assert_eq!(founded.fleet_id, fleet_id);
+            let membership = FleetFile::load(&state).unwrap().unwrap();
+            assert_eq!(membership.node.as_deref(), Some("anchor"));
+            assert_eq!(membership.fabric_protocol.as_deref(), Some("fixture-protocol"));
+            assert!(membership.legacy_peers);
+            assert!(database.exists());
+            if explicit {
+                assert!(!state.join("claims.sqlite3").exists());
+                admitted.unwrap().verify_directory().unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_join_refuses_directory_changes_during_sponsor_wait_without_database_writes() {
+        for replace in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let sponsor_dir = root.path().join("sponsor");
+            let settings = MemberSettings {
+                transports: Some(vec!["fabric".into()]),
+                ..MemberSettings::default()
+            };
+            let runtime = Arc::new(crate::store::runtime::Plain);
+            let founded = found(&sponsor_dir, "sponsor", &settings).unwrap();
+            let sponsor = Arc::new(Store::open(
+                &sponsor_dir.join("claims.sqlite3"), "sponsor", runtime.clone(),
+            ).unwrap());
+            let file = FleetFile::load(&sponsor_dir).unwrap().unwrap();
+            crate::fleet::activate(&sponsor, &sponsor_dir, &file).unwrap();
+            let key = Arc::new(MemberKey::load(&file.node_key_path(&sponsor_dir)).unwrap());
+            sponsor.publish_fleet_endpoints("listening", &[serde_json::json!({
+                "transport": "fabric", "node": "a".repeat(64),
+                "protocol": format!("st3/fleet/{}", founded.fleet_id),
+            })], "test").unwrap();
+            let invitation = invite(&sponsor, &founded.fleet_id, "sponsor", &InviteOptions {
+                name: Some("joining".into()), lifetime: std::time::Duration::from_secs(600),
+                via: "fabric".into(), person: "person/test".into(), migrate: false,
+            }).unwrap();
+            let waiting = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let backend = crate::sync::Local(sponsor.clone());
+            let secret = fs::read_to_string(sponsor_dir.join("fleet/secret")).unwrap();
+            let app = axum::Router::new().route("/v1/fleet/join", axum::routing::post({
+                let waiting = waiting.clone();
+                let release = release.clone();
+                move |axum::Json(request): axum::Json<super::super::handshake::JoinRequest>| {
+                    let backend = backend.clone();
+                    let key = key.clone();
+                    let secret = secret.clone();
+                    let waiting = waiting.clone();
+                    let release = release.clone();
+                    async move {
+                        let answer = backend.redeem(&request).await.unwrap();
+                        assert_eq!(answer["status"], "admitted");
+                        let payload = SealedJoin {
+                            fleet_id: answer["fleet_id"].as_str().unwrap().into(),
+                            secret: Some(secret),
+                            anchor_key: answer["anchor_key"].as_str().unwrap().into(),
+                            sponsor: "sponsor".into(),
+                            writer_floor: answer["writer_floor"].as_u64(),
+                            fabric_protocol: None,
+                            admitted_claim: answer["admitted_claim"].as_str().map(str::to_owned),
+                            sponsor_node_id: answer["sponsor_node_id"].as_str().map(str::to_owned),
+                            sponsor_endpoints: answer["sponsor_endpoints"].as_array().unwrap().clone(),
+                        };
+                        let response = super::super::handshake::seal_response(
+                            &request, &hex::decode(answer["token"].as_str().unwrap()).unwrap(),
+                            "sponsor", &key, &payload,
+                        ).unwrap();
+                        waiting.notify_one();
+                        release.notified().await;
+                        axum::Json(response)
+                    }
+                }
+            }));
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let directory = root.path().join("explicit");
+            let replacement = root.path().join("replacement");
+            fs::create_dir(&directory).unwrap();
+            fs::create_dir(&replacement).unwrap();
+            for path in [&directory, &replacement] {
+                drop(Store::open(&path.join("claims.sqlite3"), "joining", runtime.clone()).unwrap());
+            }
+            let admitted = AdmittedStore::from_locked_directory(
+                &directory, fs::File::open(&directory).unwrap(),
+            ).unwrap();
+            let state_dir = root.path().join("state");
+            let options = JoinOptions {
+                state_dir: state_dir.clone(), store_path: directory.join("claims.sqlite3"),
+                admitted_store: Some(admitted), configured_node: "joining".into(),
+                code: invitation.code, name: None, via: Some(format!("http://{address}")),
+                settings, legacy_secret_file: None, fabric_protocol: None,
+                runtime, version: "test".into(),
+            };
+            let joining = tokio::spawn(async move { join(&options).await });
+            tokio::time::timeout(std::time::Duration::from_secs(10), waiting.notified()).await.unwrap();
+            let snapshot = |path: &Path| {
+                ["claims.sqlite3", "claims.sqlite3-wal", "claims.sqlite3-shm"]
+                    .map(|name| fs::read(path.join(name)).ok())
+            };
+            let original_bytes = snapshot(&directory);
+            let replacement_bytes = snapshot(&replacement);
+            let retained = root.path().join("retained");
+            fs::rename(&directory, &retained).unwrap();
+            if replace {
+                fs::rename(&replacement, &directory).unwrap();
+            }
+            release.notify_one();
+            let error = joining.await.unwrap().unwrap_err();
+            assert!(format!("{error:#}").contains("directory"), "{error:#}");
+            assert_eq!(snapshot(&retained), original_bytes);
+            assert_eq!(snapshot(if replace { &directory } else { &replacement }), replacement_bytes);
+            assert_eq!(directory.exists(), replace, "a removed explicit directory must not be recreated");
+            assert!(FleetFile::load(&state_dir).unwrap().is_none());
+            assert!(!checkpoint_path(&state_dir).exists());
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn pairing_join_writes_configuration_only_after_helper_confirmation() {
+        pairing_join_with_protocol_prefix("st3/fleet/").await;
+        pairing_join_with_protocol_prefix("fractal/fleet/").await;
+    }
+
+    async fn pairing_join_with_protocol_prefix(prefix: &str) {
         let root = tempfile::tempdir().unwrap();
         let sponsor_dir = root.path().join("sponsor");
         let settings = MemberSettings {
@@ -875,7 +1078,7 @@ mod tests {
         };
         let founded = found(&sponsor_dir, "sponsor", &settings).unwrap();
         let runtime = Arc::new(crate::store::runtime::Plain);
-        let store = Arc::new(Store::open(&store_path(&sponsor_dir), "sponsor", runtime.clone()).unwrap());
+        let store = Arc::new(Store::open(&sponsor_dir.join("claims.sqlite3"), "sponsor", runtime.clone()).unwrap());
         let file = FleetFile::load(&sponsor_dir).unwrap().unwrap();
         crate::fleet::activate(&store, &sponsor_dir, &file).unwrap();
         let sponsor_key = Arc::new(MemberKey::load(&file.node_key_path(&sponsor_dir)).unwrap());
@@ -883,7 +1086,7 @@ mod tests {
         let node_id = "b".repeat(64);
         let endpoints = vec![serde_json::json!({
             "transport": "fabric", "node": gateway,
-            "protocol": format!("st3/fleet/{}", founded.fleet_id)
+            "protocol": format!("{prefix}{}", founded.fleet_id)
         })];
         store.publish_fleet_endpoints("listening", &endpoints, "test").unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -941,11 +1144,15 @@ mod tests {
             let joining_dir = root.path().join(name);
             let options = JoinOptions {
                 state_dir: joining_dir.clone(), configured_node: name.into(),
+                store_path: root.path().join(format!("{name}.sqlite3")),
+                admitted_store: None,
                 code: code.encode().unwrap(), name: None, via: None,
                 settings: settings.clone(), legacy_secret_file: None, fabric_protocol: None,
                 runtime: runtime.clone(), version: "test".into(),
             };
             let result = join_inner(&options, Some(&helper)).await;
+            assert!(options.store_path.exists());
+            assert!(!joining_dir.join("claims.sqlite3").exists());
             if confirmed {
                 let joined = result.unwrap();
                 assert_eq!(joined.fleet_id, founded.fleet_id);
@@ -1013,6 +1220,7 @@ mod tests {
                     fs::set_permissions(&fresh_helper, fs::Permissions::from_mode(0o700)).unwrap();
                     let fresh_options = JoinOptions {
                         state_dir: fresh_dir.clone(), configured_node: name.into(),
+                        store_path: fresh_dir.with_extension("sqlite3"),
                         code: fresh_code.encode().unwrap(), ..options.clone()
                     };
                     let replaced = join_inner(&fresh_options, Some(&fresh_helper)).await;

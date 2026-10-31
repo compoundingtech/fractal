@@ -994,7 +994,7 @@ fn replay_rebuild_replication_and_checkpoint_retain_raw_hidden_and_absent_author
         let mut noise = claim("daemon/membership-noise", "daemon.diagnostic",
             json!({"severity":"warning","code":"membership-checkpoint-noise","reason":format!("sample {number}")}));
         noise.actor = None;
-        store.append_claim(&noise).unwrap();
+        store.append_as_older_build_for_test(&noise).unwrap();
     }
     let retained: Vec<_> = [SEAT_A, SEAT_B, SEAT_C].iter().map(|member| head(&store, member)).collect();
     let before = rows(&store);
@@ -1336,26 +1336,26 @@ fn placement_migration_mixed_rules_twenty_one_twenty_two_exchange_authority_but_
     migrate_placements(&modern);
     let mut digest = Sha256::new();
     digest.update(b"st3-checkpoint-rules-v1\0");
-    digest.update(21_u32.to_be_bytes());
+    digest.update(25_u32.to_be_bytes());
     digest.update(checkpoint_rules::rules_description().as_bytes());
-    let rules21 = hex::encode(digest.finalize());
-    assert_eq!(checkpoint_rules::RULES_VERSION, 22);
-    assert_ne!(rules21, checkpoint_rules::rules_digest());
-    let terms22 = SealTerms {
+    let rules25 = hex::encode(digest.finalize());
+    assert_eq!(checkpoint_rules::RULES_VERSION, 26);
+    assert_ne!(rules25, checkpoint_rules::rules_digest());
+    let terms26 = SealTerms {
         cut_unix_ms: now_ms(),
         participants: BTreeSet::from([legacy.origin.clone(), modern.origin.clone()]),
         sealed_digest: "a".repeat(64),
         rules_digest: checkpoint_rules::rules_digest(),
     };
-    let terms21 = SealTerms { rules_digest: rules21, ..terms22.clone() };
-    assert_eq!(seal_difference(&terms22, &terms21), "rules");
+    let terms25 = SealTerms { rules_digest: rules25, ..terms26.clone() };
+    assert_eq!(seal_difference(&terms26, &terms25), "rules");
     let directory = tempfile::tempdir().unwrap();
     let context = CheckpointContext { now_unix_ms: now_ms(), configured_peers: vec![legacy.origin.clone()],
         scratch: directory.path().to_owned(), reviewer: "person/ada".into() };
     let before = modern.index().unwrap();
     let mut actions = Vec::new();
     // Mismatched rules must return before reading a seal row or running a proof.
-    modern.graph.verify_checkpoint("checkpoint/mixed-migration-rules", &terms21, 0, &context, &mut actions).unwrap();
+    modern.graph.verify_checkpoint("checkpoint/mixed-migration-rules", &terms25, 0, &context, &mut actions).unwrap();
     assert!(actions.is_empty());
     assert_eq!(modern.index().unwrap(), before);
 }

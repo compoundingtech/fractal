@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "TUI action buttons leave a visible gap between the key cap and its label, including that gap in the clickable area",
+  "replay": {"status": "none", "detail": "Rendering-only change; no projection replay."},
+  "schema": {"status": "none", "detail": "No persisted format or schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest changes."},
+  "compatibility": {"status": "none", "detail": "No wire or client compatibility changes."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No upgrade steps."},
+  "recovery": {"status": "none", "detail": "No upgrade state changes to recover."}
+}

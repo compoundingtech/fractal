@@ -22,6 +22,59 @@ use tokio::sync::{Notify, watch};
 const SUBJECT: &str = "agent/eval.codex-bootstrap";
 const TERMINAL: &str = "pty/person/eval/019a0000-0000-7000-8000-000000000001";
 
+const BOUND_EXIT_PUBLICATION: &str =
+    r#"printf '%s' "$?" > "$HOME/driver-returned.tmp" && mv "$HOME/driver-returned.tmp" "$HOME/driver-returned""#;
+
+#[tokio::test]
+async fn bound_codex_exit_status_is_published_only_after_its_content_is_complete() {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let root = tempfile::tempdir().unwrap();
+    // Bash applies a function's redirection before entering its body. Pause that exact
+    // interval in the publication command used by the real bound-shell fixture.
+    let script = format!(
+        r#"printf() {{
+    builtin printf 'opened\n' >&2
+    IFS= read -r release
+    builtin printf "$@"
+}}
+(exit 2)
+{BOUND_EXIT_PUBLICATION}
+"#
+    );
+    let mut child = tokio::process::Command::new("bash")
+        .args(["--noprofile", "--norc", "-c", &script])
+        .env_clear()
+        .env("HOME", root.path())
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut events = tokio::io::BufReader::new(child.stderr.take().unwrap());
+    let mut opened = String::new();
+    tokio::time::timeout(Duration::from_secs(10), events.read_line(&mut opened))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(opened, "opened\n");
+    let result = root.path().join("driver-returned");
+    assert!(
+        !result.exists(),
+        "wrapper exit status must be complete before its publication path becomes visible"
+    );
+
+    child.stdin.take().unwrap().write_all(b"go\n").await.unwrap();
+    let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.success(), "{status}");
+    assert_eq!(std::fs::read_to_string(result).unwrap(), "2");
+}
+
 fn runtime_claim(store: &Store, runtime_id: &str, status: &str, incarnation: Option<&str>) {
     let mut fields = BTreeMap::from([
         ("status".into(), json!(status)),
@@ -222,19 +275,24 @@ async fn delivery_recovery_control(
     runtime_claim(&store, &runtime_id, "starting", None);
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "bootstrap".into(),
-    state_dir: root.into(),
-    pty_root: pty_root.clone(),
-    pty_binary: pty.clone(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "bootstrap".into(),
+        state_dir: root.into(),
+        pty_root: pty_root.clone(),
+        pty_binary: pty.clone(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let delay = delayed.clone();
     let read_count = reads.clone();
     let bootstrap_custody = Arc::new(std::sync::Mutex::new(None));
@@ -348,8 +406,8 @@ async fn delivery_recovery_control(
             command.arg("--env").arg(format!("{key}={value}"));
         }
         if bound_shell {
-            command.args(["--", bash.to_str().unwrap(), "--noprofile", "--norc", "-c",
-                "while [ ! -e \"$HOME/launch-bound-codex\" ]; do sleep 0.02; done; \"$ST3_BIN\" driver codex --subject \"$ST_AGENT\" -- \"$HOME/provider\"; printf '%s' \"$?\" > \"$HOME/driver-returned\"; while :; do sleep 1; done"]);
+            command.args(["--", bash.to_str().unwrap(), "--noprofile", "--norc", "-c"])
+                .arg(format!("while [ ! -e \"$HOME/launch-bound-codex\" ]; do sleep 0.02; done; \"$ST3_BIN\" driver codex --subject \"$ST_AGENT\" -- \"$HOME/provider\"; {BOUND_EXIT_PUBLICATION}; while :; do sleep 1; done"));
         } else {
             command.arg("--").arg(binary).args(["driver", "codex", "--subject", SUBJECT, "--"]).arg(provider);
         }
@@ -440,7 +498,7 @@ async fn delivery_recovery_control(
         until(|| root.join("driver-returned").exists(),
             "Codex preflight failure was hidden waiting for a harness event").await;
         assert_eq!(std::fs::read_to_string(root.join("driver-returned")).unwrap(), "2");
-        let diagnostic = store.latest_claim(SUBJECT, Some("harness.diagnostic")).unwrap().unwrap();
+        let diagnostic = store.latest_observation(SUBJECT, "harness.diagnostic").unwrap().unwrap();
         assert_eq!(diagnostic.body["fields"]["code"], "codex-launch-failed");
         assert!(diagnostic.body["fields"]["reason"].as_str().unwrap()
             .contains("synthetic app-server schema failure"));
@@ -824,7 +882,7 @@ async fn delivery_recovery_control(
         );
         if let Some(control) = completion {
             if control.failure {
-                assert!(store.claims_for(SUBJECT, Some("harness.diagnostic")).unwrap().iter()
+                assert!(store.observations_for(SUBJECT, "harness.diagnostic").unwrap().iter()
                     .any(|claim| claim.body["fields"]["code"] == "codex-driver-failed"));
             }
             assert_eq!(offers(), 1, "terminal disposition must not replay native mail");
@@ -910,19 +968,24 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     runtime_claim(&store, &runtime_id, status, previous);
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0).0,
-    node: "bootstrap".into(),
-    state_dir: root.path().into(),
-    pty_root: pty_root.clone(),
-    pty_binary: pty.clone(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "bootstrap".into(),
+        state_dir: root.path().into(),
+        pty_root: pty_root.clone(),
+        pty_binary: pty.clone(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let pending_count = pending.clone();
     let bound_count = bound.clone();
     let bound_store = state.store.clone();

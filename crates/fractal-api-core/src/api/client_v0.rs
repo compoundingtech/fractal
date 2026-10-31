@@ -329,6 +329,7 @@ pub const ALL_SCOPES: &[&str] = &[
 const ACTIONS: &[&str] = &[
     "private-notes.write",
     "arrangement.edit",
+    "harness.answer",
     "arrangement.membership.edit",
     "attention.resolve",
     "review.approve",
@@ -389,6 +390,7 @@ const ACTIONS: &[&str] = &[
 const AVAILABLE_ACTIONS: &[&str] = &[
     "private-notes.write",
     "custom.reply",
+    "harness.answer",
     "prompt.respond",
     "arrangement.edit",
     "arrangement.membership.edit",
@@ -634,6 +636,9 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangement-placement-migration", "version":1, "state":if session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
+        if *action == "harness.answer" {
+            return super::harness_questions::capability(state, session);
+        }
         let scope = action_scope(action).expect("registered client action has a scope");
         let state = if !AVAILABLE_ACTIONS.contains(action) {
             "unavailable"
@@ -3487,6 +3492,13 @@ pub fn timeline_first_page_with_extent(
         .store
         .conversation_timeline_owner_claims_at(owner, before)
         .map_err(ApiError::internal)?;
+    // Observability diagnostics stay in the local log of the node that runs the seat.
+    owner_claims.extend(
+        state
+            .store
+            .conversation_timeline_owner_local_diagnostics_at(owner, before)
+            .map_err(ApiError::internal)?,
+    );
     owner_claims.reverse();
     let mut message_claims = session_messages(state, owner, &session_id, incarnation, before)?;
     message_claims.reverse();
@@ -4322,6 +4334,9 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if action == "harness.answer" {
+        return Some("terminal.control");
+    }
     if action == "private-notes.write" { return Some("control.work"); }
     if matches!(
         action,

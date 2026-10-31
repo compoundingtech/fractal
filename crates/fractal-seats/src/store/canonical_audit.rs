@@ -80,6 +80,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "retired_range_pending",
         "retired_operation_receipts",
         "retired_claim_ancestry",
+        "local_trim_citations",
         "writer_heads",
         "projection_health",
         "local_ordered_membership_pending",
