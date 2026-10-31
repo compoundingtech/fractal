@@ -252,20 +252,24 @@ mod tests {
             .unwrap();
         // A handoff writes its note to the graph today; point the release at a stream item.
         let note = "message/00000000000000c1";
-        shard
-            .append_claim(&ClaimInput {
-                subject: note.into(),
-                kind: "message.sent".into(),
-                actor: Some(start.actor.clone()),
-                fields: serde_json::from_value(json!({
-                    "from": start.actor, "to": to, "content": "Inspect the stream fixture next", "status": "sent"
-                }))
-                .unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            })
-            .unwrap();
+        // Other mail to the recipient, which is not the handoff's note.
+        let other = "message/00000000000000c2";
+        for subject in [note, other] {
+            shard
+                .append_claim(&ClaimInput {
+                    subject: subject.into(),
+                    kind: "message.sent".into(),
+                    actor: Some(start.actor.clone()),
+                    fields: serde_json::from_value(json!({
+                        "from": start.actor, "to": to, "content": "Inspect the stream fixture next", "status": "sent"
+                    }))
+                    .unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+        }
         store
             .connection
             .write()
@@ -274,6 +278,10 @@ mod tests {
                 params![work.subject, note],
             )
             .unwrap();
+        // Acknowledging with other mail is refused and leaves that mail unread.
+        let wrong = WorkAcknowledgeRequest { actor: to.into(), message: other.into() };
+        assert_eq!(store.acknowledge_work(&work.subject, &wrong).unwrap_err().code, "stale-handoff");
+        assert!(crate::store::messages_shard::mailbox_reads::lifecycle_step(&store, other, "message.read").unwrap().is_none());
         let acknowledge = WorkAcknowledgeRequest { actor: to.into(), message: note.into() };
         store.acknowledge_work(&work.subject, &acknowledge).unwrap();
         assert_eq!(store.message(note).unwrap().unwrap().status, "read");

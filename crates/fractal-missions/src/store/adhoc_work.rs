@@ -290,8 +290,7 @@ impl AdhocWorkStore for Store {
         // to the reader; the transaction below checks that again under the writer.
         let stream_receipt = match self.message(&input.message).map_err(internal)? {
             Some(note) if crate::store::messages_shard::mailbox_reads::is_stream_item(&note) => {
-                let current = note.to == input.actor
-                    && names_current_handoff(&self.readers.get(), &subject, input)?;
+                let current = names_current_handoff(&self.readers.get(), &subject, input)?;
                 Some(current.then(|| stream_note_read(self, &input.message, &input.actor)).transpose()?)
             }
             _ => None,
@@ -313,7 +312,7 @@ impl AdhocWorkStore for Store {
                 // Were the progress claim to fail, the note stays read and a repeated
                 // acknowledgment finds it so. The receipt is not a graph claim, so the progress
                 // cites it without following it.
-                let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "only the note's recipient can acknowledge it"))?;
+                let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "the handoff changed while it was acknowledged; acknowledge it again"))?;
                 (receipt, vec![handoff.id])
             } else {
                 let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
