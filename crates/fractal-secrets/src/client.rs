@@ -1061,7 +1061,7 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
 pub fn is_absent_route(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<UnexpectedResponse>()
-        .is_some_and(|error| error.status == 404 && error.body.is_empty())
+        .is_some_and(|error| error.status == 404 && error.empty)
 }
 
 /// The HTTP status an API call failed with, including an answer without an error body.
@@ -1143,6 +1143,8 @@ impl std::error::Error for ApiResponseError {}
 struct UnexpectedResponse {
     status: u16,
     body: String,
+    /// Whether the answer had no bytes at all; `body` is trimmed for display.
+    empty: bool,
 }
 
 impl fmt::Display for UnexpectedResponse {
@@ -1723,6 +1725,7 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     UnexpectedResponse {
         status,
         body: String::from_utf8_lossy(bytes).trim().to_owned(),
+        empty: bytes.is_empty(),
     }
     .into()
 }
@@ -3030,10 +3033,13 @@ mod absent_route_tests {
     /// exists, and another status is not about routes.
     #[test]
     fn only_an_empty_404_is_an_absent_route() {
-        let answer = |status, body: &str| anyhow::Error::from(UnexpectedResponse { status, body: body.into() });
-        assert!(is_absent_route(&answer(404, "")));
-        assert!(!is_absent_route(&answer(404, "not json")));
-        assert!(!is_absent_route(&answer(500, "")));
+        // Through the decoder that builds the error from the answer's bytes.
+        let answer = |status, body: &[u8]| api_error(status, body);
+        assert!(is_absent_route(&answer(404, b"")));
+        assert!(!is_absent_route(&answer(404, b"not json")));
+        assert!(!is_absent_route(&answer(404, b"  \n")), "a body of whitespace is still a body");
+        assert!(!is_absent_route(&answer(500, b"")));
         assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
     }
+
 }
