@@ -90,7 +90,7 @@ selection keeps that tab visible; manual scrolling may still hide the active tab
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, and `Ctrl+D` shows the agent's details.
-The Attach button opens the agent's terminal; Enter attaches a detached terminal pane.
+`Ctrl+A` then `t` opens the agent's terminal from its conversation; Enter attaches a detached terminal pane.
 `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
