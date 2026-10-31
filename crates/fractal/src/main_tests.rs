@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn demo_environment_excludes_both_tui_configuration_spellings() {
+    for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
+        for prefix in ["ST3", "FRACTAL"] {
+            let name = format!("{prefix}_{suffix}");
+            assert!(DEMO_ENVIRONMENT_NAMES.contains(&name.as_str()), "{name} must not leak into the demo");
+        }
+    }
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",

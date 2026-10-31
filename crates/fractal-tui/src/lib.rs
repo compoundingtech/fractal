@@ -4,6 +4,7 @@
 mod ci_test_paths;
 
 mod connection;
+mod environment;
 mod ui;
 mod version;
 mod voice;
@@ -112,8 +113,10 @@ fn person_from_config(path: &std::path::Path) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 fn configured_person() -> Result<Option<String>> {
-    if let Ok(person) = std::env::var("ST3_PERSON") {
-        return Ok(Some(person));
+    if let Some(person) = environment::read("FRACTAL_PERSON", "ST3_PERSON")? {
+        return Ok(Some(person.into_string().map_err(|_| {
+            anyhow::anyhow!("FRACTAL_PERSON or ST3_PERSON must contain valid Unicode")
+        })?));
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -831,7 +834,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
+        .context("fractal ui open needs FRACTAL_PERSON=person/NAME (ST3_PERSON also works) or person = \"person/NAME\" in the Fractal config")?;
     let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
@@ -939,7 +942,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
+        "fractal ui needs FRACTAL_PERSON=person/NAME (ST3_PERSON also works) or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -959,11 +962,8 @@ pub fn run(mut options: Args) -> Result<()> {
             )
         }
         None => {
-            let path = fractal_client::discover_unix_endpoint(
-                options
-                    .endpoint
-                    .or_else(|| std::env::var_os("ST3_ENDPOINT").map(PathBuf::from)),
-            )?;
+            let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")?.map(PathBuf::from);
+            let path = fractal_client::discover_unix_endpoint(options.endpoint.or(endpoint))?;
             let actor = person.as_deref().unwrap_or_default();
             (
                 vec![Client::unix_as(&path, actor)],
