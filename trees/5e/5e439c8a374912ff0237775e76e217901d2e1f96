@@ -65,3 +65,13 @@ record d53ac41548f93fa5229165b9cdf5ae2d7e18fefd linux-gate 0 fleet/ci 2026-10-31
 record d53b163f558efbeb78eca3fe28443ec11a51e0c1 fractal-web 0 fleet/ci 2026-10-31T06:42:30Z
 record e72a98a80b75c785e945f1c438ae772cdfbfdd60 fractal-web 0 fleet/ci 2026-10-31T06:47:42Z
 record efd46b0b04a82a04becb5735dbf07b5c60c4012f linux-fleet-compat 0 fleet/ci 2026-10-31T06:34:02Z
+record 05881e8b0dec14d56c96a02f0a872e47800278a6 rust-tests 0 host/forge 2026-10-31T08:26:30Z
+record 0dc09f1fe019d0ce4c4597987e3f09887617a94f rust-tests 0 host/forge 2026-10-31T08:26:38Z
+record 11e2600f7a8f6d1037e4fdf1186c0687093beeaf rust-tests 0 host/forge 2026-10-31T08:26:29Z
+record 27998dba2de426f9ff84ce73dcee22862776eada rust-tests 0 host/forge 2026-10-31T08:26:29Z
+record 4cfdc60f7be3fd0dc8de156361c2444d85f96f67 rust-tests 0 host/forge 2026-10-31T08:26:29Z
+record 59f90c61c9cf402ac1fac8cb50b2499e7204ebc2 rust-tests 0 host/forge 2026-10-31T08:26:29Z
+record 5d0c7a90adb82afa5807eabaefc50427a7e7889f rust-tests 0 host/forge 2026-10-31T08:26:29Z
+record ae45b54fb31af8fc3b2f9aaf9ed0508ff5926ca3 rust-tests 0 host/forge 2026-10-31T08:26:22Z
+record da2a4d1e2ee0e1ab4f994792ea2d0d9c908900a4 rust-tests 0 host/forge 2026-10-31T08:26:29Z
+record e2342b9833c72eded80483f075b8c1914553df99 rust-tests 0 host/forge 2026-10-31T08:26:30Z
