@@ -39,8 +39,10 @@ st() { on garden-host "$home" "$instance" "$@"; }
 st_pond() { on pond-host "$audit/home-pond" images-audit-pond "$@"; }
 on() {
   local host="$1" at="$2" name="$3"; shift 3
+  local exec_worker=()
+  if [[ "${1:-}" == replication-worker ]]; then exec_worker=(exec); fi
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  env -i HOME="$at" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" \
+  "${exec_worker[@]}" env -i HOME="$at" PATH="$audit/tools:$(dirname "$(command -v ls)"):/usr/bin:/bin" USER="$(id -un)" \
     LANG=C.UTF-8 SHELL=/bin/sh HOSTNAME="$host" FRACTAL_PERSON="$person" ST3_PERSON="$person" FRACTAL_WORKER_INTERVAL_MS=300 ST3_WORKER_INTERVAL_MS=300 \
     "$audit/tools/st3" --instance "$name" "$@"
 }
