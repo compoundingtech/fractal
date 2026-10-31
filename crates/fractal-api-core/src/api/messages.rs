@@ -16,7 +16,13 @@ pub async fn message_delivery(
         let message = state.store.message(&subject).map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
         let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
-        let sent_at = claims.first().map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
+        // A stream item's sent claim is in the messages shard, not the graph.
+        let sent = match claims.into_iter().next() {
+            Some(claim) => Some(claim),
+            None => crate::store::messages_shard::mailbox_reads::sent_claim(&state.store, &subject)
+                .map_err(ApiError::internal)?,
+        };
+        let sent_at = sent.map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
             "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
     }).await

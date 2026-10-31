@@ -32,11 +32,12 @@ pub const SHARD_ID: &str = "messages";
 /// pages past every graph message continues into the stream.
 pub const STREAM_INDEX_BASE: u64 = 1 << 48;
 
-/// The shard's own tables. `stream_messages` indexes each message by recipient as it is
-/// admitted; on open it catches up only on claims newer than its newest row, such as those a
-/// rolled-back build admitted without the trigger. `stream_lifecycle` is this member's record of a stream item's delivery: it is
+/// The shard's own tables. `stream_messages` indexes each message by recipient, by sender and
+/// in shard order as it is admitted; on open it catches up only on claims newer than its newest
+/// row, such as those a rolled-back build admitted without the trigger, and an existing shard
+/// gains an index it lacks. `stream_lifecycle` is this member's record of a stream item's delivery: it is
 /// local, never replicated and outside every digest, as a lifecycle claim would not be.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha5ce4a3a3ab1 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a9e73d4f2c3 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -45,6 +46,10 @@ CREATE TABLE IF NOT EXISTS stream_messages (
 );
 CREATE INDEX IF NOT EXISTS stream_messages_recipient
     ON stream_messages(recipient, store_index);
+CREATE INDEX IF NOT EXISTS stream_messages_sender
+    ON stream_messages(sender, store_index);
+CREATE INDEX IF NOT EXISTS stream_messages_order
+    ON stream_messages(store_index);
 CREATE TRIGGER IF NOT EXISTS stream_messages_admitted AFTER INSERT ON claims
 WHEN NEW.kind='message.sent' BEGIN
     INSERT OR IGNORE INTO stream_messages(subject, recipient, sender, store_index)
@@ -130,11 +135,13 @@ pub fn message_view(graph: &super::Store, subject: &str) -> anyhow::Result<Optio
     super::message_view_from(&connection, subject, STREAM_INDEX_BASE + index, actual, None).map(Some)
 }
 
-/// The stream items addressed to any of `names`, after shard index `after`, oldest first, at
-/// most `limit` of them, with their shard indexes.
-pub fn recipient_page(
+/// The stream items after shard index `after`, oldest first, at most `limit` of them, with their
+/// shard indexes: those addressed to any of `recipients` and sent by any of `senders`, where a
+/// party left out matches every item.
+pub fn page(
     graph: &super::Store,
-    names: &[String],
+    recipients: Option<&[String]>,
+    senders: Option<&[String]>,
     after: u64,
     limit: usize,
 ) -> anyhow::Result<Vec<(String, u64)>> {
@@ -142,17 +149,41 @@ pub fn recipient_page(
         return Ok(Vec::new());
     };
     let connection = shard.readers.get();
-    let mut statement = connection.prepare_cached(
-        "SELECT subject, store_index FROM stream_messages
-         WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
-         ORDER BY store_index LIMIT ?3",
-    )?;
-    let rows = statement
-        .query_map(
-            rusqlite::params![serde_json::to_string(names)?, after, limit],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
+    let row = |row: &rusqlite::Row<'_>| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?));
+    let rows = match (recipients, senders) {
+        (recipients, Some(senders)) => connection
+            .prepare_cached(
+                "SELECT subject, store_index FROM stream_messages
+                 WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2
+                   AND (?3 IS NULL OR recipient IN (SELECT value FROM json_each(?3)))
+                 ORDER BY store_index LIMIT ?4",
+            )?
+            .query_map(
+                rusqlite::params![
+                    serde_json::to_string(senders)?,
+                    after,
+                    recipients.map(serde_json::to_string).transpose()?,
+                    limit
+                ],
+                row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?,
+        (Some(recipients), None) => connection
+            .prepare_cached(
+                "SELECT subject, store_index FROM stream_messages
+                 WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
+                 ORDER BY store_index LIMIT ?3",
+            )?
+            .query_map(rusqlite::params![serde_json::to_string(recipients)?, after, limit], row)?
+            .collect::<Result<Vec<_>, _>>()?,
+        (None, None) => connection
+            .prepare_cached(
+                "SELECT subject, store_index FROM stream_messages
+                 WHERE store_index>?1 ORDER BY store_index LIMIT ?2",
+            )?
+            .query_map(rusqlite::params![after, limit], row)?
+            .collect::<Result<Vec<_>, _>>()?,
+    };
     Ok(rows)
 }
 
@@ -902,6 +933,68 @@ mod tests {
         );
         assert!(record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar"), &status("read")).unwrap());
         assert_eq!(graph.message(note).unwrap().unwrap().status, "read");
+    }
+
+    /// A page without a recipient, which a thread reads, lists every graph message and then every
+    /// stream item, one page at a time across the boundary, and leaves a closed one out unless
+    /// it is asked for. The stream is not cut at `through`; the graph is.
+    #[test]
+    fn a_page_without_a_recipient_goes_on_from_the_graph_into_the_stream() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = open(&graph, root.path()).unwrap();
+        let message = |subject: &str, to: &str| {
+            let mut sent = input("message.sent", Some("agent/birch"), json!({
+                "from": "agent/birch", "to": to, "content": subject, "status": "sent"
+            }));
+            sent.subject = subject.into();
+            sent
+        };
+        graph.append_claim(&message("message/00000000000000a1", "agent/cedar")).unwrap();
+        for (subject, to) in [
+            ("message/00000000000000b1", "agent/cedar"),
+            ("message/00000000000000b2", "agent/other"),
+            ("message/00000000000000b3", "agent/cedar"),
+        ] {
+            shard.append_claim(&message(subject, to)).unwrap();
+        }
+        let closed = BTreeMap::from([("status".to_owned(), json!("closed"))]);
+        assert!(record_lifecycle(&graph, "message/00000000000000b3", "message.closed", Some("daemon/runtime"), &closed).unwrap());
+        let through = graph.index().unwrap();
+        graph.append_claim(&message("message/00000000000000a2", "agent/cedar")).unwrap();
+        let listing = |include_closed: bool, limit: usize| {
+            let (mut after, mut listed, mut cursors) = (None, Vec::new(), Vec::new());
+            loop {
+                let (page, next) = graph
+                    .messages_page_inner(None, include_closed, after, through, limit, false)
+                    .unwrap();
+                listed.extend(page.into_iter().map(|message| message.subject));
+                match next {
+                    Some(next) => {
+                        cursors.push(next);
+                        after = Some(next);
+                    }
+                    None => return (listed, cursors),
+                }
+            }
+        };
+        let (listed, cursors) = listing(false, 1);
+        assert_eq!(listed, ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2"]);
+        assert!(cursors[0] <= through, "the first page ends in the graph: {cursors:?}");
+        assert!(cursors[1..].iter().all(|cursor| *cursor > STREAM_INDEX_BASE), "{cursors:?}");
+        let (listed, cursors) = listing(true, 2);
+        assert_eq!(
+            listed,
+            ["message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2", "message/00000000000000b3"]
+        );
+        assert_eq!(cursors.len(), 1);
+        assert!(cursors[0] > STREAM_INDEX_BASE);
+        // A new listing at a newer `through` sees the later graph message, still before the stream.
+        let (page, _) = graph.messages_page_inner(None, false, None, graph.index().unwrap(), 2, false).unwrap();
+        assert_eq!(
+            page.iter().map(|message| message.subject.as_str()).collect::<Vec<_>>(),
+            ["message/00000000000000a1", "message/00000000000000a2"]
+        );
     }
 
     /// A mailbox stream follows the shard by its position: a new item to its recipient and a

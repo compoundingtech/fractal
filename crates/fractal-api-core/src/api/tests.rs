@@ -1472,6 +1472,61 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
         .collect::<Vec<_>>(), ["head", "later", "last"]);
 }
 
+/// A stream item's receipts are its recipient member's local lifecycle. To a seat on this host
+/// its delivery reads them as graph mail's does; to a seat on another host this member holds
+/// none, so the label is `unknown`. Graph mail to that seat keeps its ordinary label.
+#[test]
+fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+    let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+    let workspace = root.path().display().to_string();
+    let source = format!(
+        "version 2\nagent \"example/near\" {{ host \"alder\"; command \"true\"; workspace {workspace:?} }}\nagent \"example/far\" {{ host \"birch\"; command \"true\"; workspace {workspace:?} }}\n"
+    );
+    let intent = crate::graph::parse_intent(&source, "alder").unwrap();
+    store.apply_internal(&intent, "stream-delivery").unwrap();
+    let message = |subject: &str, to: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some("agent/example/sender".into()),
+        fields: serde_json::from_value(json!({
+            "from": "agent/example/sender", "to": to, "content": "probe", "status": "sent"
+        }))
+        .unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let delivery = |subject: &str, sent_at: u128| {
+        let view = store.message(subject).unwrap().unwrap();
+        message_delivery_for(&store, &view, sent_at, sent_at).unwrap()
+    };
+    let (near, far) = ("message/00000000000000d1", "message/00000000000000d2");
+    let near_sent = shard.append_claim(&message(near, "agent/example/near")).unwrap().accepted_at_unix_ms;
+    let far_sent = shard.append_claim(&message(far, "agent/example/far")).unwrap().accepted_at_unix_ms;
+
+    let unknown = delivery(far, far_sent);
+    assert_eq!((&unknown["state"], &unknown["phase"]), (&json!("unknown"), &json!("unknown")), "{unknown}");
+    assert!(unknown["reason"].as_str().unwrap().contains("birch"), "{unknown}");
+
+    let status = |status: &str| BTreeMap::from([("status".to_owned(), json!(status))]);
+    let here = delivery(near, near_sent);
+    assert_eq!((&here["state"], &here["phase"]), (&json!("pending"), &json!("sent")), "{here}");
+    assert!(crate::store::messages_shard::record_lifecycle(
+        &store, near, "message.delivered", Some("agent/example/near"), &status("delivered"),
+    ).unwrap());
+    assert_eq!(delivery(near, near_sent)["phase"], "delivered");
+    assert!(crate::store::messages_shard::record_lifecycle(
+        &store, near, "message.read", Some("agent/example/near"), &status("read"),
+    ).unwrap());
+    assert_eq!(delivery(near, near_sent)["state"], "read");
+
+    let graph = store.append_claim(&message("message/00000000000000d3", "agent/example/far")).unwrap();
+    let graph_mail = delivery(&graph.subject, graph.accepted_at_unix_ms);
+    assert_eq!((&graph_mail["state"], &graph_mail["phase"]), (&json!("pending"), &json!("sent")), "{graph_mail}");
+}
+
 #[test]
 fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
     let store = Store::open_memory("message-delivery-test").unwrap();
