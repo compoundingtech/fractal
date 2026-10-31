@@ -1803,9 +1803,12 @@ impl Store {
                 })?
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
         } else {
+            // A claim an unfinished requeue has not reached counts as held, as it reads. The
+            // per-row probe runs only while a requeue is pending.
+            let requeuing = requeue_pending(&connection)?;
             connection
-            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
-            .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1], |row| {
+            .prepare("SELECT CASE WHEN EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND (p.complete=0 OR p.dirty=1 OR p.blocked=1)) OR (c.candidates>32 AND NOT EXISTS(SELECT 1 FROM claim_signature_judging p WHERE p.claim_id=v.claim_id AND p.complete=1 AND p.dirty=0 AND p.candidate_count=c.candidates)) OR (?4 AND EXISTS(SELECT 1 FROM meta m JOIN claim_verdict_links l ON l.link=substr(m.key,?3) AND l.claim_id=v.claim_id WHERE m.key>=?1 AND m.key<?2 AND m.value<v.claim_id)) THEN 'held' ELSE verdict END, COUNT(*) FROM claim_verdicts v LEFT JOIN claim_signature_counts c USING(claim_id) GROUP BY 1")?
+            .query_map(params![REQUEUE, REQUEUE_END, REQUEUE.len() + 1, requeuing], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()?
