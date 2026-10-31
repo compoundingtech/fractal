@@ -15,19 +15,16 @@ pub(super) struct RecentState {
 struct Entry {
     place: StoredPlace,
     label: String,
-    search: String,
 }
 
 struct Popup {
     entries: Vec<Entry>,
-    matches: Vec<usize>,
     selected: usize,
-    query: String,
 }
 
 impl Popup {
     fn cycle(&mut self, backwards: bool) {
-        let count = self.matches.len();
+        let count = self.entries.len();
         if count != 0 {
             self.selected = if backwards {
                 (self.selected + count - 1) % count
@@ -35,26 +32,6 @@ impl Popup {
                 (self.selected + 1) % count
             };
         }
-    }
-
-    fn refresh_matches(&mut self) {
-        let query = self.query.to_lowercase();
-        self.matches = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                query
-                    .split_whitespace()
-                    .all(|word| entry.search.contains(word))
-            })
-            .map(|(index, _)| index)
-            .collect();
-    }
-
-    fn filter(&mut self) {
-        self.refresh_matches();
-        self.selected = 0;
     }
 }
 
@@ -65,24 +42,17 @@ impl Ui {
 
     /// Explicit popup with the previous destination selected, also on legacy Ctrl+6/Ctrl+^.
     pub(super) fn open_recent(&mut self) {
-        let entries: Vec<_> = self
+        let entries = self
             .recent_places()
             .into_iter()
-            .map(|place| {
-                let label = self.place_label(&place);
-                let search = label.to_lowercase();
-                Entry {
-                    place,
-                    label,
-                    search,
-                }
+            .map(|place| Entry {
+                label: self.place_label(&place),
+                place,
             })
             .collect();
         let mut popup = Popup {
-            matches: (0..entries.len()).collect(),
             entries,
             selected: 0,
-            query: String::new(),
         };
         popup.cycle(false);
         self.recent.popup = Some(popup);
@@ -92,13 +62,13 @@ impl Ui {
         let Some(popup) = self.recent.popup.take() else {
             return;
         };
-        if let Some(&index) = popup.matches.get(popup.selected) {
-            self.restore_place(&popup.entries[index].place);
+        if let Some(entry) = popup.entries.get(popup.selected) {
+            self.restore_place(&entry.place);
         }
     }
 
     /// Dispatch after the parent's attached-program passthrough gate (unless already open).
-    /// Returns true exactly when the recent surface owns this event.
+    /// Returns true exactly when the recent surface owns this event: while open, every key.
     pub(super) fn recent_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return self.recent_open();
@@ -119,36 +89,8 @@ impl Ui {
             KeyCode::Enter => self.commit_recent(),
             KeyCode::Up | KeyCode::BackTab => self.recent.popup.as_mut().unwrap().cycle(true),
             KeyCode::Down | KeyCode::Tab => self.recent.popup.as_mut().unwrap().cycle(false),
-            KeyCode::Backspace => {
-                let popup = self.recent.popup.as_mut().unwrap();
-                popup.query.pop();
-                popup.filter();
-            }
-            KeyCode::Char(ch)
-                if !key.modifiers.intersects(
-                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
-                ) =>
-            {
-                let popup = self.recent.popup.as_mut().unwrap();
-                popup.query.push(ch);
-                popup.filter();
-            }
             _ => {}
         }
-        true
-    }
-
-    /// A paste while the popup is open filters it, one line typed at once, and never reaches
-    /// whatever is behind it. Returns true exactly when the popup took the paste.
-    pub(super) fn recent_paste(&mut self, text: &str) -> bool {
-        let Some(popup) = self.recent.popup.as_mut() else {
-            return false;
-        };
-        let line = text.lines().next().unwrap_or_default();
-        popup
-            .query
-            .extend(line.chars().filter(|ch| !ch.is_control()));
-        popup.filter();
         true
     }
 
@@ -160,9 +102,9 @@ impl Ui {
             return;
         }
         let width = area.width.saturating_sub(4).min(88);
-        // Border, query, footer and at least the selected destination: the outer margin yields first,
+        // Border, footer and at least the selected destination: the outer margin yields first,
         // so the smallest accepted window still shows what Enter opens.
-        let height = area.height.saturating_sub(2).clamp(5, 22);
+        let height = area.height.saturating_sub(2).clamp(4, 22);
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -179,17 +121,10 @@ impl Ui {
             .render(rect, buf);
         let x = rect.x + 2;
         let room = rect.width.saturating_sub(4);
-        buf.set_stringn(
-            x,
-            rect.y + 1,
-            format!("› {}▏", popup.query),
-            room as usize,
-            theme::fg(theme::ACCENT).bg(theme::MANTLE),
-        );
-        let rows = rect.height.saturating_sub(4) as usize;
+        let rows = rect.height.saturating_sub(3) as usize;
         let start = popup.selected.saturating_sub(rows.saturating_sub(1));
-        for (row, (index, &entry)) in popup
-            .matches
+        for (row, (index, entry)) in popup
+            .entries
             .iter()
             .enumerate()
             .skip(start)
@@ -202,20 +137,20 @@ impl Ui {
                 theme::MANTLE
             };
             let style = theme::text().bg(background);
-            let y = rect.y + 2 + row as u16;
+            let y = rect.y + 1 + row as u16;
             buf.set_style(Rect::new(x, y, room, 1), style);
-            buf.set_stringn(x, y, &popup.entries[entry].label, room as usize, style);
+            buf.set_stringn(x, y, &entry.label, room as usize, style);
         }
-        if popup.matches.is_empty() {
+        if popup.entries.is_empty() {
             buf.set_stringn(
                 x,
-                rect.y + 2,
-                "No recent places match",
+                rect.y + 1,
+                "No recent places yet",
                 room as usize,
                 theme::soft().bg(theme::MANTLE),
             );
         }
-        let hint = "↑↓: choose · Enter: open · Esc: cancel · type: filter";
+        let hint = "↑↓: choose · Enter: open · Esc: cancel";
         buf.set_stringn(
             x,
             rect.bottom() - 2,
@@ -256,31 +191,44 @@ mod tests {
     }
 
     #[test]
-    fn popup_preselects_previous_filters_draws_and_commits_real_destination() {
+    fn popup_preselects_previous_cycles_draws_and_commits_real_destination() {
         let mut ui = places();
-        let previous = ui.recent_places()[1].pane.clone();
+        let history = ui.recent_places();
+        let alpha = Pane::Documents(Some("recent-alpha".into()));
+        let alpha_at = history
+            .iter()
+            .position(|place| Pane::parse(&place.pane) == Some(alpha.clone()))
+            .unwrap();
         assert!(ui.recent_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::CONTROL)));
-        let popup = ui.recent.popup.as_ref().unwrap();
-        assert_eq!(
-            popup.entries[popup.matches[popup.selected]].place.pane,
-            previous
-        );
-        for ch in "recent-alpha".chars() {
-            assert!(ui.recent_key(key(KeyCode::Char(ch))));
+        assert_eq!(ui.recent.popup.as_ref().unwrap().selected, 1);
+        // Keys the chooser has no use for are swallowed and leave the selection alone.
+        for code in [KeyCode::Char('x'), KeyCode::Backspace, KeyCode::Left] {
+            assert!(ui.recent_key(key(code)));
+            assert_eq!(ui.recent.popup.as_ref().unwrap().selected, 1);
         }
-        assert_eq!(ui.recent.popup.as_ref().unwrap().matches.len(), 1);
+        // Up and Down wrap around the whole list.
+        ui.recent_key(key(KeyCode::Up));
+        ui.recent_key(key(KeyCode::Up));
+        assert_eq!(
+            ui.recent.popup.as_ref().unwrap().selected,
+            history.len() - 1
+        );
+        ui.recent_key(key(KeyCode::Down));
+        assert_eq!(ui.recent.popup.as_ref().unwrap().selected, 0);
+        for _ in 0..alpha_at {
+            ui.recent_key(key(KeyCode::Tab));
+        }
         let area = Rect::new(0, 0, 100, 24);
         let mut buf = Buffer::empty(area);
         ui.draw_recent(&mut buf, area);
         let rendered: String = buf.content.iter().map(|cell| cell.symbol()).collect();
         assert!(rendered.contains("Recent places"));
         assert!(rendered.contains("recent-alpha"));
+        assert!(rendered.contains("Enter: open"));
+        assert!(!rendered.contains("filter"), "the chooser offers no typing");
         ui.recent_key(key(KeyCode::Enter));
         assert!(!ui.recent_open());
-        assert_eq!(
-            ui.focused_pane(),
-            Some(Pane::Documents(Some("recent-alpha".into())))
-        );
+        assert_eq!(ui.focused_pane(), Some(alpha));
     }
 
     #[test]
@@ -305,16 +253,9 @@ mod tests {
             spaces.insert(&entry.place.space);
         }
         assert!(spaces.len() > 1);
-        for ch in "no-match".chars() {
-            ui.recent_key(key(KeyCode::Char(ch)));
-        }
-        for _ in 0.."no-match".len() {
-            ui.recent_key(key(KeyCode::Backspace));
-        }
-        assert_eq!(
-            ui.recent.popup.as_ref().unwrap().matches.len(),
-            history.len()
-        );
+        ui.recent_key(key(KeyCode::Esc));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.recent_places().len(), history.len(), "Esc changes nothing");
     }
 
     #[test]
@@ -405,7 +346,7 @@ mod tests {
         ui.key(key(KeyCode::Down));
         let popup = ui.recent.popup.as_ref().unwrap();
         assert!(popup.selected > 0, "the selection is not the first row");
-        let entry = &popup.entries[popup.matches[popup.selected]];
+        let entry = &popup.entries[popup.selected];
         let (label, target) = (entry.label.clone(), Pane::parse(&entry.place.pane).unwrap());
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
@@ -426,7 +367,7 @@ mod tests {
         // Opening straight into the smallest accepted window shows the preselected destination.
         ui.open_recent();
         let popup = ui.recent.popup.as_ref().unwrap();
-        let entry = &popup.entries[popup.matches[popup.selected]];
+        let entry = &popup.entries[popup.selected];
         let (label, target) = (entry.label.clone(), Pane::parse(&entry.place.pane).unwrap());
         let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
         terminal.draw(|frame| ui.render(frame)).unwrap();
@@ -509,10 +450,10 @@ mod tests {
             "opening the popup takes the program's focus"
         );
 
+        let selected = ui.recent.popup.as_ref().unwrap().selected;
         ui.input_event(Event::Paste("recent-alpha\nsecond line".into()));
-        let popup = ui.recent.popup.as_ref().unwrap();
-        assert_eq!(popup.query, "recent-alpha", "the paste filters the popup");
-        assert_eq!(popup.matches.len(), 1);
+        assert!(ui.recent_open(), "the paste leaves the popup open");
+        assert_eq!(ui.recent.popup.as_ref().unwrap().selected, selected);
 
         draw(&ui);
         let (column, row) = (body.x + 2, body.y + 2);
@@ -533,10 +474,7 @@ mod tests {
             ui.mouse(mouse);
         }
         ui.paste("direct".into());
-        assert_eq!(
-            ui.recent.popup.as_ref().unwrap().query,
-            "recent-alphadirect"
-        );
+        assert_eq!(ui.recent.popup.as_ref().unwrap().selected, selected);
         // The outer terminal's own focus changes stay with the popup too.
         ui.input_event(Event::FocusLost);
         ui.input_event(Event::FocusGained);

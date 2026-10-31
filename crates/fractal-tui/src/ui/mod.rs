@@ -1513,8 +1513,8 @@ impl Ui {
     /// included, so a paste never sends anything by itself. A pasted path to an image, such as a
     /// file dropped on the terminal, attaches that image to a message to an agent.
     pub fn paste(&mut self, text: String) {
-        // The recent popup is modal over an attached program: a paste filters it instead.
-        if self.recent_paste(&text) {
+        // The modal recent popup keeps a paste from everything behind it, attached programs too.
+        if self.recent_open() {
             return;
         }
         if self.terminal_focused()
@@ -3804,7 +3804,7 @@ impl Ui {
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
                 (
                     "ctrl+^",
-                    "recent places when detached; Enter opens, typing filters",
+                    "recent places when detached; Enter opens",
                 ),
                 (
                     "ctrl+\\ r",
