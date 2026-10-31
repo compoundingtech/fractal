@@ -483,7 +483,9 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
     let scratch = tempfile::tempdir().unwrap();
     let store = local_member("alder");
     store.trim_locally_at_most(10);
-    for n in 0..30 {
+    // Superseded observer observations and each day's superseded resource observation: three
+    // days of at most ten.
+    for n in 0..27 {
         apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
     }
     let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
@@ -499,8 +501,9 @@ fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
         let (prepared, rebuilt) = prepared_and_rebuilt(&store, &format!("resource/pr/{day}"));
         assert_eq!(prepared, rebuilt, "day {day}");
         assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}");
+        let state = if day < 2 { "trimming" } else { "trimmed" };
+        assert_eq!(cut_states(&store).last().map(String::as_str), Some(state), "day {day}");
     }
-    assert_eq!(cut_states(&store).last().map(String::as_str), Some("trimmed"));
 }
 
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
