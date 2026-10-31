@@ -167,7 +167,7 @@ pub fn validate_retry(
 /// The recipient's receipt for a handoff note that is a stream item: the read or close it
 /// already recorded, or a read recorded now. It names the step, as a stream receipt does.
 fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<String, St3Error> {
-    use crate::store::messages_shard::{lifecycle_receipt, mailbox_reads, record_lifecycle};
+    use crate::store::messages_shard::{lifecycle_receipt, mailbox_reads, record_admitted_lifecycle};
     let read = BTreeMap::from([("status".to_owned(), json!("read"))]);
     for kind in ["message.read", "message.closed"] {
         if mailbox_reads::lifecycle_step(store, note, kind)
@@ -177,7 +177,8 @@ fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<String, St
             return Ok(lifecycle_receipt(&store.origin, note, kind, Some(actor), &read).id);
         }
     }
-    record_lifecycle(store, note, "message.read", Some(actor), &read)?;
+    // The graph's acknowledgement reads the note wherever it stands; so does the stream's.
+    record_admitted_lifecycle(store, note, "message.read", Some(actor), &read)?;
     Ok(lifecycle_receipt(&store.origin, note, "message.read", Some(actor), &read).id)
 }
 

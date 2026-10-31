@@ -213,6 +213,29 @@ pub fn record_lifecycle(
     actor: Option<&str>,
     fields: &std::collections::BTreeMap<String, Value>,
 ) -> Result<bool, St3Error> {
+    record_lifecycle_checked(graph, subject, kind, actor, fields, true)
+}
+
+/// Record a step its caller has already admitted, as the graph's internal appends skip the
+/// message transitions: a handoff acknowledgement reads its note from wherever it stands.
+pub fn record_admitted_lifecycle(
+    graph: &super::Store,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &std::collections::BTreeMap<String, Value>,
+) -> Result<bool, St3Error> {
+    record_lifecycle_checked(graph, subject, kind, actor, fields, false)
+}
+
+fn record_lifecycle_checked(
+    graph: &super::Store,
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &std::collections::BTreeMap<String, Value>,
+    checked: bool,
+) -> Result<bool, St3Error> {
     let internal = |error: anyhow::Error| St3Error::new("internal", error.to_string());
     let shard = shard(graph)
         .ok_or_else(|| St3Error::new("missing-message", "this member holds no messages shard"))?;
@@ -231,14 +254,18 @@ pub fn record_lifecycle(
         .filter_map(|(kind, _)| lifecycle_rank(kind))
         .max()
         .unwrap_or(0);
+    // A successor records its own custody read of mail its predecessor already read, once.
+    let custody_reread = checked && rank == 3 && current == 3 && fields.contains_key("acting_for");
     // A replayed or earlier step settles to what is recorded, as a graph receipt does.
-    if rank <= current {
+    if rank <= current && !custody_reread {
         return Ok(false);
     }
     // Forward steps follow the graph's message transitions, so a stream item moves as the same
     // mail would through the graph.
     let recipient = sent.body.pointer("/fields/to").and_then(Value::as_str);
-    let valid = matches!((current, rank), (0, 1) | (1, 2) | (0, 2) | (2, 3) | (3, 4))
+    let valid = !checked
+        || custody_reread
+        || matches!((current, rank), (0, 1) | (1, 2) | (0, 2) | (2, 3) | (3, 4))
         // A person's displayed message has no harness handoff; their read is its delivery.
         || (rank == 3 && current <= 1 && actor.is_some_and(|actor| actor.starts_with("person/")) && actor == recipient)
         || (rank == 3 && current <= 1 && fields.contains_key("acting_for"))
@@ -263,8 +290,11 @@ pub fn record_lifecycle(
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![subject, kind, actor.unwrap_or(""), fields, smallclaims::store::now_ms() as i64],
         )
-        .map(|inserted| inserted > 0)
         .map_err(|error| internal(error.into()))
+        .and_then(|inserted| match inserted {
+            0 if custody_reread => Err(St3Error::new("invalid-message-transition", "custody read is already recorded")),
+            inserted => Ok(inserted > 0),
+        })
 }
 
 /// The graph, as the shard's fleet authority. It is held weakly: the daemon owns the graph,
@@ -837,6 +867,41 @@ mod tests {
         let receipt = lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read"));
         assert!(receipt.id.starts_with("offset-receipt/"));
         assert_eq!(receipt.id, lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read")).id);
+    }
+
+    /// A successor's custody read of mail its predecessor read is recorded once; a step its
+    /// caller admitted skips the transitions, as the graph's internal appends do.
+    #[test]
+    fn a_custody_reread_is_recorded_once_and_an_admitted_read_skips_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = open(&graph, root.path()).unwrap();
+        for subject in ["message/00000000000000d1", "message/00000000000000d2"] {
+            let mut sent = input("message.sent", Some("agent/birch"), json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": "hi", "status": "sent"
+            }));
+            sent.subject = subject.into();
+            shard.append_claim(&sent).unwrap();
+        }
+        let status = |status: &str| BTreeMap::from([("status".to_owned(), json!(status))]);
+        let subject = "message/00000000000000d1";
+        assert!(record_lifecycle(&graph, subject, "message.delivered", Some("agent/cedar"), &status("delivered")).unwrap());
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar"), &status("read")).unwrap());
+        let mut custody = status("read");
+        custody.insert("acting_for".into(), json!("agent/cedar"));
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap());
+        assert_eq!(
+            record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap_err().code,
+            "invalid-message-transition"
+        );
+
+        let note = "message/00000000000000d2";
+        assert_eq!(
+            record_lifecycle(&graph, note, "message.read", Some("agent/cedar"), &status("read")).unwrap_err().code,
+            "invalid-message-transition"
+        );
+        assert!(record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar"), &status("read")).unwrap());
+        assert_eq!(graph.message(note).unwrap().unwrap().status, "read");
     }
 
     /// A mailbox stream follows the shard by its position: a new item to its recipient and a

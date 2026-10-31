@@ -4545,6 +4545,7 @@ mod tests {
             session_id: format!("session/external-{}", "a".repeat(24)),
             message_id: "fixture-native-record".into(),
         };
+        assert!(receipt("delivered", None).unwrap().1);
         let (record, appended) = receipt("read", Some(&proof)).unwrap();
         assert!(appended);
         assert_eq!(record.kind, "message.read");
