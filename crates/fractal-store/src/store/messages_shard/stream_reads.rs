@@ -113,3 +113,135 @@ pub fn stream_events_page(
         frontier: through,
     }))
 }
+
+/// Record arrivals only when the shard holds an item that has none, so a reader that finds
+/// every item recorded writes nothing.
+fn arrivals_current(graph: &super::super::Store, shard: &GraphStore) -> anyhow::Result<()> {
+    let behind: bool = shard.readers.get().prepare_cached(
+        "SELECT COALESCE((SELECT MAX(store_index) FROM stream_messages),0)
+              > COALESCE((SELECT MAX(store_index) FROM stream_arrivals),0)",
+    )?.query_row([], |row| row.get(0))?;
+    if behind {
+        record_arrivals(graph)?;
+    }
+    Ok(())
+}
+
+/// Which stream items a conversation read takes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamAfter {
+    /// Those past this index in the shard, the position a conversation cursor carries.
+    Position(u64),
+    /// Those that arrived on this member after this graph index.
+    Arrival(u64),
+}
+
+/// The newest stream item this member has admitted: where a conversation cursor stands in the
+/// stream. The start, without a shard.
+pub fn conversation_position(graph: &super::super::Store) -> anyhow::Result<u64> {
+    let Some(shard) = shard(graph) else {
+        return Ok(0);
+    };
+    Ok(shard.readers.get().prepare_cached(
+        "SELECT COALESCE(MAX(store_index),0) FROM stream_messages",
+    )?.query_row([], |row| row.get(0))?)
+}
+
+/// The stream items to or from any of `names` after `after`, newest first, each with the graph
+/// index it arrived at. Its claim's `store_index` is its `created_index`, past every graph
+/// index, as a message page lists it. `limit` bounds a delta; without one the read keeps the
+/// newest 10,000 stream items, as the graph's conversation read keeps its newest 10,000 sends.
+pub fn conversation_items(
+    graph: &super::super::Store,
+    names: &[String],
+    after: StreamAfter,
+    limit: Option<usize>,
+) -> anyhow::Result<Vec<(ClaimRecord, u64)>> {
+    let Some(shard) = shard(graph) else {
+        return Ok(Vec::new());
+    };
+    arrivals_current(graph, &shard)?;
+    let connection = shard.readers.get();
+    let floor = match limit {
+        Some(_) => 0,
+        None => connection
+            .prepare_cached(
+                "SELECT store_index FROM stream_messages ORDER BY store_index DESC LIMIT 1 OFFSET 9999",
+            )?
+            .query_row([], |row| row.get::<_, u64>(0))
+            .optional()?
+            .unwrap_or(0),
+    };
+    let (position, arrival) = match after {
+        StreamAfter::Position(position) => (position.max(floor), 0),
+        StreamAfter::Arrival(arrival) => (floor, arrival),
+    };
+    let mut statement = connection.prepare_cached(&format!(
+        /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+            SELECT store_index, subject FROM stream_messages INDEXED BY stream_messages_recipient
+            WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
+            UNION
+            SELECT store_index, subject FROM stream_messages INDEXED BY stream_messages_sender
+            WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2
+         ) SELECT {}, arrivals.graph_index FROM selected
+           JOIN stream_arrivals arrivals ON arrivals.subject=selected.subject
+           JOIN claims ON claims.store_index=selected.store_index
+           WHERE arrivals.graph_index>?3 AND claims.kind='message.sent'
+           ORDER BY selected.store_index DESC LIMIT ?4",
+        smallclaims::store::CLAIM_COLUMNS
+    ))?;
+    let rows = statement
+        .query_map(
+            rusqlite::params![
+                serde_json::to_string(names)?,
+                position,
+                arrival,
+                limit.map_or(-1, |limit| i64::try_from(limit).unwrap_or(i64::MAX))
+            ],
+            |row| {
+                let mut claim = smallclaims::store::claim_from_row(row)?;
+                claim.store_index = STREAM_INDEX_BASE + claim.store_index;
+                Ok((claim, row.get::<_, i64>(10)?.max(0) as u64))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Whether a stream item to or from any of `names` was admitted after shard index `after`
+/// through `through`. No payload leaves SQL.
+pub fn conversation_changed(
+    graph: &super::super::Store,
+    names: &[String],
+    after: u64,
+    through: u64,
+) -> anyhow::Result<bool> {
+    let Some(shard) = shard(graph) else {
+        return Ok(false);
+    };
+    if through <= after {
+        return Ok(false);
+    }
+    Ok(shard.readers.get().prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM stream_messages INDEXED BY stream_messages_recipient
+                WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2 AND store_index<=?3)
+             OR EXISTS(SELECT 1 FROM stream_messages INDEXED BY stream_messages_sender
+                WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2 AND store_index<=?3)",
+    )?.query_row(rusqlite::params![serde_json::to_string(names)?, after, through], |row| row.get(0))?)
+}
+
+/// The first of a message's two timeline sequences, the message entry's; its content entry takes
+/// the next. A graph message's is its index times four. A stream item has no graph index, so it
+/// takes two past the graph index it arrived at on this member: it sorts after the graph claim
+/// it arrived behind and before the next, and two items that arrived together tie, which the
+/// entry ID breaks. The sequence orders entries; it never identifies one.
+pub fn timeline_base(graph: &super::super::Store, claim: &ClaimRecord) -> anyhow::Result<u64> {
+    if claim.store_index < STREAM_INDEX_BASE {
+        return Ok(claim.store_index.saturating_mul(4));
+    }
+    let arrived = match arrival(graph, &claim.subject)? {
+        Some(arrived) => arrived,
+        None => graph.index()?,
+    };
+    Ok(arrived.saturating_mul(4).saturating_add(2))
+}
