@@ -397,7 +397,14 @@ pub(super) fn prompt_form(
         }
     }
     if let Some(elsewhere) = &model.form.elsewhere {
-        note(doc, elsewhere);
+        note(
+            doc,
+            if place == Place::Terminal {
+                "Other choices are available in this terminal."
+            } else {
+                elsewhere
+            },
+        );
     }
     doc.blank();
     // The keys, as the harness's dialog lists its own.
