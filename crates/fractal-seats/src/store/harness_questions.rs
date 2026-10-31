@@ -93,8 +93,6 @@ pub trait HarnessQuestionsStore {
     fn harness_question_generation(&self, question: &str) -> Result<Option<QuestionGeneration>>;
     fn harness_question_generations(&self, after: &str, limit: usize) -> Result<Vec<QuestionGeneration>>;
     fn forget_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<()>;
-    /// Upgrade recovery only; current ingestion always records a generation before its claim.
-    fn unleased_local_harness_questions(&self, origin: &str, after: &str, limit: usize) -> Result<Vec<HarnessQuestion>>;
 }
 
 impl HarnessQuestionsStore for Store {
@@ -141,18 +139,6 @@ impl HarnessQuestionsStore for Store {
         Ok(())
     }
 
-    fn unleased_local_harness_questions(&self, origin: &str, after: &str, limit: usize) -> Result<Vec<HarnessQuestion>> {
-        let connection = self.readers.get();
-        let ids = connection.prepare_cached(
-            "SELECT DISTINCT observed.subject FROM claims AS observed
-             WHERE observed.kind=?1 AND observed.origin=?2 AND observed.subject>?3
-             AND NOT EXISTS (SELECT 1 FROM local_harness_question_generations AS owner WHERE owner.question=observed.subject)
-             AND NOT EXISTS (SELECT 1 FROM claims AS closed WHERE closed.subject=observed.subject AND closed.kind=?4)
-             ORDER BY observed.subject LIMIT ?5",
-        )?.query_map(rusqlite::params![OBSERVED, origin, after, RESOLVED, limit as i64],
-            |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.into_iter().filter_map(|id| question_at(&connection, &id, None).transpose()).collect()
-    }
 
 
     fn harness_question(&self, subject: &str, at: u128) -> Result<Option<HarnessQuestion>> {

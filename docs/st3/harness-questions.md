@@ -143,10 +143,18 @@ wall-clock age, and unavailable process/provider evidence leaves the question pe
 This cleanup continues with the opt-in off. The sweep runs every two seconds between
 bounded passes; readers do not synthesize resolutions.
 
-An upgrade also retires unresolved locally ingested OMP observations predating these
-leases: their exact admitted wrapper generation cannot be recovered, so the upgrade
-revokes that old observation authority with `cancelled`. Foreign observations and
-observations that have since acquired a generation are not retired by this recovery.
+An observation without a local generation lease stays pending and indeterminate
+across restart. Its stored shape has no exact wrapper birth/provider ownership
+generation, so neither startup nor the present runtime's state proves that its
+native call ended. It remains visible through the existing pending resource with
+answering unavailable; no new client state is introduced. A later native close
+from the authenticated same runtime/session binding can settle it normally,
+including a cancellation emitted by the shutdown/switch hook. A replayed open
+from that binding may first attach its authenticated generation; only then can
+the normal positive-evidence lease reconciliation apply. Foreign observations
+are never swept as local generations. Recovery visits only the local lease
+table in keyset-paginated batches of at most 128; it does not scan lease-less
+observations or invent a lease for them.
 
 Observation metadata is not a proof that a web selection can be executed. In particular,
 the current typed timeline lacks native preview/required presentation semantics.

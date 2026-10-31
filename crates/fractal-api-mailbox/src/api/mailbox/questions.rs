@@ -130,6 +130,9 @@ fn apply(store: &Store, request: &Request, generation: &QuestionGeneration) -> R
         }
         Observation::Closed { status, .. } => {
             let current = current.ok_or_else(|| refused("cannot close an unobserved native question"))?;
+            // An admitted close for this exact call/runtime/session is positive
+            // native end evidence, including for a pre-lease observation. Startup
+            // alone cannot provide that evidence or manufacture this generation.
             if current.resolution.is_none() {
                 store.retain_harness_question_generation(generation)?;
             }

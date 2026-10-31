@@ -190,7 +190,7 @@ fn orphan_registration_and_reconciliation_errors_never_invent_an_answer() {
 }
 
 #[tokio::test]
-async fn startup_retires_only_unleased_local_observations() {
+async fn leaseless_open_survives_restart_until_matching_native_close() {
     let root = tempfile::tempdir().unwrap();
     let mut state = crate::api::tests_shared::state(root.path());
     state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
@@ -217,18 +217,56 @@ async fn startup_retires_only_unleased_local_observations() {
     state.store.validate_replication_backlog().unwrap();
     state.store.apply_replication_repairs().unwrap();
     assert!(state.store.project_replication_backlog().unwrap());
+    assert!(state.store.harness_question_generation(&local.id).unwrap().is_none());
+    // A real reopen loses all daemon-local memory. The old observation carries
+    // no exact wrapper/provider generation, so startup has no proof it ended.
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+    let token = fractal_runtime::process_start_token(std::process::id()).unwrap();
+    let generation = QuestionGeneration {
+        question: local.id.clone(), agent: request.agent.clone(),
+        runtime_incarnation: request.runtime_incarnation.clone(), session: "native-session".into(),
+        owner_session: "owner".into(), owner_sequence: 1,
+        witness: QuestionWitness { runtime_name: "runtime".into(), created_at: "created".into(),
+            daemon: (std::process::id(), token), terminal: (std::process::id(), token),
+            wrapper: (std::process::id(), token), bound: false },
+    };
+    // An orphan registration is an ordered startup-pass acknowledgement. Wait
+    // for actual reconciliation, not an arbitrary delay before asserting silence.
+    let mut sentinel = generation.clone();
+    sentinel.question = "harness-question/startup-pass-sentinel".into();
+    state.store.retain_harness_question_generation(&sentinel).unwrap();
+    let index = state.store.index().unwrap();
     let worker = super::super::question_lifecycle::start(&state);
-    let retired = tokio::time::timeout(Duration::from_secs(10), async {
+    let reconciled = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if state.store.harness_question_held(&local.id).unwrap().unwrap().resolution.is_some() { break; }
+            if state.store.harness_question_generation(&sentinel.question).unwrap().is_none() { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }).await;
     worker.abort();
-    retired.unwrap();
+    reconciled.unwrap();
+    assert_eq!(state.store.index().unwrap(), index, "startup invented an end");
+    assert_eq!(state.store.harness_question_held(&local.id).unwrap(), Some(local.clone()));
+    assert_eq!(state.store.harness_question_held(&remote.id).unwrap(), Some(remote.clone()));
+    assert!(state.store.harness_question_generation(&local.id).unwrap().is_none());
+
+    // The normal admitted native close is positive evidence for this exact
+    // call/session. Shutdown/switch hooks use this same cancelled close shape.
+    let mut close = request;
+    close.event = Observation::Closed { session: "another-session".into(),
+        native_id: local.native_id.clone(), status: CloseStatus::Cancelled };
+    assert!(apply(&state.store, &close, &generation).is_err());
+    assert_eq!(state.store.index().unwrap(), index, "a foreign session wrote a close");
+    close.event = Observation::Closed { session: generation.session.clone(),
+        native_id: local.native_id.clone(), status: CloseStatus::Cancelled };
+    assert!(apply(&state.store, &close, &generation).unwrap().1);
     let resolution = state.store.harness_question_held(&local.id).unwrap().unwrap().resolution.unwrap();
     assert_eq!(resolution.status, Status::Cancelled);
     assert!(resolution.answers.is_empty());
     assert!(resolution.receipt.is_none());
-    assert!(state.store.harness_question_held(&remote.id).unwrap().unwrap().resolution.is_none());
+    assert!(state.store.harness_question_generation(&local.id).unwrap().is_none());
+    let index = state.store.index().unwrap();
+    assert!(!apply(&state.store, &close, &generation).unwrap().1);
+    assert_eq!(state.store.index().unwrap(), index);
+    assert_eq!(state.store.harness_question_held(&remote.id).unwrap(), Some(remote));
 }
