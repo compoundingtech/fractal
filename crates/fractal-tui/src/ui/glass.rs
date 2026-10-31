@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+mod navigation;
+
 /// Live tab chrome. Never stored with the workspace: observations can change between frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TabBadge {
@@ -287,6 +289,8 @@ pub(crate) struct Glasses {
     /// is still empty when st first sends the person's glasses, st's glass of that name is
     /// shown instead of keeping both.
     placeholder: Option<String>,
+    history: Vec<glass_store::StoredPlace>,
+    history_cursor: usize,
     /// Where each split's tab strip starts, for the glass last drawn: this window only, never
     /// stored. Drawing keeps it, so it is shared state behind a `RefCell`.
     strips: RefCell<TabStrips>,
@@ -493,29 +497,65 @@ impl Glass {
 
     /// Take st's structure, keeping which group and tabs this window shows where they still are.
     fn take(&mut self, body: GlassBody, revision: Option<String>) {
-        let current = self
-            .layout
-            .groups()
-            .iter()
-            .map(|group| group.current)
-            .collect::<Vec<_>>();
+        let previous = self.layout.groups();
+        let focused_id = previous.get(self.focus).map(|group| group.id.as_str());
         self.name = body.name;
         let mut layout = from_wire(body.layout);
-        // Borders dragged here stay where the shape is still the same.
         layout.carry_ratios(&self.layout);
-        self.layout = layout;
-        let count = self.layout.groups().len();
+        let count = layout.groups().len();
+        let mut carried = vec![false; previous.len()];
         for index in 0..count {
-            let shown = self.count(index);
-            if let Some(group) = self.layout.group_mut(index) {
-                group.current = current
-                    .get(index)
-                    .copied()
-                    .unwrap_or(0)
-                    .min(shown.saturating_sub(1));
+            let group = layout.group_mut(index).unwrap();
+            // The wire carries content, not device identities. Only a surviving member
+            // establishes group continuity; unrelated replacement groups get fresh ids.
+            let found = previous
+                .iter()
+                .enumerate()
+                .filter(|(old, _)| !carried[*old])
+                .map(|(old, prior)| {
+                    (
+                        old,
+                        prior
+                            .tabs
+                            .iter()
+                            .filter(|tab| group.tabs.iter().any(|next| next.pane == tab.pane))
+                            .count(),
+                    )
+                })
+                .filter(|(_, shared)| *shared > 0)
+                .max_by_key(|(_, shared)| *shared)
+                .map(|(old, _)| old)
+                .or_else(|| {
+                    previous
+                        .get(index)
+                        .filter(|old| {
+                            !carried[index] && old.tabs.is_empty() && group.tabs.is_empty()
+                        })
+                        .map(|_| index)
+                });
+            let Some(old) = found else { continue };
+            carried[old] = true;
+            let prior = previous[old];
+            group.id.clone_from(&prior.id);
+            for tab in &mut group.tabs {
+                if let Some(previous) = prior.tabs.iter().find(|previous| previous.pane == tab.pane)
+                {
+                    tab.id.clone_from(&previous.id);
+                }
             }
+            let current_id = prior.tabs.get(prior.current).map(|tab| &tab.id);
+            group.current = group
+                .tabs
+                .iter()
+                .position(|tab| Some(&tab.id) == current_id)
+                .unwrap_or_else(|| prior.current.min(group.tabs.len().saturating_sub(1)));
         }
-        self.focus = self.focus.min(count - 1);
+        self.focus = layout
+            .groups()
+            .iter()
+            .position(|group| Some(group.id.as_str()) == focused_id)
+            .unwrap_or_else(|| self.focus.min(count.saturating_sub(1)));
+        self.layout = layout;
         self.revision = revision;
     }
 
@@ -699,6 +739,61 @@ impl Glasses {
                 .viewed(glass.view)
             })
             .collect::<Vec<_>>();
+        let mut history = Vec::new();
+        let mut history_cursor: usize = 0;
+        for (index, mut place) in stored.history.into_iter().enumerate() {
+            if Pane::parse(&place.pane).is_none() {
+                continue;
+            }
+            let Some(glass) = all.iter().find(|glass| glass.id == place.space) else {
+                continue;
+            };
+            let groups = glass.layout.groups();
+            if place.group_id.is_empty() {
+                let Some(group) = groups.get(place.group) else {
+                    continue;
+                };
+                place.group_id.clone_from(&group.id);
+                place.tab_id = group.tabs.get(place.tab).map(|tab| tab.id.clone());
+            }
+            match &place.tab_id {
+                Some(id) => {
+                    // A stable tab can move out of its recorded group, even removing that group.
+                    let Some((group_index, group, tab_index)) =
+                        groups.iter().enumerate().find_map(|(index, group)| {
+                            group
+                                .tabs
+                                .iter()
+                                .position(|tab| &tab.id == id)
+                                .map(|tab| (index, *group, tab))
+                        })
+                    else {
+                        continue;
+                    };
+                    place.group = group_index;
+                    place.group_id.clone_from(&group.id);
+                    place.tab = tab_index;
+                }
+                None => {
+                    let Some(group_index) =
+                        groups.iter().position(|group| group.id == place.group_id)
+                    else {
+                        continue;
+                    };
+                    if place.pane != Pane::List(0).key() {
+                        continue;
+                    }
+                    place.group = group_index;
+                }
+            }
+            if index <= stored.history_cursor {
+                history_cursor = history.len();
+            }
+            history.push(place);
+        }
+        let excess = history.len().saturating_sub(50);
+        history.drain(..excess);
+        history_cursor = history_cursor.saturating_sub(excess);
         let name = wanted.or(stored.last).unwrap_or_else(|| "main".to_owned());
         let mut placeholder = None;
         let shown = match all.iter().position(|glass| glass.name == name) {
@@ -724,6 +819,8 @@ impl Glasses {
             last_border: None,
             pending: BTreeMap::new(),
             placeholder,
+            history,
+            history_cursor,
             strips: RefCell::default(),
         }
     }
@@ -759,6 +856,8 @@ impl Glasses {
         let stored = Stored {
             version: 0,
             sidebar: self.sidebar.configured.then_some(self.sidebar.shown),
+            history: self.history.clone(),
+            history_cursor: self.history_cursor,
             last: Some(self.glass().name.clone()),
             glasses: self
                 .all
@@ -1832,6 +1931,7 @@ impl Ui {
 
     /// Move the tab at `from` to `target`, keep the glass, and show it there.
     fn drop_tab(&mut self, from: (usize, usize), target: Drop) {
+        let before = self.current_place();
         let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let (from_group, from_tab) = from;
@@ -1909,10 +2009,12 @@ impl Ui {
         let id = glasses.glass().id.clone();
         self.glass_changed(&id);
         self.show_focused();
+        self.record_place_change(before);
     }
 
     /// Open `id` where a drag from the sidebar let go: as a tab in a strip, or in a new split.
     fn drop_subject(&mut self, id: &str, target: Drop) {
+        let before = self.current_place();
         let section = self.glasses.sidebar.section;
         let terminal = self.resource_sidebar.terminals.iter().find(|row| row.id == id).map(|row| row.open.clone());
         let pane = if let Some(terminal) = terminal {
@@ -1963,6 +2065,7 @@ impl Ui {
         let id = glasses.glass().id.clone();
         self.glass_changed(&id);
         self.show_focused();
+        self.record_place_change(before);
     }
 
     /// While a tab is dragged: where it would land, and its name by the pointer.
@@ -3554,6 +3657,7 @@ impl Ui {
     /// Show `pane` in this glass: where it already shows, else as `how` says. Home stays Home,
     /// so what opens from Home gets its own tab, and a Home item opens on Home itself.
     pub(crate) fn open_in_glass(&mut self, pane: Pane, how: Open) {
+        let before = self.current_place();
         self.open_in_glass_inner(pane.clone(), how);
         // Opening an agent attaches its terminal once its tab has stayed in front a moment,
         // unless this device chose its conversation. Only opening does: moving the focus to a
@@ -3565,6 +3669,7 @@ impl Ui {
         {
             self.attach_when = Some((id.clone(), Instant::now()));
         }
+        self.record_place_change(before);
     }
 
     fn open_in_glass_inner(&mut self, pane: Pane, how: Open) {
@@ -3808,6 +3913,14 @@ impl Ui {
     /// Focus group `group` and show its tab `tab` (as its strip counts them). A tab it does
     /// not have leaves the group showing what it showed.
     pub(crate) fn show_in(&mut self, group: usize, tab: usize) {
+        let before = self.current_place();
+        let changed = self
+            .glasses
+            .glass()
+            .layout
+            .groups()
+            .get(group)
+            .is_some_and(|shown| tab < shown.tabs.len() && shown.current != tab);
         let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let count = glass.count(group);
@@ -3821,6 +3934,9 @@ impl Ui {
         // Where the person is, remembered on this device for the next start.
         glasses.save();
         self.show_focused();
+        if changed {
+            self.record_place_change(before);
+        }
     }
 
     pub(crate) fn focus_group(&mut self, group: usize) {
@@ -4261,7 +4377,8 @@ impl Ui {
             }
             _ => {}
         }
-        if group.tabs.is_empty() && count > 1 {
+        let removed_group = group.tabs.is_empty() && count > 1;
+        if removed_group {
             let layout = std::mem::take(&mut glass.layout);
             glass.layout = layout.remove(focus).unwrap_or_default();
             glass.focus = focus.saturating_sub(1);
@@ -4276,6 +4393,7 @@ impl Ui {
         }
         self.glass_changed(&id);
         self.show_focused();
+        self.record_place_change(None);
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
@@ -4397,6 +4515,8 @@ impl Ui {
     }
 
     fn show_glass(&mut self, index: usize) {
+        let before = self.current_place();
+        let changed = self.glasses.shown != index;
         let glasses = &mut self.glasses;
         if index >= glasses.all.len() {
             return;
@@ -4404,6 +4524,9 @@ impl Ui {
         glasses.shown = index;
         glasses.save();
         self.show_focused();
+        if changed {
+            self.record_place_change(before);
+        }
     }
 
     /// Whether keys go to the attached terminal: in glasses only while its tab has focus.
@@ -4423,6 +4546,7 @@ impl Ui {
 
     /// Show `pane` in place of what the split `group` shows.
     pub(crate) fn swap_shown_pane(&mut self, group: usize, pane: Pane) {
+        let before = self.current_place();
         let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let Some(split) = glass.layout.group_mut(group) else {
@@ -4438,6 +4562,7 @@ impl Ui {
         tab.pane = pane.key();
         let id = glass.id.clone();
         self.glass_changed(&id);
+        self.record_place_change(before);
     }
 
     /// The pane each split of the glass in front shows, with the split's index.
@@ -4580,9 +4705,11 @@ fn to_wire(layout: &Layout) -> GlassLayout {
 fn from_wire(layout: GlassLayout) -> Layout {
     match layout {
         GlassLayout::Group { tabs } => Layout::Group(Group {
+            id: new_id(),
             tabs: tabs
                 .into_iter()
                 .map(|tab| Tab {
+                    id: new_id(),
                     title: tab.title,
                     pane: tab.pane,
                 })
@@ -4956,11 +5083,19 @@ mod tests {
         update.kind = AttentionKind::Message { from: "agent/a".into(), body: "informational".into() };
         ui.world.attention = Load::Ready(vec![alert, second, update]);
         ui.glasses.glass_mut().layout = Layout::Group(Group {
+            id: new_id(),
             tabs: [
                 ("agent:agent/a", "Atlas"), ("agent:agent/b", "Idle"),
                 ("agent:agent/c", "Stopped"), ("mission:mission/m", "Mission"),
                 ("list:home", "Inbox"),
-            ].into_iter().map(|(pane, title)| Tab { pane: pane.into(), title: Some(title.into()) }).collect(),
+            ]
+            .into_iter()
+            .map(|(pane, title)| Tab {
+                id: new_id(),
+                pane: pane.into(),
+                title: Some(title.into()),
+            })
+            .collect(),
             current: 0,
         });
         ui.refresh_tab_statuses();
@@ -5912,6 +6047,7 @@ mod tests {
     fn tab_badge_overflow_keeps_selected_and_neighbor_title_suffixes_visible() {
         let mut ui = glass();
         ui.glasses.glass_mut().layout = Layout::Group(Group {
+            id: new_id(),
             tabs: (0..14).map(|n| Tab::pane(format!("mission:mission/fleet/example/m{n:02}"))).collect(),
             current: 0,
         });
@@ -9327,6 +9463,7 @@ mod tests {
         layout.split(0, Side::Right, Group::of(Tab::pane("mission:m")));
         layout.split(1, Side::Below, Group::default());
         layout.group_mut(2).unwrap().tabs.push(Tab {
+            id: new_id(),
             title: Some("hosts".into()),
             pane: "machine:h".into(),
         });
