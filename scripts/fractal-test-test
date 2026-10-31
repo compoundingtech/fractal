@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import shlex
 import time
 import os
 from pathlib import Path
@@ -388,16 +389,32 @@ class GovernedTest(unittest.TestCase):
                 cgroup.joinpath('cpu.max').write_text(cpu + '\n')
         Path(tmp, 'cgroup').write_text(f'0::/{leaf}\n')
 
-    def governed_in(self, leaf, limits, environment=None):
+    def governed_in(self, leaf, limits, environment=None, lane=None, named=None):
+        """governed() for a caller in LEAF; LANE is (slice, limits) of a seat's lane beside it, and NAMED what a fake `st agents
+        lane` answers ((exit code, stdout)); its arguments are kept in self.asked, None when it was not run."""
+        self.asked = None
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, 'bus').touch()
+            if lane:
+                self.tree(tmp, f'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/{lane[0]}', lane[1])
             self.tree(tmp, leaf, limits)
-            real = st_test.own_cap
-            with mock.patch.dict(os.environ, dict(environment or {}, XDG_RUNTIME_DIR=tmp), clear=True), \
+            environment = dict(environment or {}, XDG_RUNTIME_DIR=tmp)
+            if named:
+                st = Path(tmp, 'st')
+                st.write_text(f'#!/bin/sh\necho "$@" > {tmp}/asked\nprintf %s {shlex.quote(named[1])}\nexit {named[0]}\n')
+                st.chmod(0o755)
+                environment['ST3_BIN'] = str(st)
+            real, real_lane = st_test.own_cap, st_test.seat_lane
+            with mock.patch.dict(os.environ, environment, clear=True), \
                     mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
+                    mock.patch.object(st_test, 'seat_lane', lambda: real_lane(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
                     mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'), \
-                    contextlib.redirect_stderr(io.StringIO()):
-                return st_test.governed(['check'], 'linux-gate')
+                    contextlib.redirect_stderr(io.StringIO()) as err:
+                governed = st_test.governed(['check'], 'linux-gate')
+            if Path(tmp, 'asked').exists():
+                self.asked = Path(tmp, 'asked').read_text().split()
+            self.said = err.getvalue()
+            return governed
 
     def assert_scoped(self, governed, why):
         self.assertIn('--slice=builds.slice', governed, why)
@@ -437,6 +454,39 @@ class GovernedTest(unittest.TestCase):
         # A level without a memory controller still caps CPU: each file is read on its own.
         limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
         self.assert_in_place(self.governed_in(self.LANE, limits), 'no memory controller on the CPU level')
+
+    UNIT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st-test-seat-1.service'
+    CAPPED = {LANE_SLICE: ('268435456', '100000 100000')}
+
+    def named(self, slice_name=LANE_SLICE):
+        return 0, json.dumps({'agent': 'agent/seat-1', 'slice': slice_name})
+
+    def test_a_seat_unit_outside_its_lane_runs_the_check_in_its_capped_lane(self):
+        governed = self.governed_in(self.UNIT, {}, {'ST_AGENT': 'agent/seat-1'}, (self.LANE_SLICE, self.CAPPED), self.named())
+        self.assertEqual(self.asked[:4], ['agents', 'lane', 'agent/seat-1', '--json'])
+        self.assertIn(f'--slice={self.LANE_SLICE}', governed)
+        self.assertNotIn('--slice=builds.slice', governed)
+        self.assertIn('--property=OOMPolicy=continue', governed)
+        rest = governed[governed.index('--') + 1:]
+        self.assertEqual(rest[1:], ['BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={self.LANE_SLICE}', 'check'])
+        self.assertEqual(Path(rest[0]).name, 'env')
+
+    def test_without_a_capped_lane_the_seat_unit_takes_builds_slice_and_says_why(self):
+        seat = {'ST_AGENT': 'agent/seat-1'}
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, None, self.named()), 'no such slice on this host')
+        self.assertIn('not on this host', self.said)
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, {}), self.named()), 'an uncapped slice')
+        self.assertIn('no memory and CPU limit', self.said)
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), (2, '')), 'st cannot name it')
+        self.assertIn('did not name its lane', self.said)
+        # The daemon's name decides, never one that only looks like a lane.
+        other = 'app-lanes-seat_2_ffffffffffff.slice'
+        self.assert_scoped(self.governed_in(self.UNIT, {}, seat, (self.LANE_SLICE, self.CAPPED), self.named(other)), 'another name')
+
+    def test_a_caller_that_is_no_seat_never_asks_for_a_lane(self):
+        self.assert_scoped(self.governed_in(self.UNIT, {}, {}, (self.LANE_SLICE, self.CAPPED), self.named()), 'no ST_AGENT')
+        self.assertIsNone(self.asked)
+        self.assertEqual(self.said, '')
 
     def test_an_unreadable_cgroup_is_no_cap(self):
         self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
