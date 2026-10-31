@@ -177,22 +177,16 @@ struct Position(Vec<SqlValue>);
 
 impl Position {
     fn compare(&self, other: &Self) -> CmpOrdering {
-        for (left, right) in self.0.iter().zip(&other.0) {
-            let ordering = match (left, right) {
-                (SqlValue::Integer(left), SqlValue::Integer(right)) => left.cmp(right),
-                (SqlValue::Text(left), SqlValue::Text(right)) => left.cmp(right),
-                (SqlValue::Null, SqlValue::Null) => CmpOrdering::Equal,
-                (SqlValue::Null, _) => CmpOrdering::Less,
-                (_, SqlValue::Null) => CmpOrdering::Greater,
-                (SqlValue::Integer(_), _) => CmpOrdering::Less,
-                (_, SqlValue::Integer(_)) => CmpOrdering::Greater,
-                _ => CmpOrdering::Equal,
-            };
-            if ordering != CmpOrdering::Equal {
-                return ordering;
+        use crate::principal::facts::{OrderComponent, compare_order};
+        fn component(value: &SqlValue) -> OrderComponent<'_> {
+            match value {
+                SqlValue::Integer(value) => OrderComponent::Integer(i128::from(*value)),
+                SqlValue::Text(value) => OrderComponent::Text(value),
+                SqlValue::Null => OrderComponent::Null,
+                _ => OrderComponent::Other,
             }
         }
-        CmpOrdering::Equal
+        compare_order(self.0.iter().map(component), other.0.iter().map(component))
     }
 }
 
@@ -348,32 +342,13 @@ fn signature_candidates(connection: &Connection, claim_id: &str) -> Result<Vec<C
 }
 
 fn signature_fields(row: &ClaimRow) -> Value {
-    let mut fields = row.body.get("fields").cloned().unwrap_or(Value::Null);
-    // A long message's claim holds a preview, and names its whole text in an `attachments` entry
-    // of type text/plain. A device that signs such a message names `body_sha256` and `body_bytes`
-    // among its signed fields; they are those entry's hash and size, not stored fields.
-    if row.kind == "message.sent"
-        && let Some(body) = fields
-            .get("attachments")
-            .and_then(crate::principal::message_body_entry)
-            .cloned()
-    {
-        fields["body_sha256"] = body.get("sha256").cloned().unwrap_or(Value::Null);
-        fields["body_bytes"] = body.get("size").cloned().unwrap_or(Value::Null);
-    }
-    fields
+    crate::principal::facts::signature_fields(&row.kind, &row.body)
 }
 
 fn signature_matches(row: &ClaimRow, signature: &ClaimSignature) -> bool {
-    let fields = signature_fields(row);
-    signature.verifies(&crate::principal::Judged {
-        id: &row.id,
-        subject: &row.subject,
-        kind: &row.kind,
-        actor: row.actor.as_deref(),
-        content: content_digest(&row.subject, &row.kind, row.actor.as_deref(), &row.body),
-        fields: &fields,
-    })
+    crate::principal::facts::nonce_eligible(
+        &row.id, &row.subject, &row.kind, row.actor.as_deref(), &row.body, signature,
+    )
 }
 
 mod judging;
@@ -715,7 +690,9 @@ impl Facts for StoreFacts<'_> {
 
     fn is_root(&self, subject: &str, key: &str) -> bool {
         self.links.borrow_mut().insert("root".into());
-        self.roots.contains(&(subject.to_owned(), key.to_owned()))
+        crate::principal::facts::root_eligible(
+            subject, key, crate::principal::facts::RootContext::Runtime(self.roots),
+        )
     }
 
     fn revoked_before(&self, principal: &str, key: &str) -> bool {
