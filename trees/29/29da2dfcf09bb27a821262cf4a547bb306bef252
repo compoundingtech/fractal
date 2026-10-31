@@ -3,3 +3,4 @@ record 393299c8950c6a9afa8ecf17eddb005139655495 genie-freshness 0 host/forge 202
 record 89bb734782d25b9c82f0180243c5bf1d39959582 ci-script-tests 0 host/forge 2026-10-31T14:25:27Z
 record 116ebbbc5d9e1af545dd17c6db09c23e43347bf2 linux-gate 0 host/forge 2026-10-31T15:33:12Z
 record 0e36c793709c205c5e19a6ca8d5ef71afc6fd962 linux-clippy 0 host/forge 2026-10-31T15:35:15Z
+record 13f13c0f0aaecf81a8eb7a33adda32bcc25021be fractal-web 1 host/forge 2026-10-31T15:53:56Z
