@@ -6,6 +6,8 @@ description = "Claims-graph agent reconciler"
 license = "MIT"
 # Most tests share one binary; descriptor-limit fault injection needs its own process.
 autotests = false
+# src/main.rs is the library's root, not a binary: `fractal` is crates/fractal-cli, and fractal-fixture is declared below.
+autobins = false
 
 [features]
 # Forwarded to the library; tests enable it through the dev-dependencies below, which also turn on this
@@ -65,8 +67,6 @@ fractal-tui = { path = "../fractal-tui" }
 fractal-conversation-ui = { path = "../fractal-conversation-ui", features = ["ratatui"] }
 fractal-schema = { path = "../fractal-schema" }
 fractal-drivers = { path = "../fractal-drivers" }
-# The build identity, baked here and not in a library (see crates/fractal-build-stamp).
-fractal-build-stamp = { path = "../fractal-build-stamp" }
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.27"
@@ -108,16 +108,13 @@ required-features = ["test-support"]
 name = "collection_fixture"
 required-features = ["test-support"]
 
+# The CLI and daemon. The `fractal` executable is its own package (crates/fractal-cli): only it bakes the build
+# identity, so a new commit relinks it and rebuilds nothing here. The library also lets this package switch
+# on its own `test-support` feature through the dev-dependency on itself above. Its root keeps the name
+# src/main.rs, which other branches and tools name.
 [lib]
-name = "fractal_package_marker"
-path = "src/package_marker.rs"
-test = false
-doctest = false
-doc = false
-
-[[bin]]
-name = "fractal"
 path = "src/main.rs"
+doctest = false
 
 [[bin]]
 name = "fractal-fixture"

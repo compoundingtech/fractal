@@ -77,9 +77,57 @@ macro_rules! test_bin {
     };
 }
 
+/// fractal beside `fixture`, where the fractal-cli package puts it in the same target directory (`cargo
+/// test --workspace`, `-p fractal-cli`, or a nextest archive of both). A plain `cargo test -p fractal` does
+/// not build it: a missing fractal fails, and one older than the fixture may be stale and is warned about.
+#[allow(dead_code)]
+pub(crate) fn fractal_beside(fixture: &std::path::Path) -> String {
+    let fractal = fixture.with_file_name("fractal");
+    let modified = |path: &std::path::Path| path.metadata().and_then(|metadata| metadata.modified());
+    match (modified(&fractal), modified(fixture)) {
+        (Err(error), _) => panic!(
+            "{} is missing ({error}): the fractal-cli package builds it; run these tests with -p fractal-cli or --workspace",
+            fractal.display()
+        ),
+        (Ok(fractal_time), Ok(fixture_time)) if fractal_time < fixture_time => eprintln!(
+            "warning: {} is older than fractal-fixture and may be stale; build it too with -p fractal-cli",
+            fractal.display()
+        ),
+        _ => {}
+    }
+    fractal.to_str().expect("test target path is UTF-8").to_owned()
+}
+
+/// The fractal a parent test hands down in `NEXTEST_BIN_EXE_fractal` when it reruns itself with a cleared
+/// environment (git_evidence), or else fractal beside `fixture`. In an extracted archive that rerun has
+/// none of the archive variables, so the fixture resolves to its compiled path, with no fractal beside it.
+#[allow(dead_code)]
+pub(crate) fn fractal_handed_down_or_beside<'a>(
+    handed_down: Option<String>,
+    fixture: impl FnOnce() -> &'a std::path::Path,
+) -> String {
+    handed_down.unwrap_or_else(|| fractal_beside(fixture()))
+}
+
+/// The fractal executable, another package's binary, as a path string (see `fractal_handed_down_or_beside`).
+#[allow(unused_macros)]
+macro_rules! fractal_bin {
+    () => {{
+        static VALUE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        VALUE
+            .get_or_init(|| {
+                crate::ci_test_paths::fractal_handed_down_or_beside(
+                    std::env::var("NEXTEST_BIN_EXE_fractal").ok(),
+                    || test_bin!("fractal-fixture"),
+                )
+            })
+            .as_str()
+    }};
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve;
+    use super::{fractal_handed_down_or_beside, resolve};
 
     #[test]
     fn a_library_fixture_uses_its_own_relocated_manifest() {
@@ -110,6 +158,20 @@ mod tests {
             )
             .unwrap(),
             "/extract/target/debug/fractal-fixture"
+        );
+    }
+
+    #[test]
+    fn a_rerun_uses_the_fractal_its_parent_handed_down() {
+        // In an extracted archive, git_evidence's env-cleared rerun resolves the fixture to its
+        // compiled path, and no fractal sits beside that; only the fractal its parent handed down exists.
+        let compiled_fixture =
+            std::path::Path::new("/absent-build-tree/target/debug/fractal-fixture");
+        assert_eq!(
+            fractal_handed_down_or_beside(Some("/archive/target/debug/fractal".to_owned()), || {
+                compiled_fixture
+            }),
+            "/archive/target/debug/fractal"
         );
     }
 

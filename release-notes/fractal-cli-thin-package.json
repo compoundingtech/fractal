@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The fractal executable is now built by its own small package, crates/fractal-cli, the only one that bakes the build identity. A new commit relinks fractal and no longer recompiles the CLI and its tests. The cargo invocation changed: `cargo build -p fractal-cli --bin fractal` (or `--workspace`) builds fractal, and `cargo build -p fractal` now builds only the CLI library",
+  "replay": {"status": "none", "detail": "No replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "The product name and install are unchanged: the executable is still named fractal and behaves the same, the st and st3 aliases still point at it, and the flake outputs, release archive names and contents, and scripts/install give users the same files. The CLI code stays in crates/fractal, now a library. Tests in crates/fractal that run fractal find it beside fractal-fixture, so run them with `-p fractal-cli` too, or with --workspace."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "Anyone with their own build command for the fractal executable changes `-p fractal` (or `-p fractal --bin fractal`) to `-p fractal-cli` (or `-p fractal-cli --bin fractal`). No operator action for installed binaries."},
+  "recovery": {"status": "none", "detail": "No persistent state; an older build installs and runs as before."}
+}

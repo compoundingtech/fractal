@@ -29,7 +29,7 @@ def isolated_path(bin_dir):
 
 
 def source_findings(root):
-    for crate in ("fractal", "fractal-tui"):
+    for crate in ("fractal-cli", "fractal", "fractal-tui"):
         for path in sorted((root / "crates" / crate).rglob("*.rs")):
             source = path.read_text()
             for match in IMPORT.finditer(source):
@@ -42,7 +42,7 @@ def dependency_findings(metadata):
     # features and target/dev/build dependencies. Traverse neutral crates too: an alias or
     # indirect workspace dependency must not let st2 back into either current product.
     packages = {package["name"]: package for package in metadata["packages"]}
-    for product in ("fractal",):
+    for product in ("fractal-cli", "fractal"):
         pending = [(product, [product])]
         seen = set()
         while pending:

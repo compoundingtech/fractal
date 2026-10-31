@@ -1,4 +1,9 @@
 //! Version inspection needs neither a daemon nor the caller's source checkout.
+
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use std::process::Command;
 
 fn version(directory: &std::path::Path, args: &[&str]) -> String {
@@ -54,7 +59,7 @@ fn version_is_baked_and_available_without_a_daemon() {
         .unwrap();
     assert!(commit.status.success(), "{commit:?}");
     std::fs::write(root.path().join("untracked"), "different source").unwrap();
-    // The identity the binary bakes and hands to the library at startup, as st3's `main` does.
+    // The identity the binary bakes and hands to the library at startup, as this package's `main` does.
     fractal_drivers::version::set_build_stamps(
         fractal_build_stamp::CLI_BUILD_STAMP,
         fractal_build_stamp::ST_BUILD_STAMP_LOCAL,

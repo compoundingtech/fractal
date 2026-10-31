@@ -239,9 +239,9 @@ fn cli_command_with_bindings(
 
 /// The reconcile pass cap when the config sets none. The test fixture runs at the fastest
 /// supported cap, so integration tests check what converges without waiting out pass spacing;
-/// a test about spacing sets its cap in the config. The binary name is a compile-time value.
+/// a test about spacing sets its cap in the config.
 fn default_max_passes_per_minute() -> u32 {
-    if env!("CARGO_BIN_NAME") == "fractal-fixture" {
+    if fixture() {
         600
     } else {
         fractal_daemon::config::DEFAULT_MAX_PASSES_PER_MINUTE
@@ -4856,12 +4856,31 @@ fn checkpoint_space_gate_capabilities_request(arguments: &[std::ffi::OsString]) 
         .then(|| arguments.len() == 2 && arguments[1] == FLAG)
 }
 
-fn main() -> ExitCode {
-    // Before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
-    use fractal_build_stamp::{CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL};
-    fractal_drivers::version::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
-    fractal_tui::set_build_stamps(CLI_BUILD_STAMP, ST_BUILD_STAMP_LOCAL);
+/// The `fractal` executable's entry point. The fractal-cli package bakes the build identity and hands it
+/// over here, before anything reads the version: clap's `--version`, telemetry, the API, hook receipts, stui.
+pub fn main(cli_build_stamp: Option<&'static str>, local_build_stamp: Option<&'static str>) -> ExitCode {
+    fractal_drivers::version::set_build_stamps(cli_build_stamp, local_build_stamp);
+    fractal_tui::set_build_stamps(cli_build_stamp, local_build_stamp);
     cli_output::finish(cli_main())
+}
+
+/// The test fixture's entry point (src/fixture.rs), the only caller. It exists only with test-support.
+#[cfg(feature = "test-support")]
+pub fn fixture_main() -> ExitCode {
+    FIXTURE.store(true, std::sync::atomic::Ordering::Relaxed);
+    cli_output::finish(cli_main())
+}
+
+#[cfg(feature = "test-support")]
+static FIXTURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the test fixture runs the CLI rather than `fractal`. Only `fixture_main` sets it, and nothing
+/// outside a test-support build can call that.
+fn fixture() -> bool {
+    #[cfg(feature = "test-support")]
+    return FIXTURE.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(feature = "test-support"))]
+    false
 }
 
 fn cli_main() -> ExitCode {
@@ -4941,10 +4960,10 @@ fn cli_main() -> ExitCode {
     {
         return run_driver_hook();
     }
-    // Cargo bakes the target name into each executable. The installed st3 binary cannot
-    // enable this with an argument, environment variable, or a different filename.
+    // Only the fixture's own entry point sets this. The installed fractal binary cannot enable it with an
+    // argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell = (env!("CARGO_BIN_NAME") == "fractal-fixture")
+    let _fixture_shell = fixture()
         .then(fractal_daemon::test_support::initialize_fixture);
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { fractal_drivers::reexec::take_resume_environment() };
@@ -18805,7 +18824,7 @@ impl NativeMailbox {
             }
             Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "fractal-fixture"
+                if fixture()
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
                     fs::write(PathBuf::from(root).join("title-stream-admitted"), b"seat")?;

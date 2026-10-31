@@ -101,7 +101,7 @@ fn bounded_output(mut command: Command, limit: Duration) -> Result<Output, Strin
 }
 
 fn command(root: &Path) -> Command {
-    let mut command = Command::new(test_bin!("fractal"));
+    let mut command = Command::new(fractal_bin!());
     command
         .current_dir(root)
         .env_clear()

@@ -417,7 +417,7 @@ fn person_admission_exception_is_local_reversible_and_never_spawns_the_producer(
     std::fs::write(&producer, format!("#!/bin/sh\nprintf called > '{}'\nexit 1\n", marker.display())).unwrap();
     std::fs::set_permissions(&producer, std::fs::Permissions::from_mode(0o700)).unwrap();
     let run = |action: &str, agent: bool| {
-        let mut command = std::process::Command::new(test_bin!("fractal"));
+        let mut command = std::process::Command::new(fractal_bin!());
         command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .arg("--json").args(["admission", action, "omp", "--binary"])
             .arg(&producer).arg("--state-dir").arg(root.path().join("state"));

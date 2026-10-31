@@ -350,14 +350,18 @@ def main():
         # Keep the original no-default-features unit/integration/doc tests and dependency gate,
         # using the producer's compiler cache instead of rebuilding in the runtime consumer.
         subprocess.run(['bash', 'scripts/ci-linux', 'conversation-model'], check=True)
-        # The real-user gateway must retain the standalone production feature set.
+        # The real-user gateway must retain the standalone production feature set: the fractal binary and the
+        # CLI library it links (the fractal package's library), which is the one that has a test-support feature.
         with (directory / 'production-build.json').open('w') as stream:
-            subprocess.run(['cargo', 'build', '--locked', '-p', 'fractal', '--bin', 'fractal',
+            subprocess.run(['cargo', 'build', '--locked', '-p', 'fractal-cli', '--bin', 'fractal',
                             '--message-format=json'], check=True, stdout=stream)
         artifacts = [json.loads(line) for line in (directory / 'production-build.json').read_text().splitlines()]
-        binaries = [item for item in artifacts if item.get('reason') == 'compiler-artifact'
-                    and item['target']['name'] == 'fractal' and item.get('executable')]
-        if len(binaries) != 1 or 'test-support' in binaries[0]['features'] or binaries[0]['profile']['test']:
+        compiled = [item for item in artifacts if item.get('reason') == 'compiler-artifact'
+                    and item['target']['name'] == 'fractal']
+        binaries = [item for item in compiled if 'bin' in item['target']['kind'] and item.get('executable')]
+        libraries = [item for item in compiled if 'lib' in item['target']['kind']]
+        if (len(binaries) != 1 or len(libraries) != 1
+                or any('test-support' in item['features'] or item['profile']['test'] for item in binaries + libraries)):
             raise ValueError('standalone production gateway feature/profile identity required')
         import shutil
         shutil.copy2(binaries[0]['executable'], directory / 'sekrets-st3')

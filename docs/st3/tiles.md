@@ -173,7 +173,7 @@ tiles get user IDs from a test range, and afterwards `st tiles remove` removes e
 and directory:
 
 ```sh
-ST_TILES_ROOT_TEST=1 cargo test -p fractal --test integration tiles_root:: -- --nocapture
+ST_TILES_ROOT_TEST=1 cargo test -p fractal-cli -p fractal --test integration tiles_root:: -- --nocapture
 ```
 
 CI does not run these: its runners have no root, and the tests return at once there. The builder

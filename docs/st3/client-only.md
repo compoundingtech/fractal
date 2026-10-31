@@ -91,7 +91,7 @@ local profile makes the terminal UI select local mode again but does not revoke 
 ## Isolated verification
 
 ```sh
-cargo test -p fractal --locked --test integration client_only
+cargo test -p fractal-cli -p fractal --locked --test integration client_only
 cargo run -p fractal-client-codegen --locked -- --check
 ```
 

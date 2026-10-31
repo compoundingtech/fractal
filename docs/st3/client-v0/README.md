@@ -1764,7 +1764,7 @@ The shared `checks.st3` suite includes the adapter's Rust tests.
 Rerun the scratch exercise (no live daemon or ChatGPT application is touched):
 
 ```sh
-nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
+nix develop -c bash -c 'export CARGO_TARGET_DIR=tmp/target; cargo run -p fractal-client-codegen && cargo build -j 2 -p fractal-chatgpt -p fractal -p fractal-cli --features fractal/test-support --bin st-chatgpt --bin fractal --example chatgpt_fixture && cargo test -j 2 -p fractal-chatgpt && cargo test -j 2 -p fractal --test assistant_native && python3 scripts/chatgpt-prototype-e2e.py'
 ```
 
 The script starts the repository API harness with its own persistent store, paired gateway,

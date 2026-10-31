@@ -258,6 +258,8 @@
           "--exclude"
           "fractal-runtime"
           "--exclude"
+          "fractal-cli"
+          "--exclude"
           "fractal"
           "--exclude"
           "fractal-daemon"
@@ -497,7 +499,7 @@
           inherit cargoDeps;
           cargoBuildFlags = [
             "-p"
-            "fractal"
+            "fractal-cli"
             "-p"
             "fractal-migrate"
           ];
@@ -508,6 +510,8 @@
             "smallclaims"
             "-p"
             "fractal-runtime"
+            "-p"
+            "fractal-cli"
             "-p"
             "fractal"
             "-p"

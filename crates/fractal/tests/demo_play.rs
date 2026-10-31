@@ -144,7 +144,7 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
             pixel_height: 0,
         })
         .unwrap();
-    let mut command = CommandBuilder::new(test_env!("CARGO_BIN_EXE_fractal"));
+    let mut command = CommandBuilder::new(fractal_bin!());
     command.args(["--instance", "demo-test", "demo", "play"]);
     command.arg(&file);
     command.env_clear();
