@@ -343,12 +343,8 @@ pub async fn receipt(
             )));
         }
         let record_stream = || -> Result<(ClaimRecord, bool), St3Error> {
-            let appended = crate::store::messages_shard::record_fenced_lifecycle(
-                &store, &request.fence, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
-            )?;
-            Ok((crate::store::messages_shard::lifecycle_receipt(
-                &store.graph.origin, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
-            ), appended))
+            let message = stream.as_ref().expect("only a stream item is recorded in the shard");
+            record_stream_receipt(&store, &request.fence, message, &input, payload.native_receipt.as_ref())
         };
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
@@ -379,6 +375,35 @@ pub async fn receipt(
         super::signal_message_changed(&state, &kind, work_wake);
     }
     Ok(Json(record))
+}
+
+/// A stream item's receipt, admitted as a graph receipt is: a seat whose rollout drains stages
+/// no new independent mail, and a Claude consumption proof is kept with the read. The proof is
+/// this member's record, as the graph keeps it beside its claim, so it rides in the step's
+/// local fields; the receipt answered is the one the step names, without it.
+fn record_stream_receipt(
+    store: &Store,
+    fence: &Fence,
+    message: &MessageView,
+    input: &ClaimInput,
+    native: Option<&crate::conversation_delivery::NativeReceipt>,
+) -> Result<(ClaimRecord, bool), St3Error> {
+    if input.kind == "message.staged" && !store.rollout_message_allowed(message)? {
+        return Err(St3Error::new("seat-rollout-draining", "new independent delivery waits for the seat rollout"));
+    }
+    let mut fields = input.fields.clone();
+    if let Some(native) = native {
+        fields.insert(
+            "native_receipt".into(),
+            serde_json::to_value(native).map_err(|error| St3Error::new("internal", error.to_string()))?,
+        );
+    }
+    let appended = crate::store::messages_shard::record_fenced_lifecycle(
+        store, fence, &input.subject, &input.kind, input.actor.as_deref(), &fields,
+    )?;
+    Ok((crate::store::messages_shard::lifecycle_receipt(
+        &store.graph.origin, &input.subject, &input.kind, input.actor.as_deref(), &input.fields,
+    ), appended))
 }
 
 type Snapshot = (
@@ -4446,6 +4471,94 @@ mod tests {
         for subject in [first, second] {
             assert!(store.claims_for(subject, None).unwrap().is_empty(), "{subject} reached the graph");
         }
+    }
+
+    /// A stream item's receipt is admitted as a graph receipt is: a seat whose rollout drains
+    /// stages no new independent stream item, and a read keeps its Claude consumption proof.
+    #[test]
+    fn stream_receipts_wait_for_a_draining_rollout_and_keep_a_native_proof() {
+        use crate::store::owned_sets::{Options, Source};
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
+        let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+        let name = "eval.stream-rollout";
+        let subject = format!("agent/{name}");
+        let input = crate::graph::parse_owned_set_intent(&format!(
+            "version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"omp\" {{}} }}"
+        ), "node").unwrap();
+        let policy = crate::rollout::Policy::when_idle(1_800_000, false);
+        let mut options = Options {
+            set: name.into(), source: Source { repository: "fixture/stream".into(),
+                r#ref: "refs/heads/main".into(), sha: "1".repeat(40), sequence: 1 },
+            expected_set: "absent".into(), rollout: Some(policy.clone()),
+            adopt: Default::default(), allow_empty: false, confirm_retire: None,
+            expected_subjects: Default::default(),
+        };
+        let preview = store.owned_set_preview(&input, &options).unwrap();
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        options.expected_subjects = preview.expected_subjects;
+        store.apply_owned_set(&input, &options, "stream-publish", "person/test").unwrap();
+        let selected = store.rollout_selection(&subject).unwrap().unwrap();
+        let member = selected.desired.member.as_ref().unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "host":"node",
+                "runtime_id":member.runtime_id, "incarnation_id":"current"})),
+            ("harness.observed", json!({"state":"ready", "driver":"omp", "incarnation_id":"current"})),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some(subject.clone()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let fence = store.bind_mailbox(&Fence::new(&subject, "current", "delivery")).unwrap();
+        store.request_rollout(&subject, &selected.desired_token, member, "current",
+            "person/test", &policy, "stream-drain").unwrap();
+        assert!(store.rollout_intake_hold(&subject).unwrap().is_some());
+        let item = "message/00000000000000f1";
+        shard.append_claim(&ClaimInput {
+            subject: item.into(),
+            kind: "message.sent".into(),
+            actor: Some("agent/fixture.sender".into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("sent")),
+                ("from".into(), json!("agent/fixture.sender")),
+                ("to".into(), json!(subject)),
+                ("content".into(), json!("An independent stream fixture.")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let receipt = |lifecycle: &str, native: Option<&crate::conversation_delivery::NativeReceipt>| {
+            let message = store.message(item).unwrap().unwrap();
+            record_stream_receipt(&store, &fence, &message, &ClaimInput {
+                subject: item.into(),
+                kind: format!("message.{lifecycle}"),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([("status".into(), json!(lifecycle))]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }, native)
+        };
+        assert_eq!(receipt("staged", None).unwrap_err().code, "seat-rollout-draining");
+        assert_eq!(store.message(item).unwrap().unwrap().status, "sent");
+
+        let proof = crate::conversation_delivery::NativeReceipt {
+            session_id: format!("session/external-{}", "a".repeat(24)),
+            message_id: "fixture-native-record".into(),
+        };
+        let (record, appended) = receipt("read", Some(&proof)).unwrap();
+        assert!(appended);
+        assert_eq!(record.kind, "message.read");
+        assert_eq!(record.body["fields"], json!({"status": "read"}));
+        let fields: String = shard.readers.get().query_row(
+            "SELECT fields FROM stream_lifecycle WHERE subject=?1 AND kind='message.read'",
+            [item],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&fields).unwrap()["native_receipt"],
+            serde_json::to_value(&proof).unwrap()
+        );
+        assert!(store.claims_for(item, None).unwrap().is_empty(), "the receipt reached the graph");
     }
 
     #[test]

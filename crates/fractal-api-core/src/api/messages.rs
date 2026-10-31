@@ -489,13 +489,25 @@ pub async fn post_message_claim(
                     format!("`{subject}` is a stream item: it has no graph claim to compare with"),
                 )));
             }
-            // A delegated or successor's transition is checked by the graph's write rules, which
-            // a stream item does not reach yet; only the recipient's own transitions are recorded.
-            if fields.contains_key("acting_for") || request.delegation.is_some() {
-                return Err(ApiError::bad(St3Error::new(
-                    "stream-lifecycle-unsupported",
-                    format!("`{subject}` is a stream item: only its recipient records its lifecycle"),
-                )));
+            // A successor's custody step and a delegated step pass the rules the graph applies to
+            // their claims, read against the stream item; the step itself stays this member's
+            // record, with its custody or delegation proof in its fields.
+            let input = ClaimInput {
+                subject: subject.clone(),
+                kind: kind.into(),
+                actor: Some(actor.clone()),
+                fields: fields.clone(),
+                evidence: evidence.clone(),
+                expected_subject: None,
+                idempotency_key: None,
+            };
+            crate::store::retirements::admit_mail_claim_to(&store.readers.get(), &input, &message)
+                .map_err(ApiError::bad)?;
+            if fields.contains_key("delegation") || fields.contains_key("acted_for") {
+                crate::store::delegation::validate_stream_write(
+                    &store, &subject, kind, Some(&actor), &fields, &evidence,
+                )
+                .map_err(ApiError::bad)?;
             }
             let appended = crate::store::messages_shard::record_lifecycle(
                 &store, &subject, kind, Some(&actor), &fields,

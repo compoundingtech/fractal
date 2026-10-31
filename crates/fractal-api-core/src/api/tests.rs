@@ -12519,6 +12519,80 @@ async fn delegated_person_work_api_preserves_identity_and_closes_person_message(
     assert_eq!(status, StatusCode::OK, "{repeated}");
 }
 
+/// A stream item to a person is closed for them by a delegated agent as graph mail is: the
+/// proof is checked against the item's sent claim in the messages shard, and the step is this
+/// member's record, carrying the proof, with nothing written to the graph.
+#[tokio::test]
+async fn a_delegated_close_of_a_stream_item_is_validated_and_recorded_locally() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    )
+    .unwrap();
+    state.store.apply_internal(&intent, "delegation-stream-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let sent = |subject: &str, from: &str, to: &str, content: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some(from.into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!(from)),
+            ("to".into(), json!(to)),
+            ("content".into(), json!(content)),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let instruction = state
+        .store
+        .append_claim(&sent("message/instruction", "person/avery", &actor, "Archive the stream notice"))
+        .unwrap();
+    let notice = "message/00000000000000d1";
+    let notice_sent = shard.append_claim(&sent(notice, &actor, "person/avery", "Notice")).unwrap();
+    let (status, policy) = json_request(app.clone(), "/v1/work/delegation", json!({
+        "person":"person/avery","actor":"person/avery","actions":["close-item"],
+        "evidence":[instruction.id],"idempotency_key":"allow"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let proof = json!({"person":"person/avery","policy":policy["id"],"message":"message/instruction",
+        "quote":"Archive the stream notice","episode":notice_sent.id});
+    let path = format!("/v1/messages/{}/claims", urlencoding::encode(notice));
+    let close = |delegation: Value| json!({"lifecycle":"closed","actor":actor,"delegation":delegation,
+        "evidence":[],"idempotency_key":"close"});
+    let mut misquoted = proof.clone();
+    misquoted["quote"] = json!("Keep the stream notice");
+    let (status, refused) = json_request(app.clone(), &path, close(misquoted)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "delegation-refused");
+    let mut expected = close(proof.clone());
+    expected["expected_subject"] = json!("fixture-digest");
+    let (status, refused) = json_request(app.clone(), &path, expected).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "expected-subject-unsupported");
+    assert_eq!(state.store.message(notice).unwrap().unwrap().status, "sent");
+
+    let (status, closed) = json_request(app.clone(), &path, close(proof.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["actor"], actor);
+    assert!(closed["id"].as_str().unwrap().starts_with("offset-receipt/"), "{closed}");
+    assert_eq!(closed["body"]["fields"]["acted_for"], "person/avery");
+    assert_eq!(closed["body"]["fields"]["delegation"], proof);
+    assert_eq!(state.store.message(notice).unwrap().unwrap().status, "closed");
+    assert_eq!(
+        crate::store::messages_shard::mailbox_reads::lifecycle_step(&state.store, notice, "message.closed")
+            .unwrap()
+            .map(|(actor, _)| actor),
+        Some(actor.clone())
+    );
+    assert!(state.store.claims_for(notice, None).unwrap().is_empty(), "the close reached the graph");
+}
+
 #[tokio::test]
 async fn message_pages_are_bounded_and_stable_across_new_writes() {
     let root = tempfile::tempdir().unwrap();

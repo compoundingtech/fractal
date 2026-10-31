@@ -186,6 +186,8 @@ pub fn lifecycle_receipt(
 /// A delivery channel's receipt for a stream item, admitted under the fence a graph receipt
 /// is: a live incarnation, the lease, and the current owner's token. The shard is a separate
 /// database, so the fence is read just before the record rather than in its transaction.
+/// That leaves a window a graph receipt does not have: the fence is read on the graph and the
+/// record goes to the shard, so a token revoked between the two can still record one step.
 pub fn record_fenced_lifecycle(
     graph: &super::Store,
     fence: &crate::mailbox::Fence,
