@@ -33,10 +33,10 @@ const FOLDED_SUBJECTS: [&str; 2] = ["agent/", "step-run/"];
 
 /// Only production-reader-complete replacements may suppress a kind's inventory comparison.
 /// Other kinds keep their conservative inventory check, even when history counts can differ.
-const SLOT_READERS: [&str; 2] = ["observer.observed", "resource.observed"];
+const SLOT_READERS: [&str; 1] = ["observer.observed"];
 
 fn observation_slot(subject: &str, kind: &str) -> Result<String> {
-    // Both supported production readers are subject-level, spanning every writer.
+    // The observer production readers are subject-level, spanning every writer.
     Ok(serde_json::to_string(&[subject, kind])?)
 }
 
@@ -62,11 +62,10 @@ pub fn slot_reader_movement(
          AND CAST(accepted_at_unix_ms AS INTEGER)>=?2)",
     )?;
     for subject in subjects {
-        let kind = if subject.starts_with("resource/") { "resource.observed" }
-            else if subject.starts_with("observer/") { "observer.observed" }
-            else { continue };
+        if !subject.starts_with("observer/") { continue; }
+        let kind = "observer.observed";
         // Bounded subject/cut keys and a single EXISTS boolean.
-        let cursor_moved: bool = kind == "observer.observed" && cursor.query_row(
+        let cursor_moved: bool = cursor.query_row(
             /* sqlite-large-value: allow-for-now lv-h4bf037bf5361 owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ params![subject, i64::try_from(cut)?], |row| row.get(0),
         )?;
         if actual_moved(connection, subject, cut)? || cursor_moved {
@@ -82,8 +81,6 @@ fn slot_reader_answers(
     cut: u128,
 ) -> Result<BTreeMap<String, Vec<smallclaims::answers::AnswerKey>>> {
     let mut readers = BTreeMap::new();
-    let repaired = connection.prepare_cached("SELECT id FROM projection_digest_repaired_claims")?
-        .query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<BTreeSet<_>>>()?;
     for kind in SLOT_READERS {
         let subjects = connection.prepare_cached(
             "SELECT DISTINCT subject FROM claims WHERE kind=?1 ORDER BY subject",
@@ -92,39 +89,19 @@ fn slot_reader_answers(
         let mut keys = Vec::new();
         for subject in subjects {
             let history = claims_of_kind_in_order(connection, &subject, kind)?;
-            let cursor_moving = kind == "observer.observed"
-                && history.last().is_some_and(|claim| claim.accepted_at_unix_ms >= cut);
-            if kind == "resource.observed" && !history.iter().any(|claim| !repaired.contains(&claim.id)) {
-                continue;
-            }
+            let cursor_moving = history.last().is_some_and(|claim| claim.accepted_at_unix_ms >= cut);
             let moving = cursor_moving || actual_moved(connection, &subject, cut)?;
-                let answer = if kind == "resource.observed" {
-                    // Read the production projection: its first opener, attribution-only rows
-                    // and compact item-state overlays depend on observation acceptance times.
-                    let row: Option<String> = connection.query_row(
-                        "SELECT json_object('kind',r.kind,'claim',r.claim_id,'facts',json(r.facts),'observed_at',r.observed_at,
-                         'opened_by',r.opened_by,'opened_by_run',r.opened_by_run,
-                         'observer',json_extract(c.body,'$.fields.observer'))
-                         FROM resource_observations r JOIN claims c ON c.id=r.claim_id WHERE r.subject=?1",
-                        [&subject], |row| row.get(0),
-                    ).optional()?;
-                    json!({
-                        "collection": row.map(|row| serde_json::from_str::<Value>(&row)).transpose()?,
-                        "actual": latest_actual(connection, &subject)?,
-                    })
-                } else {
-                    json!({
-                        "state": latest_actual(connection, &subject)?,
-                        "cursor": resources::claimed_observer_cursor_at(connection, &subject)?,
-                    })
-                };
-                let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
-                keys.push(smallclaims::answers::AnswerKey {
-                    subject: subject.clone(),
-                    origin: observation_slot(&subject, kind)?,
-                    claim: hex::encode(Sha256::digest(canonical.as_bytes())),
-                    moving,
-                });
+            let answer = json!({
+                "state": latest_actual(connection, &subject)?,
+                "cursor": resources::claimed_observer_cursor_at(connection, &subject)?,
+            });
+            let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
+            keys.push(smallclaims::answers::AnswerKey {
+                subject: subject.clone(),
+                origin: observation_slot(&subject, kind)?,
+                claim: hex::encode(Sha256::digest(canonical.as_bytes())),
+                moving,
+            });
         }
         keys.sort();
         // Empty entries advertise coverage, including when one member has no claims of the kind.

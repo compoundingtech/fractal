@@ -113,16 +113,13 @@ fn retained_history_case(kind: &str) {
             /* sqlite-large-value: allow-for-now lv-h82b449284c39 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id IN (?1,?2)", [&ids[first], &ids[1]],
         ).unwrap();
         let trimmed = summary();
-        if !matches!(kind, "observer.observed" | "resource.observed") {
+        if kind != "observer.observed" {
             assert!(differing_kinds(&full, &trimmed, true).iter().any(|difference| difference.kind == kind),
                 "incomplete production-reader coverage must retain {kind}'s conservative inventory check");
             return;
         }
         assert!(differing_kinds(&full, &trimmed, true).is_empty(), "{kind}");
-        let update = match kind {
-            "resource.observed" => /* sqlite-large-value: allow-for-now lv-h72b484fa5067 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.facts.state','closed') WHERE id=?1",
-            _ => /* sqlite-large-value: allow-for-now lv-h02c49cdc0193 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.status','failed') WHERE id=?1",
-        };
+        let update = /* sqlite-large-value: allow-for-now lv-h02c49cdc0193 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.status','failed') WHERE id=?1";
         store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hea7a342bde64 owner=fractal_store::store::answers_check_tests TODO=trace-statement-and-value-representation */ update, [&ids[2]]).unwrap();
         assert!(!differing_kinds(&trimmed, &summary(), true).is_empty(), "{kind}");
 }
@@ -152,62 +149,28 @@ fn observer_reader_preserves_field_carriers() {
     assert_ne!(full, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
 }
 
-fn observation(store: &Store, subject: &str, kind: &str, writer: &str, at: u128, mut fields: Value) -> String {
+fn observation(store: &Store, subject: &str, kind: &str, writer: &str, at: u128, fields: Value) -> String {
     store.set_write_clock_at(at).unwrap();
-    if kind == "vcs.item.state" {
-        let fields = fields.as_object_mut().unwrap();
-        fields.entry("version").or_insert(json!(1));
-        fields.entry("observer").or_insert(json!("observer/example"));
-    }
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();
     let claim = append_claim_tx(&transaction, writer, subject, kind, None, &json!({"fields":fields}), &[], None).unwrap();
-    if subject.starts_with("resource/") { resources::refresh(&transaction, subject).unwrap(); }
     transaction.commit().unwrap();
     claim.id
 }
 
-#[test]
-fn resource_reader_includes_compact_overlay_timing() {
-    let answer = |at| {
-        let store = Store::open_memory("alder").unwrap();
-        let subject = "resource/example/issue/1502";
-        observation(&store, subject, "resource.observed", "alder", at,
-            json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
-        observation(&store, subject, "vcs.item.state", "alder", 200,
-            json!({"item_kind":"vcs.issue","state":"closed"}));
-        slot_reader_answers(&store.readers.get(), 1_000).unwrap()["slots/resource.observed"].clone()
-    };
-    assert_ne!(answer(100), answer(300), "the same compact state overlays only the older observation");
-}
 
 #[test]
-fn slot_readers_exclude_repaired_originals() {
-    let store = Store::open_memory("alder").unwrap();
-    let subject = "resource/example/issue/1502";
-    let original = observation(&store, subject, "resource.observed", "alder", 100,
-        json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h4a2ed0ed1e0c owner=fractal_store::store::answers_check_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&original]).unwrap();
-    // The production repair projection excludes the original; only its admitted row remains.
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h50cf7c6643ae owner=fractal_store::store::answers_check_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations WHERE subject=?1", [subject]).unwrap();
-    let retained = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb78dff70f153 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original]).unwrap();
-    assert_eq!(retained, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
-}
-
-#[test]
-fn served_cache_tracks_resource_actual_state_dependencies() {
+fn served_cache_tracks_observer_actual_state_dependencies() {
     use smallclaims::answers::AnswersCache;
     let store = Arc::new(Store::open_memory("alder").unwrap());
-    let subject = "resource/example/issue/1502";
-    observation(&store, subject, "resource.observed", "alder", 100,
-        json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
+    let subject = "observer/example";
+    observation(&store, subject, "observer.observed", "alder", 100, json!({"status":"healthy"}));
     let cache = Arc::new(AnswersCache::default());
     cache.set_readers(Arc::new(fold_reader_answers));
     cache.set_reader_movement(Arc::new(slot_reader_movement));
-    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 1);
+    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/observer.observed"].keys, 1);
     observation(&store, subject, "publication.operation", "alder", 2_000, json!({"status":"accepted"}));
-    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 0);
+    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/observer.observed"].keys, 0);
 }
 
 fn served_summary(
@@ -222,45 +185,6 @@ fn served_summary(
     panic!("cache did not answer");
 }
 
-#[test]
-fn cached_resource_receipts_move_with_observations_and_compact_state() {
-    use smallclaims::answers::AnswersCache;
-    for (kind, fields) in [
-        ("resource.observed", json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"closed"}})),
-        ("vcs.item.state", json!({"item_kind":"vcs.issue","state":"closed"})),
-    ] {
-        let store = Arc::new(Store::open_memory("alder").unwrap());
-        let subject = "resource/example/issue/1502";
-        observation(&store, subject, "resource.observed", "receipt", 50,
-            json!({"kind":"vcs.issue","attribution_only":true,"opened_by":"agent/opener"}));
-        observation(&store, subject, "resource.observed", "poller", 100,
-            json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
-        let cache = || {
-            let cache = Arc::new(AnswersCache::default());
-            cache.set_readers(Arc::new(fold_reader_answers));
-            cache.set_reader_movement(Arc::new(slot_reader_movement));
-            cache
-        };
-        let early = cache();
-        assert_eq!(served_summary(&early, &store).kinds["reader/slots/resource.observed"].keys, 1);
-        observation(&store, subject, kind, "poller", 2_000, fields);
-        let earlier = served_summary(&early, &store);
-        let later = served_summary(&cache(), &store);
-        assert_eq!(earlier.kinds["reader/slots/resource.observed"], later.kinds["reader/slots/resource.observed"]);
-        assert_eq!(later.kinds["reader/slots/resource.observed"].keys, 0, "{kind}");
-    }
-}
-
-#[test]
-fn resource_reader_covers_the_winning_recorder() {
-    let answer = |observer| {
-        let store = Store::open_memory("alder").unwrap();
-        observation(&store, "resource/example/issue/1502", "resource.observed", "alder", 100,
-            json!({"kind":"vcs.issue","observer":observer,"facts":{"state":"open"}}));
-        slot_reader_answers(&store.readers.get(), 1_000).unwrap()
-    };
-    assert_ne!(answer("observer/a"), answer("observer/b"));
-}
 
 #[test]
 fn observer_reader_covers_newest_cursor_not_only_merged_fields() {
@@ -286,7 +210,7 @@ fn conservative_usage_inventory_keeps_required_hourly_boundaries_visible() {
             json!({"semantics":"response_rollup","driver":"codex","incarnation_id":"one","model":"example","total_tokens":hour * 10})));
     }
     let full = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
-    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h8d443b1840fc owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&ids[1]]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb78dff70f153 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&ids[1]]).unwrap();
     let missing = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
     assert!(smallclaims::answers::differing_kinds(&full, &missing, true).iter()
         .any(|difference| difference.kind == "harness.usage"));
@@ -305,21 +229,3 @@ fn conservative_transport_inventory_keeps_legacy_recency_visible() {
         .any(|difference| difference.kind == "transport.observed"));
 }
 
-#[test]
-fn resource_actual_observer_survives_a_shared_compact_overlay() {
-    let mut answers = Vec::new();
-    let mut compact_ids = Vec::new();
-    for observer in ["observer/a", "observer/b"] {
-        let store = Store::open_memory("alder").unwrap();
-        let subject = "resource/example/issue/1502";
-        observation(&store, subject, "resource.observed", "poller", 100,
-            json!({"kind":"vcs.issue","observer":observer,"facts":{"state":"open"}}));
-        compact_ids.push(observation(&store, subject, "vcs.item.state", "compact", 200,
-            json!({"item_kind":"vcs.issue","state":"closed"})));
-        assert_eq!(store.resource_recorder(subject, "observer/unrelated").unwrap().as_deref(), Some("observer/example"));
-        assert_eq!(store.latest_actual_value(subject).unwrap().unwrap()["observer"], observer);
-        answers.push(slot_reader_answers(&store.readers.get(), 1_000).unwrap());
-    }
-    assert_eq!(compact_ids[0], compact_ids[1], "both replicas hold the same compact state");
-    assert_ne!(answers[0], answers[1], "the actual-state observer still differs");
-}
