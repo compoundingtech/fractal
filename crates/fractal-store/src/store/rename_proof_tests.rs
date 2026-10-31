@@ -230,10 +230,10 @@ fn portable_proof_rejects_removed_anchor_admission_evidence() {
         })
     }).unwrap();
     proof.envelopes.remove(admission_index);
-    // Removing the founding admission also removes the writer's first sequence.
+    // Without the founding admission, no member window can authenticate the writer.
     let error = verify_rename_proof(&proof, member.public(), None).unwrap_err();
-    assert_eq!(error.code, "broken-chain");
-    assert_eq!(error.exit_code(), 3);
+    assert_eq!(error.code, "untrusted-membership");
+    assert_eq!(error.exit_code(), 4);
 }
 
 #[test]
