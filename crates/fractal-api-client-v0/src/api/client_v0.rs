@@ -1382,6 +1382,7 @@ async fn open_terminal_subscription(
 struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
+    stream_position: u64,
     managed: Option<super::ManagedSessionOwner>,
     routing_owner: Option<super::ManagedSessionOwner>,
 }
@@ -1390,6 +1391,7 @@ fn resolve_conversation(
     state: &AppState, target: &str,
 ) -> Result<(String, ResolvedConversation), ApiError> {
     let local_position = local_latest_position(state)?;
+    let stream_position = stream_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let (session_id, managed) = if target.starts_with("agent/") {
         let owner = state.store.conversation_owner_at(target, snapshot.store_index)
@@ -1411,7 +1413,7 @@ fn resolve_conversation(
     } else {
         managed.clone()
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, managed, routing_owner }))
+    Ok((session_id, ResolvedConversation { snapshot, local_position, stream_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1637,14 +1639,15 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, managed, .. } = resolved;
+    let ResolvedConversation { snapshot, local_position, stream_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
     let source = conversation_blocks::source(state, session_id, managed.as_ref());
     let mark = ConversationMark::from_resolved(
-        session_id, snapshot.store_index, local_position, managed.as_ref(), source.as_ref().ok(),
+        session_id, snapshot.store_index, local_position, stream_position, managed.as_ref(),
+        source.as_ref().ok(),
     );
     #[cfg(test)]
     BEFORE_CONVERSATION_PAGE.with(|pause| {
@@ -1670,6 +1673,7 @@ fn conversation_open_local_marked(
     let cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position,
+        stream_position,
         native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
             .max(extent.native_latest()),
         source_generation,
@@ -4515,19 +4519,22 @@ pub struct ConversationQuery {
 struct ConversationPosition {
     store_index: u64,
     local_position: u64,
+    /// How far into the messages stream the conversation was read, in shard indexes.
+    stream_position: u64,
     native_sequence: u64,
     source_generation: u64,
 }
 
 fn conversation_cursor(state: &AppState, session_id: &str, position: ConversationPosition) -> String {
     format!(
-        "conversation-cursor/{}/{}/{}.{}.{}.{}",
+        "conversation-cursor/{}/{}/{}.{}.{}.{}.{}",
         state.node,
         session_id.trim_start_matches("session/"),
         position.store_index,
         position.local_position,
         position.native_sequence,
-        position.source_generation
+        position.source_generation,
+        position.stream_position,
     )
 }
 
@@ -4545,12 +4552,17 @@ fn conversation_position(
         .strip_prefix(&prefix)
         .and_then(|part| {
             let mut parts = part.split('.');
-            let result = ConversationPosition {
+            let mut result = ConversationPosition {
                 store_index: parts.next()?.parse().ok()?,
                 local_position: parts.next()?.parse().ok()?,
                 native_sequence: parts.next()?.parse().ok()?,
                 source_generation: parts.next()?.parse().ok()?,
+                stream_position: 0,
             };
+            // A cursor from before the stream has no stream part: it has read none of the stream.
+            if let Some(stream) = parts.next() {
+                result.stream_position = stream.parse().ok()?;
+            }
             parts.next().is_none().then_some(result)
         })
         .ok_or_else(|| ApiError {
@@ -4798,6 +4810,8 @@ fn conversation_read_now_unbounded(
     session_id: &str,
     after: Option<&str>,
 ) -> Result<Value, ApiError> {
+    // Read before the page, so the next cursor never passes a stream item the page missed.
+    let stream_latest = stream_latest_position(state)?;
     let snapshot = new_client_snapshot(state);
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
         .map_err(ApiError::internal)?;
@@ -4823,6 +4837,7 @@ fn conversation_read_now_unbounded(
     if let Some(position) = position {
         if position.store_index > snapshot.store_index
             || position.local_position > local_latest
+            || position.stream_position > stream_latest
             || position.native_sequence > native_latest
         {
             return Err(conversation_replay_gap(
@@ -4847,7 +4862,7 @@ fn conversation_read_now_unbounded(
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
     let mut scan_remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
-    if let Some(ConversationPosition { store_index, local_position, .. }) = position {
+    if let Some(ConversationPosition { store_index, local_position, stream_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
@@ -4886,13 +4901,25 @@ fn conversation_read_now_unbounded(
             }
         }
         for claim in owner.as_deref().map(|owner| {
-            state.store.conversation_messages_at(owner, snapshot.store_index.checked_add(1), store_index)
+            state.store.conversation_messages_at(
+                owner, snapshot.store_index.checked_add(1), store_index,
+                Some(crate::store::messages_shard::stream_reads::StreamAfter::Position(stream_position)),
+            )
         }).transpose().map_err(ApiError::internal)?.unwrap_or_default() {
+            // A stream item admitted after this read's stream position is the next read's.
+            if claim.store_index.checked_sub(crate::store::messages_shard::STREAM_INDEX_BASE)
+                .is_some_and(|index| index > stream_latest)
+            {
+                continue;
+            }
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("session_id").and_then(Value::as_str)
                 .is_none_or(|message_session| message_session == session_id) {
                 changed_indexes.insert(claim.store_index);
-                message_indexes.insert(claim.store_index);
+                // The pair's sequences: a stream item's follow the graph index it arrived at.
+                message_indexes.insert(
+                    crate::store::messages_shard::stream_reads::timeline_base(&state.store, &claim).map_err(ApiError::internal)?,
+                );
                 // A stored timeline names a message by its claim; a native page by its digest.
                 changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
                 let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
@@ -4969,11 +4996,8 @@ fn conversation_read_now_unbounded(
         .cloned()
         .collect::<Vec<_>>();
     let changed = |item: &&Value| item["id"].as_str().is_some_and(|id| changed_ids.contains(id));
-    let missing_message_pair = message_indexes.iter().any(|index| {
-        ![
-            index.saturating_mul(4),
-            index.saturating_mul(4).saturating_add(1),
-        ]
+    let missing_message_pair = message_indexes.iter().any(|base| {
+        ![*base, base.saturating_add(1)]
         .iter()
         .all(|sequence| {
             items
@@ -5006,6 +5030,7 @@ fn conversation_read_now_unbounded(
     let next_cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position: local_latest,
+        stream_position: stream_latest,
         native_sequence: native_latest,
         source_generation,
     });
@@ -5028,6 +5053,7 @@ struct ConversationMark {
     resolved_at: std::time::Instant,
     store_index: u64,
     local_position: u64,
+    stream_position: u64,
     transcript_seen: Option<(u64, std::time::SystemTime)>,
 }
 
@@ -5091,12 +5117,12 @@ impl ConversationMark {
         let source = conversation_blocks::source(state, session_id, resolved.managed.as_ref());
         Ok(Self::from_resolved(
             session_id, resolved.snapshot.store_index, resolved.local_position,
-            resolved.managed.as_ref(), source.as_ref().ok(),
+            resolved.stream_position, resolved.managed.as_ref(), source.as_ref().ok(),
         ))
     }
 
     fn from_resolved(
-        session_id: &str, store_index: u64, local_position: u64,
+        session_id: &str, store_index: u64, local_position: u64, stream_position: u64,
         managed: Option<&super::ManagedSessionOwner>,
         source: Option<&crate::external_sessions::ExternalSession>,
     ) -> Self {
@@ -5113,6 +5139,7 @@ impl ConversationMark {
             owner: managed.map(|(owner, _, _)| owner.clone()),
             store_index,
             local_position,
+            stream_position,
         }
     }
 
@@ -5125,6 +5152,7 @@ impl ConversationMark {
         super::read_deadline::query(&state.store, "/v1/client/conversations/{id}/changes", || {
             self.store_index = state.store.index().map_err(ApiError::internal)?;
             self.local_position = local_latest_position(state)?;
+            self.stream_position = stream_latest_position(state)?;
             Ok(())
         })?;
         self.transcript_seen = transcript_seen(self.transcript.as_deref());
@@ -5141,13 +5169,16 @@ impl ConversationMark {
     fn changed_unbounded(&mut self, state: &AppState) -> Result<bool, ApiError> {
         let index = state.store.index().map_err(ApiError::internal)?;
         let local = local_latest_position(state)?;
+        let stream = stream_latest_position(state)?;
         let mut changed = self.owner.as_deref().map(|owner| {
             state.store.conversation_changed_at(
                 owner, self.store_index, index, self.local_position, local,
+                (self.stream_position, stream),
             )
         }).transpose().map_err(ApiError::internal)?.unwrap_or(false);
         self.store_index = index;
         self.local_position = local;
+        self.stream_position = stream;
         let seen = transcript_seen(self.transcript.as_deref());
         if seen != self.transcript_seen {
             changed = true;
@@ -5159,6 +5190,12 @@ impl ConversationMark {
 
 fn local_latest_position(state: &AppState) -> Result<u64, ApiError> {
     state.store.conversation_local_position().map_err(ApiError::internal)
+}
+
+/// The newest stream item this member has admitted: a conversation's position in the messages
+/// stream, beside its graph and local positions.
+fn stream_latest_position(state: &AppState) -> Result<u64, ApiError> {
+    crate::store::messages_shard::stream_reads::conversation_position(&state.store).map_err(ApiError::internal)
 }
 
 async fn conversation_changes_local(
@@ -5194,12 +5231,13 @@ async fn conversation_changes_local_marked(
     let mut quiet = None;
     if let Some(cursor) = after
         && let Some(seen) = issued_transcript(cursor)
-        && let Ok(ConversationPosition { store_index, local_position, .. }) =
+        && let Ok(ConversationPosition { store_index, local_position, stream_position, .. }) =
             conversation_position(state, session_id, cursor)
     {
         let mut since = ConversationMark {
             store_index,
             local_position,
+            stream_position,
             transcript_seen: seen,
             ..mark.clone()
         };
@@ -5242,6 +5280,7 @@ async fn conversation_changes_local_marked(
                     let checked = ConversationPosition {
                         store_index: mark.store_index,
                         local_position: mark.local_position,
+                        stream_position: mark.stream_position,
                         ..conversation_position(state, session_id, cursor)?
                     };
                     let next = conversation_cursor(state, session_id, checked);
@@ -18702,6 +18741,59 @@ mission "example/zero-run" state="ready" {
         assert!(delta["items"].as_array().unwrap().iter().any(|item| item["body"]["text"] == "committed during OPEN"), "{delta}");
     }
 
+    /// A stream item to a seat that arrives while the graph stands still reaches its
+    /// conversation: the cursor's stream position, not its graph index, says what the follower
+    /// has read, and the quiet check that answers an issued cursor without a read sees it. Its
+    /// entries sort two past the graph claim it arrived behind.
+    #[tokio::test]
+    async fn conversation_changes_carry_a_stream_item_that_arrives_while_the_graph_stands_still() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "stream-follow");
+        let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+        let owner = "agent/stream-follow";
+        let incarnation = "stream-follow-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"stream-follow-runtime", "incarnation_id":incarnation})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let (start, page) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        let cursor = start["next_cursor"].as_str().unwrap().to_owned();
+        let on_stream = |value: &Value| value["items"].as_array().unwrap().iter()
+            .filter(|item| item["body"]["text"] == "on the stream" || item["body"]["message_id"] == "message/00000000000000c1")
+            .map(|item| (item["type"].as_str().unwrap().to_owned(), item["sequence"].as_u64().unwrap()))
+            .collect::<BTreeSet<_>>();
+        assert!(on_stream(&page).is_empty());
+
+        let graph = state.store.index().unwrap();
+        shard.append_claim(&ClaimInput {
+            subject: "message/00000000000000c1".into(), kind: "message.sent".into(), actor: Some("agent/birch".into()),
+            fields: serde_json::from_value(json!({"from":"agent/birch", "to":owner, "session_id":session_id,
+                "status":"sent", "content":"on the stream"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        crate::store::messages_shard::stream_reads::record_arrivals(&state.store).unwrap();
+        assert_eq!(state.store.index().unwrap(), graph, "the graph stands still");
+
+        let delta = conversation_changes_local(&state, &session, &session_id, Some(&cursor), 0).await.unwrap();
+        let expected = BTreeSet::from([("message".to_owned(), graph * 4 + 2), ("content".to_owned(), graph * 4 + 3)]);
+        assert_eq!(on_stream(&delta), expected, "{delta}");
+        let next = delta["next_cursor"].as_str().unwrap();
+        assert_eq!(conversation_position(&state, &session_id, next).unwrap().stream_position,
+            crate::store::messages_shard::stream_reads::conversation_position(&state.store).unwrap());
+        let (_, reopened) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        assert_eq!(on_stream(&reopened), expected);
+        let after = conversation_changes_local(&state, &session, &session_id, Some(next), 0).await.unwrap();
+        assert!(on_stream(&after).is_empty(), "read once: {after}");
+
+        // A cursor from before the stream part existed has read none of the stream.
+        let old = next.rsplit_once('.').unwrap().0;
+        let position = conversation_position(&state, &session_id, old).unwrap();
+        assert_eq!(position.stream_position, 0);
+    }
+
     #[tokio::test]
     async fn conversation_open_replays_local_rows_that_follow_a_newer_graph_cut() {
         let root = tempfile::tempdir().unwrap();
@@ -18850,6 +18942,7 @@ mission "example/zero-run" state="ready" {
         let unknown = conversation_cursor(&owner, &session_id, ConversationPosition {
             store_index: 0,
             local_position: 0,
+            stream_position: 0,
             native_sequence: 0,
             source_generation: 0,
         });
@@ -20126,7 +20219,7 @@ mission "example/zero-run" state="ready" {
         let wrong_session = post_snapshot_native_sends(&state, &snapshot, "agent/cap", "session/other", None,
             &identity("message/post-snapshot-256"), &BTreeSet::new()).unwrap_err();
         assert_eq!(wrong_session.code, "cursor-gap");
-        let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2).unwrap();
+        let bounded = state.store.conversation_message_delta_at("agent/cap", None, snapshot.store_index, 2, None).unwrap();
         assert_eq!(bounded.len(), 2);
     }
 

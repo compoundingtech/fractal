@@ -10998,6 +10998,12 @@ async fn run_trace_command(
 struct LocalEventPage {
     items: Vec<EventRecord>,
     next_after: Option<u64>,
+    /// The messages stream's message events, when the read asked for them with
+    /// `messages_after` and the daemon holds the stream.
+    #[serde(default)]
+    stream_items: Option<Vec<EventRecord>>,
+    #[serde(default)]
+    messages_next_after: Option<u64>,
 }
 
 #[derive(Debug)]
