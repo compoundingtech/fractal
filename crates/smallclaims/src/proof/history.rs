@@ -90,15 +90,6 @@ pub fn verify_sealed_history(
             return Err(malformed("signature does not name a claim in its envelope"));
         }
     }
-    for envelopes in writers.values() {
-        let mut previous = None;
-        for (index, envelope) in envelopes.values().enumerate() {
-            if envelope.sequence != index as u64 + 1 || envelope.previous_hash.as_deref() != previous {
-                return Err(chain_error("writer envelope chain is incomplete or disconnected"));
-            }
-            previous = batch_hashes.get(&(envelope.writer.as_str(), envelope.sequence)).map(String::as_str);
-        }
-    }
     let membership = Membership::fold(Some(fleet_anchor), &fleet);
     for envelope in envelopes {
         let key = envelope.member_key.as_deref().expect("checked above");
@@ -110,6 +101,30 @@ pub fn verify_sealed_history(
         });
         if !bootstrap && !membership.keys_for(&envelope.writer, envelope.sequence).contains(key) {
             return Err(ProofError::new("untrusted-membership", format!("writer {} sequence {} is outside its member window", envelope.writer, envelope.sequence)));
+        }
+    }
+    for envelopes in writers.values() {
+        let mut high_water = 0;
+        let mut previous = None;
+        for envelope in envelopes.values() {
+            let incarnation = membership.incarnations().find(|incarnation| {
+                incarnation.name == envelope.writer
+                    && Some(incarnation.member_key.as_str()) == envelope.member_key.as_deref()
+                    && incarnation.start <= envelope.sequence
+                    && incarnation.end.is_none_or(|end| envelope.sequence <= end)
+            }).ok_or_else(|| chain_error("writer has no authenticated incarnation"))?;
+            // A fresh store has a floor but no retained head. Only the authenticated
+            // incarnation's first sequence can reset that head; never an interior gap.
+            let fresh = envelope.sequence == incarnation.start && envelope.previous_hash.is_none();
+            let (sequence, predecessor) = crate::writer_chain::writer_continuation(
+                if fresh { 0 } else { high_water }, incarnation.start - 1,
+                if fresh { None } else { previous },
+            );
+            if envelope.sequence != sequence || envelope.previous_hash.as_deref() != predecessor {
+                return Err(chain_error("writer envelope chain is incomplete or disconnected"));
+            }
+            high_water = envelope.sequence;
+            previous = batch_hashes.get(&(envelope.writer.as_str(), envelope.sequence)).map(String::as_str);
         }
     }
     Ok(VerifiedHistory { records, membership })

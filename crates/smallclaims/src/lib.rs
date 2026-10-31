@@ -30,6 +30,7 @@ pub mod shards;
 pub mod sqlite;
 pub mod store;
 pub mod sync;
+pub mod writer_chain;
 pub mod touched;
 /// Rolling latency windows for the daemon's targets: routes, statements, transactions, holds.
 pub mod windows;

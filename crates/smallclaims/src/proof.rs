@@ -2,6 +2,10 @@
 //!
 //! Envelopes retain their exact sealed CBOR payloads. Writer chains prove a historical
 //! cut, not that no later envelope exists; callers pin progress with `after_revision`.
+//! Bundles disclose full retained authenticated prefixes, not just rename claims, and
+//! are marked `disclosure: "fleet-internal"`; sharing requires the fleet's consent.
+//! Membership's authenticated incarnation floor can start a fresh chain above one
+//! without a predecessor. Missing interior sequences never establish a new chain.
 
 use std::fmt;
 use serde::{Deserialize, Serialize};
@@ -19,6 +23,8 @@ pub const VERDICT_SCHEMA: &str = "fractal.rename-proof-verdict.v1";
 #[serde(deny_unknown_fields)]
 pub struct RenameProofBundle {
     pub schema: String,
+    /// Full retained envelopes are for consented fleet-internal disclosure only.
+    pub disclosure: String,
     pub fleet_id: String,
     /// Informational only; the verifier compares it to, but never trusts it over, its caller.
     pub fleet_anchor: String,
@@ -44,6 +50,7 @@ pub struct RenameProofStep {
 #[serde(deny_unknown_fields)]
 pub struct RenameProofVerdict {
     pub schema: String,
+    pub disclosure: String,
     pub ok: bool,
     pub identity_kind: String,
     pub storage_id: String,
