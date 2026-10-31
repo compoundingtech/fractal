@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Expose strict Manifest v1 canonicalization and SHA-256 identity with shared valid/invalid golden vectors, including the pinned reveal text-node digest and zero-reader rotation pilot.",
+  "summary": "Expose strict Manifest v1 canonicalization and SHA-256 identity with shared valid/invalid golden vectors, including the pinned reveal text-node digest, zero-reader rotation pilot and exact locator/CSS/safe-URL boundary pairs.",
   "replay": {"status": "none", "detail": "No claims or replay changes."},
   "schema": {"status": "none", "detail": "Shared manifest identity library and fixtures only; no registry or storage changes."},
   "rules": {"status": "none", "detail": "No checkpoint rule changes."},

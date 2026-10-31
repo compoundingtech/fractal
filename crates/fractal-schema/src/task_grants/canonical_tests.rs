@@ -163,3 +163,52 @@ fn invalid_utf8_is_refused_before_hashing() {
     assert!(canonicalize_task_manifest_v1(input).is_err());
     assert!(digest_task_manifest_v1(input).is_err());
 }
+
+#[test]
+fn shared_boundary_vectors_pin_exact_units_and_odd_node_counts() {
+    fn bounds(locator: &Value) -> (usize, usize) {
+        let children = match locator["kind"].as_str().unwrap() {
+            "nth" => vec![bounds(&locator["within"]), (1, 1)],
+            "within" => vec![bounds(&locator["scope"]), bounds(&locator["target"])],
+            "withinFrame" => vec![bounds(&locator["frame"]), bounds(&locator["target"])],
+            _ => vec![],
+        };
+        (1 + children.iter().map(|(nodes, _)| nodes).sum::<usize>(),
+            1 + children.iter().map(|(_, depth)| *depth).max().unwrap_or(0))
+    }
+    let fixture = fixture();
+    let document = |name: &str| {
+        let input = fixture.valid.iter().find(|case| case.name == name).map(|case| &case.input)
+            .or_else(|| fixture.invalid.iter().find(|case| case.name == name).map(|case| &case.input))
+            .unwrap();
+        serde_json::from_str::<Value>(input).unwrap()
+    };
+    for (name, expected) in [
+        ("locatorDepthAt8WithNth", (15, 8)),
+        ("locatorDepthOver9WithNth", (17, 9)),
+        ("locatorOddNodeCountAt31WithNth", (31, 5)),
+        ("locatorOddNodeCountOver33WithNth", (33, 6)),
+    ] {
+        assert_eq!(bounds(&document(name)["browserSteps"][0]["locator"]), expected, "{name}");
+    }
+    // Binary branches (including nth's synthetic leaf) make 32 unreachable.
+    for (name, units) in [("cssAt2048Utf16Units", 2048), ("cssOver2049Utf16Units", 2049)] {
+        assert_eq!(document(name)["browserSteps"][0]["locator"]["selector"]
+            .as_str().unwrap().encode_utf16().count(), units, "{name}");
+    }
+    for (name, length, multibyte) in [
+        ("safeUrlAt4096Utf16Units", 4096, false),
+        ("safeUrlOver4097Utf16Units", 4097, false),
+        ("safeUrlMultibyteAt4096Utf8Bytes", 4096, true),
+        ("safeUrlMultibyteOver4097Utf8BytesBelowUtf16Limit", 4097, true),
+    ] {
+        let document = document(name);
+        let value = document["browserSteps"][0]["safeUrl"].as_str().unwrap();
+        assert_eq!(value.len(), length, "{name}");
+        if multibyte {
+            assert!(value.encode_utf16().count() < 4096, "{name}");
+        } else {
+            assert_eq!(value.encode_utf16().count(), length, "{name}");
+        }
+    }
+}
