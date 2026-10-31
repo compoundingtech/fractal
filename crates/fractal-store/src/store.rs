@@ -100,6 +100,7 @@ pub mod mission_provenance;
 pub mod agent_queue_values;
 pub mod backup_format;
 pub mod message_bodies;
+pub mod messages_shard;
 pub mod projectors;
 #[cfg(test)]
 pub mod projectors_tests;
