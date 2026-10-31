@@ -40,22 +40,34 @@ fn observation_slot(subject: &str, kind: &str) -> Result<String> {
     Ok(serde_json::to_string(&[subject, kind])?)
 }
 
+static ACTUAL_MOVED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+    "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1
+     AND CAST(accepted_at_unix_ms AS INTEGER)>=?2 AND {ACTUAL_STATE_CLAIM}
+     AND {UNREPAIRED_CLAIM})",
+));
+
+fn actual_moved(connection: &Connection, subject: &str, cut: u128) -> Result<bool> {
+    Ok(connection.prepare_cached(&ACTUAL_MOVED)?
+        .query_row(params![subject, i64::try_from(cut)?], |row| row.get(0))?)
+}
+
 /// Only slots touched by post-cut claims move; another writer must not hide a stable slot.
 pub fn slot_reader_movement(
     connection: &Connection, subjects: &BTreeSet<String>, cut: u128,
 ) -> Result<smallclaims::answers::ReaderMoves> {
     let mut moved = smallclaims::answers::ReaderMoves::new();
-    let mut query = connection.prepare_cached(
-        "SELECT DISTINCT kind FROM claims WHERE subject=?1 AND CAST(accepted_at_unix_ms AS INTEGER)>=?2
-         AND (kind='observer.observed' OR NOT EXISTS(
-             SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id))",
+    let mut cursor = connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='observer.observed'
+         AND CAST(accepted_at_unix_ms AS INTEGER)>=?2)",
     )?;
     for subject in subjects {
-        for kind in query.query_map(params![subject, i64::try_from(cut)?], |row| row.get::<_, String>(0))? {
-            let kind = kind?;
-            let kind = if kind == "vcs.item.state" { "resource.observed" }
-                else if SLOT_READERS.contains(&kind.as_str()) { kind.as_str() }
-                else { continue };
+        let kind = if subject.starts_with("resource/") { "resource.observed" }
+            else if subject.starts_with("observer/") { "observer.observed" }
+            else { continue };
+        let cursor_moved: bool = kind == "observer.observed" && cursor.query_row(
+            params![subject, i64::try_from(cut)?], |row| row.get(0),
+        )?;
+        if actual_moved(connection, subject, cut)? || cursor_moved {
             moved.entry(format!("reader/slots/{kind}")).or_default()
                 .entry(subject.clone()).or_default().insert(observation_slot(subject, kind)?);
         }
@@ -80,11 +92,10 @@ fn slot_reader_answers(
             let history = claims_of_kind_in_order(connection, &subject, kind)?;
             let cursor_moving = kind == "observer.observed"
                 && history.last().is_some_and(|claim| claim.accepted_at_unix_ms >= cut);
-            let claims = history.iter().filter(|claim| !repaired.contains(&claim.id)).collect::<Vec<_>>();
-            if claims.is_empty() && kind == "resource.observed" { continue; }
-            let moving = cursor_moving || claims.iter().any(|claim| claim.accepted_at_unix_ms >= cut)
-                || (kind == "resource.observed" && resources::newest_item_state(connection, &subject)?
-                    .is_some_and(|(_, _, at)| at.parse::<u128>().map_or(true, |at| at >= cut)));
+            if kind == "resource.observed" && !history.iter().any(|claim| !repaired.contains(&claim.id)) {
+                continue;
+            }
+            let moving = cursor_moving || actual_moved(connection, &subject, cut)?;
                 let answer = if kind == "resource.observed" {
                     // Read the production projection: its first opener, attribution-only rows
                     // and compact item-state overlays depend on observation acceptance times.
@@ -95,10 +106,13 @@ fn slot_reader_answers(
                          FROM resource_observations r JOIN claims c ON c.id=r.claim_id WHERE r.subject=?1",
                         [&subject], |row| row.get(0),
                     ).optional()?;
-                    row.map(|row| serde_json::from_str(&row)).transpose()?.unwrap_or(Value::Null)
+                    json!({
+                        "collection": row.map(|row| serde_json::from_str::<Value>(&row)).transpose()?,
+                        "actual": latest_actual(connection, &subject)?,
+                    })
                 } else {
                     json!({
-                        "state": fold_latest_values(claims.iter().map(|claim| (kind.to_owned(), claim.body.clone())))?,
+                        "state": latest_actual(connection, &subject)?,
                         "cursor": resources::claimed_observer_cursor_at(connection, &subject)?,
                     })
                 };

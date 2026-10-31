@@ -75,7 +75,11 @@ fn retained_history_case(kind: &str) {
                 &transaction, writer, subject, kind, None,
                 &json!({"fields": {"state": state, "code": "example", "observer": "observer/example",
                     "incarnation_id": "one", "semantics": "session_cumulative", "total_tokens": 1,
-                    "driver": "codex", "kind": "vcs.issue", "facts": {"state": "open"}}}),
+                    "driver": "codex", "kind": "vcs.issue", "facts": {"state": "open"},
+                    "severity": "error", "reason": "example", "status": "up",
+                    "harness": "omp", "session_id": "session", "observed_at": "2026-10-03T14:00:00Z",
+                    "source_op": "hydrate", "phases": [], "truncated": false,
+                    "totals": {"pending": 0, "in_progress": 0, "completed": 0, "blocked": 0}}}),
                 &[], None,
             ).unwrap();
             ids.push(claim.id);
@@ -141,8 +145,13 @@ fn observer_reader_preserves_field_carriers() {
     assert_ne!(full, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
 }
 
-fn observation(store: &Store, subject: &str, kind: &str, writer: &str, at: u128, fields: Value) -> String {
+fn observation(store: &Store, subject: &str, kind: &str, writer: &str, at: u128, mut fields: Value) -> String {
     store.set_write_clock_at(at).unwrap();
+    if kind == "vcs.item.state" {
+        let fields = fields.as_object_mut().unwrap();
+        fields.entry("version").or_insert(json!(1));
+        fields.entry("observer").or_insert(json!("observer/example"));
+    }
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();
     let claim = append_claim_tx(&transaction, writer, subject, kind, None, &json!({"fields":fields}), &[], None).unwrap();
@@ -180,7 +189,7 @@ fn slot_readers_exclude_repaired_originals() {
 }
 
 #[test]
-fn served_cache_keeps_stable_resource_when_an_unrelated_claim_moves() {
+fn served_cache_tracks_resource_actual_state_dependencies() {
     use smallclaims::answers::AnswersCache;
     let store = Arc::new(Store::open_memory("alder").unwrap());
     let subject = "resource/example/issue/1502";
@@ -191,7 +200,7 @@ fn served_cache_keeps_stable_resource_when_an_unrelated_claim_moves() {
     cache.set_reader_movement(Arc::new(slot_reader_movement));
     assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 1);
     observation(&store, subject, "custom.unrelated", "alder", 2_000, json!({"status":"changed"}));
-    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 1);
+    assert_eq!(served_summary(&cache, &store).kinds["reader/slots/resource.observed"].keys, 0);
 }
 
 fn served_summary(
@@ -287,4 +296,23 @@ fn conservative_transport_inventory_keeps_legacy_recency_visible() {
         .collect::<Vec<_>>();
     assert!(smallclaims::answers::differing_kinds(&summaries[0], &summaries[1], true).iter()
         .any(|difference| difference.kind == "transport.observed"));
+}
+
+#[test]
+fn resource_actual_observer_survives_a_shared_compact_overlay() {
+    let mut answers = Vec::new();
+    let mut compact_ids = Vec::new();
+    for observer in ["observer/a", "observer/b"] {
+        let store = Store::open_memory("alder").unwrap();
+        let subject = "resource/example/issue/1502";
+        observation(&store, subject, "resource.observed", "poller", 100,
+            json!({"kind":"vcs.issue","observer":observer,"facts":{"state":"open"}}));
+        compact_ids.push(observation(&store, subject, "vcs.item.state", "compact", 200,
+            json!({"item_kind":"vcs.issue","state":"closed"})));
+        assert_eq!(store.resource_recorder(subject, "observer/unrelated").unwrap().as_deref(), Some("observer/example"));
+        assert_eq!(store.latest_actual_value(subject).unwrap().unwrap()["observer"], observer);
+        answers.push(slot_reader_answers(&store.readers.get(), 1_000).unwrap());
+    }
+    assert_eq!(compact_ids[0], compact_ids[1], "both replicas hold the same compact state");
+    assert_ne!(answers[0], answers[1], "the actual-state observer still differs");
 }
