@@ -1509,6 +1509,10 @@ impl Ui {
     /// included, so a paste never sends anything by itself. A pasted path to an image, such as a
     /// file dropped on the terminal, attaches that image to a message to an agent.
     pub fn paste(&mut self, text: String) {
+        // The recent popup is modal over an attached program: a paste filters it instead.
+        if self.recent_paste(&text) {
+            return;
+        }
         if self.terminal_focused()
             && let Some(native) = self.native_terminal()
         {
@@ -4141,7 +4145,8 @@ impl Ui {
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {
-            return self.mouse_moved(mouse);
+            // Motion under the modal recent popup never reaches hover or an attached program.
+            return !self.recent_open() && self.mouse_moved(mouse);
         }
         if event == Event::FocusLost {
             self.hover.clear();
@@ -4184,6 +4189,7 @@ impl Ui {
 
     fn input_terminal(&self) -> Option<String> {
         (self.terminal_focused()
+            && !self.recent_open()
             && !self.palette_open()
             && !self.help
             && self.popover.is_none()
@@ -5885,6 +5891,10 @@ impl Ui {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) {
+        // The recent popup is modal: nothing behind it, an attached program included, gets the mouse.
+        if self.recent_open() {
+            return;
+        }
         if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
             && self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
                 contains(*rect, mouse.column, mouse.row) && matches!(hit, Hit::ResourceRow(_) | Hit::ResourceFilter)
