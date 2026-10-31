@@ -49,6 +49,9 @@ Use these documents for implementation details:
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
 - [Conversation search](conversation-search.md) describes searching normalized conversations and opening a match.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
+- [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
+  allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and
+  `/v1/plugins/github/*` with `st gh prs|pr|checks`.
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.

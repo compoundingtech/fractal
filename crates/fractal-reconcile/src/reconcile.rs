@@ -53,7 +53,9 @@ use crate::resource::{
 use crate::store::Store;
 
 pub mod channel_recovery;
+pub mod github_events;
 pub mod github_plugin_store;
+pub mod plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
@@ -1224,6 +1226,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
     github_plugin: Arc<github_plugin_store::GithubPluginStore>,
+    /// Whether an unfilled mirror refills from GitHub with a look of its own. The daemon's
+    /// reconciler does; a test's, with no GitHub behind its provider, does when it asks.
+    refill_mirrors: bool,
     /// By observer: the cursor its plugin database did not keep. Every arm of the observer keeps
     /// it before it asks the provider again.
     unkept_cursors: Arc<Mutex<HashMap<String, UnkeptCursor>>>,
@@ -1377,16 +1382,20 @@ impl Reconciler<NativeRuntime> {
         notify: Arc<Notify>,
         event_notify: watch::Sender<u64>,
         recorder: Option<PathBuf>,
+        unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     ) -> Result<Self> {
         let selected_pty_root = pty_root
             .map(Path::to_path_buf)
             .unwrap_or_else(|| state_dir.join("pty"));
         Ok(Self {
             store,
-            runtime: Arc::new(
-                NativeRuntime::new(state_dir, Some(&selected_pty_root), pty_binary)
-                    .with_recorder(recorder),
-            ),
+            runtime: Arc::new({
+                let mut runtime = NativeRuntime::new(state_dir, Some(&selected_pty_root), pty_binary)
+                    .with_recorder(recorder);
+                runtime.pty = runtime.pty.with_unlaned_seat(unlaned_seat.clone());
+                runtime.exec = runtime.exec.with_unlaned_seat(unlaned_seat);
+                runtime
+            }),
             host,
             endpoint,
             driver_state_dir: state_dir.join("drivers"),
@@ -1439,7 +1448,8 @@ impl Reconciler<NativeRuntime> {
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
-            github_plugin: Arc::new(github_plugin_store::GithubPluginStore::open(state_dir)?),
+            github_plugin: github_plugin_store::GithubPluginStore::shared(state_dir)?,
+            refill_mirrors: true,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1618,6 +1628,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: Arc::new(github_plugin_store::GithubPluginStore::memory()),
+            refill_mirrors: false,
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1791,6 +1802,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     #[doc(hidden)]
     pub fn with_github_plugin(mut self, store: Arc<github_plugin_store::GithubPluginStore>) -> Self {
         self.github_plugin = store;
+        self
+    }
+
+    /// Refill unfilled GitHub mirrors from the resource provider, as the daemon's reconciler does.
+    pub fn with_mirror_refill(mut self, refill: bool) -> Self {
+        self.refill_mirrors = refill;
         self
     }
 
@@ -3140,6 +3157,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                             &subject,
                             "harness.diagnostic",
                             BTreeMap::from([
+                                // An observability code: the warning stays in this node's
+                                // local observation log (retention.toml `local_codes`).
+                                ("code".into(), Value::String("render-warning".into())),
                                 ("status".into(), Value::String("warning".into())),
                                 ("reason".into(), Value::String(warning)),
                             ]),
@@ -8937,9 +8957,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             RestartDecision::Fail { reason } => {
                 if member.driver.as_deref() == Some("codex") {
                     let token = self.launch_token(&subject.subject)?;
+                    // The driver's failure is an observability code: it stays in this node's
+                    // local observation log, and an older driver's arrives as a claim.
                     let diagnostic = self
                         .store
-                        .harness_diagnostics(&subject.subject)?
+                        .observations_for(&subject.subject, "harness.diagnostic")?
                         .iter()
                         .rev()
                         .find(|claim| {
@@ -16775,6 +16797,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let unkept_cursors = self.unkept_cursors.clone();
         let github_plugin = self.github_plugin.clone();
+        let refill_mirrors = self.refill_mirrors;
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -16942,6 +16965,24 @@ impl<R: RuntimeControl> Reconciler<R> {
                                     }
                                 }
                                 durable_changed = wrote;
+                                if spec.provider == "github.repository" {
+                                    mirror_observation(
+                                        &github_plugin, &observer_subject, &spec,
+                                        cursor.as_deref(), observation.cursor.as_deref(), &outcome.recorded_items,
+                                    );
+                                    // A mirror that is new, moved, restored, set aside or behind
+                                    // the cursor refills from GitHub once the listing has caught up.
+                                    if refill_mirrors
+                                        && !continuing
+                                        && !github_plugin.filled(&spec.resource).unwrap_or(true)
+                                        && github_plugin.refill_due(&spec.resource, now_ms())
+                                    {
+                                        refill_mirror(
+                                            provider.as_ref(), &github_plugin, &observer_subject, &spec,
+                                            observation.cursor.as_deref(),
+                                        ).await;
+                                    }
+                                }
                                 previous_facts = Some(observation.facts);
                                 // The cursor survives a restart only in the plugin database. A poll
                                 // that cannot keep it there is the observer's failure, which its
@@ -18501,6 +18542,86 @@ impl<R: RuntimeControl> Reconciler<R> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|subject, _| used.contains(subject));
+    }
+}
+
+/// Lay what one look at a GitHub repository recorded into the poller's plugin mirror, with the
+/// cursor the look started from and ended at, so the mirror knows whether it followed every
+/// look. The mirror is a cache: a failure is logged and the reads it serves fall back to the
+/// graph, never failing the observer.
+fn mirror_observation(
+    plugin: &github_plugin_store::GithubPluginStore,
+    observer: &str,
+    spec: &crate::model::ObserverSpec,
+    polled_from: Option<&str>,
+    cursor: Option<&str>,
+    recorded: &[crate::model::RecordedItem],
+) {
+    let items = recorded
+        .iter()
+        .filter_map(|recorded| {
+            recorded.facts.as_object().map(|facts| github_plugin_store::MirrorItem {
+                subject: recorded.subject.clone(),
+                item_kind: recorded.kind.clone(),
+                facts: facts.clone(),
+                claim: Some(recorded.claim.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    if let Err(error) = plugin.mirror(&spec.resource, observer, &spec.locator, polled_from, cursor, &items) {
+        tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+    }
+}
+
+/// Fill a repository's mirror from GitHub itself: one fresh look by the repository provider, as a
+/// new poller's first look reads (the open items, with each open pull request's details), within
+/// the same request budget as the observer's own polls. It records nothing in the graph and
+/// moves no cursor: the observer's own looks keep delivering from where they read to. Each item
+/// is laid over the mirror's row as a recording would lay it.
+async fn refill_mirror(
+    provider: &dyn ResourceProvider,
+    plugin: &github_plugin_store::GithubPluginStore,
+    observer: &str,
+    spec: &crate::model::ObserverSpec,
+    cursor: Option<&str>,
+) {
+    let request = ObservationRequest {
+        provider: spec.provider.clone(),
+        locator: spec.locator.clone(),
+        fields: spec.fields.iter().cloned().collect(),
+        cursor: None,
+        previous_facts: None,
+        every_ms: spec.every_ms,
+        refresh: false,
+    };
+    let filled = async {
+        let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
+        let mut known = |subject: &str| {
+            let number = subject.rsplit('/').next()?.parse::<u64>().ok()?;
+            Some(plugin.item(&spec.resource, number).ok()??["facts"].clone())
+        };
+        let items = crate::store::repository_item_facts(&spec.resource, &observation.facts, &mut known)
+            .into_iter()
+            .map(|(subject, kind, facts)| github_plugin_store::MirrorItem {
+                subject,
+                item_kind: kind.to_owned(),
+                facts,
+                claim: None,
+            })
+            .collect::<Vec<_>>();
+        let count = items.len();
+        plugin.fill(&spec.resource, observer, &spec.locator, cursor, &items).map(|filled| (filled, count))
+    }
+    .await;
+    // A fill that failed waits before the next, so a lasting failure does not spend the
+    // observer's budget on every look.
+    // A look that moved the mirror on during the fill is no failure: the next look tries again,
+    // and the doubling wait starts over, since GitHub answered.
+    plugin.refill_ended(&spec.resource, now_ms(), filled.is_ok());
+    match filled {
+        Ok((true, items)) => tracing::info!(observer, resource = %spec.resource, items, "the GitHub plugin mirror refilled from GitHub"),
+        Ok((false, _)) => tracing::info!(observer, resource = %spec.resource, "the GitHub plugin mirror moved on during its refill; the next look tries again"),
+        Err(error) => tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror could not refill from GitHub; reads answer from the graph until it does: {error:#}"),
     }
 }
 
@@ -32935,7 +33056,7 @@ mission "orchid/final-launch" state="ready" timeout="1m" {
             .unwrap();
         assert!(workspace.join("notes.txt").is_file(), "changed work stays");
         let kept = store
-            .latest_claim(&agent.subject, Some("harness.diagnostic"))
+            .latest_observation(&agent.subject, "harness.diagnostic")
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -40586,6 +40707,7 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
                 store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
             )
             .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
             .with_resource_provider(Arc::new(OnePoll { asked: asked.clone(), facts, cursor: cursor.clone() }));
             // Due now, rather than at the deadline the last poll recorded.
             reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
@@ -40612,6 +40734,14 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // A restart reopens the plugin database: the older build's claim is not adopted again.
         poll(disk(), listing(&[1, 3]), cursor(12)).await;
         assert_eq!(delivered(), 1, "issue 3 opened after the last poll");
+        // The poller's new mirror refilled from a look at GitHub of its own, then took each item
+        // the poll recorded; a first sighting is a baseline and holds no event.
+        let mirror = disk();
+        assert!(mirror.filled("resource/repo").unwrap());
+        assert_eq!(mirror.item("resource/repo", 1).unwrap().expect("filled from GitHub")["facts"]["title"], "issue 1");
+        assert_eq!(mirror.item("resource/repo", 3).unwrap().expect("mirrored from the poll")["kind"], "vcs.issue");
+        assert_eq!(mirror.repositories("acme/garden").unwrap()[0]["observer"], "observer/repo");
+        assert!(mirror.events("resource/repo", None, 10).unwrap().is_empty());
         let observed = newest_observed();
         assert_eq!(observed["changed"], true);
         // The claim carries how far the poll read, not the version maps.
@@ -40628,11 +40758,22 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         // from the claim's position: only issue 4, opened meanwhile, delivers.
         poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing(&[1, 3, 4]), cursor(13)).await;
         assert_eq!(delivered(), 2, "a lost database delivers only what is new");
+        // Each poller whose mirror was not filled also looked once from no cursor, recording
+        // nothing: the first poll of this build, and the member without the database.
         assert_eq!(*asked.lock().unwrap(), [
-            Some("old-build".into()), Some(cursor(11)), Some(position(12).to_string()),
+            Some("old-build".into()), None, Some(cursor(11)), Some(position(12).to_string()), None,
         ]);
         assert_eq!(claimed(&newest_observed()), position(13));
 
+        // Back on the member with the plugin database, a change the poll records is one keyed
+        // event in its mirror.
+        let mut closed = issue(3);
+        closed["state"] = Value::String("closed".into());
+        poll(disk(), serde_json::json!({"repository_id": 7, "issues": [issue(1), closed, issue(4)]}), cursor(14)).await;
+        let events = disk().events("resource/repo", Some(3), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["event"], "closed");
+        assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
@@ -43801,10 +43942,13 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             let sent = usize::from(case == "skip");
             let expected: &[&str] = if sent == 1 { &["escape"] } else { &[] };
             assert_eq!(runtime.keys.lock().unwrap().as_slice(), expected, "{case}");
+            // The prompt is a control claim; the notice is local to the seat's node.
             let claims = store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .observations_for(&subject.subject, "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims.len(), 2);
+            assert_eq!(claims[0].body["fields"]["code"], "provider-update-prompt");
+            assert!(claims[0].store_index > 0);
             assert_eq!(claims[1].body["fields"]["code"], "provider-update-available");
             assert_eq!(claims[1].body["fields"]["status"], "available");
             assert!(claims[1].body["fields"].get("severity").is_none());
@@ -43841,7 +43985,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap();
             assert_eq!(
                 store
-                    .claims_for(&subject.subject, Some("harness.diagnostic"))
+                    .observations_for(&subject.subject, "harness.diagnostic")
                     .unwrap()
                     .len(),
                 2
@@ -43867,7 +44011,7 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                 .unwrap();
             assert!(store.fault_items(None).unwrap().is_empty());
             let claims = store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))
+                .observations_for(&subject.subject, "harness.diagnostic")
                 .unwrap();
             assert_eq!(claims[2].body["fields"]["code"], "provider-update-restored");
             assert_eq!(claims[2].body["evidence"][0], claims[0].id);
@@ -44019,9 +44163,10 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
                     .0
             );
             assert_eq!(store.fault_items(None).unwrap().len(), 1);
+            // The update notice is an observability code, local to this node.
             assert_eq!(
                 store
-                    .claims_for("agent/node.seat", Some("harness.diagnostic"))
+                    .observations_for("agent/node.seat", "harness.diagnostic")
                     .unwrap()
                     .len(),
                 if code == "provider-update-prompt" { 2 } else { 1 }
