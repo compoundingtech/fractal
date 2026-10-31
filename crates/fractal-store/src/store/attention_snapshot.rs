@@ -2134,7 +2134,7 @@ fn running_since(connection: &Connection, seat: &str) -> Result<Option<(i64, Str
 /// The newest observation of `seat` that began a turn or ended its session: its store position,
 /// state and when that state began. Observations of the seat at rest, which repeat as it is
 /// refreshed, lie after it and are passed over.
-fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
+pub(super) fn last_turn_or_end(connection: &Connection, seat: &str) -> Result<Option<(i64, String, Option<u64>)>> {
     connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hded7b14f0a67 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
             "{} LIMIT 1",

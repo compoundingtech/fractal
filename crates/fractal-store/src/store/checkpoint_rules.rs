@@ -48,7 +48,11 @@ pub use staged::plan_staged;
 /// newest observation of each attribution, the earliest opener, a pull request's observations
 /// back to the newest one outside "open and out of the merge queue", and every observation of a
 /// resource described in flat facts.
-pub const RULES_VERSION: u32 = 23;
+/// Version 24 keeps, for `harness.observed`, the credential report that ended the run before
+/// the current one, so a seat's needs-login `since` stays where the current run began.
+/// Version 25 keeps each incarnation's newest `working` and newest `ended` observation, which
+/// readers of a seat's last turn ask for.
+pub const RULES_VERSION: u32 = 25;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -181,7 +185,7 @@ fn planner_rule(rule: &fractal_schema::retention::RulePolicy) -> Option<Rule> {
             Some(age) => Rule::NewestAged(age),
             None => Rule::Newest,
         },
-        "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start" => {
+        "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start-and-the-report-ending-the-run-before,newest-working,newest-ended" => {
             Rule::HarnessObserved
         }
         "first-and-last-of-each-run-of-status-and-round,first-with-items" => Rule::LoopState,
@@ -342,6 +346,15 @@ pub fn harness_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
             keep.insert(after + offset);
         }
     }
+    // A finished turn's readers ask for the newest `working`, which a later other state no
+    // longer keeps above: when the last turn began (`ready_since_last_turn`), whether the seat
+    // worked after a nudge (`harness_worked_after`), and its newest turn or end
+    // (`last_turn_or_end`), which also reads the newest `ended`.
+    for wanted in ["working", "ended"] {
+        if let Some(position) = claims.iter().rposition(|claim| state(claim).as_deref() == Some(wanted)) {
+            keep.insert(position);
+        }
+    }
     // `current_harness_at` takes each optional field from the newest observation carrying it.
     for name in HARNESS_OPTIONAL_FIELDS {
         if let Some(position) = claims
@@ -359,10 +372,16 @@ pub fn harness_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
             .and_then(Value::as_bool)
     };
     if let Some(last_auth) = claims.iter().rev().find_map(|claim| auth(claim)) {
-        let after = claims
+        let before = claims
             .iter()
-            .rposition(|claim| auth(claim).is_some_and(|value| value != last_auth))
-            .map_or(0, |position| position + 1);
+            .rposition(|claim| auth(claim).is_some_and(|value| value != last_auth));
+        // The report that ended the run before is where the current run begins: without it, the
+        // current run would seem to begin at an earlier report of the same value, and a seat's
+        // needs-login `since` would move back to it.
+        if let Some(position) = before {
+            keep.insert(position);
+        }
+        let after = before.map_or(0, |position| position + 1);
         if let Some(offset) = claims[after..]
             .iter()
             .position(|claim| auth(claim) == Some(last_auth))

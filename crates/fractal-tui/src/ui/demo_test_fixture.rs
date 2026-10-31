@@ -156,6 +156,9 @@ fn slo() -> Vec<fractal_client::SloRow> {
         status: s(status),
         resets_at_unix_ms: None,
         measured_at_unix_ms: None,
+        forecast_used_percent: None,
+        forecast_basis_minutes: None,
+        runs_out_at_unix_ms: None,
         explain: s(explain),
     };
     let budget = |id: &str, account: &str, about: &str, current: &str, window: &str, left: f64, resets: u64| fractal_client::SloRow {
@@ -170,9 +173,12 @@ fn slo() -> Vec<fractal_client::SloRow> {
         status: s(if left > 0.0 { "met" } else { "missed" }),
         resets_at_unix_ms: Some(now + resets),
         measured_at_unix_ms: Some(now - 180_000),
+        forecast_used_percent: None,
+        forecast_basis_minutes: None,
+        runs_out_at_unix_ms: None,
         explain: format!("{about}. It resets on its own; when it is spent, seats on this account wait."),
     };
-    vec![
+    let mut rows = vec![
         objective(
             "request-latency",
             "Client reads answer quickly",
@@ -220,7 +226,28 @@ fn slo() -> Vec<fractal_client::SloRow> {
             94.0,
             6 * 86_400_000,
         ),
-    ]
+    ];
+    // What the daemon adds from its history: the weekly budget runs out before it resets, the
+    // 5-hour one ends the window well inside its allowance.
+    for row in &mut rows {
+        match row.id.as_str() {
+            "anthropic-weekly" => {
+                row.forecast_used_percent = Some(100.0);
+                row.forecast_basis_minutes = Some(1_440);
+                row.runs_out_at_unix_ms = Some(now + 20 * 3_600_000 + 60_000);
+            }
+            "anthropic-5-hour" => {
+                row.forecast_used_percent = Some(72.0);
+                row.forecast_basis_minutes = Some(60);
+            }
+            "openai-weekly" => {
+                row.forecast_used_percent = Some(18.0);
+                row.forecast_basis_minutes = Some(1_440);
+            }
+            _ => {}
+        }
+    }
+    rows
 }
 
 /// The demo's charts: the request objective recovering, the weekly budget spent a little more
@@ -400,6 +427,7 @@ fn attention() -> Vec<Attention> {
     vec![
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/1"),
             tier: Tier::Stopped,
             title: s("Approve the atlas store cut-over"),
@@ -436,6 +464,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/2"),
             tier: Tier::Stopped,
             title: s("Feedback on the new pricing page"),
@@ -467,6 +496,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/3"),
             tier: Tier::Today,
             title: s("Launch harbor/nightly-audit"),
@@ -532,6 +562,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/4"),
             tier: Tier::Alert,
             title: s("Release Captain keeps restarting"),
@@ -557,6 +588,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/5"),
             tier: Tier::Today,
             title: s("Add an audit step to the rekey mission"),
@@ -587,6 +619,7 @@ fn attention() -> Vec<Attention> {
         },
         Attention {
             conversations: vec![],
+            requested_at: None,
             id: s("attention/6"),
             tier: Tier::Later,
             title: s("Weekly usage is up 18%"),

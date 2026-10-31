@@ -1447,16 +1447,17 @@ with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only i
 sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
 drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is.
+and the trimmed log: today `observer.observed` and `harness.observed`. Everything else is kept, as a protected claim is.
 An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
 fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
-raw record, signature and verdict rows and position), its ID goes into the retired ledger, and
+raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
 admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
-envelopes atomic. Two audited
-rules stay out because a reader reads the history they drop, which no projection digest covers.
-`harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
-needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
-and a watch walks those observations back to find when the pull request left the merge queue. Two checks stand in for the
+envelopes atomic. One audited
+rule stays out because a reader reads the history it drops, which no projection digest covers:
+`resource.observed`'s keeps only the newest observation of a GitHub pull request, and a watch walks
+those observations back to find when the pull request left the merge queue. `harness.observed`
+joined once its rule kept the credential report where a seat's needs-login run begins (rules
+version 24, see #4237). Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything
 is recorded. While deleting, every chunk compares the projection digests before and after and
 stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
@@ -1469,7 +1470,12 @@ The capture is admitted by the same disk guard as a shared one, which skips and 
 disk cannot hold.
 Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
 and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
-at once.
+at once. A member deletes at most `[trim] daily_claims` claims a day (100,000 unless set; about
+1.7 h of paced deletion on a 53 GB member). A cut that drops more stops at that count, stays
+`trimming`, and goes on the next day where it stopped; the next cut begins only after it finishes,
+with what the day has left, so a large first cut drains over several days instead of one long
+trim. The day's count is kept in `meta` (`local_trim_day`) in the deleting transaction, so a
+restart neither repeats nor exceeds it.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges

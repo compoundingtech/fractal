@@ -8589,19 +8589,18 @@ async fn dispatch_action(
                 .runtime_desired_revision
                 .as_deref()
                 .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
-            state
-                .store
-                .retire_agent_with_successor(
-                    &agent,
-                    authority_actor,
-                    &parameters.reason,
-                    token,
-                    request.fence.runtime_incarnation.as_deref(),
-                    &request.idempotency_key,
-                    &state.configured_peers,
-                    parameters.successor.as_deref(),
-                )
-                .map_err(ApiError::bad)?;
+            state.store.retire_agent_with_successor(
+                &agent, authority_actor, &parameters.reason, token,
+                request.fence.runtime_incarnation.as_deref(),
+                &request.idempotency_key, &state.configured_peers,
+                parameters.successor.as_deref(), parameters.expect_revision.as_deref(),
+            ).map_err(|error| {
+                if error.code == "idempotency-mismatch" {
+                    action_idempotency_conflict()
+                } else {
+                    ApiError::bad(error)
+                }
+            })?;
             signal_changed(state);
             Ok(vec![agent])
         }
@@ -9026,6 +9025,11 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         .as_object_mut()
         .expect("an action is an object")
         .remove("fence");
+    if request.action_type == "agent.retire"
+        && let Some(incarnation) = request.fence.runtime_incarnation.as_deref()
+    {
+        content["fence"] = json!({"runtime_incarnation": incarnation});
+    }
     if request.action_type == "private-notes.write" {
         // The shared receipt reserves the cross-action key, not the private
         // mutation. Content matching and recovery stay in the owner-local ledger.
@@ -19669,6 +19673,45 @@ mission "example/zero-run" state="ready" {
             updated_at_unix_ms: 0,
             process: None,
         }
+    }
+
+    /// A mailbox message's content entry names its message, as its header does, on the native
+    /// projection and on the stored timeline, so a client pairs the two by identity rather than by
+    /// a sequence slot another message can share.
+    #[tokio::test]
+    async fn a_mailbox_messages_content_entry_names_its_message_on_both_timelines() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "content-names");
+        let owner = "agent/content-names";
+        let incarnation = "content-names-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"content-names-runtime", "incarnation_id":incarnation})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(owner, incarnation);
+        state.store.append_claim(&ClaimInput {
+            subject: "message/content-names".into(), kind: "message.sent".into(), actor: Some("person/alex".into()),
+            fields: serde_json::from_value(json!({"from":"person/alex", "to":owner, "session_id":session_id,
+                "status":"sent", "content":"named content"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let named = |items: &[Value]| items.iter()
+            .filter(|item| item["type"] == "message" || item["type"] == "content")
+            .map(|item| (item["type"].as_str().unwrap().to_owned(), item["body"]["message_id"].clone()))
+            .collect::<Vec<_>>();
+        let expected = vec![
+            ("message".to_owned(), json!("message/content-names")),
+            ("content".to_owned(), json!("message/content-names")),
+        ];
+        let snapshot = new_client_snapshot(&state);
+        let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
+        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        native.reverse();
+        assert_eq!(named(&native), expected, "native: {native:?}");
+        let (_, stored) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        assert_eq!(named(stored["items"].as_array().unwrap()), expected, "stored: {stored}");
     }
 
     #[test]

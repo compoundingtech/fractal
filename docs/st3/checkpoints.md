@@ -200,7 +200,7 @@ agree on a checkpoint only when they run the same rules. In summary:
 
 | Kind | Slot | Kept |
 |---|---|---|
-| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode |
+| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode and the credential report that ended the one before (rules version 24); the newest `working` claim and the newest `ended` claim (rules version 25) |
 | observed seat status history (`harness.observed` transitions and runtime resets) | seat | the last 200 transitions and runtime resets within seven days before the cut, ignoring stamped heartbeats; for each incarnation the transition before its first visible one, even when older; the start of the current state |
 | `harness.timeline` | subject, incarnation | the newest; only claims dated at least five days before the cut go |
 | `loop.state` | subject | the first and last claim of each run of equal (status, round); the first claim carrying the loop's items |
@@ -210,9 +210,9 @@ agree on a checkpoint only when they run the same rules. In summary:
 | `runtime.action.*` with no actor, `render.applied`, `runtime.readiness-deadline-reached` | subject (and action, incarnation, status) | the newest; only claims dated at least five days before the cut go |
 | `sekret.called`, `sekret.exited`, `sekret.refused`, `sekret.changed` written before they became local observations | subject | the newest; only claims dated at least five days before the cut go |
 | `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |
-| `harness.todo.observed` | subject | the newest (a rule that predates its description line) |
+| `harness.todo.observed` | subject | the newest |
 | `runtime.reconcile-decision` | subject, decision key | the newest of each key; the reconciler asks whether a key was recorded, reads the newest member-reconcile decision and the subject's newest |
-| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut (rules version 18, following #1473's allocated 17); the resolution is durable (see [Harness questions](harness-questions.md)) |
+| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut; the resolution is durable (see [Harness questions](harness-questions.md)) |
 | `harness.usage`, response rollups | subject, incarnation, model, account, run, step, host | the last snapshot of each UTC hour in the seven days before the cut, the newest snapshot before that window, and the newest of all |
 | `harness.usage`, session cumulative | subject, incarnation | the newest and the last claim of the largest total |
 | `harness.usage`, context occupancy | subject, incarnation | the newest |
