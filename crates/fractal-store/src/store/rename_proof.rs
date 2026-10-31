@@ -65,6 +65,7 @@ impl Store {
             .ok_or_else(|| St3Error::new("untrusted-membership", "rename proofs require a pinned fleet anchor"))?;
         let bundle = RenameProofBundle {
             schema: "fractal.rename-proof.v1".into(),
+            disclosure: "fleet-internal".into(),
             fleet_id,
             fleet_anchor: anchor.clone(),
             identity_kind: match kind { IdentityKind::Agent => "agent", IdentityKind::Mission => "mission" }.into(),
