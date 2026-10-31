@@ -39,31 +39,35 @@ pub fn record_arrivals(graph: &super::super::Store) -> anyhow::Result<usize> {
     )?)
 }
 
-/// The graph index at which `subject`, a stream item, arrived on this member.
+/// The graph index at which `subject`, a stream item, arrived on this member, as recorded. It
+/// reads only: a read path that must see every item recorded calls `arrivals_current` first.
+fn recorded_arrival(shard: &GraphStore, subject: &str) -> anyhow::Result<Option<u64>> {
+    Ok(shard
+        .readers
+        .get()
+        .query_row(
+            "SELECT graph_index FROM stream_arrivals WHERE subject=?1",
+            [subject],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .map(|index| index.max(0) as u64))
+}
+
+/// The graph index at which `subject`, a stream item, arrived on this member, recording the
+/// shard's unrecorded items first when it has none.
 pub fn arrival(graph: &super::super::Store, subject: &str) -> anyhow::Result<Option<u64>> {
     let Some(shard) = shard(graph) else {
         return Ok(None);
     };
-    let read = |shard: &GraphStore| -> anyhow::Result<Option<u64>> {
-        Ok(shard
-            .readers
-            .get()
-            .query_row(
-                "SELECT graph_index FROM stream_arrivals WHERE subject=?1",
-                [subject],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .map(|index| index.max(0) as u64))
-    };
-    if let Some(index) = read(&shard)? {
+    if let Some(index) = recorded_arrival(&shard, subject)? {
         return Ok(Some(index));
     }
     if stream_item(&shard, subject)?.is_none() {
         return Ok(None);
     }
     record_arrivals(graph)?;
-    read(&shard)
+    recorded_arrival(&shard, subject)
 }
 
 /// One page of the stream's message events after `after`, in stream order, through the stream's
@@ -239,7 +243,13 @@ pub fn timeline_base(graph: &super::super::Store, claim: &ClaimRecord) -> anyhow
     if claim.store_index < STREAM_INDEX_BASE {
         return Ok(claim.store_index.saturating_mul(4));
     }
-    let arrived = match arrival(graph, &claim.subject)? {
+    // Read only: the conversation read that brought the item recorded every arrival. An item it
+    // did not record sorts at the graph's current index.
+    let recorded = match shard(graph) {
+        Some(shard) => recorded_arrival(&shard, &claim.subject)?,
+        None => None,
+    };
+    let arrived = match recorded {
         Some(arrived) => arrived,
         None => graph.index()?,
     };

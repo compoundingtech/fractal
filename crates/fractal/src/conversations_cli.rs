@@ -707,7 +707,9 @@ fn came_after(created_index: u64, after: u64) -> bool {
     }
 }
 
-/// The earliest message to `actor` from `sender` that arrived after `after`.
+/// The first message to `actor` from `sender` after `after`, by index: a graph reply before a
+/// stream item, since a stream item's index is past every graph index, and within a store the
+/// earliest.
 fn earliest_reply(messages: Vec<MessageView>, sender: &str, after: u64) -> Option<MessageView> {
     messages
         .into_iter()
