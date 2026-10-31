@@ -1,5 +1,5 @@
 //! Owner-local wire normalization. References contain no path or payload and hold no durable
-//! state: a fetch rebinds the exact native source and refuses a changed revision.
+//! state: line transcripts bind source identity and entry content; SQLite binds its revision.
 use super::*;
 use crate::external_sessions::{ExternalConversation, ExternalSession};
 use base64::engine::general_purpose::STANDARD;
@@ -87,6 +87,18 @@ fn basis(source: &ExternalSession) -> Result<String, ApiError> {
     };
     #[cfg(not(unix))]
     let identity = format!("{:?}", metadata.created().ok());
+    // Line transcripts can grow without changing previously issued content references.
+    if source.driver != crate::external_sessions::ExternalDriver::OpenCode {
+        return Ok(hex::encode(Sha256::digest(
+            serde_json::to_vec(&json!([
+                source.driver.as_str(),
+                source.native_id,
+                source.transcript,
+                identity
+            ]))
+            .map_err(ApiError::internal)?,
+        )));
+    }
     // SQLite may change in its WAL without touching the database file.
     let wal = source.transcript.with_file_name(format!(
         "{}-wal",
@@ -117,8 +129,36 @@ fn basis(source: &ExternalSession) -> Result<String, ApiError> {
     )))
 }
 
-fn reference(basis: &str, session: &str, item: &Value, pointer: &str) -> String {
-    let identity = json!([basis, session, item["id"], item["revision"], pointer]);
+struct ReferenceEntry {
+    id: Value,
+    revision: Value,
+    content_hash: Option<String>,
+}
+
+impl ReferenceEntry {
+    fn new(source: &ExternalSession, item: &Value) -> Self {
+        let content_hash = (source.driver != crate::external_sessions::ExternalDriver::OpenCode)
+            .then(|| {
+                hex::encode(Sha256::digest(
+                    serde_json::to_vec(item).expect("JSON value encodes"),
+                ))
+            });
+        Self {
+            id: item["id"].clone(),
+            revision: item["revision"].clone(),
+            content_hash,
+        }
+    }
+}
+
+fn reference(basis: &str, session: &str, entry: &ReferenceEntry, pointer: &str) -> String {
+    let mut identity = json!([basis, session, entry.id, entry.revision, pointer]);
+    if let Some(hash) = &entry.content_hash {
+        identity
+            .as_array_mut()
+            .expect("reference identity is an array")
+            .push(json!(hash));
+    }
     hex::encode(Sha256::digest(
         serde_json::to_vec(&identity).expect("JSON value encodes"),
     ))
@@ -176,7 +216,7 @@ fn continuation(reference: String, media: &str, size: Option<usize>, reason: &st
     result
 }
 
-fn image_refs(value: &mut Value, pointer: &str, basis: &str, session: &str, item: &Value) {
+fn image_refs(value: &mut Value, pointer: &str, basis: &str, session: &str, item: &ReferenceEntry) {
     if image(value) {
         *value = json!({"type":"image","content":continuation(reference(basis,session,item,pointer),image_media(value),None,"on-demand")});
         return;
@@ -230,7 +270,7 @@ pub(super) fn prepare(
 ) -> Result<Vec<Value>, ApiError> {
     let basis = basis(source)?;
     for item in &mut items {
-        let original = item.clone();
+        let original = ReferenceEntry::new(source, item);
         let body = item["body"]
             .as_object_mut()
             .ok_or_else(|| ApiError::internal("native body is not an object"))?;
@@ -389,15 +429,24 @@ pub(super) async fn chunk_local(
             crate::external_sessions::normalized_timeline(&source).map_err(ApiError::internal)?;
         let mut found = None;
         for item in &items {
+            let entry = ReferenceEntry::new(&source, item);
             find_content(
                 &item["body"],
                 "/body",
-                item,
+                &entry,
                 &before,
                 &request_session,
                 &request_reference,
                 &mut found,
             );
+            if found.is_some() {
+                if !crate::external_sessions::native_entry_source_matches(&source, item)
+                    .map_err(ApiError::internal)?
+                {
+                    return Err(invalidated());
+                }
+                break;
+            }
         }
         Ok((source, before, found.ok_or_else(invalidated)?))
     })
@@ -430,7 +479,7 @@ pub(super) async fn chunk_local(
 fn find_content(
     value: &Value,
     pointer: &str,
-    item: &Value,
+    item: &ReferenceEntry,
     basis: &str,
     session: &str,
     wanted: &str,
@@ -602,6 +651,52 @@ mod tests {
             process: None,
         }
     }
+    #[test]
+    fn refs_fence_session_entry_revision_content_and_source_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let source = fixture(root.path(), json!([{"type":"text","text":"original"}]));
+        let item = json!({"id":"entry-test","revision":"revision-one","body":{"text":"original"}});
+        let before = basis(&source).unwrap();
+        let entry = ReferenceEntry::new(&source, &item);
+        let original = reference(&before, &source.id, &entry, "/body");
+        assert_ne!(
+            original,
+            reference(&before, "session/other", &entry, "/body")
+        );
+
+        let mut revised = item.clone();
+        revised["revision"] = json!("revision-two");
+        assert_ne!(
+            original,
+            reference(
+                &before,
+                &source.id,
+                &ReferenceEntry::new(&source, &revised),
+                "/body"
+            )
+        );
+        let mut changed = item;
+        changed["body"]["text"] = json!("changed");
+        assert_ne!(
+            original,
+            reference(
+                &before,
+                &source.id,
+                &ReferenceEntry::new(&source, &changed),
+                "/body"
+            )
+        );
+
+        let replacement =
+            tempfile::NamedTempFile::new_in(source.transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            replacement.path(),
+            std::fs::read(&source.transcript).unwrap(),
+        )
+        .unwrap();
+        std::fs::rename(replacement.path(), &source.transcript).unwrap();
+        assert_ne!(before, basis(&source).unwrap());
+    }
 
     #[tokio::test]
     async fn full_unknown_arguments_reasoning_and_pixels_survive_owner_fetch_without_storage() {
@@ -654,10 +749,11 @@ mod tests {
         let original = crate::external_sessions::normalized_timeline(&source).unwrap();
         let mut unknown = None;
         for item in &original {
+            let entry = ReferenceEntry::new(&source, item);
             find_content(
                 &item["body"],
                 "/body",
-                item,
+                &entry,
                 &before,
                 &source.id,
                 blocks[2]["continuation"]["ref"].as_str().unwrap(),
@@ -801,12 +897,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(full, json!({"raw":large}));
-        // A native replacement invalidates already issued references visibly, including the
-        // second chunk of a read. Nothing is fetched from a prepared or durable fallback.
-        fixture(
-            root.path(),
-            json!([{ "type":"text", "text":"replacement" }]),
+        // The page's image and oversized-JSON refs remain usable after a live append,
+        // including chunks fetched after the source discovery revision changes.
+        {
+            use std::io::Write as _;
+            let mut transcript = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&native.transcript)
+                .unwrap();
+            writeln!(
+                transcript,
+                "{}",
+                json!({"type":"message","id":"appended-message","timestamp":"2026-10-06T12:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"appended"}]}})
+            )
+            .unwrap();
+        }
+        let (status, after_append) = request(route.clone(), true).await;
+        assert_eq!(status, StatusCode::OK, "{after_append}");
+        assert_eq!(
+            STANDARD
+                .decode(after_append["value"]["data"].as_str().unwrap())
+                .unwrap(),
+            pixels[..CHUNK_BYTES]
         );
+        let (status, after_append) = request(
+            format!("/v1/client/conversations/{id}/content/{reference}/chunk"),
+            true,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{after_append}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &STANDARD
+                    .decode(after_append["value"]["data"].as_str().unwrap())
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({"raw":large})
+        );
+        // Replacing the transcript with identical bytes on a new inode invalidates issued refs.
+        // Nothing is fetched from a prepared or durable fallback.
+        let replacement =
+            tempfile::NamedTempFile::new_in(native.transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            replacement.path(),
+            std::fs::read(&native.transcript).unwrap(),
+        )
+        .unwrap();
+        std::fs::rename(replacement.path(), &native.transcript).unwrap();
         let (status, expired) = request(route, true).await;
         assert_eq!(status, StatusCode::GONE, "{expired}");
         assert_eq!(expired["code"], "conversation-content-invalidated");
@@ -822,36 +960,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refs_fence_session_entry_revision_and_replacement() {
+    #[tokio::test]
+    async fn rewriting_referenced_entry_invalidates_ref_without_changing_source_identity() {
         let root = tempfile::tempdir().unwrap();
-        let source = fixture(root.path(), json!([{"type":"future","text":"one"}]));
-        let original = crate::external_sessions::normalized_timeline(&source).unwrap();
-        let item = original.last().unwrap();
-        let before = basis(&source).unwrap();
-        let token = reference(&before, &source.id, item, "/body/blocks/0/payload");
-        assert_ne!(
-            token,
-            reference(&before, "session/other", item, "/body/blocks/0/payload")
+        let source = fixture(
+            root.path(),
+            json!([{"type":"image","mimeType":"image/png","data":STANDARD.encode([1u8; 8])}]),
         );
-        let mut revised = item.clone();
-        revised["revision"] = json!(2);
-        assert_ne!(
-            token,
-            reference(&before, &source.id, &revised, "/body/blocks/0/payload")
+        let mut state = super::super::tests::test_state_named(root.path(), "rewrite-owner-test");
+        state.native_session_home = Some(root.path().to_path_buf());
+        let mut session = ClientSession::local(Some("person/example")).unwrap();
+        session.conversation_blocks = true;
+        let items = read(&source, &session, &source.id).unwrap();
+        let reference = items
+            .iter()
+            .filter_map(|item| item["body"]["blocks"].as_array())
+            .flatten()
+            .find(|block| block["kind"] == "image")
+            .unwrap()["continuation"]["ref"]
+            .as_str()
+            .unwrap();
+        let before = chunk_local(&state, &session, &source.id, reference, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            STANDARD.decode(before["data"].as_str().unwrap()).unwrap(),
+            [1u8; 8]
         );
-        std::fs::write(&source.transcript, "replacement\n").unwrap();
-        assert_ne!(before, basis(&source).unwrap());
-        assert_ne!(
-            token,
-            reference(
-                &basis(&source).unwrap(),
-                &source.id,
-                item,
-                "/body/blocks/0/payload"
-            )
+        // Same native message id, byte offsets, file identity and length: only its content changes.
+        fixture(
+            root.path(),
+            json!([{"type":"image","mimeType":"image/png","data":STANDARD.encode([2u8; 8])}]),
         );
-        assert_eq!(invalidated().code, "conversation-content-invalidated");
+        let error = chunk_local(&state, &session, &source.id, reference, 0)
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::GONE);
+        assert_eq!(error.code, "conversation-content-invalidated");
+        assert_eq!(error.details["full_resync"], true);
     }
 
     #[test]

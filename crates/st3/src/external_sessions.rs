@@ -838,77 +838,376 @@ pub(crate) fn timestamp(unix_ms: u128) -> String {
 /// the rest of the transcript. What it emits stays conservative: a skipped line or an
 /// unrecognized record becomes a clearly-labelled `system` entry, never an entry attributed to
 /// the user or the agent. Only opening the file can fail the whole read.
+///
+/// Line transcripts are folded incrementally: a read after an append normalizes only the
+/// appended records (see [`LineTimelineFold`]).
 pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value>> {
     if session.driver == ExternalDriver::OpenCode {
         return normalized_opencode_timeline(session);
     }
-    let metadata = fs::metadata(&session.transcript)
-        .with_context(|| format!("inspect transcript {}", session.transcript.display()))?;
-    let mut file = File::open(&session.transcript)
-        .with_context(|| format!("read transcript {}", session.transcript.display()))?;
-    let start = metadata.len().saturating_sub(MAX_TIMELINE_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut reader = BufReader::new(file);
-    let mut read_error = None;
-    // Where each line starts in the file: an entry's identity, which must not change as the
-    // read window slides along a growing transcript.
-    let mut offset = start;
-    if start != 0 {
-        let mut partial = Vec::new();
-        match reader.read_until(b'\n', &mut partial) {
-            Ok(count) => offset += count as u64,
-            Err(error) => read_error = Some(error),
+    let fold = line_fold(session);
+    let mut state = match fold.lock() {
+        Ok(state) => state,
+        Err(error) => {
+            let mut state = error.into_inner();
+            *state = LineTimelineFold::default();
+            fold.clear_poison();
+            state
+        }
+    };
+    let result = state.read(session);
+    account_line_fold(&fold, state.retained_source_bytes);
+    result
+}
+
+/// Fence owner content reads against edits that the append-only page fold cannot detect.
+pub(crate) fn native_entry_source_matches(
+    session: &ExternalSession,
+    entry: &Value,
+) -> Result<bool> {
+    if session.driver == ExternalDriver::OpenCode {
+        return Ok(true);
+    }
+    let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let fold = line_fold(session);
+    let mut state = match fold.lock() {
+        Ok(state) => state,
+        Err(error) => {
+            let mut state = error.into_inner();
+            *state = LineTimelineFold::default();
+            fold.clear_poison();
+            state
+        }
+    };
+    let contains = |state: &LineTimelineFold| {
+        state.lines.iter().any(|line| {
+            line.items
+                .iter()
+                .any(|item| item["id"].as_str() == Some(id))
+        })
+    };
+    if !contains(&state) {
+        let result = state.read(session);
+        account_line_fold(&fold, state.retained_source_bytes);
+        result?;
+    }
+    let Some(line) = state.lines.iter().find(|line| {
+        line.items
+            .iter()
+            .any(|item| item["id"].as_str() == Some(id))
+    }) else {
+        return Ok(false);
+    };
+    let mut file = File::open(&session.transcript)?;
+    if state.identity.as_ref() != Some(&file_identity(&file.metadata()?)) {
+        return Ok(false);
+    }
+    let mut bytes = vec![0; line.byte_len];
+    file.seek(SeekFrom::Start(line.start))?;
+    match std::io::Read::read_exact(&mut file, &mut bytes) {
+        Ok(()) => Ok(<[u8; 32]>::from(Sha256::digest(&bytes)) == line.digest),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// How many line transcripts keep a folded window in memory; the least recently read is
+/// dropped and rebuilt from its transcript on its next read.
+const MAX_FOLDED_TRANSCRIPTS: usize = 16;
+// Expanded serde Values can be several times the source size, and #1574's block payload
+// clone doubles it. Bound the source bytes as well as the number of retained folds.
+const MAX_FOLDED_SOURCE_BYTES: usize = 96 * 1024 * 1024;
+
+type SharedLineFold = Arc<Mutex<LineTimelineFold>>;
+
+type LineFoldCache = VecDeque<(PathBuf, ExternalDriver, SharedLineFold, usize)>;
+static LINE_FOLDS: LazyLock<Mutex<LineFoldCache>> = LazyLock::new(Mutex::default);
+
+fn line_fold(session: &ExternalSession) -> SharedLineFold {
+    let mut folds = match LINE_FOLDS.lock() {
+        Ok(folds) => folds,
+        Err(error) => {
+            let mut folds = error.into_inner();
+            folds.clear();
+            LINE_FOLDS.clear_poison();
+            folds
+        }
+    };
+    let found = folds
+        .iter()
+        .position(|(path, driver, _, _)| path == &session.transcript && *driver == session.driver);
+    let entry = match found.and_then(|index| folds.remove(index)) {
+        Some(entry) => entry,
+        None => (
+            session.transcript.clone(),
+            session.driver,
+            SharedLineFold::default(),
+            0,
+        ),
+    };
+    let fold = Arc::clone(&entry.2);
+    folds.push_back(entry);
+    trim_line_folds(&mut folds, MAX_FOLDED_SOURCE_BYTES);
+    fold
+}
+
+fn account_line_fold(fold: &SharedLineFold, bytes: usize) {
+    let mut folds = match LINE_FOLDS.lock() {
+        Ok(folds) => folds,
+        Err(error) => {
+            let mut folds = error.into_inner();
+            folds.clear();
+            LINE_FOLDS.clear_poison();
+            folds
+        }
+    };
+    if let Some(index) = folds.iter().position(|entry| Arc::ptr_eq(&entry.2, fold)) {
+        let mut entry = folds.remove(index).expect("located fold");
+        entry.3 = bytes;
+        folds.push_back(entry);
+    }
+    trim_line_folds(&mut folds, MAX_FOLDED_SOURCE_BYTES);
+}
+
+fn trim_line_folds(folds: &mut LineFoldCache, budget: usize) {
+    // Oversized reads remain usable by their caller, but must never be retained.
+    folds.retain(|entry| entry.3 <= budget);
+    let mut bytes: usize = folds.iter().map(|entry| entry.3).sum();
+    while folds.len() > MAX_FOLDED_TRANSCRIPTS || bytes > budget {
+        if let Some(entry) = folds.pop_front() {
+            bytes -= entry.3;
         }
     }
-    // Each line keeps whether it ended with a newline: only the final, unterminated line can be
-    // a record the harness is still writing.
-    let mut lines = VecDeque::new();
-    while read_error.is_none() {
-        let mut buffer = Vec::new();
-        match reader.read_until(b'\n', &mut buffer) {
-            Ok(0) => break,
-            Ok(_) => {
-                let terminated = buffer.last() == Some(&b'\n');
-                if lines.len() == MAX_TIMELINE_LINES {
-                    lines.pop_front();
+}
+
+/// The bounded read window of one line transcript (OMP, Pi, Claude, Codex), folded record by
+/// record.
+///
+/// The fold assumes append-only transcripts: a read resumes after the last newline-terminated
+/// record and normalizes only what was appended. Page reads detect replacement, truncation,
+/// and a changed last folded record. An in-place rewrite of an earlier record is detected only
+/// by [`native_entry_source_matches`], used for owner content fetches. The fold is volatile:
+/// it is never stored and is rebuilt after restart or eviction. The window is the one a fresh
+/// read uses: records starting in the last `MAX_TIMELINE_BYTES` of the file (strictly after
+/// its starting offset when nonzero), at most `MAX_TIMELINE_LINES` lines, including a tail.
+///
+/// After the window slides, retained records keep their original fallback timestamps and
+/// sequence carry-over. A fresh fold instead seeds the window head from the session timestamp
+/// and zero sequence; records without timestamps (or whose sequence was pushed forward by an
+/// earlier multipart record) can therefore differ. Keeping the carry-over preserves already
+/// observed entry identities and timestamps while their predecessors leave the window.
+#[derive(Default)]
+pub(crate) struct LineTimelineFold {
+    identity: Option<FileIdentity>,
+    /// Where the last folded record starts and a digest of its bytes.
+    last_record: Option<(u64, [u8; 32])>,
+    /// The file offset after the last newline-terminated record folded.
+    consumed: u64,
+    /// Includes a speculative tail, so removing that tail also rebuilds a capped window.
+    observed_len: u64,
+    lines: VecDeque<FoldedLine>,
+    retained_source_bytes: usize,
+    /// An entry without its own timestamp takes its predecessor's, so it stays in place when
+    /// the timeline is merged by time with Small Talk messages.
+    last_timestamp: String,
+    next_free_sequence: u64,
+}
+
+struct FoldedLine {
+    start: u64,
+    byte_len: usize,
+    digest: [u8; 32],
+    items: Vec<Value>,
+}
+
+impl LineTimelineFold {
+    fn read(&mut self, session: &ExternalSession) -> Result<Vec<Value>> {
+        let mut file = File::open(&session.transcript)
+            .with_context(|| format!("read transcript {}", session.transcript.display()))?;
+        let metadata = file
+            .metadata()
+            .with_context(|| format!("inspect transcript {}", session.transcript.display()))?;
+        let len = metadata.len();
+        let window_start = len.saturating_sub(MAX_TIMELINE_BYTES);
+        let identity = file_identity(&metadata);
+        let mut read_error = None;
+        if !self.resumable(&identity, len, window_start, &mut file) {
+            *self = Self {
+                identity: Some(identity),
+                consumed: window_start,
+                last_timestamp: timestamp(session.updated_at_unix_ms),
+                ..Self::default()
+            };
+        }
+        file.seek(SeekFrom::Start(self.consumed))?;
+        let mut reader = BufReader::new(file);
+        if self.consumed == window_start && window_start != 0 && self.lines.is_empty() {
+            // The line the window starts in is incomplete.
+            let mut partial = Vec::new();
+            match reader.read_until(b'\n', &mut partial) {
+                Ok(count) => self.consumed += count as u64,
+                Err(error) => read_error = Some(error),
+            }
+        }
+        // Only the final, unterminated line can be a record the harness is still writing; it is
+        // shown but not folded, and the next read sees it whole.
+        let mut tail = None;
+        // Delay normalization until the bounded raw window is known. A cold read must not
+        // inherit fallback timestamps from records already outside the line/byte window.
+        let mut pending = VecDeque::new();
+        while read_error.is_none() {
+            let mut buffer = Vec::new();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) if buffer.last() == Some(&b'\n') => {
+                    let start = self.consumed;
+                    self.consumed += buffer.len() as u64;
+                    let digest = Sha256::digest(&buffer).into();
+                    self.last_record = Some((start, digest));
+                    pending.push_back((start, buffer, digest));
+                    if pending.len() > MAX_TIMELINE_LINES {
+                        pending.pop_front();
+                    }
                 }
-                // A line that is not UTF-8 is read lossily rather than ending the transcript.
-                lines.push_back((
-                    String::from_utf8_lossy(&buffer).into_owned(),
-                    terminated,
-                    offset,
-                ));
-                offset += buffer.len() as u64;
-                if !terminated {
+                Ok(_) => {
+                    tail = Some(buffer);
                     break;
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => read_error = Some(error),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) => read_error = Some(error),
         }
+        while window_start != 0
+            && self
+                .lines
+                .front()
+                .is_some_and(|line| line.start <= window_start)
+        {
+            self.lines.pop_front();
+        }
+        while window_start != 0
+            && pending
+                .front()
+                .is_some_and(|(start, _, _)| *start <= window_start)
+        {
+            pending.pop_front();
+        }
+        // The tail counts towards the output cap but is never committed to the fold. Keep
+        // the extra completed line so a tail removed by a writer cannot erase cached history.
+        let output_cap = MAX_TIMELINE_LINES - usize::from(tail.is_some());
+        while pending.len() > output_cap {
+            pending.pop_front();
+        }
+        while self.lines.len() + pending.len() > MAX_TIMELINE_LINES {
+            self.lines.pop_front();
+        }
+        for (start, buffer, digest) in pending {
+            let items = self.fold_line(session.driver, &buffer, start, true);
+            self.lines.push_back(FoldedLine {
+                start,
+                byte_len: buffer.len(),
+                digest,
+                items,
+            });
+        }
+        self.retained_source_bytes = self.lines.iter().map(|line| line.byte_len).sum();
+        let skip = self.lines.len().saturating_sub(output_cap);
+        let mut items = Vec::new();
+        if window_start != 0
+            || self.lines.len() - skip + usize::from(tail.is_some()) == MAX_TIMELINE_LINES
+        {
+            items.push(timeline_item(
+                0,
+                &timestamp(session.updated_at_unix_ms),
+                "system",
+                "truncation",
+                json!({
+                    "reason": "the native transcript prefix is outside the bounded read window",
+                    "omitted_from_sequence": 0,
+                    "omitted_to_sequence": 0
+                }),
+            ));
+        }
+        for line in self.lines.iter().skip(skip) {
+            items.extend(line.items.iter().cloned());
+        }
+        let (mut last_timestamp, mut next_free_sequence) =
+            (self.last_timestamp.clone(), self.next_free_sequence);
+        if let Some(tail) = tail {
+            // Folded into a scratch copy: the record may still change before it is complete.
+            let mut scratch = Self {
+                last_timestamp: self.last_timestamp.clone(),
+                next_free_sequence: self.next_free_sequence,
+                ..Self::default()
+            };
+            items.extend(scratch.fold_line(session.driver, &tail, self.consumed, false));
+            (last_timestamp, next_free_sequence) =
+                (scratch.last_timestamp, scratch.next_free_sequence);
+        }
+        if let Some(error) = read_error {
+            items.push(timeline_item(
+                next_free_sequence.max(16),
+                &last_timestamp,
+                "system",
+                "error",
+                json!({
+                    "code": "native-transcript-read-failed",
+                    "message": format!("st stopped reading the {} transcript early: {error}", session.driver.as_str()),
+                    "retryable": true,
+                    "details": {}
+                }),
+            ));
+        }
+        items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
+        self.observed_len = len;
+        Ok(items)
     }
-    let mut items = Vec::new();
-    if start != 0 || lines.len() == MAX_TIMELINE_LINES {
-        items.push(timeline_item(
-            0,
-            &timestamp(session.updated_at_unix_ms),
-            "system",
-            "truncation",
-            json!({
-                "reason": "the native transcript prefix is outside the bounded read window",
-                "omitted_from_sequence": 0,
-                "omitted_to_sequence": 0
-            }),
-        ));
+
+    /// Whether the folded window is still a prefix of this file.
+    fn resumable(
+        &self,
+        identity: &FileIdentity,
+        len: u64,
+        window_start: u64,
+        file: &mut File,
+    ) -> bool {
+        if self.identity.as_ref() != Some(identity)
+            || len < self.consumed
+            || len < self.observed_len
+        {
+            return false;
+        }
+        // The window slid past everything folded: a fresh read is the same work.
+        if self.consumed <= window_start {
+            return false;
+        }
+        let Some((start, digest)) = self.last_record else {
+            return self.consumed == 0;
+        };
+        let Ok(length) = usize::try_from(self.consumed - start) else {
+            return false;
+        };
+        let mut record = vec![0; length];
+        file.seek(SeekFrom::Start(start)).is_ok()
+            && std::io::Read::read_exact(file, &mut record).is_ok()
+            && <[u8; 32]>::from(Sha256::digest(&record)) == digest
     }
-    // An entry without its own timestamp takes its predecessor's, so it stays in place when
-    // the timeline is merged by time with Small Talk messages.
-    let mut last_timestamp = timestamp(session.updated_at_unix_ms);
-    let mut next_free_sequence = 0_u64;
-    for (line_index, (line, terminated, line_start)) in lines.into_iter().enumerate() {
+
+    fn fold_line(
+        &mut self,
+        driver: ExternalDriver,
+        buffer: &[u8],
+        line_start: u64,
+        terminated: bool,
+    ) -> Vec<Value> {
+        let mut items = Vec::new();
+        // A line that is not UTF-8 is read lossily rather than ending the transcript.
+        let line = String::from_utf8_lossy(buffer);
         let line = line.trim();
         if line.is_empty() {
-            continue;
+            return items;
         }
         // A line's entries are numbered from where it starts in the file, so an entry keeps its
         // ID however the read window slides; numbered by position in the window, every entry
@@ -918,16 +1217,11 @@ pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value
         let sequence = line_start
             .saturating_add(1)
             .saturating_mul(16)
-            .max(next_free_sequence);
-        let first_new = items.len();
+            .max(self.next_free_sequence);
         match serde_json::from_str::<Value>(line) {
-            Ok(value) => normalize_native_line(
-                session.driver,
-                &value,
-                sequence,
-                &last_timestamp,
-                &mut items,
-            ),
+            Ok(value) => {
+                normalize_native_line(driver, &value, sequence, &self.last_timestamp, &mut items);
+            }
             // The harness is still writing this record; the next read sees it whole.
             Err(_) if !terminated => {}
             Err(error) => {
@@ -935,53 +1229,52 @@ pub(crate) fn normalized_timeline(session: &ExternalSession) -> Result<Vec<Value
                 push_unreadable_line(
                     &mut items,
                     sequence,
-                    &last_timestamp,
-                    session.driver,
-                    line_index,
+                    &self.last_timestamp,
+                    driver,
+                    line_start,
                     &error,
                     recovered.is_some(),
                 );
                 if let Some(value) = recovered {
                     normalize_native_line(
-                        session.driver,
+                        driver,
                         &value,
                         sequence.saturating_add(1),
-                        &last_timestamp,
+                        &self.last_timestamp,
                         &mut items,
                     );
                 }
             }
         }
-        if let Some(highest) = items[first_new..]
+        if let Some(highest) = items
             .iter()
             .filter_map(|item| item["sequence"].as_u64())
             .max()
         {
-            next_free_sequence = highest.saturating_add(1);
+            self.next_free_sequence = highest.saturating_add(1);
         }
-        if let Some(stamp) = items[first_new..]
-            .last()
-            .and_then(|item| item["timestamp"].as_str())
-        {
-            last_timestamp = stamp.to_owned();
+        if let Some(stamp) = items.last().and_then(|item| item["timestamp"].as_str()) {
+            self.last_timestamp = stamp.to_owned();
         }
+        items
     }
-    if let Some(error) = read_error {
-        items.push(timeline_item(
-            next_free_sequence.max(16),
-            &last_timestamp,
-            "system",
-            "error",
-            json!({
-                "code": "native-transcript-read-failed",
-                "message": format!("st stopped reading the {} transcript early: {error}", session.driver.as_str()),
-                "retryable": true,
-                "details": {}
-            }),
-        ));
+}
+
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = Option<SystemTime>;
+
+fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        (metadata.dev(), metadata.ino())
     }
-    items.sort_by_key(|item| item["sequence"].as_u64().unwrap_or(u64::MAX));
-    Ok(items)
+    #[cfg(not(unix))]
+    {
+        metadata.created().ok()
+    }
 }
 
 fn normalize_native_line(
@@ -1039,7 +1332,7 @@ fn push_unreadable_line(
     sequence: u64,
     timestamp: &str,
     driver: ExternalDriver,
-    line_index: usize,
+    line_start: u64,
     error: &serde_json::Error,
     recovered: bool,
 ) {
@@ -1064,7 +1357,7 @@ fn push_unreadable_line(
             "message": message,
             "retryable": false,
             "details": {
-                "line_in_window": line_index.saturating_add(1),
+                "line_offset": line_start,
                 "parse_error": error.to_string(),
             }
         }),
@@ -3974,6 +4267,309 @@ mod tests {
                 .unwrap()
                 .get("args")
                 .is_none()
+        );
+    }
+
+    /// Measures a cold window read against a read after one appended record, on a copy of a
+    /// real transcript.
+    /// `ST_CONV_IVM_CORPUS=path cargo test -p st3 --release --lib conversation_ivm_bench -- --ignored --nocapture`
+    #[test]
+    #[ignore = "benchmark over a local corpus"]
+    fn conversation_ivm_bench() {
+        let Ok(corpus) = std::env::var("ST_CONV_IVM_CORPUS") else {
+            return;
+        };
+        let median = |mut samples: Vec<f64>| {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        };
+        let ms = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
+        let text = fs::read(&corpus).unwrap();
+        // The last 40 MiB from a record boundary: more than the 32 MiB read window.
+        let base = text.len().saturating_sub(40 << 20);
+        let base = if base == 0 {
+            0
+        } else {
+            base + text[base..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .expect("corpus must contain complete records")
+                + 1
+        };
+        let text = &text[base..];
+        // Cut before the last 16 records; each run appends one of them.
+        let mut cuts: Vec<usize> = text
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte == b'\n')
+            .map(|(index, _)| index + 1)
+            .collect();
+        assert!(
+            cuts.len() >= 2,
+            "corpus must contain at least two complete records"
+        );
+        cuts = cuts.split_off(cuts.len().saturating_sub(17));
+        let root = tempfile::tempdir().unwrap();
+        let mut cold = Vec::new();
+        let mut incremental = Vec::new();
+        let mut items = 0;
+        for (run, window) in cuts.windows(2).enumerate() {
+            let path = root.path().join(format!("run-{run}.jsonl"));
+            fs::write(&path, &text[..window[0]]).unwrap();
+            let session = transcript_session(ExternalDriver::Omp, &path);
+            let start = Instant::now();
+            normalized_timeline(&session).unwrap();
+            cold.push(ms(start));
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            std::io::Write::write_all(&mut file, &text[window[0]..window[1]]).unwrap();
+            let start = Instant::now();
+            let after = normalized_timeline(&session).unwrap();
+            incremental.push(ms(start));
+            items = after.len();
+        }
+        eprintln!(
+            "corpus_bytes={} window_items={items} cold_p50_ms={:.3} cold_max_ms={:.3} incremental_p50_ms={:.3} incremental_max_ms={:.3}",
+            text.len(),
+            median(cold.clone()),
+            cold.iter().copied().fold(0.0, f64::max),
+            median(incremental.clone()),
+            incremental.iter().copied().fold(0.0, f64::max),
+        );
+    }
+
+    #[test]
+    fn incremental_line_fold_matches_fresh_reads_across_the_line_cap() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        // Empty lines count towards the cap too, without making this a large transcript.
+        fs::write(&path, "\n".repeat(MAX_TIMELINE_LINES - 3)).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        assert_eq!(
+            normalized_timeline(&session).unwrap(),
+            LineTimelineFold::default().read(&session).unwrap()
+        );
+        for index in 0..8 {
+            let record = claude_line("user", "2026-09-30T10:00:00Z", &format!("record-{index}"));
+            writeln!(file, "{record}").unwrap();
+            assert_eq!(
+                normalized_timeline(&session).unwrap(),
+                LineTimelineFold::default().read(&session).unwrap(),
+                "append {index}"
+            );
+        }
+        // An error's byte offset is stable even when its index in the window changes.
+        let offset = fs::metadata(&path).unwrap().len();
+        writeln!(file, "not JSON").unwrap();
+        let before = normalized_timeline(&session).unwrap();
+        let error = before.iter().find(|item| item["type"] == "error").unwrap();
+        assert_eq!(error["body"]["details"]["line_offset"], offset);
+        writeln!(
+            file,
+            "{}",
+            claude_line("user", "2026-09-30T10:00:01Z", "after error")
+        )
+        .unwrap();
+        let after = normalized_timeline(&session).unwrap();
+        assert_eq!(after, LineTimelineFold::default().read(&session).unwrap());
+        assert_eq!(
+            after.iter().find(|item| item["type"] == "error").unwrap(),
+            error
+        );
+    }
+
+    #[test]
+    fn owner_source_fence_detects_earlier_equal_length_rewrite() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let record = |text| claude_line("user", "2026-09-30T10:00:00Z", text);
+        let original = format!("{}\n{}\n", record("first"), record("last"));
+        fs::write(&path, &original).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let items = normalized_timeline(&session).unwrap();
+        let first = items
+            .iter()
+            .find(|item| item["body"]["text"] == "first")
+            .unwrap();
+        let last = items
+            .iter()
+            .find(|item| item["body"]["text"] == "last")
+            .unwrap();
+        let rewritten = format!("{}\n{}\n", record("other"), record("last"));
+        assert_eq!(original.len(), rewritten.len());
+        fs::write(&path, rewritten).unwrap();
+        // Page reads deliberately retain the append-only projection.
+        assert_eq!(
+            texts(&normalized_timeline(&session).unwrap()),
+            ["first", "last"]
+        );
+        assert!(!native_entry_source_matches(&session, first).unwrap());
+        assert!(native_entry_source_matches(&session, last).unwrap());
+    }
+
+    #[test]
+    fn fold_cache_evicts_to_source_byte_budget_and_drops_oversized_reads() {
+        let budget = 2 * (claude_line("user", "2026-09-30T10:00:00Z", "small").len() + 1);
+        let root = tempfile::tempdir().unwrap();
+        let mut cache = LineFoldCache::new();
+        let mut expected_bytes = 0;
+        for index in 0..4 {
+            let path = root.path().join(format!("{index}.jsonl"));
+            let text = if index == 3 {
+                "x".repeat(budget)
+            } else {
+                "small".into()
+            };
+            let record = format!("{}\n", claude_line("user", "2026-09-30T10:00:00Z", &text));
+            fs::write(&path, &record).unwrap();
+            let session = transcript_session(ExternalDriver::Claude, &path);
+            let fold = SharedLineFold::default();
+            let bytes = {
+                let mut state = match fold.lock() {
+                    Ok(state) => state,
+                    Err(error) => panic!("test fold poisoned: {error}"),
+                };
+                assert_eq!(texts(&state.read(&session).unwrap()), [text.as_str()]);
+                assert_eq!(state.retained_source_bytes, record.len());
+                state.retained_source_bytes
+            };
+            cache.push_back((path.clone(), session.driver, fold, bytes));
+            trim_line_folds(&mut cache, budget);
+            assert!(cache.iter().map(|entry| entry.3).sum::<usize>() <= budget);
+            if bytes > budget {
+                assert!(!cache.iter().any(|entry| entry.0 == path));
+                assert_eq!(
+                    cache.iter().map(|entry| entry.3).sum::<usize>(),
+                    expected_bytes
+                );
+            } else {
+                assert_eq!(cache.back().unwrap().0, path);
+                if index == 2 {
+                    assert_eq!(cache.front().unwrap().0, root.path().join("1.jsonl"));
+                }
+                expected_bytes = cache.iter().map(|entry| entry.3).sum();
+            }
+        }
+    }
+
+    #[test]
+    fn line_fold_rebuilds_after_rewrite_truncation_and_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let record = |text| claude_line("user", "2026-09-30T10:00:00Z", text);
+        let original = format!("{}\n{}\n", record("first"), record("last"));
+        fs::write(&path, &original).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        assert_eq!(
+            texts(&normalized_timeline(&session).unwrap()),
+            ["first", "last"]
+        );
+        let identity = file_identity(&fs::metadata(&path).unwrap());
+
+        // The sentinel record changes too: same-length edits solely before the sentinel are
+        // outside the append-only fold's rewrite detection contract.
+        let rewritten = format!("{}\n{}\n", record("other"), record("edit"));
+        assert_eq!(original.len(), rewritten.len());
+        fs::write(&path, &rewritten).unwrap();
+        assert_eq!(file_identity(&fs::metadata(&path).unwrap()), identity);
+        let rewritten_items = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&rewritten_items), ["other", "edit"]);
+        assert_eq!(
+            rewritten_items,
+            LineTimelineFold::default().read(&session).unwrap()
+        );
+
+        fs::write(&path, format!("{}\n", record("short"))).unwrap();
+        let truncated = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&truncated), ["short"]);
+        assert_eq!(
+            truncated,
+            LineTimelineFold::default().read(&session).unwrap()
+        );
+
+        let replacement = root.path().join("replacement.jsonl");
+        fs::write(
+            &replacement,
+            format!("{}\n{}\n", record("replacement"), record("new")),
+        )
+        .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        #[cfg(unix)]
+        assert_ne!(file_identity(&fs::metadata(&path).unwrap()), identity);
+        let replaced = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&replaced), ["replacement", "new"]);
+        assert_eq!(
+            replaced,
+            LineTimelineFold::default().read(&session).unwrap()
+        );
+    }
+
+    #[test]
+    fn parsed_unterminated_tail_keeps_its_id_when_completed() {
+        use std::io::Write as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let first = claude_line("user", "2026-09-30T10:00:00Z", "question");
+        let tail = claude_line("assistant", "2026-09-30T10:00:01Z", "answer");
+        fs::write(&path, format!("{first}\n{tail}")).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let writing = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&writing), ["question", "answer"]);
+        // Changing an uncommitted tail must be visible even when its byte length is unchanged.
+        let changed_tail = tail.replace("answer", "edited");
+        fs::write(&path, format!("{first}\n{changed_tail}")).unwrap();
+        let edited = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&edited), ["question", "edited"]);
+        assert_eq!(
+            edited.iter().map(|item| &item["id"]).collect::<Vec<_>>(),
+            writing.iter().map(|item| &item["id"]).collect::<Vec<_>>()
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file).unwrap();
+        assert_eq!(normalized_timeline(&session).unwrap(), edited);
+        assert_eq!(LineTimelineFold::default().read(&session).unwrap(), edited);
+    }
+
+    #[test]
+    fn a_cold_fold_does_not_inherit_timestamps_from_outside_the_line_window() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let omitted = claude_line("user", "2026-09-30T10:00:00Z", "omitted");
+        let head = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"head"}]}});
+        fs::write(
+            &path,
+            format!("{omitted}\n{}{head}\n", "\n".repeat(MAX_TIMELINE_LINES - 1)),
+        )
+        .unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        let timeline = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&timeline), ["head"]);
+        let entry = timeline
+            .iter()
+            .find(|item| item["type"] == "content")
+            .unwrap();
+        assert_eq!(entry["timestamp"], timestamp(session.updated_at_unix_ms));
+    }
+
+    #[test]
+    fn removing_a_tail_restores_the_full_completed_line_window() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("session.jsonl");
+        let first = claude_line("user", "2026-09-30T10:00:00Z", "first");
+        let tail = claude_line("assistant", "2026-09-30T10:00:01Z", "tail");
+        let completed = format!("{first}\n{}", "\n".repeat(MAX_TIMELINE_LINES - 1));
+        fs::write(&path, format!("{completed}{tail}")).unwrap();
+        let session = transcript_session(ExternalDriver::Claude, &path);
+        assert_eq!(texts(&normalized_timeline(&session).unwrap()), ["tail"]);
+        fs::write(&path, &completed).unwrap();
+        let restored = normalized_timeline(&session).unwrap();
+        assert_eq!(texts(&restored), ["first"]);
+        assert_eq!(
+            restored,
+            LineTimelineFold::default().read(&session).unwrap()
         );
     }
 
