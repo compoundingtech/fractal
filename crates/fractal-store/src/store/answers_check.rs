@@ -89,7 +89,7 @@ fn slot_reader_answers(
                     // Read the production projection: its first opener, attribution-only rows
                     // and compact item-state overlays depend on observation acceptance times.
                     let row: Option<String> = connection.query_row(
-                        "SELECT json_object('kind',r.kind,'facts',json(r.facts),'observed_at',r.observed_at,
+                        "SELECT json_object('kind',r.kind,'claim',r.claim_id,'facts',json(r.facts),'observed_at',r.observed_at,
                          'opened_by',r.opened_by,'opened_by_run',r.opened_by_run,
                          'observer',json_extract(c.body,'$.fields.observer'))
                          FROM resource_observations r JOIN claims c ON c.id=r.claim_id WHERE r.subject=?1",
