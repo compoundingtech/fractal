@@ -128,6 +128,23 @@ impl Store {
         Ok(quiet_since_at(&connection, subject, attempt, now_ms())?)
     }
 
+    /// When this daemon or a peer first raised the fault `episode` on `subject`, if it has: the
+    /// stalled grace runs from the holder's fault, not from the deadline it was due at.
+    pub fn quiet_fault_at(&self, subject: &str, episode: &str) -> Result<Option<u128>> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        Ok(connection
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-h17e9cc15e678 owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT accepted_at_unix_ms FROM claims
+                 WHERE subject=?1 AND kind='operational.failure'
+                   AND json_extract(body, '$.fields.episode')=?2
+                 ORDER BY CANONICAL_ASC(claims) LIMIT 1",
+            ))?
+            .query_row(/* sqlite-large-value: allow-for-now lv-h2ba4633a62ab owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ params![subject, episode], |row| row.get::<_, String>(0))
+            .optional()?
+            .and_then(|at| at.parse().ok()))
+    }
+
     /// Raise a quiet or stalled fault on a step. Nothing more is written while the same
     /// episode is pending.
     pub fn record_quiet_fault(

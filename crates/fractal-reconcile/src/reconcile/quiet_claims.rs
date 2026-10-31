@@ -34,7 +34,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }),
         );
         let quiet_at = since.saturating_add(stalled_after);
-        let stalled_at = quiet_at.saturating_add(STALLED_GRACE_MS);
         let now = now_ms();
         let key = format!("quiet-claim:{}", view.subject);
         if now < quiet_at {
@@ -47,7 +46,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let step = &view.subject;
         let title = view.title.as_deref().unwrap_or(&view.step);
-        let quiet_for = super::waits::describe_age(stalled_after);
+        let quiet_for = super::waits::describe_age(now.saturating_sub(since));
         let mut changed = self.raise_quiet_fault(
             STEP_QUIET_CONDITION,
             view,
@@ -69,6 +68,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 idempotency_key: format!("step-quiet:{step}:{}:{since}", view.attempt),
             },
         )?;
+        // The holder has thirty minutes from its fault, however long the step was quiet before a
+        // daemon raised it: one that was down or not yet upgraded raises it late, not stalled.
+        let episode = quiet_episode(STEP_QUIET_CONDITION, step, view.attempt, since);
+        let faulted_at = self.store.quiet_fault_at(step, &episode)?.unwrap_or(now);
+        let stalled_at = faulted_at.max(quiet_at).saturating_add(STALLED_GRACE_MS);
         if now < stalled_at {
             self.arm_deadline_at(
                 &key,
@@ -81,7 +85,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .map(|report| report.to)
             .or_else(|| Some(run.requester.clone()).filter(|agent| agent.starts_with("agent/")))
             .unwrap_or_else(|| "person/operator".to_owned());
-        let stalled_for = super::waits::describe_age(stalled_after + STALLED_GRACE_MS);
+        let stalled_for = super::waits::describe_age(now.saturating_sub(since));
         changed |= self.raise_quiet_fault(
             STEP_STALLED_CONDITION,
             view,
