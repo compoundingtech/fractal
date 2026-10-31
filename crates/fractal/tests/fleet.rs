@@ -6086,9 +6086,9 @@ async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
     })
 }
 
-/// A member of the previous release that depends on a repository, through a seat that watches it,
-/// keeps its poller writing item snapshots, which it reads. Once it upgrades and advertises
-/// the GitHub plugin, the poller records the next change as compact state alone.
+/// A member of the previous release in the fleet keeps a repository's poller writing item
+/// snapshots, which its seat watching the repository reads. Once it upgrades and advertises the
+/// GitHub plugin, the poller records the next compact-only change as compact state alone.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
 async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {

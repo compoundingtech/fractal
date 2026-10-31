@@ -194,7 +194,7 @@ pub fn read_inputs(
             resource,
             field,
             previous.as_ref(),
-            &facts,
+            facts,
             &mut |subject| {
                 recorded_items
                     .get(subject)
