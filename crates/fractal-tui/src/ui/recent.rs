@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(entry.label, ui.place_label(&selected));
         assert_ne!(entry.label, before);
         assert!(entry.label.contains("updated"));
-        assert!(entry.label.contains('>'), "working activity is live");
+        assert!(entry.label.starts_with("● "), "working activity is live");
         assert!(entry.label.contains('?'), "live question is visible");
         assert_eq!(entry.search, entry.label.to_lowercase());
         let area = Rect::new(0, 0, 100, 24);
