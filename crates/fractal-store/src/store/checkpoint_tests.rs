@@ -1418,7 +1418,7 @@ fn write_history(store: &Store) {
     }
     for n in 0..4 {
         store
-            .append_claim(&input(
+            .append_as_older_build_for_test(&input(
                 "daemon/alder",
                 "daemon.diagnostic",
                 None,
@@ -2746,7 +2746,7 @@ fn reconcile_decisions_keep_the_newest_of_each_key() {
     let crash = decision(Some("runtime-crash-loop:token"), "raise", "three exits", 202);
     let restart = decision(None, "wait", "restart in 9s", 203);
     store.set_write_clock_at(300).unwrap();
-    store.append_claim(&input("daemon/alder", "daemon.diagnostic", None,
+    store.append_as_older_build_for_test(&input("daemon/alder", "daemon.diagnostic", None,
         json!({"severity": "warning", "code": "slow-request", "reason": "last"}), "decision-last")).unwrap();
     store.seal_local_batches().unwrap();
     let fault_before = store.member_reconcile_fault(AGENT, None).unwrap();

@@ -8,18 +8,24 @@ const ACTOR: &str = "person/example/session/phone";
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 fn state(root: &std::path::Path) -> AppState {
-    AppState { store: Arc::new(Store::open(&root.join("graph.db"), "push-test").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0u64).0,
-    node: "push-test".into(),
-    state_dir: root.into(),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("unused"),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(), owning_person: None, }
+    AppState {
+        store: Arc::new(Store::open(&root.join("graph.db"), "push-test").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0u64).0,
+        node: "push-test".into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused"),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        owning_person: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
 fn grant(state: &AppState, expiry: u64) {

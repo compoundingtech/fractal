@@ -35,19 +35,24 @@ impl Host {
         std::fs::create_dir_all(root).unwrap();
         let socket = root.join("st3.sock");
         let store = Arc::new(Store::open(&root.join("store.db"), name).unwrap());
-        let state = AppState { owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: name.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: name.into(),
+            state_dir: root.to_path_buf(),
+            pty_root: root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let server_socket = socket.clone();
         let server = tokio::spawn(async move {
             fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
