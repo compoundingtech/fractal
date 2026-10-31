@@ -2090,6 +2090,15 @@ mod tests {
 
     #[tokio::test]
     async fn peer_envelope_versions_are_accepted_by_the_client_relay() {
+        assert_signed_peer_envelope_versions(CLIENT_READ_PATH).await;
+    }
+
+    #[tokio::test]
+    async fn peer_envelope_versions_are_accepted_by_seat_freshness() {
+        assert_signed_peer_envelope_versions(SEAT_FRESHNESS_PATH).await;
+    }
+
+    async fn assert_signed_peer_envelope_versions(path: &'static str) {
         use std::future::IntoFuture as _;
         let root = tempfile::tempdir().unwrap();
         let secret = root.path().join("fleet-secret");
@@ -2099,16 +2108,16 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let app = Router::new().route(
-                CLIENT_READ_PATH,
+                path,
                 post(move |request: Bytes| async move {
                     let body = serde_json::to_vec(&serde_json::json!({
                         "api_version": version, "request_id": "test", "snapshot_host": "owner-node",
-                        "store_index": 0, "value": {"accepted": true}
+                        "store_index": 0, "value": {"recorded": []}
                     }))
                     .unwrap();
                     let headers = FleetAuth::test("fleet-test", &[7; 32])
                         .response_headers_for(
-                            CLIENT_READ_PATH,
+                            path,
                             "owner-node",
                             &body,
                             &FleetAuth::body_digest(&request),
@@ -2141,13 +2150,24 @@ mod tests {
                     cursor: None,
                 },
             };
-            let result = relay.read("host/owner-node", &request).await;
+            let result = if path == SEAT_FRESHNESS_PATH {
+                relay
+                    .push_seat_freshness(
+                        "owner-node",
+                        &SeatFreshnessPush::default(),
+                        Duration::from_secs(5),
+                    )
+                    .await
+                    .map(|ack| serde_json::to_value(ack.unwrap()).unwrap())
+            } else {
+                relay.read("host/owner-node", &request).await
+            };
             server.abort();
             let _ = server.await;
             if version == "future.v9" {
                 assert!(result.is_err());
             } else {
-                assert_eq!(result.unwrap(), serde_json::json!({"accepted": true}));
+                assert_eq!(result.unwrap(), serde_json::json!({"recorded": []}));
             }
         }
     }
