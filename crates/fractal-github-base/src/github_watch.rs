@@ -432,6 +432,35 @@ pub fn open_outside_merge_queue(facts: &Value) -> bool {
 /// observed only when it changes. A checkpoint keeps what such a check can read.
 pub const THREAD_SCAN: u32 = 400;
 
+/// When a pull request left the merge queue, from its observations newest first: each one's
+/// facts, accepted time, and whether it is a receipt, which the walk skips. While the pull
+/// request is open outside the queue, the oldest such observation is when it left, and the one
+/// before that must have it queued; it counts only if it left after `after_unix_ms`. `None`
+/// when the observations run out before they decide.
+pub fn merge_queue_exit<E>(
+    history: impl IntoIterator<Item = Result<(Value, u128, bool), E>>,
+    after_unix_ms: u128,
+) -> Result<Option<Option<u128>>, E> {
+    let mut left = None::<u128>;
+    for row in history {
+        let (facts, at, receipt) = row?;
+        if receipt {
+            continue;
+        }
+        if left.is_none() && !open_outside_merge_queue(&facts) {
+            return Ok(Some(None));
+        }
+        if in_merge_queue(&facts) {
+            return Ok(Some(left.filter(|left| *left > after_unix_ms)));
+        }
+        if !open_outside_merge_queue(&facts) || at <= after_unix_ms {
+            return Ok(Some(None));
+        }
+        left = Some(at);
+    }
+    Ok(None)
+}
+
 /// One wake: its message subject, the key it was decided by, title, content and tags.
 pub struct Wake {
     pub subject: String,
