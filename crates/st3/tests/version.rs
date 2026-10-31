@@ -1,4 +1,9 @@
 //! Version inspection needs neither a daemon nor the caller's source checkout.
+
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use std::process::Command;
 
 fn version(directory: &std::path::Path, args: &[&str]) -> String {
