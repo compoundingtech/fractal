@@ -4545,7 +4545,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
     let client = Client::new(Endpoint::Unix(PathBuf::from("/nonexistent/st3.sock")));
     let args = |to: &str| MessageSendArgs {
         to: to.into(),
-        body: "Done.".into(),
+        body: Some("Done.".into()),
+        body_file: None,
         subject: None,
         in_reply_to: Some("message/0123456789abcdef".into()),
         tags: Vec::new(),
@@ -5556,6 +5557,52 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     };
     assert_eq!(explicit.identity.as_deref(), Some("agent/explicit"));
     assert!(explicit.archive);
+}
+
+fn parse_body_send(extra: &[&str]) -> Result<MessageSendArgs, clap::Error> {
+    let mut args = vec!["fractal", "conversations", "send", "agent/example", "--from", "agent/sender"];
+    args.extend_from_slice(extra);
+    match Cli::try_parse_from(args)?.command {
+        Command::Conversations { command: MessageCommand::Send(send) } => Ok(send),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn message_body_sources_require_exactly_one() {
+    assert_eq!(parse_body_send(&[]).err().unwrap().kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert_eq!(parse_body_send(&["--body", "text", "--body-file", "file"]).err().unwrap().kind(), clap::error::ErrorKind::ArgumentConflict);
+    for flag in ["--body", "-m"] {
+        let args = parse_body_send(&[flag, "-"]).unwrap();
+        let text = " \n`command` $VAR é\r\n";
+        assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, text.as_bytes()).unwrap(), text);
+    }
+}
+
+#[test]
+fn message_body_file_preserves_text_and_rejects_invalid_utf8() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_str().unwrap();
+    let text = " \n`command` $VAR é\r\n";
+    std::fs::write(&file, text).unwrap();
+    let args = parse_body_send(&["--body-file", path]).unwrap();
+    assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, std::io::empty()).unwrap(), text);
+    std::fs::write(&file, [0xff]).unwrap();
+    assert!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).unwrap_err().to_string().contains("UTF-8"));
+    assert!(conversations_cli::read_message_body(Some("-".into()), None, &[0xff][..]).unwrap_err().to_string().contains("UTF-8"));
+}
+
+#[test]
+fn message_body_sources_share_the_byte_limit() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for length in [fractal_daemon::message_body::MAX_BYTES, fractal_daemon::message_body::MAX_BYTES + 1] {
+        let text = "a".repeat(length);
+        let accepted = length == fractal_daemon::message_body::MAX_BYTES;
+        std::fs::write(&file, &text).unwrap();
+        assert_eq!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some("-".into()), None, text.as_bytes()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some(text), None, std::io::empty()).is_ok(), accepted);
+    }
 }
 
 #[test]
