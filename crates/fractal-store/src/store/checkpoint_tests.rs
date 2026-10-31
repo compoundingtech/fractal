@@ -822,6 +822,59 @@ proptest! {
     }
 }
 
+/// A seat's current harness view, from one incarnation's observations (state, credential report,
+/// whether it is a transition), before and after deleting what the harness rule drops.
+fn harness_view_full_and_kept(observations: &[(&str, Option<bool>, bool)]) -> (String, String) {
+    let store = Store::open_memory("alder").unwrap();
+    store
+        .append_claim(&input(AGENT, "runtime.observed", None, json!({"status": "running", "incarnation_id": "inc-1"}), "runtime"))
+        .unwrap();
+    for (n, (state, provider_auth, transition)) in observations.iter().enumerate() {
+        let mut fields = json!({"state": state, "driver": "codex", "incarnation_id": "inc-1",
+            "observed_at_ms": n + 1, "status_transition": transition});
+        if let Some(provider_auth) = provider_auth {
+            fields["provider_auth"] = json!(provider_auth);
+        }
+        store.append_claim(&input(AGENT, "harness.observed", Some(AGENT), fields, &format!("harness-{n}"))).unwrap();
+    }
+    let view = |store: &Store| format!("{:?}", current_harness_at(&store.readers.get(), AGENT, None).unwrap());
+    let full = view(&store);
+    let claims = claims_of_kind_in_order(&store.readers.get(), AGENT, "harness.observed").unwrap();
+    let keep = checkpoint_rules::harness_keep(&claims.iter().collect::<Vec<_>>());
+    for (_, claim) in claims.iter().enumerate().filter(|(position, _)| !keep.contains(position)) {
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h7a6efe0439c2 owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id]).unwrap();
+    }
+    (full, view(&store))
+}
+
+/// A credential refusal, a report that restored it, and the refusal again: the seat needs a
+/// login since the second refusal, and the rule keeps the restoring report that says so (#4237).
+#[test]
+fn harness_rule_keeps_where_the_current_needs_login_began() {
+    let (full, kept) = harness_view_full_and_kept(&[("ready", Some(false), true), ("starting", Some(true), true), ("ready", Some(false), true)]);
+    assert!(full.contains("needs-login") && full.contains("since_unix_ms: 3"), "{full}");
+    assert_eq!(full, kept);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Whatever an incarnation reports, its current harness view (state, since, reason and the
+    /// claim it shows) is the same from the kept observations as from all of them.
+    #[test]
+    fn the_current_harness_view_is_the_same_from_the_kept_observations(
+        observations in proptest::collection::vec(
+            (prop_oneof![Just("starting"), Just("ready"), Just("idle"), Just("working"), Just("blocked")],
+             prop_oneof![2 => Just(None), 1 => Just(Some(true)), 1 => Just(Some(false))],
+             any::<bool>()),
+            1..14,
+        ),
+    ) {
+        let (full, kept) = harness_view_full_and_kept(&observations);
+        prop_assert_eq!(full, kept);
+    }
+}
+
 #[test]
 fn loop_rule_keeps_the_ends_of_each_round_and_the_first_items() {
     let mut sealed = Sealed::default();
@@ -2467,7 +2520,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 23);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 24);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2486,6 +2539,7 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                 ),
             )
             .replace("mission-run-input,", "mission-run-input,request-discovery,")
+            .replace("current-native-auth-run-start", "current-native-auth-run-start-and-the-report-ending-the-run-before")
             .replace(
                 "resource.observed actor=null observer=set slot=subject keep=newest",
                 "resource.observed actor=null observer=set slot=subject keep=newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts",
