@@ -2761,7 +2761,7 @@ enum AgentsCommand {
     /// Print one agent's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
     /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
-    /// It names where the lane is when the seat has one; the cgroup tree shows whether it exists.
+    /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
     Lane { subject: String },
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
