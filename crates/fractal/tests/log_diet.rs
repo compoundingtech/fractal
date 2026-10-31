@@ -167,19 +167,24 @@ impl Daemon {
         std::fs::create_dir_all(&state_dir).unwrap();
         let store = Arc::new(Store::open(&state_dir.join("claims.sqlite3"), NODE).unwrap());
         let notify = Arc::new(Notify::new());
-        let state = AppState { owning_person: None,
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir,
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify: notify.clone(),
+            event_notify: watch::channel(0_u64).0,
+            node: NODE.into(),
+            state_dir,
+            pty_root: root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = root.join("st3.sock");
         let server_socket = socket.clone();
         runtime.spawn(async move {
