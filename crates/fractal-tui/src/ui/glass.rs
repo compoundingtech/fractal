@@ -6166,7 +6166,8 @@ mod tests {
                                 view.current = Some((current, "agent:agent/a".into()));
                             }
                             let row = tab_strip_row(&ui, width);
-                            if count == 50 && width == 11 && first == 25 && current == 25 && !manual {
+                            if count == 50 && width == 11 && first == 25 && current == 25 && !manual
+                            {
                                 println!("NARROW 11: |{row}|");
                             }
                             let info = ui.frame.borrow();
