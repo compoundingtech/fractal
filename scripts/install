@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-# Install st3 and its tools from one source build. `st` is always a symlink to the installed `st3`,
-# never a separate build, so the two names cannot drift apart.
+# Install physical fractal and its tools from one source build. The temporary
+# st and st3 commands are reverse aliases, never separately copied binaries.
 #
 # usage: scripts/install [--bin-dir DIR] [--from DIR] [--instance NAME]
 #
@@ -39,7 +39,7 @@ export FRACTAL_INSTANCE=$instance ST_INSTANCE=$instance
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}}}
 
-binaries=(st3 st3-migrate)
+binaries=(fractal st3-migrate)
 
 if [[ -z $from ]]; then
   repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -54,66 +54,102 @@ if [[ -z $from ]]; then
 fi
 
 for binary in "${binaries[@]}"; do
-  [[ -x $from/$binary && ! -d $from/$binary ]] || {
+  [[ -x $from/$binary && ! -d $from/$binary && ! -L $from/$binary ]] || {
     echo "install: $from/$binary is not an executable file" >&2
     exit 1
   }
 done
-# `mv` onto a directory (or a link to one) would move the file inside it instead of replacing it.
-for name in "${binaries[@]}" st stui; do
+# Share the release installer's Nix and canonical-command ownership policy.
+installer="$(cd "$(dirname "$0")" && pwd)/install-release"
+bash "$installer" --source-preflight --bin-dir "$bin_dir"
+bin_dir=$(cd "$bin_dir" && pwd)
+for name in "${binaries[@]}" st st3 stui; do
   [[ ! -d $bin_dir/$name ]] || {
     echo "install: $bin_dir/$name is a directory; refusing to replace it" >&2
     exit 1
   }
 done
+stage=
+locked=false
+rollback_ready=false
+committed=false
+# Compare the directory entries themselves, including hardlinked dangling
+# symlinks. Neither GNU nor Darwin stat follows links without an explicit -L.
+previous_entry_is_unchanged() {
+  local previous current
+  if $macos; then
+    previous=$(stat -f '%d:%i' "$1" 2>/dev/null) || return 1
+    current=$(stat -f '%d:%i' "$2" 2>/dev/null) || return 1
+  else
+    previous=$(stat -c '%d:%i' -- "$1" 2>/dev/null) || return 1
+    current=$(stat -c '%d:%i' -- "$2" 2>/dev/null) || return 1
+  fi
+  [[ -n $previous && -n $current && $previous == "$current" ]]
+}
 
-mkdir -p "$bin_dir"
-bin_dir=$(cd "$bin_dir" && pwd)
+cleanup() {
+  status=$?
+  trap - EXIT
+  set +e
+  restored=true
+  if $rollback_ready && ! $committed; then
+    for name in "${binaries[@]}" st st3 stui; do
+      # The macOS helper owns its independent signed-app/link transaction.
+      if $macos && [[ $name == fractal || $name == st || $name == st3 ]]; then continue; fi
+      if [[ -e $stage/previous/$name || -L $stage/previous/$name ]]; then
+        # An untouched hardlink is already restored; mv rejects identical
+        # source/destination entries. Uncertain identity uses the original
+        # restore path, retaining evidence if that operation really fails.
+        if previous_entry_is_unchanged "$stage/previous/$name" "$bin_dir/$name"; then continue; fi
+        mv -f "$stage/previous/$name" "$bin_dir/$name" || restored=false
+      else
+        rm -f -- "$bin_dir/$name" || restored=false
+      fi
+    done
+  fi
+  if $restored; then
+    [[ -z $stage ]] || rm -rf "$stage"
+    if $locked; then rmdir "$bin_dir/.smalltalk-install.lock"; fi
+  else
+    echo "install: rollback failed; prior files and lock retained in $stage" >&2
+    status=1
+  fi
+  exit "$status"
+}
 macos=false
-if [[ $(uname -s) == Darwin ]]; then
-  python3 "$(cd "$(dirname "$0")" && pwd)/install-macos.py" --from "$from" --bin-dir "$bin_dir"
-  macos=true
-fi
-# Each name is replaced by rename, so a running process keeps its old inode and a concurrent
-# caller sees either the old or the new file, never a partial copy.
-for binary in "${binaries[@]}"; do
-  if [[ $macos == true && $binary == st3 ]]; then continue; fi
-  staged=$(mktemp "$bin_dir/.$binary.install.XXXXXX")
-  cp "$from/$binary" "$staged"
-  chmod 0755 "$staged"
-  mv -f "$staged" "$bin_dir/$binary"
-done
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-link=$(mktemp -u "$bin_dir/.st.install.XXXXXX")
-ln -s st3 "$link"
-mv -f "$link" "$bin_dir/st"
-
-[[ $(readlink "$bin_dir/st") == st3 ]] || {
-  echo "install: $bin_dir/st does not link to st3" >&2
+[[ $(uname -s) != Darwin ]] || macos=true
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$bin_dir/.smalltalk-install.lock" || {
+  echo "install: another install or retained recovery lock exists: $bin_dir/.smalltalk-install.lock" >&2
   exit 1
 }
-# LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-# Retire the old executable; no alias or shim remains.
-rm -f -- "$bin_dir/stui"
-if ! $macos; then
-  foreign_path=false
-  IFS=: read -ra path_dirs <<< "${PATH:-}"
-  for path_dir in "${path_dirs[@]}"; do
-    path_dir=${path_dir:-.}
-    [[ -d $path_dir ]] || continue
-    path_dir=$(cd "$path_dir" && pwd)
-    [[ $path_dir != "$bin_dir" ]] || continue
-    if [[ -e $path_dir/fractal || -L $path_dir/fractal ]]; then
-      [[ -L $path_dir/fractal && $(readlink "$path_dir/fractal") == "$bin_dir/st3" ]] || foreign_path=true
-    fi
-  done
-  # Only these exact targets identify a link installed by Fractal.
-  if [[ -L $bin_dir/fractal && ( $(readlink "$bin_dir/fractal") == st3 || $(readlink "$bin_dir/fractal") == "$bin_dir/st3" ) ]]; then
-    link=$(mktemp -u "$bin_dir/.fractal.install.XXXXXX")
-    ln -s st3 "$link"
-    mv -f "$link" "$bin_dir/fractal"
-  elif $foreign_path || [[ -e $bin_dir/fractal || -L $bin_dir/fractal ]] || ! ln -s st3 "$bin_dir/fractal" 2>/dev/null; then
-    printf 'install: leaving fractal unchanged: destination %s/fractal or PATH contains a foreign command; use st, or move the foreign fractal and reinstall to enable the alias.\n' "$bin_dir" >&2
+locked=true
+stage=$(mktemp -d "$bin_dir/.source.install.XXXXXX")
+mkdir "$stage/previous"
+for name in "${binaries[@]}" st st3 stui; do
+  if [[ -e $bin_dir/$name || -L $bin_dir/$name ]]; then
+    ln -P "$bin_dir/$name" "$stage/previous/$name"
   fi
+done
+for binary in "${binaries[@]}"; do
+  cp "$from/$binary" "$stage/$binary"
+  chmod 0755 "$stage/$binary"
+done
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+ln -s fractal "$stage/st"
+ln -s fractal "$stage/st3"
+# LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
+if $macos; then
+  python3 "$(dirname "$installer")/install-macos.py" --from "$from" --bin-dir "$bin_dir"
 fi
-printf 'installed %s and st -> st3 in %s\n' "${binaries[*]}" "$bin_dir"
+rollback_ready=true
+for name in "${binaries[@]}" st st3; do
+  if $macos && [[ $name == fractal || $name == st || $name == st3 ]]; then continue; fi
+  mv -f "$stage/$name" "$bin_dir/$name"
+done
+rm -f -- "$bin_dir/stui"
+committed=true
+printf 'installed %s and st/st3 -> fractal in %s\n' "${binaries[*]}" "$bin_dir"
