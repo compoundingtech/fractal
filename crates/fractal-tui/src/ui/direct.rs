@@ -54,7 +54,7 @@ pub(super) struct Terminal<'a> {
     pub fallback: bool,
 }
 
-pub(super) const RESTARTED: &str = "the terminal restarted; Ctrl+] attaches the new one";
+pub(super) const RESTARTED: &str = "the terminal restarted; Enter attaches the new one";
 
 pub(super) async fn open(client: &Client, terminal: &Terminal<'_>) -> Result<Opened, String> {
     if client.is_local_socket() {
@@ -346,19 +346,24 @@ mod tests {
     }
 
     fn state(root: &Path) -> fractal_daemon::api::AppState {
-        fractal_daemon::api::AppState { owning_person: None,
-        store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0_u64).0,
-        node: "attach-node".into(),
-        state_dir: root.join("daemon"),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("bin/pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        fractal_daemon::api::AppState {
+            owning_person: None,
+            store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "attach-node".into(),
+            state_dir: root.join("daemon"),
+            pty_root: root.join("pty"),
+            pty_binary: root.join("bin/pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
     }
 
     fn observe_terminal(store: &fractal_daemon::store::Store, incarnation: &str) {
@@ -488,9 +493,10 @@ mod tests {
         let subject = std::env::var("STUI_PROBE_SUBJECT").expect("STUI_PROBE_SUBJECT");
         let person = std::env::var("STUI_PROBE_PERSON").expect("STUI_PROBE_PERSON");
         let runtime = std::env::var("STUI_PROBE_RUNTIME").expect("STUI_PROBE_RUNTIME");
-        let socket =
-            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(PathBuf::from))
-                .unwrap();
+        let endpoint = crate::environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
+            .unwrap()
+            .map(PathBuf::from);
+        let socket = fractal_client::discover_unix_endpoint(endpoint).unwrap();
         let client = Client::unix_as(&socket, person);
         let started = Instant::now();
         // Fractal TUI's own feed already holds an agent's incarnation and host, so a real attach reads

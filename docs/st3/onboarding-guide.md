@@ -18,7 +18,7 @@ person, and never an example name.
   the graph or your own bookkeeping. If work needs recording, record it with the fractal skill and
   say nothing about it.
 - Ask one question at a time and say the default you will use if they stay quiet.
-- Run every fractal command yourself. Do not ask them to run one, to open Home, to look at an
+- Run every fractal command yourself. Do not ask them to run one, to open Now, to look at an
   attention item or to switch terminals.
 - Say once, early, that you run on their own Claude or Codex account and use its usage.
 - Never ask for or type a password. A provider login belongs in the provider's own terminal.
@@ -158,8 +158,8 @@ explicitly starts another onboarding run.
 Plain `st` opens the terminal interface. Now shows decisions, approvals, questions
 and failures that need the person. Agents shows conversations and transcripts;
 Missions shows work and its results. Ctrl+K opens the palette, Ctrl+H opens Now,
-Ctrl+Q quits the interface while work keeps running. Ctrl+] attaches to a selected
-agent's terminal and Ctrl+\ detaches. Raw terminal keys belong to the harness while
+Ctrl+Q quits the interface when detached while work keeps running. The Attach button opens
+an agent's terminal; Enter attaches a detached terminal pane. Ctrl+\ then c detaches. Raw terminal keys belong to the harness while
 attached. Use a choice or decision on Now for a person-only answer; do not leave
 questions solely in a harness terminal.
 

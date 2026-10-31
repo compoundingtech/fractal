@@ -1513,15 +1513,14 @@ class CommittedPolicy(unittest.TestCase):
                 found.append(str(source.relative_to(ROOT)))
         self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
 
-    def test_the_host_level_is_admitted_for_exactly_the_locally_signable_checks_wrapper_kind_and_pull_requests_only(self):
+    def test_host_and_agent_levels_admit_pr_and_queue_events_for_the_locally_signable_wrapper_checks(self):
         policy = json.loads(root_config('evidence-skip-policy.json').read_text())
-        # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
-        # every other check keeps enforce false until its own flip PR.
+        # Event eligibility does not enable queue reuse: the BASE gate mode remains off until post-merge proof is deployed.
         self.assertEqual({check: entry.get('enforce', False) for check, entry in policy['checks'].items()},
                          {check: check in ENFORCED for check in policy['checks']})
         for check in ENFORCED:
-            self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
-            # Our pull requests skip CI entirely (Ada, 2026-10-26): no comparison sample; the merge queue's full run is the comparison.
+            self.assertEqual(policy['checks'][check].get('events'), ['pull_request', 'merge_group'], check)
+            # Sampling remains unchanged; queue reuse independently requires an exact signed tree.
             self.assertEqual(policy['checks'][check].get('sample_one_in', 1), 1, check)
         with_host = {}
         for check, entry in policy['checks'].items():
@@ -1546,7 +1545,7 @@ class CommittedPolicy(unittest.TestCase):
             agent = dict(rule['by_level']['agent'])
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
-            self.assertEqual(override['events'], ['pull_request'], check)
+            self.assertEqual(override['events'], ['pull_request', 'merge_group'], check)
             # The queue level (a merge-queue signer's key): the host's command and inputs, held to the lane, for the merge queue only.
             queue = dict(rule['by_level']['queue'])
             self.assertIs(queue.pop('lane'), True, check)
@@ -1555,7 +1554,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
-            self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
+            self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request', 'merge_group'])
         # The commands are the ones scripts/fractal-test records, so a local note can match.
         script = ROOT / 'scripts/st-test'
         if script.exists():
@@ -1566,9 +1565,8 @@ class CommittedPolicy(unittest.TestCase):
             for (check, kind), rule in with_host.items():
                 self.assertEqual(rule['by_level']['host']['command'], st_test.LOCAL[check], check)
 
-    def test_a_queue_note_never_covers_a_pull_request_and_covers_nothing_until_its_check_admits_the_merge_queue(self):
-        # Inert by construction: the level is limited to merge_group, and every check is still limited to pull requests, so the
-        # narrowed list is empty. A check's own flip (its events gaining merge_group) is what lets a queue note skip, one check at a time.
+    def test_a_queue_note_never_covers_a_pull_request_and_requires_check_event_eligibility(self):
+        # Queue-level records stay merge-group-only, even though host and agent records also admit PR events.
         policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         with_queue = []
         for check, entry in policy['checks'].items():
@@ -1583,7 +1581,7 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertNotIn('pull_request', evidence_verify.narrowed_events(None, level['events']), check)
                 self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']),
                                  ['merge_group'] if 'merge_group' in (rules['events'] or []) else [], check)
-                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']), [], f'{check}: not flipped yet')
+                self.assertEqual(evidence_verify.narrowed_events(['pull_request'], level['events']), [], check)
         self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
 
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
@@ -2349,6 +2347,81 @@ class InputKeyed(unittest.TestCase):
         self.assertEqual((code, result['record'], result['trust_level']), (0, newest, 'machine'))
         self.assertEqual(self.f.cli('--check', 'unit', '--revision', 'HEAD', '--members', '--prefer-levels', 'host',
                                     '--keys', str(self.f.keys))[0], 2)
+
+    # ---- which record decides (#4241): the newest pass that validates, unless a failure is dated after it ------------------------
+
+    THIS_LANE, OTHER_LANE = 'a' * 64, 'b' * 64
+
+    def host_rules(self):
+        return evidence_verify.policy_rules(policy_text(inputs=self.PATHS, trust_levels=['host']), 'unit', 'org/repo')
+
+    def host_note(self, commit, tree, key, lane, seconds, exit_code=0):
+        """A host pass (or failure) for this key, carrying the lane definition it was signed under, indexed under the key."""
+        if not hasattr(self, 'host'):
+            self.host = self.f.key('host', 'host/box')
+        record = self.f.note(commit, tree, self.host, 'host/box', runner=OBSERVED, seconds=seconds, exit_code=exit_code,
+                             inputs={'source_inputs': key, 'lane_definition_sha256': lane},
+                             command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        self.f.git('update-ref', f'refs/notes/evidence-input/unit/{key}/{record}', record)
+        return record
+
+    def verify_here(self, rules=None):
+        lane = {'sha256': self.THIS_LANE, 'tree_sha256': self.THIS_LANE, 'changed': []}
+        return self.f.verify(self.tree, rules=rules or self.host_rules(), lane=lane)
+
+    def test_1_a_newer_pass_from_a_level_no_kind_accepts_does_not_shadow_an_older_accepted_pass(self):
+        # CI's per-crate notes are signed at a level rust-tests does not accept; the newest of them hid an older host pass.
+        key = self.key(self.tree)
+        mine = self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        newer = [self.observed(later, other, key, seconds=s, inputs={'source_inputs': key, 'lane_definition_sha256': self.THIS_LANE})
+                 for s in (-600, 0)]
+        code, result = self.verify_here()
+        self.assertEqual((code, result['record'], result['decided_by'], result['signer']), (0, mine, mine, 'host/box'))
+        self.assertEqual(result['skipped_newer'], [f'{record} machine level_not_accepted' for record in reversed(newer)])
+
+    def test_2_a_newer_pass_signed_for_another_lane_definition_does_not_shadow_one_for_this_trees(self):
+        key = self.key(self.tree)
+        mine = self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs, other lane scripts'})
+        theirs = self.host_note(later, other, key, self.OTHER_LANE, -300)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['decided_by']), (0, mine))
+        self.assertEqual(result['skipped_newer'], [f'{theirs} host wrong_definition'])
+
+    def test_3_a_failure_dated_after_the_satisfying_pass_refuses(self):
+        key = self.key(self.tree)
+        self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        failure = self.host_note(later, other, key, self.THIS_LANE, -300, exit_code=1)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'check_failed', failure))
+        # Even from a level no kind accepts: a failure is never passed over.
+        _, third = self.commit_files({'docs/readme.txt': 'yet another'})
+        fleet = self.observed(self.f.git('rev-parse', 'HEAD'), third, key, exit_code=1, seconds=0)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'check_failed', fleet))
+
+    def test_4_a_failure_signed_for_another_lane_definition_after_the_pass_still_refuses(self):
+        key = self.key(self.tree)
+        self.host_note(self.commit, self.tree, key, self.THIS_LANE, -900)
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs, other lane scripts'})
+        failure = self.host_note(later, other, key, self.OTHER_LANE, -300, exit_code=1)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'check_failed', failure))
+
+    def test_5_with_no_pass_that_validates_the_newest_record_is_refused_as_before(self):
+        key = self.key(self.tree)
+        self.observed(self.commit, self.tree, key, seconds=-600)
+        newest = self.observed(self.commit, self.tree, key, seconds=-300)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'untrusted_level', newest))
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs, other lane scripts'})
+        theirs = self.host_note(later, other, key, self.OTHER_LANE, 0)
+        code, result = self.verify_here()
+        self.assertEqual((code, result['reason'], result['decided_by']), (1, 'wrong_definition', theirs))
+    # (6) a weaker signer's newer imitation of another kind still refuses: scripts/ci-evidence-gate-test,
+    # test_a_weaker_local_signer_never_makes_the_gate_skip_on_an_observed_looking_record.
 
     def test_the_policy_validates_inputs_and_sampling(self):
         def reason(**overrides):

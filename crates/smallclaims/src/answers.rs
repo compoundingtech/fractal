@@ -1,11 +1,9 @@
 //! What readers answer from each claim kind, summarized so two members can compare.
 //!
-//! A member that trims on its own deletes claims its peers may still hold, so members no longer
-//! hold the same claims and their envelope and claim digests stop agreeing. What must still agree
-//! is what a reader answers. For every kind a trim may touch, the answer for one key, a subject
-//! and the writer that wrote it, is the key's newest claim in canonical order; a trim never
-//! deletes it. So for each kind this summarizes the newest claim of every key, and two members
-//! whose summaries differ disagree about what some reader answers.
+//! Trimming can remove superseded claims, including a writer's newest claim when a slot spans
+//! writers. Claim inventories are diagnostics, not proof of reader disagreement. The runtime
+//! supplies folded reader values for retention slots; when both members supply such a reader,
+//! its values replace the corresponding kind's inventory comparison.
 //!
 //! The summary is taken at a cut, so members compare the same history while new claims arrive.
 //! A key counts only once its newest claim is older than the cut: a key with a newer claim is
@@ -15,7 +13,9 @@
 //! A key that gains a claim after the cut leaves the summary on each member when that claim
 //! arrives, so two members that compute at different times can differ only in such keys. The
 //! keys a narrowing lists therefore carry them too, marked `moving`, and a key moving on either
-//! member is no difference.
+//! member is no difference. A kept fold reader's answers learn of those claims as they are
+//! served: each subject with a claim at or after the cut by then moves, and the reader's digests
+//! are counted again without it, so two members that computed hours apart still agree.
 //!
 //! `keys` counts the keys a kind's digest covers and `claims` the kind's claims older than the
 //! cut. A member that trims holds fewer claims than one that does not, so callers compare
@@ -337,6 +337,10 @@ pub const READER_PREFIX: &str = "reader/";
 /// order, and a `moving` key for each subject with a claim at or after the cut. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
 pub type FoldReaders = Arc<dyn Fn(&Connection, u128) -> Result<BTreeMap<String, Vec<AnswerKey>>> + Send + Sync>;
 
+/// Explicit (reader kind, subject, slot) keys that moved after a kept summary's cut.
+pub type ReaderMoves = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+pub type ReaderMovement = Arc<dyn Fn(&Connection, &BTreeSet<String>, u128) -> Result<ReaderMoves> + Send + Sync>;
+
 /// A fold reader's answers as a kind: its summary entry, and every key with its bucket digests.
 pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (String, KindAnswers, KindBuckets) {
     let kind = format!("{READER_PREFIX}{name}");
@@ -422,6 +426,14 @@ pub fn differing_kinds(
     kinds
         .into_iter()
         .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
+        .filter(|kind| {
+            let replacement = format!("{READER_PREFIX}slots/{kind}");
+            !(ours.kinds.contains_key(&replacement) && theirs.kinds.contains_key(&replacement))
+        })
+        .filter(|kind| {
+            !kind.starts_with("reader/slots/")
+                || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind))
+        })
         .filter_map(|kind| {
             let (a, b) = (ours.kinds.get(kind), theirs.kinds.get(kind));
             // A member that holds no claim of a kind answers as one that counts none of its keys.
@@ -589,6 +601,7 @@ const KEPT_KINDS: usize = 8;
 pub struct AnswersCache {
     state: Mutex<CacheState>,
     readers: Mutex<Option<FoldReaders>>,
+    movement: Mutex<Option<ReaderMovement>>,
 }
 
 #[derive(Default)]
@@ -641,6 +654,24 @@ fn still_current(connection: &Connection, mark: i64, cut_unix_ms: u128) -> Resul
     Ok((!late).then_some(newest))
 }
 
+/// The subjects of `subjects` with a claim accepted at or after the cut by now. A fold reader's
+/// key moves when any claim of its subject does, so a reader kept since before such a claim
+/// arrived still counts the subject a member computing now leaves out. One index read a subject.
+fn moved_since(connection: &Connection, subjects: &BTreeSet<String>, cut_unix_ms: u128) -> Result<BTreeSet<String>> {
+    let mut newest = connection.prepare_cached(
+        "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_accepted_index WHERE subject=?1
+         ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+    )?;
+    let mut moved = BTreeSet::new();
+    for subject in subjects {
+        let accepted: Option<String> = newest.query([subject])?.next()?.map(|row| row.get(0)).transpose()?;
+        if accepted.is_some_and(|accepted| accepted.parse::<u128>().map_or(true, |accepted| accepted >= cut_unix_ms)) {
+            moved.insert(subject.clone());
+        }
+    }
+    Ok(moved)
+}
+
 /// Where `store` keeps its summary: beside its database, and nowhere for a store in memory.
 fn kept_path(store: &Store) -> Option<std::path::PathBuf> {
     let mut path = store.path.clone().into_os_string();
@@ -681,10 +712,52 @@ fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: 
     Ok(())
 }
 
+impl CacheState {
+    /// The subjects the kept fold readers still count.
+    fn counted_subjects(&self) -> BTreeSet<String> {
+        self.readers
+            .iter()
+            .flat_map(|every| every.keys.iter().filter(|key| !key.moving).map(|key| key.subject.clone()))
+            .collect()
+    }
+
+    /// Mark every key of a `moved` subject moving in the kept fold readers, and count each reader
+    /// that had one again, in the summary as in its buckets.
+    fn remark_moving(&mut self, moved: &BTreeSet<String>, slots: &ReaderMoves) {
+        let Some(summary) = self.summary.as_mut() else { return };
+        for every in &mut self.readers {
+            let moves = |key: &AnswerKey| {
+                if every.kind.starts_with("reader/slots/") {
+                    slots.get(&every.kind).and_then(|keys| keys.get(&key.subject))
+                        .is_some_and(|slots| slots.contains(&key.origin))
+                } else {
+                    moved.contains(&key.subject)
+                }
+            };
+            if !every.keys.iter().any(|key| !key.moving && moves(key)) {
+                continue;
+            }
+            for key in every.keys.iter_mut().filter(|key| moves(key)) {
+                key.moving = true;
+                key.claim.clear();
+            }
+            let name = every.kind.strip_prefix(READER_PREFIX).unwrap_or(&every.kind).to_owned();
+            let (kind, answers, buckets) = reader_answers(&name, every.cut_unix_ms, std::mem::take(&mut every.keys));
+            summary.kinds.insert(kind, answers);
+            *every = buckets;
+        }
+    }
+}
+
 impl AnswersCache {
     /// Cover these fold readers' answers in every summary from now on.
     pub fn set_readers(&self, readers: FoldReaders) {
         *self.readers.lock().unwrap_or_else(PoisonError::into_inner) = Some(readers);
+    }
+
+    /// Track runtime-defined retention slots without moving unrelated slots of the same subject.
+    pub fn set_reader_movement(&self, movement: ReaderMovement) {
+        *self.movement.lock().unwrap_or_else(PoisonError::into_inner) = Some(movement);
     }
 
     /// Answer `request` from what is kept, or answer `pending` and start computing it on a thread
@@ -697,10 +770,21 @@ impl AnswersCache {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
             let mark = state.summary_mark;
+            let counted = state.counted_subjects();
             drop(state);
             let store: &Store = (**store).borrow();
             let current = still_current(&store.readers.get(), mark, request.cut_unix_ms);
+            let moved = moved_since(&store.readers.get(), &counted, request.cut_unix_ms);
+            let slots = self.movement.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                .map(|movement| movement(&store.readers.get(), &counted, request.cut_unix_ms))
+                .unwrap_or_else(|| Ok(ReaderMoves::new()));
             state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
+                match moved.and_then(|moved| Ok((moved, slots?))) {
+                    Ok((moved, slots)) => state.remark_moving(&moved, &slots),
+                    Err(error) => eprintln!("st3: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
+                }
+            }
             match current {
                 Ok(Some(newest)) => state.summary_mark = state.summary_mark.max(newest),
                 Ok(None) => {

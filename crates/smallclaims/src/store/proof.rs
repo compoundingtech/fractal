@@ -131,12 +131,11 @@ impl Store {
                      WHERE rowid>?1 AND rowid<=?2 AND batch_id IS NOT NULL
                      ORDER BY rowid LIMIT ?3",
                 )?;
-                let rows = statement.query_map(params![after, high, PROOF_INVENTORY_PAGE], |row| {
+                statement.query_map(params![after, high, PROOF_INVENTORY_PAGE], |row| {
                     Ok((row.get::<_, i64>(0)?, ReplicaEnvelopeId {
                         writer: row.get(1)?, sequence: row.get(2)?, hash: row.get(3)?,
                     }))
-                })?.collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
+                })?.collect::<rusqlite::Result<Vec<_>>>()?
             };
             let Some((last, _)) = page.last() else { break; };
             after = *last;

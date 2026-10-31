@@ -137,6 +137,7 @@ pub(super) fn authenticated_actor_alias(
         record.claim.kind == "agent.renamed" && record.claim.subject == storage
             && record.claim.body["fields"]["to"].as_str() == Some(requested)
     }) {
+        if authentication.require(&candidate.claim.id).is_err() { continue; }
         let mut current = candidate;
         let mut expected = requested;
         let mut visited = BTreeSet::new();
@@ -146,7 +147,6 @@ pub(super) fn authenticated_actor_alias(
             if claim.kind != "agent.renamed" || claim.subject != storage {
                 return Err(chain_error("actor alias crosses storage identity"));
             }
-            authentication.require(&claim.id)?;
             let fields = &claim.body["fields"];
             if fields["to"].as_str() != Some(expected)
                 || fields["owner_host"].as_str() != Some(claim.origin.as_str()) {
@@ -183,6 +183,7 @@ pub(super) fn authenticated_actor_alias(
                 Some(Value::String(previous)) => {
                     current = authentication.records.get(previous)
                         .ok_or_else(|| chain_error("missing actor alias previous revision"))?;
+                    authentication.require(previous)?;
                 }
                 _ => return Err(chain_error("malformed actor alias previous revision")),
             }
@@ -233,10 +234,9 @@ pub(super) fn validate_rename_schema(claim: &ClaimRecord) -> Result<(), ProofErr
         }
     }
     for (name, field) in [("expected_naming_revision", "previous_revision"), ("expected_declaration", "declaration")] {
-        if let Some(value) = request.get(name).filter(|value| !value.is_null()) {
-            if !value.is_string() || value != &fields[field] {
-                return Err(chain_error(format!("request {name} disagrees with effect")));
-            }
+        if let Some(value) = request.get(name).filter(|value| !value.is_null())
+            && (!value.is_string() || value != &fields[field]) {
+            return Err(chain_error(format!("request {name} disagrees with effect")));
         }
     }
     let key = request["idempotency_key"].as_str().expect("checked string");

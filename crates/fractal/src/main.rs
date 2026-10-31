@@ -449,6 +449,11 @@ enum Command {
         #[command(subcommand)]
         command: SubjectCommand,
     },
+    /// Inspect native harness question metadata or answer with option positions.
+    HarnessQuestions {
+        #[command(subcommand)]
+        command: HarnessQuestionsCommand,
+    },
     /// Watch GitHub issues and pull requests: each comment, review, required-check result and
     /// close wakes this agent once.
     Gh {
@@ -1031,7 +1036,7 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
         })
         .unwrap_or_default();
     // An instance owns its directory, but a foreign replacement of the new program name
-    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    // does not become ours. Plan bin entries separately so deletion rechecks ownership.
     let bin = root.join("bin");
     if fs::symlink_metadata(bin.join("fractal")).is_ok()
         && let Some(index) = removals.iter().position(|path| path == &bin)
@@ -1128,6 +1133,9 @@ struct FleetMigrateArgs {
 struct UpArgs {
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Enroll a foreground replication worker before listening; unavailable for service daemons.
+    #[arg(long)]
+    replication_worker_pid: Option<u32>,
     #[arg(long)]
     node: Option<String>,
     #[arg(long)]
@@ -1291,6 +1299,10 @@ enum MissionViewCommand {
     ReportTo(MissionReportToArgs),
     /// Set a finished run's outcome to completed, failed, or cancelled, with a reason.
     Outcome(MissionOutcomeArgs),
+    /// Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it.
+    ///
+    /// A person or the fleet's fault agent may. A later failure of the same source is a new fault.
+    DismissFault(MissionDismissFaultArgs),
     /// Retire a mission so it leaves the lists and cannot start; publishing it again brings it back.
     Retire(MissionRetireArgs),
     /// Show one agent's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
@@ -1511,6 +1523,22 @@ struct MissionOutcomeArgs {
     #[arg(long)]
     reason: String,
     /// A person, or an agent that requested the run or may revise its mission.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+}
+
+#[derive(Args)]
+struct MissionDismissFaultArgs {
+    /// The fault's run (`mission-run/...`) or its exact source subject, as its fault message names it.
+    source: String,
+    /// The fault's episode, needed only when its source has more than one current fault.
+    #[arg(long)]
+    episode: Option<String>,
+    /// Why the fault can be put aside, for example that the run ended and a later run replaced it.
+    #[arg(long)]
+    reason: String,
+    /// A person, or the fleet's fault agent.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
@@ -2227,6 +2255,44 @@ struct DevicesArgs {
 }
 
 #[derive(Subcommand)]
+enum HarnessQuestionsCommand {
+    /// List native question metadata without question or option text.
+    List {
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        /// Maximum questions on this page (the daemon defaults to 50, capped at 200).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Continue the snapshot-bound page using its next_cursor.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Read one native question's metadata.
+    Show {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+    },
+    /// Answer with a JSON file mapping question ids to {positions: [zero-based indexes]}.
+    Answer {
+        question: String,
+        #[arg(long = "as", value_parser = parse_harness_question_person)]
+        person: String,
+        #[arg(long)]
+        answers_file: PathBuf,
+        /// Observation revision returned by `harness-questions show`.
+        #[arg(long)]
+        revision: String,
+        /// Runtime incarnation returned by `harness-questions show`.
+        #[arg(long)]
+        incarnation: String,
+        /// Reuse this key and the identical answer file when retrying.
+        #[arg(long)]
+        idempotency_key: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SubjectCommand {
     /// Reply to a custom source under its current revision and waiting episode.
     Reply {
@@ -2728,6 +2794,9 @@ enum AgentsCommand {
     },
     /// Print one agent's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
+    /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
+    /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
+    Lane { subject: String },
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
@@ -3501,6 +3570,12 @@ struct AgentRetireArgs {
     /// Existing eligible agent identity, bare name or agent/NAME.
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     successor: Option<String>,
+    /// Desired content revision: `revision` in agents show (not the declaration claim ID).
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_revision: Option<String>,
+    /// Selected runtime's `incarnation_id` in agents show.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_incarnation: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: String,
 }
@@ -3617,6 +3692,42 @@ enum GhCommand {
     /// Record a comment or review this agent posted some other way, by its URL, as this agent's.
     /// A watch that already reported it woke the agent once.
     Own(GhOwnArgs),
+    /// List a repository's pull requests from the GitHub plugin's mirror on the member that polls
+    /// it. Another member relays the read there, or answers from its own graph and says why.
+    #[command(
+        after_help = "Examples:\n  fractal gh prs acme/garden\n  fractal gh prs acme/garden --state all --limit 100"
+    )]
+    Prs(GhPrsArgs),
+    /// Show one pull request's facts from the GitHub plugin's mirror.
+    #[command(after_help = "Examples:\n  fractal gh pr acme/garden#12\n  fractal gh pr https://github.com/acme/garden/pull/12 --json")]
+    Pr(GhReadArgs),
+    /// Show one pull request's checks: its current required checks and every head it has had.
+    #[command(after_help = "Examples:\n  fractal gh checks acme/garden#12")]
+    Checks(GhReadArgs),
+}
+
+#[derive(Args)]
+struct GhPrsArgs {
+    /// OWNER/REPO, or the repository URL.
+    repository: String,
+    /// open, closed or all.
+    #[arg(long, default_value = "open")]
+    state: String,
+    /// The most pull requests to list, newest first (at most 500).
+    #[arg(long, default_value_t = 30)]
+    limit: usize,
+    /// Read as this person or agent. Reading another member's mirror relays the read as them.
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: Option<String>,
+}
+
+#[derive(Args)]
+struct GhReadArgs {
+    /// OWNER/REPO#NUMBER, or the pull request URL.
+    thread: String,
+    /// Read as this person or agent. Reading another member's mirror relays the read as them.
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -5105,6 +5216,12 @@ fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> Ex
     }
 }
 
+const DEMO_ENVIRONMENT_NAMES: &[&str] = &[
+    "ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION", "ST3_DOWNLOADS",
+    "FRACTAL_AGENT", "FRACTAL_PERSON", "FRACTAL_ENDPOINT", "FRACTAL_INCARNATION",
+    "FRACTAL_DOWNLOADS",
+];
+
 /// `st demo`: like the terminal interface, it runs before the CLI runtime, because it opens one.
 fn run_demo(command: DemoCommand) -> ExitCode {
     let result = (|| -> Result<()> {
@@ -5140,7 +5257,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
                 )?;
                 let demo = demo::load(&file)?;
                 // The demo acts as its own people and agents; a seat's identity must not leak in.
-                for name in ["ST_AGENT", "ST3_PERSON", "ST3_ENDPOINT", "ST3_INCARNATION"] {
+                for name in DEMO_ENVIRONMENT_NAMES {
                     // SAFETY: no other thread exists yet; the player starts after this.
                     unsafe { std::env::remove_var(name) };
                 }
@@ -5750,7 +5867,31 @@ async fn run(cli: Cli) -> Result<()> {
             };
             change_cli::run(&client, arguments, cli.json).await
         }
-        Command::Gh { command } => run_gh(&client, command, cli.json).await,
+        Command::Gh { command } => {
+            let reader = match &command {
+                GhCommand::Prs(args) => Some(args.actor.as_deref()),
+                GhCommand::Pr(args) | GhCommand::Checks(args) => Some(args.actor.as_deref()),
+                _ => None,
+            };
+            match reader {
+                // A read relayed to the poller is made as a person or agent.
+                Some(actor) => {
+                    let actor = actor.map(str::to_owned).or_else(|| config.person.clone());
+                    let named = match (&endpoint, actor) {
+                        (Endpoint::Unix(socket), Some(actor)) if actor.starts_with("agent/") => {
+                            Client::unix_agent(socket, actor)?.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        }
+                        (Endpoint::Unix(socket), Some(actor)) => {
+                            Client::unix_as(socket, parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
+                                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        }
+                        _ => client.clone(),
+                    };
+                    run_gh(&named, command, cli.json).await
+                }
+                None => run_gh(&client, command, cli.json).await,
+            }
+        }
         Command::Lanes { command } => {
             run_lanes(&client, config.person.as_deref(), command, cli.json).await
         }
@@ -5839,6 +5980,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Service { command } => run_service(command, cli.json),
         Command::ClaudeChannel { command } => run_claude_channel(command),
         Command::Subject { command } => run_subject(&client, command, cli.json).await,
+        Command::HarnessQuestions { command } => {
+            run_harness_questions(&endpoint, command, cli.json).await
+        }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
@@ -5860,9 +6004,9 @@ async fn run(cli: Cli) -> Result<()> {
                 .context("clap_complete lacks a built-in shell")?
                 .write_registration(
                     "COMPLETE",
-                    "st",
-                    "st",
-                    "st",
+                    "fractal",
+                    "fractal",
+                    "fractal",
                     &mut cli_output::stdout(),
                 )?;
             Ok(())
@@ -5950,6 +6094,7 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
+            MissionViewCommand::DismissFault(args) => Some(args.actor.as_str()),
             MissionViewCommand::ReportTo(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retire(args) => Some(args.actor.as_str()),
             MissionViewCommand::Release(args) | MissionViewCommand::CancelRequest(args) => {
@@ -6058,7 +6203,7 @@ fn guard_mutating_cli_actor(
             GhCommand::Unwatch(args) => Some(args.actor.as_str()),
             GhCommand::Comment(args) => Some(args.actor.as_str()),
             GhCommand::Own(args) => Some(args.actor.as_str()),
-            GhCommand::Ls(_) => None,
+            GhCommand::Ls(_) | GhCommand::Prs(_) | GhCommand::Pr(_) | GhCommand::Checks(_) => None,
         },
         Command::Devices(args) => match args.command.as_ref() {
             Some(DevicesCommand::Pair { assistant: Some(_), .. })
@@ -6105,6 +6250,75 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
         String::new()
     };
     format!("{}{agent}  {state}{until}{title}", text("thread"))
+}
+
+/// `OWNER/REPO` from `OWNER/REPO` or a repository URL.
+fn gh_repository(text: &str) -> Result<String> {
+    let trimmed = text
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("github.com/")
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    let mut parts = trimmed.split('/');
+    let (Some(owner), Some(repository), None) = (parts.next(), parts.next(), parts.next()) else {
+        anyhow::bail!("name a repository as OWNER/REPO, not {text}");
+    };
+    anyhow::ensure!(!owner.is_empty() && !repository.is_empty(), "name a repository as OWNER/REPO, not {text}");
+    Ok(format!("{owner}/{repository}"))
+}
+
+/// One pull request as one line: number, state, checks, review and queue, then its title.
+fn gh_pull_line(pull: &Value) -> String {
+    let text = |name: &str| pull.get(name).and_then(Value::as_str).unwrap_or_default();
+    let state = if pull.get("merged") == Some(&Value::Bool(true)) {
+        "merged"
+    } else if pull.get("draft") == Some(&Value::Bool(true)) && text("state") == "open" {
+        "draft"
+    } else {
+        text("state")
+    };
+    let checks = pull
+        .get("required_checks_state")
+        .or_else(|| pull.pointer("/required_checks/state"))
+        .and_then(Value::as_str)
+        .or_else(|| pull.get("checks_state").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let mut line = format!("#{:<6} {:<7} checks {:<8}", pull["number"], state, checks);
+    if !text("review_decision").is_empty() {
+        line.push_str(&format!(" {}", text("review_decision").to_ascii_lowercase()));
+    }
+    if let Some(position) = pull.pointer("/merge_queue/position").filter(|value| !value.is_null()) {
+        line.push_str(&format!(" queued #{position}"));
+    }
+    if !text("title").is_empty() {
+        line.push_str(&format!("  {}", text("title")));
+    }
+    line
+}
+
+fn gh_required_checks(required: &Value) -> String {
+    let state = required["state"].as_str().unwrap_or("unknown");
+    match required["failed"].as_array().filter(|failed| !failed.is_empty()) {
+        Some(failed) => format!(
+            "{state} ({})",
+            failed.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+        ),
+        None => state.to_owned(),
+    }
+}
+
+/// Where an answer came from: the poller's mirror, or this member's graph and why.
+fn gh_source_line(answer: &Value) -> String {
+    let source = &answer["source"];
+    let host = source["host"].as_str().unwrap_or("this member");
+    match source["kind"].as_str() {
+        Some("mirror") => format!("(from the GitHub plugin mirror on {host})"),
+        _ => format!(
+            "(from {host}'s graph: {})",
+            source["reason"].as_str().unwrap_or("the poller's mirror was not read")
+        ),
+    }
 }
 
 const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
@@ -6208,6 +6422,100 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
                 recorded["id"],
                 recorded["thread"].as_str().unwrap_or_default()
             );
+        }
+        GhCommand::Prs(args) => {
+            let locator = gh_repository(&args.repository)?;
+            let answer: Value = client
+                .get(&format!(
+                    "/v1/plugins/github/repos/{locator}/pulls?state={}&limit={}",
+                    urlencoding::encode(&args.state),
+                    args.limit
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let pulls = answer["pulls"].as_array().cloned().unwrap_or_default();
+            if pulls.is_empty() {
+                println!("No {} pull requests.", args.state);
+            }
+            for pull in &pulls {
+                println!("{}", gh_pull_line(pull));
+            }
+            println!("{}", gh_source_line(&answer));
+        }
+        GhCommand::Pr(args) => {
+            let thread = fractal_daemon::github_watch::ThreadRef::parse(&args.thread)?;
+            let answer: Value = client
+                .get(&format!("/v1/plugins/github/repos/{}/{}/pulls/{}", thread.owner, thread.repository, thread.number))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let Some(pull) = answer.get("pull").filter(|pull| !pull.is_null()) else {
+                println!("No pull request {thread} is recorded.");
+                println!("{}", gh_source_line(&answer));
+                return Ok(());
+            };
+            let facts = &pull["facts"];
+            let text = |name: &str| facts.get(name).and_then(Value::as_str).unwrap_or("");
+            println!("{thread}  {}", text("title"));
+            println!("{}", gh_pull_line(facts));
+            if !text("url").is_empty() {
+                println!("{}", text("url"));
+            }
+            if let Some(required) = facts.get("required_checks").filter(|value| !value.is_null()) {
+                println!("required checks: {}", gh_required_checks(required));
+            }
+            println!("{}", gh_source_line(&answer));
+        }
+        GhCommand::Checks(args) => {
+            let thread = fractal_daemon::github_watch::ThreadRef::parse(&args.thread)?;
+            let answer: Value = client
+                .get(&format!(
+                    "/v1/plugins/github/repos/{}/{}/pulls/{}/checks",
+                    thread.owner, thread.repository, thread.number
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let Some(checks) = answer.get("checks").filter(|checks| !checks.is_null()) else {
+                println!("No pull request {thread} is recorded.");
+                println!("{}", gh_source_line(&answer));
+                return Ok(());
+            };
+            println!(
+                "{thread}  head {}  checks {}",
+                checks["head_sha"].as_str().map_or("unknown", |sha| sha.get(..12).unwrap_or(sha)),
+                checks["checks_state"].as_str().unwrap_or("unknown")
+            );
+            if let Some(required) = checks.get("required_checks").filter(|value| !value.is_null()) {
+                println!("required: {}", gh_required_checks(required));
+            }
+            for check in checks["checks"].as_array().into_iter().flatten() {
+                let text = |name: &str| check.get(name).and_then(Value::as_str).unwrap_or("");
+                let outcome = if text("conclusion").is_empty() { text("status") } else { text("conclusion") };
+                println!("  {:<10} {}", outcome, text("name"));
+            }
+            match checks["heads"].as_array() {
+                Some(heads) if heads.len() > 1 => {
+                    println!("earlier heads:");
+                    for head in heads.iter().skip(1) {
+                        println!(
+                            "  {}  {}",
+                            head["head_sha"].as_str().map_or("", |sha| sha.get(..12).unwrap_or(sha)),
+                            head["required_checks"]["state"].as_str().or(head["checks_state"].as_str()).unwrap_or("unknown")
+                        );
+                    }
+                }
+                Some(_) => {}
+                None => println!("earlier heads: unknown here"),
+            }
+            println!("{}", gh_source_line(&answer));
         }
         GhCommand::Ls(args) => {
             let agent = if args.all {
@@ -6585,6 +6893,7 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
+    let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
     let mut phase_elapsed_ms = || {
@@ -6706,6 +7015,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local)?;
+    if let Some(claims) = config.trim.daily_claims {
+        store.trim_locally_at_most(claims);
+    }
     *store
         .extension::<fractal_store::store::answers_check::TrimSettings>()
         .notify
@@ -6715,6 +7027,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store
         .extension::<smallclaims::answers::AnswersCache>()
         .set_readers(Arc::new(fractal_store::store::answers_check::fold_reader_answers));
+    store.extension::<smallclaims::answers::AnswersCache>()
+        .set_reader_movement(Arc::new(fractal_store::store::answers_check::slot_reader_movement));
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6784,7 +7098,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":1,"seat_freshness":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6858,6 +7172,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        harness_question_sink: None,
         assistant_receipts: Default::default(),
         private_notes: Arc::new(fractal_daemon::private_notes::Authority {
             catalogs: config.private_notes_catalogs.clone(),
@@ -6880,6 +7195,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
+        config.unlaned_seat.clone(),
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
@@ -6994,6 +7310,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     fractal_daemon::api::start_agent_roster(&state);
+    fractal_daemon::api::seat_freshness::start_seat_freshness_push(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
     // Nor does an attention window fold every person's attention.
@@ -7093,7 +7410,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                router(state.clone()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer).layer(web_status.clone()),
                 Some(state.store.clone()),
                 ready
             ),
@@ -8088,7 +8405,7 @@ async fn fabric_route(
         .with_context(|| format!("this machine is in no fleet to reach `{owner}` through"))?;
     let fabric =
         fabric.with_context(|| format!("this machine has no `fabric` to reach `{owner}` with"))?;
-    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = crate::fleet_cli::fleet_read(client, "membership").await?;
     let peer = fractal_daemon::terminal_fabric::owner_peer(&fabric, &view.members, owner)
         .await
         .with_context(|| {
@@ -10631,6 +10948,76 @@ fn unseen_timeline_entries(
             .then(a.sequence.cmp(&b.sequence))
     });
     changed
+}
+
+fn parse_harness_question_person(actor: &str) -> std::result::Result<String, String> {
+    let person = parse_person_subject(actor)?;
+    if person.contains('*') || person.chars().any(char::is_whitespace) {
+        return Err("harness questions require a concrete `person/NAME` subject".into());
+    }
+    Ok(person)
+}
+
+fn harness_answer_action_id(key: &str, question: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [key, question] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("action/harness-answer-{}", hex::encode(digest.finalize()))
+}
+
+async fn run_harness_questions(
+    endpoint: &Endpoint,
+    command: HarnessQuestionsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        HarnessQuestionsCommand::List { person, cursor, limit } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_questions(cursor.as_deref(), limit)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Show { question, person } => {
+            let result = generated_client(endpoint, Some(&person))?
+                .harness_question(&question)
+                .await?;
+            print_client_value(&result, json_output)
+        }
+        HarnessQuestionsCommand::Answer {
+            question,
+            person,
+            answers_file,
+            revision,
+            incarnation,
+            idempotency_key,
+        } => {
+            let generated = generated_client(endpoint, Some(&person))?;
+            let capabilities = generated.capabilities().await?;
+            let question = if question.starts_with("harness-question/") {
+                question
+            } else {
+                format!("harness-question/{question}")
+            };
+            let answers: BTreeMap<String, fractal_client::HarnessAnswerInput> =
+                serde_json::from_slice(&fs::read(answers_file)?)?;
+            let result = generated
+                .harness_answer(
+                    harness_answer_action_id(&idempotency_key, &question),
+                    idempotency_key,
+                    ClientFence {
+                        snapshot_id: capabilities.snapshot.id,
+                        subject_revisions: BTreeMap::from([(question.clone(), revision)]),
+                        runtime_incarnation: Some(incarnation),
+                        ..ClientFence::default()
+                    },
+                    fractal_client::HarnessAnswerParameters { question, answers },
+                )
+                .await?;
+            print_client_value(&result, json_output)
+        }
+    }
 }
 
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {

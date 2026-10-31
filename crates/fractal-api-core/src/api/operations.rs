@@ -501,8 +501,27 @@ pub async fn get_usage(
 
 pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
-    let rows = blocking_store(move || slo_rows(&store)).await?;
+    let dir = crate::slo_history::dir(&state.state_dir);
+    let rows = blocking_store(move || {
+        let mut rows = slo_rows(&store)?;
+        add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
+        Ok(rows)
+    })
+    .await?;
     Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+}
+
+/// Say on each budget how much will be used when it resets, at the rate the local history log
+/// shows for its recent past. A log that cannot be read leaves the row without a forecast: the
+/// list is still true, only less far-sighted.
+fn add_budget_forecasts(rows: &mut [Value], dir: &std::path::Path, now_unix_ms: u64) {
+    for row in rows {
+        let Some(basis) = crate::objectives::forecast_basis_ms(row, now_unix_ms) else { continue };
+        let Some(id) = row["id"].as_str().map(str::to_owned) else { continue };
+        if let Ok(readings) = crate::slo_history::read(dir, &id, now_unix_ms.saturating_sub(basis), now_unix_ms) {
+            crate::objectives::add_forecast(row, &readings, now_unix_ms);
+        }
+    }
 }
 
 /// What was left of one objective or budget across a period, from the local history log.
@@ -641,17 +660,20 @@ pub async fn status(
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || {
-        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
+        let subject = query.subject.as_deref().map(|subject| {
+            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+        }).transpose()?;
+        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
             store.status_harness_only(subject)
         } else if query.history {
             store.status_history(
-                query.subject.as_deref(),
+                subject.as_deref(),
                 query.owner_run.as_deref(),
                 query.at_index,
             )
         } else {
             store.status_at(
-                query.subject.as_deref(),
+                subject.as_deref(),
                 query.owner_run.as_deref(),
                 query.at_index,
             )

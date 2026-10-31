@@ -39,6 +39,9 @@ pub struct Config {
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
+    /// Explicit placement for daemon-launched seats without a lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
     /// means `off`: such a seat starts without one. Seats without a declaration never change.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,12 +205,16 @@ impl CheckpointConfig {
 /// other members until a person excuses this one. Off by default; nothing changes unless a
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
+/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
+/// that drops more goes on the next day where it stopped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_claims: Option<u64>,
 }
 
 impl TrimConfig {
@@ -224,6 +231,7 @@ impl TrimConfig {
             }),
             "trim.notify names one agent/... subject"
         );
+        anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
     }
 }
@@ -584,6 +592,7 @@ impl Default for Config {
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
             seat_priority: None,
+            unlaned_seat: None,
             lanes: None,
             person: None,
             fleet_id: None,
@@ -1256,6 +1265,20 @@ mod tests {
     }
 
     #[test]
+    fn unlaned_seat_config_is_optional_and_strict() {
+        assert!(Config::default().unlaned_seat.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("unlaned_seat"));
+        let fields = "[unlaned_seat]\nslice = 'app-seats.slice'\nmemoryMax = 8589934592\nmemorySwapMax = 0\noomPolicy = 'kill'\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        assert!(configured.unlaned_seat.is_some());
+        let slice_only: Config = toml::from_str("[unlaned_seat]\nslice = 'app-seats.slice'\n").unwrap();
+        assert!(slice_only.unlaned_seat.is_some());
+        assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
+        assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
+    }
+
+    #[test]
     fn claude_primary_ownership_is_an_explicit_default_off_install_setting() {
         assert!(!Config::default().claude_primary_ownership_enabled());
         for text in ["", "claude_primary_ownership_observe=false"] {
@@ -1568,6 +1591,9 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(config.trim.local);
         assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
+        let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
+        assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 
     #[test]

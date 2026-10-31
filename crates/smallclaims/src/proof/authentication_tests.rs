@@ -127,3 +127,31 @@ fn only_genuine_earlier_signatures_consume_a_nonce() {
         }
     }
 }
+
+#[test]
+fn lower_id_unauthenticated_candidate_does_not_hide_a_valid_actor_alias() {
+    let (key, _) = MemberKey::generate().unwrap();
+    let (first, _, hash) = anchor(&key);
+    let (second, declarations, hash) = sealed(&key, 2, Some(hash), vec![
+        ("agent/source", "intent.desired", json!({"kind":"agent","member":{"host":"example"}})),
+    ]);
+    let rename = |reason| json!({"fields":{
+        "from":"agent/source","to":"agent/alias","owner_host":"example",
+        "declaration":declarations[0],"reason":reason
+    }});
+    let (mut third, mut candidates, _) = sealed(&key, 3, Some(hash), vec![
+        ("agent/source", "agent.renamed", rename("first candidate")),
+        ("agent/source", "agent.renamed", rename("second candidate")),
+    ]);
+    candidates.sort();
+    assert!(candidates[0] < candidates[1]);
+    let payload: crate::claim::ReplicaEnvelopePayload =
+        ciborium::from_reader(third.payload.bytes().unwrap()).unwrap();
+    let mut invalid = payload.claim_signatures[&candidates[0]].clone();
+    invalid.signature = "invalid".into();
+    replace_signature(&mut third, &candidates[0], invalid, &key);
+    let history = verify_sealed_history(&[first, second, third], FLEET, key.public()).unwrap();
+    assert_eq!(history.verify_claim(&candidates[0]).unwrap_err().code, "invalid-signature");
+    history.verify_claim(&candidates[1]).unwrap();
+    assert!(history.verify_actor_alias("agent/alias", "agent/source").unwrap());
+}
