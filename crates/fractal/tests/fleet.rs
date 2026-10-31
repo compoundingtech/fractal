@@ -6236,8 +6236,8 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     // The release's own conversation.
     let (opened, _) = changes(&o, None).await;
     let first = send(&o, "release-first", PERSON, reader).await;
-    let (release_cursor, listed) = changes(&o, Some(opened.clone())).await;
-    assert_eq!(listed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [first.clone()]);
+    let (release_cursor, listed) = changes(&o, Some(opened)).await;
+    assert_eq!(listed.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), std::slice::from_ref(&first));
     let first_sequence = listed[0].1;
 
     // Upgrade in place: the release's cursor resumes, and a stream item joins the conversation
