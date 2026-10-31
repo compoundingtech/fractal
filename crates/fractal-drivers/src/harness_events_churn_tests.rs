@@ -125,7 +125,7 @@ fn report_wal_bytes_per_1000_unchanged_reports() {
             connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
             if baseline {
                 let tx = connection.transaction().unwrap();
-                tx.execute("INSERT INTO snapshots VALUES (?1,?2) ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h00d8663c1682 owner=fractal_drivers::harness_events_churn_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES (?1,?2) ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
                     params!["harness-todo", body]).unwrap();
                 append_event(&tx, "harness-todo", &serde_json::from_slice(&body).unwrap()).unwrap();
                 tx.commit().unwrap();
@@ -185,7 +185,7 @@ fn crash_producer_helper() {
     let tx = connection.transaction().unwrap();
     let value = json!({"incarnation":"provider", "tasks":["committed-before-exit"]});
     let body = serde_json::to_vec(&value).unwrap();
-    tx.execute("INSERT INTO snapshots VALUES ('harness-todo',?1) ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
+    tx.execute(/* sqlite-large-value: allow-for-now lv-hcbe1ad86b9e9 owner=fractal_drivers::harness_events_churn_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO snapshots VALUES ('harness-todo',?1) ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
         [&body]).unwrap();
     append_event(&tx, "harness-todo", &value).unwrap();
     tx.commit().unwrap();
