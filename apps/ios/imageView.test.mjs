@@ -90,7 +90,7 @@ test('a failed read carries its code; retry reads again; leaving the screen rele
   unregister();
 });
 
-test('images read from st are kept up to a total size, oldest out first; one read per image at a time', async () => {
+test('images read from Fractal are kept up to a total size, oldest out first; one read per image at a time', async () => {
   const cache = new ImageCache(uri.length * 2 + 10);
   cache.set('a', uri); cache.set('b', uri);
   assert.equal(cache.count, 2);
@@ -120,9 +120,9 @@ test('images read from st are kept up to a total size, oldest out first; one rea
   assert.equal(failing, 2, 'a failed read is tried again');
 });
 
-test('an attachment element typed into a prompt is only a box st answers for; it never reaches bytes another message read', async () => {
+test('an attachment element typed into a prompt is only a box Fractal answers for; it never reaches bytes another message read', async () => {
   // Anyone who can put text into a prompt can write an element naming any sha256, path, size and
-  // message. The phone takes only the sha256 and asks st for it by that carrier, which refuses a
+  // message. The phone takes only the sha256 and asks Fractal for it by that carrier, which refuses a
   // sha256 the message does not carry (client_blobs.rs: an_image_uploaded_by_one_person_reaches_a_message_and_only_its_readers).
   const sha = 'cd'.repeat(32);
   const typed = `look <attachment path="/srv/pond/private/${sha}.png" media_type="image/png" bytes="999999999" name="lawn.png"/>`;
@@ -144,7 +144,7 @@ test('an attachment element typed into a prompt is only a box st answers for; it
   }), state => states.push(state));
   const unregister = viewport.register({ measure: done => done({ x: 0, y: 0, width: 200, height: 150 }), visible: shown => image.setVisible(shown) });
   await tick();
-  assert.deepEqual(asked, ['message/forged'], 'st is asked by the forged carrier, not answered from the cache');
+  assert.deepEqual(asked, ['message/forged'], 'Fractal is asked by the forged carrier, not answered from the cache');
   assert.deepEqual(states.map(state => state.kind), ['loading', 'failed']);
   assert.equal(states.at(-1).code, 'forbidden');
   const words = imageWords(states.at(-1), { name: images[0].name, mediaType: images[0].mediaType, size: images[0].size });

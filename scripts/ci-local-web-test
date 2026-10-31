@@ -16,6 +16,12 @@ python3 -I -c 'import json, os, sys; u = os.umask(0); print(json.dumps({"argv": 
 '''
 
 
+def cores():
+    """The cores the script divides: nproc's, which counts a CPU quota on the caller's cgroup (a seat's lane), where the
+    affinity mask still names every core of the host."""
+    return int(subprocess.run(['nproc'], capture_output=True, text=True, check=True).stdout)
+
+
 class CiLocalWeb(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -42,7 +48,7 @@ class CiLocalWeb(unittest.TestCase):
         recorder = self.home / '.local/state/st3/recorder/bin'
         env = {'PATH': f'{recorder}:{self.wrappers}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_WEB_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'ST_AGENT': 'agent/x', 'FRACTAL_AGENT': 'agent/x', 'GH_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x',
-               'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_MAX_SECONDS': '100', 'APP_TEST_SET': 'related',
+               'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_WALL_GUARD_SECONDS': '268', 'APP_TEST_SET': 'related',
                'FRACTAL_WEB_BUCK_ROOT': '/nix/store/x-buck-root', 'FRACTAL_WEB_OTHER': '/var/elsewhere', **extra}
         done = subprocess.run(['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(0o002))
@@ -59,7 +65,7 @@ class CiLocalWeb(unittest.TestCase):
                                                              'KIT_PLAY_A11Y', 'APP_TEST_SET', 'BASE_SHA', 'HEAD_SHA')},
                              {'KIT_INPUTS': 'true', 'KIT_SHARD_INDEX': '0', 'KIT_SHARD_COUNT': '1', 'KIT_PLAY_SET': 'all',
                               'KIT_PLAY_A11Y': 'on', 'APP_TEST_SET': 'all', 'BASE_SHA': self.head, 'HEAD_SHA': self.head})
-            self.assertNotIn('KIT_PLAY_MAX_SECONDS', env)  # no per-play time cap
+            self.assertNotIn('KIT_PLAY_WALL_GUARD_SECONDS', env)  # no commit-only wall ceiling
             scratch = Path(env['HOME']).parent
             self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/web.'), scratch)
             for name in ('TMPDIR', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'XDG_STATE_HOME', 'KIT_RECEIPT_DIRECTORY'):
@@ -84,7 +90,7 @@ class CiLocalWeb(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         env = calls[-1]['env']
         self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], str(admission))
-        self.assertEqual(env['KIT_PLAY_WORKERS'], str(max(1, len(os.sched_getaffinity(0)) // 2)))
+        self.assertEqual(env['KIT_PLAY_WORKERS'], str(max(1, cores() // 2)))
         # The admission program reads its limits and queue under the account's home, which the stages' HOME hides.
         self.assertEqual(env['BUILD_ADMISSION_CONFIG'], f'{self.home}/.config/build-admission')
         self.assertEqual(env['BUILD_ADMISSION_STATE'], f'{self.home}/.local/state/st3/operations')
@@ -94,7 +100,7 @@ class CiLocalWeb(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         env = calls[-1]['env']
         self.assertEqual(env['KIT_PLAY_ADMISSION_BIN'], '')
-        self.assertEqual(env['KIT_PLAY_WORKERS'], str(len(os.sched_getaffinity(0))))  # one heavy slot when the host names none
+        self.assertEqual(env['KIT_PLAY_WORKERS'], str(cores()))  # one heavy slot when the host names none
         self.assertNotIn('BUILD_ADMISSION_CONFIG', env)
 
     def test_the_host_watchman_service_is_named_by_its_socket(self):

@@ -93,6 +93,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/mission-runs/example%2Fdemo%2F1/revision",
         "/v1/missions/example%2Fdemo/retire",
         "/v1/subscription-requests/release/subscription-request%2Fexample",
+        "/v1/persons/rename",
         "/v1/reviews/step-run/example",
         "/v1/schema/registrations",
         "/v1/custom/reply",
@@ -146,6 +147,49 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn slo_budgets_forecast_their_use_at_the_reset_from_the_local_history() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let now = client_now_ms() as u64;
+    let (status, body) = json_request(
+        app.clone(),
+        "/v1/claims",
+        json!({"subject": "agent/example.live", "kind": "harness.limits", "actor": "agent/example.live",
+            "fields": {"driver": "claude", "account_ref": "ada/claude-1", "weekly_percent": 30.0,
+                "five_hour_percent": 40.0, "measured_at_unix_ms": now - 10_000,
+                "five_hour_resets_at_unix_ms": now + 3 * 3_600_000,
+                "weekly_resets_at_unix_ms": now + 3 * 86_400_000},
+            "evidence": [], "idempotency_key": "slo-forecast-limits"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, before) = get_request(app.clone(), "/v1/client/slo").await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let find = |list: &Value, id: &str| {
+        list["rows"].as_array().unwrap().iter().find(|row| row["id"] == id).unwrap_or_else(|| panic!("no {id}")).clone()
+    };
+    // No history yet: the budget is listed as it was, with no forecast.
+    assert!(find(&before, "ada/claude-1/5h").get("forecast_used_percent").is_none(), "{before}");
+    // A quarter hour at one percent a minute: 60% is left, so it lasts an hour, not three.
+    let dir = crate::slo_history::dir(&state.state_dir);
+    for ago in (0..=15u64).rev() {
+        let left = json!({"id": "ada/claude-1/5h", "remaining_percent": 60.0 + ago as f64});
+        crate::slo_history::append(&dir, now - ago * 60_000, &[left]).unwrap();
+    }
+    for path in ["/v1/slo", "/v1/client/slo"] {
+        let (status, list) = get_request(app.clone(), path).await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let five = find(&list, "ada/claude-1/5h");
+        assert_eq!(five["forecast_used_percent"], 100.0, "{path}: {five}");
+        assert!(five["runs_out_at_unix_ms"].as_u64().unwrap() < now + 2 * 3_600_000, "{path}: {five}");
+        assert!(five["explain"].as_str().unwrap().contains("will not last until it resets"), "{path}: {five}");
+        // The weekly budget has no history, so it has no forecast.
+        assert!(find(&list, "ada/claude-1/weekly").get("forecast_used_percent").is_none(), "{path}");
+    }
 }
 
 #[tokio::test]
@@ -662,6 +706,7 @@ version 2
 
   mission "planned/work" state="ready" {
     goal "Publish the planned result."
+    resource "tracker" uri="urn:example:planning"
     step "inspect" { goal "Inspect the source." }
     step "change" {
       goal "Make the approved change."
@@ -792,6 +837,7 @@ version 2
 
   mission "planned/work" state="ready" {
     goal "Publish the planned and verified result."
+    resource "tracker" uri="urn:example:planning"
     step "inspect" { goal "Inspect the source." }
     step "change" {
       goal "Make the approved change."
@@ -908,7 +954,8 @@ version 2
             .as_array()
             .unwrap()
             .len(),
-        1
+        2,
+        "the mission and its shared URI target are both declared"
     );
 
     let (status, decision) = json_request(
@@ -1027,7 +1074,9 @@ version 2
         approved["published_revision"],
         approved["candidate"]["mission_revision"]
     );
-    assert!(store.mission_spec("planned/work", None).unwrap().is_some());
+    let published = store.mission_spec("planned/work", None).unwrap().unwrap();
+    let uris = store.declared_resource_uris(&published.resources).unwrap();
+    assert_eq!(uris[&published.resources[0].subject], "urn:example:planning");
     // The planner is a durable top-level seat, not a synthetic standing
     // mission. Approval removes that seat directly and leaves no planner
     // mission run behind to clean up.
@@ -1245,6 +1294,108 @@ mission "plain" state="ready" {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(system["mission/observer"], true);
     assert_eq!(system["mission/plain"], false);
+}
+
+#[test]
+fn agents_show_their_declared_resources_until_a_declaration_drops_them() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let workspace = root.path().display().to_string();
+    let publish = |key: &str, resources: &str| {
+        let source = format!(
+            "version 2\nagent \"ada/seat\" {{\n  workspace {workspace:?}\n  command \"true\"\n{resources}}}\n"
+        );
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let planned = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply(&intent, &planned.subject_tokens, key)
+            .unwrap();
+    };
+    let goal = "urn:example:seat-goal";
+    let worktree = "urn:example:worktree";
+    publish(
+        "declare",
+        &format!(
+            "  resource \"goal\" uri=\"{goal}\" reason=\"seat goal\"\n  resource \"worktree\" uri=\"{worktree}\"\n"
+        ),
+    );
+    let subject = |uri: &str| format!("resource/uri/{}", hex::encode(Sha256::digest(uri)));
+    let read = || {
+        let agents =
+            client_agent_resources(&state.store, false, "now", state.store.index().unwrap())
+                .unwrap();
+        agents
+            .into_iter()
+            .find(|agent| agent["id"] == "agent/ada/seat")
+            .unwrap()
+    };
+    let agent = read();
+    assert_eq!(
+        agent["resources"],
+        json!([
+            { "name": "goal", "subject": subject(goal), "kind": "uri", "resolution": "resolved", "uri": goal, "reason": "seat goal" },
+            { "name": "worktree", "subject": subject(worktree), "kind": "uri", "resolution": "resolved", "uri": worktree, "reason": null },
+        ])
+    );
+    let typed: fractal_client::Resource = serde_json::from_value(agent).unwrap();
+    let fractal_client::Resource::Agent(typed) = typed else {
+        panic!("an agent resource");
+    };
+    assert_eq!(typed.resources[0].uri.as_deref(), Some(goal));
+
+    // The declaration read writes the edges back as the KDL that declared them.
+    let (_, tree) = state
+        .store
+        .agent_declaration("agent/ada/seat", None)
+        .unwrap()
+        .unwrap();
+    let uris = state
+        .store
+        .declared_resource_uris(&crate::graph::declared_resources(&tree))
+        .unwrap();
+    let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).unwrap();
+    let reparsed = crate::graph::parse_test_intent(&kdl, "node").unwrap();
+    assert_eq!(reparsed.subjects["agent/ada/seat"].desired, tree);
+    let unresolved = client_declared_resources(
+        &crate::graph::declared_resources(&tree), &BTreeMap::new(),
+    );
+    assert_eq!(unresolved[0]["kind"], "uri");
+    assert_eq!(unresolved[0]["resolution"], "unresolved");
+    assert_eq!(unresolved[0]["subject"], subject(goal));
+    assert!(unresolved[0].get("uri").is_none());
+
+    publish("subject", "  resource \"tracker\" subject=\"resource/github/example/issue/1\" reason=\"tracking\"\n");
+    assert_eq!(
+        read()["resources"],
+        json!([{"name": "tracker", "subject": "resource/github/example/issue/1", "kind": "subject", "resolution": "not-applicable", "reason": "tracking"}]),
+    );
+
+    publish("drop", &format!("  resource \"goal\" uri=\"{goal}\" reason=\"seat goal\"\n"));
+    assert_eq!(
+        read()["resources"],
+        json!([{ "name": "goal", "subject": subject(goal), "kind": "uri", "resolution": "resolved", "uri": goal, "reason": "seat goal" }])
+    );
+    assert_eq!(
+        state
+            .store
+            .selected_desired_kind(&subject(worktree))
+            .unwrap()
+            .as_deref(),
+        Some("resource"),
+        "omission leaves the resource subject in the graph"
+    );
+    publish("none", "");
+    assert_eq!(read()["resources"], json!([]));
 }
 
 #[test]

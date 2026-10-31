@@ -205,6 +205,122 @@ async fn signed_default_answer_cannot_draw_envelopes_from_a_named_shard() {
     server.abort();
 }
 
+/// A peer whose build has shards but not this one refuses the exchange before it stores
+/// anything. The dialer must treat that like an answer for the wrong store, so the route
+/// parks instead of retrying the same refusal.
+#[tokio::test]
+async fn a_peer_refusing_the_shard_is_a_shard_mismatch() {
+    let root = tempfile::tempdir().unwrap();
+    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
+    let shard = Arc::new(plain_open(&root.path().join("messages.sqlite3"), "birch").unwrap());
+    shard
+        .bind_shard(&crate::shards::ShardId::parse("messages").unwrap())
+        .unwrap();
+    shard.bind_fleet(auth.fleet_id()).unwrap();
+    let default = Arc::new(plain_open(&root.path().join("default.sqlite3"), "cedar").unwrap());
+    default.bind_fleet(auth.fleet_id()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let state = PeerState {
+        backend: Local(default.clone()),
+        node: "cedar".into(),
+        auth: auth.clone(),
+        fleet: FleetContext::legacy(BTreeSet::from(["birch".into()])),
+        outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer_router(state, Router::new()))
+            .await
+            .unwrap();
+    });
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    let error = exchange(
+        &replication_http_client(),
+        &Local(shard.clone()),
+        "birch",
+        &peer,
+        &auth,
+        &fleet,
+    )
+    .await
+    .unwrap_err();
+    let mismatch = error
+        .downcast_ref::<PeerShardMismatch>()
+        .unwrap_or_else(|| panic!("not a shard mismatch: {error:#}"));
+    assert_eq!(mismatch.refused.as_deref(), Some("shard-mismatch"));
+    assert!(default.replication_inventory().unwrap().envelopes.is_empty());
+    server.abort();
+}
+
+/// One listener answers the default store and the shards it holds. An exchange naming a held
+/// shard reaches that shard's store and nothing else; the default store's exchange to the
+/// same peer is a separate job.
+#[tokio::test]
+async fn one_listener_answers_each_held_shard_from_its_own_store() {
+    let root = tempfile::tempdir().unwrap();
+    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
+    let messages = crate::shards::ShardId::parse("messages").unwrap();
+    let open_shard = |path: &str, origin: &str| {
+        let store = Arc::new(plain_open(&root.path().join(path), origin).unwrap());
+        store.bind_shard(&messages).unwrap();
+        store.bind_fleet(auth.fleet_id()).unwrap();
+        store
+    };
+    let source = open_shard("source-messages.sqlite3", "birch");
+    source
+        .append_claim(&ClaimInput {
+            subject: "note/stream".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let target_shard = open_shard("target-messages.sqlite3", "cedar");
+    let target_default = Arc::new(plain_open(&root.path().join("target.sqlite3"), "cedar").unwrap());
+    target_default.bind_fleet(auth.fleet_id()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let state = PeerState::new(
+        Local(target_default.clone()),
+        "cedar".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["birch".into()])),
+    )
+    .with_shards(BTreeMap::from([("messages".into(), Local(target_shard.clone()))]));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer_router(state, Router::new()))
+            .await
+            .unwrap();
+    });
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    exchange(
+        &replication_http_client(),
+        &Local(source.clone()),
+        "birch",
+        &peer,
+        &auth,
+        &fleet,
+    )
+    .await
+    .unwrap();
+    target_shard.validate_replication_backlog().unwrap();
+    target_shard.project_replication_backlog().unwrap();
+    assert_eq!(target_shard.claims_for("note/stream", None).unwrap().len(), 1);
+    assert!(target_default.replication_inventory().unwrap().envelopes.is_empty());
+    assert!(target_default.claims_for("note/stream", None).unwrap().is_empty());
+    server.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
@@ -342,6 +458,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from([left.origin.clone()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = PeerConfig {
@@ -635,12 +752,14 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
     let body = Bytes::from_static(b"not json");
     let request_digest = FleetAuth::body_digest(&body);
     let response = receive_exchange(
+        None,
         State(PeerState {
             backend: Local(Arc::new(plain_memory("target").unwrap())),
             node: "target".into(),
             auth: auth.clone(),
             fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
             outbound_notify: watch::channel(0_u64).0,
+            shards: Default::default(),
         }),
         auth.request_headers("source", &body).unwrap(),
         body,
@@ -670,6 +789,7 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let exchange = ReplicationExchange {
         build: None,
@@ -782,6 +902,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let exchange = ReplicationExchange {
         build: None,
@@ -887,6 +1008,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let connection_ports = Arc::new(Mutex::new(BTreeSet::new()));
     let observed_ports = connection_ports.clone();
@@ -1037,9 +1159,11 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify,
+        shards: Default::default(),
     };
 
     let first = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("source", &body).unwrap(),
         body.clone(),
@@ -1050,6 +1174,7 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     let _ = outbound_wake.borrow_and_update();
 
     let duplicate = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("source", &body).unwrap(),
         body,
@@ -1060,6 +1185,66 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
         !outbound_wake.has_changed().unwrap(),
         "a duplicate receipt must not start a replication echo loop"
     );
+}
+
+#[tokio::test]
+async fn fresh_retry_after_accepted_but_unanswered_exchange_applies_envelope_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[7; 32]);
+    let source = plain_memory("source").unwrap();
+    let target = Arc::new(plain_memory("target").unwrap());
+    source.bind_fleet(fleet_id).unwrap();
+    target.bind_fleet(fleet_id).unwrap();
+    source.append_claim(&ClaimInput {
+        subject: "note/copper".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("source-up".into()),
+    }).unwrap();
+    let request = source.export_replication_exchange(fleet_id, &ReplicationInventory::default()).unwrap();
+    let state = PeerState::new(
+        Local(Arc::clone(&target)), "target".into(), auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["source".into()])),
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let unblock = Arc::clone(&release);
+    let router = peer_router(state, Router::new()).layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let seen = Arc::clone(&seen);
+            let unblock = Arc::clone(&unblock);
+            async move {
+                let first = seen.fetch_add(1, Ordering::Relaxed) == 0;
+                // Apply and authenticate before losing the first response.
+                let response = next.run(request).await;
+                if first {
+                    unblock.notified().await;
+                }
+                response
+            }
+        },
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig { name: "target".into(), url: format!("http://{}", listener.local_addr().unwrap()) };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = reqwest::Client::builder().timeout(Duration::from_millis(250)).build().unwrap();
+    let result = post_signed_to::<_, ReplicationExchange>(
+        &http, &peer, "source", &auth,
+        &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        EXCHANGE_PATH, &request, false,
+    ).await;
+    release.notify_one();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(target.claims_for("note/copper", Some("example.note")).unwrap().len(), 1);
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
@@ -1441,6 +1626,7 @@ async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
         auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
         fleet: member_context(&store, &anchor, &[], &[], false),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let body = serde_json::json!({
         "request": session.request(), "node_id": node_id,
@@ -1515,6 +1701,7 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
         auth: FleetAuth::test(fleet, &secret).with_member_key(Some(anchor.clone())),
         fleet: a_fleet.clone(),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let server = tokio::spawn(async move {
         axum::serve(listener, peer_router(state, Router::new()))
@@ -3016,6 +3203,7 @@ mod retry_tests {
                     auth: auth.clone(),
                     fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                     outbound_notify: watch::channel(0).0,
+                    shards: Default::default(),
                 },
                 Router::new(),
             )
@@ -3121,7 +3309,10 @@ mod retry_tests {
             })
             .await;
         }
-        assert_eq!(attempts.lock().iter().filter(|&&route| route).count(), 1);
+        assert_eq!(
+            attempts.lock().iter().filter(|&&route| route).count(), 2,
+            "one failed send plus one fresh retry; cooldown must add no preferred attempts"
+        );
         notify.send_modify(|generation| *generation += 1);
         tokio::time::advance(Duration::from_secs(31)).await;
         settled(&local, |worker| {
@@ -3195,6 +3386,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                 outbound_notify: watch::channel(0).0,
+                shards: Default::default(),
             },
             Router::new(),
         )
@@ -3332,6 +3524,7 @@ mod retry_tests {
                         auth: FleetAuth::test("invented-fleet", &[42; 32]),
                         fleet: fleet.clone(),
                         outbound_notify: watch::channel(0).0,
+                        shards: Default::default(),
                     },
                     Router::new(),
                 ),
@@ -3450,6 +3643,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: contexts[index].clone(),
                 outbound_notify: wakes[index].clone(),
+                shards: Default::default(),
             };
             tasks.push(tokio::spawn(async move {
                 axum::serve(listener, peer_router(state, Router::new()))
@@ -3781,6 +3975,228 @@ mod retry_tests {
         }
     }
 
+    /// A peer with a preferred HTTP route that breaks its next `broken` POSTs before it works,
+    /// and a Fabric fallback whose grants refuse this node. Returns the local store, the HTTP
+    /// route's remaining broken POSTs and POST count, the Fabric dial log, the wake, and the
+    /// tasks to abort. One failed exchange is two broken POSTs: the send and its one retry on a
+    /// fresh connection.
+    async fn refused_fallback_peer(
+        root: &Path,
+        broken: usize,
+    ) -> (
+        Arc<Store>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        PathBuf,
+        watch::Sender<u64>,
+        Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fleet_id = "5b0d7a52-7f43-4c3e-9a51-2f2d6c1e8b70";
+        let auth = FleetAuth::test(fleet_id, &[23; 32]);
+        let local = Arc::new(plain_open(&root.join("harbor.db"), "harbor").unwrap());
+        let remote = Arc::new(plain_open(&root.join("beacon.db"), "beacon").unwrap());
+        for store in [&local, &remote] {
+            store.bind_fleet(fleet_id).unwrap();
+        }
+        let failing = Arc::new(AtomicUsize::new(broken));
+        let posts = Arc::new(AtomicUsize::new(0));
+        let (left, counted) = (failing.clone(), posts.clone());
+        let app = peer_router(
+            PeerState {
+                backend: Local(remote.clone()),
+                node: "beacon".into(),
+                auth: auth.clone(),
+                fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
+                outbound_notify: watch::channel(0).0,
+                shards: Default::default(),
+            },
+            Router::new(),
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let (left, counted) = (left.clone(), counted.clone());
+                async move {
+                    if request.method() == axum::http::Method::POST {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        if left
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_ok()
+                        {
+                            // A broken stream, as a member restarting under a deploy leaves.
+                            return Response::new(Body::from_stream(futures_util::stream::once(
+                                async {
+                                    Err::<Bytes, _>(std::io::Error::from(
+                                        std::io::ErrorKind::ConnectionReset,
+                                    ))
+                                },
+                            )));
+                        }
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dials = root.join("dials");
+        let program = root.join("fabric");
+        std::fs::write(&program, format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{}'\necho '{{\"error\":{{\"code\":\"peer_not_permitted_for_service\",\"class\":\"refusal\",\"message\":\"peer not permitted for service st3-peer-v1\",\"peer\":null,\"service\":\"st3-peer-v1\"}}}}'\nexit 77\n",
+            dials.display()
+        )).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut fleet = FleetContext::legacy(BTreeSet::from(["beacon".into()]));
+        fleet.fabric = Some(Fabric::new(program));
+        let (routes, receiver) = watch::channel(vec![
+            Route::Http(url),
+            Route::Fabric {
+                node: "beacon".into(),
+                protocol: "st3-peer-v1".into(),
+            },
+        ]);
+        let wake = watch::channel(0).0;
+        let worker = tokio::spawn(dial_peer(
+            Local(local.clone()),
+            "harbor".into(),
+            "beacon".into(),
+            receiver,
+            auth,
+            fleet,
+            wake.subscribe(),
+        ));
+        let keep_routes = tokio::spawn(async move {
+            routes.closed().await;
+        });
+        (local, failing, posts, dials, wake, vec![server, worker, keep_routes])
+    }
+
+    fn fabric_dials(log: &Path) -> usize {
+        std::fs::read_to_string(log).unwrap_or_default().lines().count()
+    }
+
+    /// #4152: the preferred route fails once (its member restarts) and the worker fails over to
+    /// a Fabric route the member's grants refuse. The refusal is that route's answer, not the
+    /// peer's: the worker reports it as `refused`, returns to the preferred route on that route's
+    /// own short back-off, and holds the refused route instead of redialing it as if it were a
+    /// network fault.
+    #[tokio::test]
+    async fn a_refused_fallback_route_never_stalls_the_preferred_one() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let (local, failing, posts, dials, wake, tasks) =
+            refused_fallback_peer(root.path(), 2).await;
+        // Waits for an exchange that failed after `since` and then for a success after that
+        // failure. A success alone is not the recovery: an exchange already in flight, or the
+        // follow-up of one that moved envelopes, can complete after `since` and before the
+        // preferred route breaks. The route's first retry comes about a second after its
+        // failure; the bound only catches a hang, as without the fix the route is never dialed
+        // again.
+        let recovered_after = |since: u128| {
+            let local = local.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let (Some(success), Some(failure)) =
+                            local.replication_peer_transport("beacon")
+                            && failure.at_unix_ms > since
+                            && success.at_unix_ms > failure.at_unix_ms
+                        {
+                            return success;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+            }
+        };
+        let success = recovered_after(0)
+            .await
+            .expect("the preferred route must exchange again within its short back-off");
+        assert_ne!(success.carrier, crate::replication::ReplicationCarrier::Fabric);
+        assert_eq!(fabric_dials(&dials), 1, "the refused route was dialed once");
+        let peer = local
+            .replication_status(true, None, &["beacon".into()])
+            .unwrap()
+            .peers
+            .remove(0);
+        assert_eq!(peer.status, "up", "a working route makes the peer up");
+        assert!(peer.refusal_reason.is_none());
+        let failed = peer.last_failed_exchange.expect("the refusal stays as the last failure");
+        assert_eq!(failed.carrier, crate::replication::ReplicationCarrier::Fabric);
+
+        // Another brief failure of the preferred route does not redial the refused one: it is
+        // held, and the preferred route is retried on its own.
+        let before = crate::store::now_ms();
+        let posted = posts.load(Ordering::SeqCst);
+        failing.store(2, Ordering::SeqCst);
+        wake.send_modify(|generation| *generation += 1);
+        recovered_after(before)
+            .await
+            .expect("the preferred route recovers again without the refused one");
+        // The failed exchange's two broken POSTs, then the one that recovered.
+        assert!(posts.load(Ordering::SeqCst) >= posted + 3);
+        assert_eq!(fabric_dials(&dials), 1, "a refused route is held, not retried as a fault");
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    /// A peer whose every route fails keeps the long, accumulating back-off: the refused route
+    /// is held and reported as `refused`, and the failing route is not retried faster for it.
+    #[tokio::test]
+    async fn a_peer_whose_every_route_fails_keeps_the_long_back_off() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let (local, _failing, posts, dials, _wake, tasks) =
+            refused_fallback_peer(root.path(), usize::MAX).await;
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while fabric_dials(&dials) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the worker fails over to the refused route");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let elapsed = started.elapsed();
+        // Attempts no closer together than the back-off's shortest jitter allows, plus the one
+        // return to the preferred route right after the refusal.
+        let mut allowed = 1;
+        let mut earliest = Duration::ZERO;
+        loop {
+            earliest += PeerBackoff::delay(allowed as u32 - 1, 0);
+            if earliest > elapsed {
+                break;
+            }
+            allowed += 1;
+        }
+        let attempts = posts.load(Ordering::SeqCst).div_ceil(2);
+        assert!(
+            (1..=allowed + 1).contains(&attempts),
+            "{attempts} attempts in {elapsed:?}"
+        );
+        assert_eq!(fabric_dials(&dials), 1, "a refused route is held, not retried as a fault");
+        let peer = local
+            .replication_status(true, None, &["beacon".into()])
+            .unwrap()
+            .peers
+            .remove(0);
+        assert_eq!(peer.status, "refused", "{peer:?}");
+        assert!(
+            peer.refusal_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("that member's Fabric grants"))
+        );
+        assert!(peer.last_successful_exchange.is_none());
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[test]
     fn absent_members_cost_a_few_attempts_per_hour_after_exponential_backoff() {
         // Use the shortest jitter so this bounds the most aggressive retry schedule.
@@ -3909,6 +4325,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: contexts[index].clone(),
                 outbound_notify: wakes[index].clone(),
+                shards: Default::default(),
             };
             let (shutdown, stopped) = tokio::sync::oneshot::channel();
             shutdowns.push(shutdown);
@@ -4015,9 +4432,12 @@ mod retry_tests {
             }
             tokio::time::resume();
             let retries = attempts.load(Ordering::Relaxed) - before;
+            // Each unanswered logical attempt can use one fresh-connection retry;
+            // keep the same backoff budget while counting both wire connections.
+            let allowed_logical_attempts = if away == 120 { 20 } else { 40 };
             assert!(
-                retries <= if away == 120 { 20 } else { 40 },
-                "{retries} connection attempts in {away}s"
+                retries <= 2 * allowed_logical_attempts,
+                "{retries} wire connections in {away}s, budget {allowed_logical_attempts} logical attempts"
             );
             for server in &stores[..2] {
                 server.age_replication_peer_for_test("traveller");
@@ -4124,6 +4544,7 @@ mod retry_tests {
             auth: auth.clone(),
             fleet: contexts[0].clone(),
             outbound_notify: wakes[0].clone(),
+            shards: Default::default(),
         };
         tasks.push(tokio::spawn(async move {
             axum::serve(listener, peer_router(state, Router::new()))
@@ -4380,6 +4801,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     let digest = FleetAuth::body_digest(&bytes);
     let headers = auth.request_headers("birch", &bytes).unwrap();
     let interrupted = tokio::spawn(receive_exchange(
+        None,
         State(state.clone()),
         headers.clone(),
         bytes.clone(),
@@ -4400,7 +4822,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
 
     let started = tokio::time::Instant::now();
-    let overload = receive_exchange(State(state.clone()), headers.clone(), bytes.clone()).await;
+    let overload = receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()).await;
     assert_eq!(overload.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(started.elapsed() < REPLICATION_EXCHANGE_TIMEOUT);
     let overload_headers = overload.headers().clone();
@@ -4441,6 +4863,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         serde_json::to_vec(&left.export_replication_summary(fleet_id).unwrap()).unwrap(),
     );
     let busy = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("birch", &changed).unwrap(),
         changed,
@@ -4834,6 +5257,7 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
     );
     for expected_status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK] {
         let response = receive_exchange(
+            None,
             State(state.clone()),
             auth.request_headers("birch", &bytes).unwrap(),
             bytes.clone(),
@@ -5025,6 +5449,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
         };
         let state = PeerState::new(backend, "cedar".into(), auth.clone(), fleet.clone());
         requests.push(tokio::spawn(receive_exchange(
+            None,
             State(state),
             auth.request_headers(name, &bytes).unwrap(),
             bytes,
@@ -5056,6 +5481,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
     let state = PeerState::new(Local(store), "cedar".into(), auth.clone(), fleet.clone());
     let started = tokio::time::Instant::now();
     let response = receive_exchange(
+        None,
         State(state),
         auth.request_headers("elm", &query).unwrap(),
         query.clone(),
@@ -5356,10 +5782,11 @@ mod early_recovery {
         link.set(HEAD_ONLY);
         let rearmed = worker.wait(third.as_deref(), 10).await;
         assert!(rearmed.is_some_and(|waited| waited <= PEER_PROBE_INTERVAL.as_secs() + 1));
-        // Three attempts, each an export and a signature, over a link that never carried an
-        // exchange; two were released early, one per observed outage and recovery.
+        // Three logical attempts, each an export and a signature; two were released
+        // early, one per observed outage/recovery. Each unanswered attempt has one
+        // additional wire send through a fresh connection, not another recovery credit.
         assert_eq!(worker.attempts, 3);
-        assert_eq!(link.exchanges.load(Ordering::SeqCst), 3);
+        assert_eq!(link.exchanges.load(Ordering::SeqCst), 2 * worker.attempts);
         awake.abort();
         link.server.abort();
     }
@@ -5464,6 +5891,7 @@ mod early_recovery {
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                 outbound_notify: watch::channel(0).0,
+                shards: Default::default(),
             },
             Router::new(),
         )
@@ -5577,17 +6005,18 @@ mod early_recovery {
             );
             step(&local).await;
         }
-        // Not a spin: while the link was down the worker tried no more often than the shortest
-        // jitter of its backoff schedule allows.
+        // Not a spin: the logical attempt budget remains the shortest-jitter
+        // backoff schedule, with at most two wire sends per logical attempt.
         let (mut schedule, mut allowed) = (Duration::ZERO, 0);
         while schedule < outage {
             schedule += PeerBackoff::delay(allowed, 0);
             allowed += 1;
         }
         let refused = link.refused.load(Ordering::SeqCst);
+        let allowed_sends = 2 * allowed as usize;
         assert!(
-            (1..=allowed as usize).contains(&refused),
-            "{refused} exchanges in a {outage:?} outage; the backoff allows {allowed}"
+            (1..=allowed_sends).contains(&refused),
+            "{refused} wire sends in a {outage:?} outage; backoff allows {allowed} logical attempts ({allowed_sends} sends)"
         );
         dialer.abort();
         peer.abort();
@@ -5821,23 +6250,28 @@ fn claim_walk_note(store: &Store, subject: &str) -> String {
 /// nothing to move, so only the walk can bring a claim over. Returns the queries sent.
 fn walk_to_the_end(source: &Store, target: &Store, fleet: &str) -> Vec<crate::replication::ClaimRangeQuery> {
     let first = target
-        .receive_replication_exchange("source", fleet, &source.export_replication_summary(fleet).unwrap())
+        .receive_replication_exchange(&source.origin, fleet, &source.export_replication_summary(fleet).unwrap())
         .unwrap();
-    let Some(comparison) = first.claim_ranges.filter(|comparison| !comparison.same) else {
+    let Some(comparison) = first.claim_ranges.filter(|comparison| !all_same(comparison)) else {
         return Vec::new();
     };
-    let mut walk = ClaimWalk::new(&comparison.pair);
+    let mut walk = if comparison.same {
+        ClaimWalk::finished(&comparison.pair)
+    } else {
+        ClaimWalk::new(&comparison.pair)
+    };
+    walk.follow_retired(&comparison);
     let mut queries = Vec::new();
     while let Some(query) = walk.next_query() {
-        assert!(queries.len() < 32, "a walk ends");
+        assert!(queries.len() < 64, "a walk ends");
         queries.push(query.clone());
         let mut inventory = source.export_replication_summary(fleet).unwrap().inventory;
-        inventory.claim_range_query = Some(query);
+        inventory.claim_range_query = Some(query.clone());
         let answer = source.export_replication_exchange(fleet, &inventory).unwrap();
-        let receipt = target.receive_replication_exchange("source", fleet, &answer).unwrap();
+        let receipt = target.receive_replication_exchange(&source.origin, fleet, &answer).unwrap();
         target.validate_replication_backlog().unwrap();
         if let Some(comparison) = &receipt.claim_ranges {
-            walk.absorb(comparison);
+            walk.absorb(query, comparison);
         }
     }
     queries
@@ -5911,8 +6345,9 @@ fn a_claim_walk_asks_for_nothing_this_node_holds_or_retired() {
 #[test]
 fn a_finished_claim_walk_is_not_repeated_for_the_same_claims() {
     let mut walk = ClaimWalk::new("ours/theirs");
-    assert!(walk.next_query().unwrap().tops);
-    walk.absorb(&crate::replication::ClaimRangeComparison {
+    let tops = walk.next_query().unwrap();
+    assert!(tops.tops);
+    walk.absorb(tops, &crate::replication::ClaimRangeComparison {
         pair: "ours/theirs".into(),
         tops: vec![3],
         ..Default::default()
@@ -5948,6 +6383,7 @@ async fn a_claim_walk_runs_over_the_signed_peer_route() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["target".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let server = tokio::spawn(
         axum::serve(
@@ -5987,4 +6423,322 @@ async fn a_claim_walk_runs_over_the_signed_peer_route() {
     assert!(fetched, "tops, leaves, IDs and the claim fit in one exchange's round trips");
     assert!(target.claim_by_id(&lacking).unwrap().is_some());
     server.abort();
+}
+
+fn retire_claim_ids(store: &Store, ids: &[String]) {
+    let connection = store.connection.write();
+    for id in ids {
+        connection
+            .execute(
+                &format!(
+                    /* sqlite-large-value: allow-for-now lv-hbdb013909404 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})",
+                    crate::store::retired::identity_sql("?1")
+                ),
+                [id],
+            )
+            .unwrap();
+    }
+}
+
+fn local_trim_member(origin: &str, fleet: &str) -> Store {
+    let store = plain_memory(origin).unwrap();
+    store.bind_fleet(fleet).unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store
+}
+
+/// Push everything `from` holds to `to`, as an older build or a first sync does, whatever
+/// `to`'s inventory lists.
+fn push_all(from: &Store, from_name: &str, to: &Store, fleet: &str) {
+    let push = from.export_replication_exchange(fleet, &ReplicationInventory::default()).unwrap();
+    to.receive_replication_exchange(from_name, fleet, &push).unwrap();
+    to.validate_replication_backlog().unwrap();
+}
+
+fn retired_summary(store: &Store) -> Option<crate::replication::ClaimRangeDigest> {
+    store.claim_range_summary().unwrap().retired.and_then(|retired| retired.retained)
+}
+
+#[test]
+fn members_that_trim_locally_learn_each_others_retired_claims_by_walking_ranges() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d1";
+    let source = local_trim_member("source", fleet);
+    let target = local_trim_member("target", fleet);
+    // Retired IDs spread over many leaves, and one claim the target still holds.
+    let held = claim_walk_note(&target, "note/held-at-target");
+    let mut retired: Vec<String> = (0..100u32)
+        .map(|n| {
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(n.to_be_bytes()))
+        })
+        .collect();
+    retired.push(held.clone());
+    retire_claim_ids(&source, &retired);
+    fold_claim_ranges(&[&source, &target]);
+    assert!(retired_summary(&source).is_some(), "a member that trims locally summarizes its retired IDs");
+
+    let queries = walk_to_the_end(&source, &target, fleet);
+    assert!(queries.iter().any(|query| query.retired.is_some()), "{queries:?}");
+    assert!(queries.iter().all(|query| query.claims.is_empty()), "a retired ID is recorded, never fetched");
+    let connection = target.readers.get();
+    for id in &retired {
+        assert!(crate::store::retired::claim_retired(&connection, id).unwrap(), "{id}");
+    }
+    drop(connection);
+    fold_claim_ranges(&[&target]);
+    assert_eq!(retired_summary(&target), retired_summary(&source));
+    // What it learned it neither serves nor takes back.
+    assert!(target.envelopes_carrying_claims(std::slice::from_ref(&held)).unwrap().is_empty());
+
+    // An ordinary member neither sends its retired IDs nor learns a peer's.
+    let ordinary = plain_memory("ordinary").unwrap();
+    ordinary.bind_fleet(fleet).unwrap();
+    ordinary.import_retired_identities_paced(|_| {}).unwrap();
+    fold_claim_ranges(&[&ordinary]);
+    assert!(retired_summary(&ordinary).is_none());
+    walk_to_the_end(&source, &ordinary, fleet);
+    assert!(!crate::store::retired::claim_retired(&ordinary.readers.get(), &retired[0]).unwrap());
+}
+
+#[test]
+fn a_fresh_member_joining_from_trimmed_members_ends_with_the_same_answers() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d2";
+    // A member on an older build, or one that has not trimmed: it still holds what the others
+    // deleted, and pushes everything it holds.
+    let holder = plain_memory("holder").unwrap();
+    holder.bind_fleet(fleet).unwrap();
+    let kept: Vec<String> = (0..12).map(|n| claim_walk_note(&holder, &format!("note/kept-{n}"))).collect();
+    let deleted: Vec<String> = (0..4).map(|n| claim_walk_note(&holder, &format!("note/superseded-{n}"))).collect();
+
+    // The first trimmed member deleted them, and with them their envelopes, which carried
+    // nothing else; the second learns that only from the first.
+    let oak = local_trim_member("oak", fleet);
+    retire_claim_ids(&oak, &deleted);
+    holder.seal_local_batches().unwrap();
+    for id in &deleted {
+        let (writer, sequence, hash): (String, u64, String) = holder
+            .readers
+            .get()
+            .query_row(
+                "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+                 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 WHERE claims.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        crate::store::retired::retire_envelope_tx(&oak.connection.write(), &writer, sequence, &hash).unwrap();
+    }
+    push_all(&holder, "holder", &oak, fleet);
+    let elm = local_trim_member("elm", fleet);
+    push_all(&oak, "oak", &elm, fleet);
+    fold_claim_ranges(&[&oak, &elm]);
+    walk_to_the_end(&oak, &elm, fleet);
+    for id in &deleted {
+        assert!(crate::store::retired::claim_retired(&elm.readers.get(), id).unwrap(), "elm learned {id}");
+    }
+    push_all(&holder, "holder", &elm, fleet);
+
+    // A fresh member joins from the trimmed members, then meets the holder.
+    let fresh = local_trim_member("fresh", fleet);
+    push_all(&elm, "elm", &fresh, fleet);
+    fold_claim_ranges(&[&elm, &fresh]);
+    walk_to_the_end(&elm, &fresh, fleet);
+    push_all(&holder, "holder", &fresh, fleet);
+    fold_claim_ranges(&[&holder, &oak, &elm, &fresh]);
+    walk_to_the_end(&holder, &fresh, fleet);
+
+    for member in [&oak, &elm, &fresh] {
+        for id in &kept {
+            assert!(member.claim_by_id(id).unwrap().is_some(), "{id}");
+        }
+        for id in &deleted {
+            assert!(member.claim_by_id(id).unwrap().is_none(), "{} re-admitted {id}", member.origin);
+        }
+    }
+    let answers = |store: &Store| store.claim_range_summary().unwrap();
+    assert_eq!(answers(&fresh).retained, answers(&oak).retained, "the same claims");
+    assert_eq!(answers(&elm).retained, answers(&oak).retained);
+    assert_eq!(retired_summary(&fresh), retired_summary(&oak), "the same deletions");
+    assert_ne!(answers(&holder).retained, answers(&oak).retained, "control: the holder differs");
+}
+
+/// The tombstones a cut on `store` records for these claims and the envelopes that carry them.
+fn tombstones_of(
+    store: &Store,
+    ids: &[String],
+) -> (Vec<crate::store::checkpoint::EnvelopeTombstone>, Vec<crate::store::checkpoint::ClaimTombstone>) {
+    let connection = store.readers.get();
+    let mut envelopes = Vec::new();
+    let mut claims = Vec::new();
+    for id in ids {
+        let (writer, sequence, hash, subject, kind): (String, u64, String, String, String) = connection
+            .query_row(
+                "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash, claims.subject, claims.kind
+                 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 WHERE claims.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        let envelope = crate::store::checkpoint::EnvelopeTombstone {
+            writer: writer.clone(),
+            sequence,
+            envelope_hash: hash.clone(),
+            accepted_at_unix_ms: 1,
+        };
+        if !envelopes.contains(&envelope) {
+            envelopes.push(envelope);
+        }
+        claims.push(crate::store::checkpoint::ClaimTombstone {
+            id: id.clone(),
+            writer,
+            sequence,
+            envelope_hash: hash,
+            subject,
+            kind,
+            actor: None,
+            predecessors: Vec::new(),
+            operation_id: None,
+            request_digest: None,
+            accepted_at_unix_ms: 1,
+        });
+    }
+    (envelopes, claims)
+}
+
+/// A cut that records its tombstones and then stops before trimming, as a graph-changed stop,
+/// the drop-newest abort or a crash leaves it, deleted nothing, so it retires nothing a peer could
+/// learn, and a fresh member still gets its claims. What a cut deletes enters the ledger in the
+/// deleting transaction, so a chunk that rolls back retires nothing either.
+#[test]
+fn a_cut_that_records_and_stops_teaches_no_peer_to_refuse_its_claims() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d3";
+    let holder = plain_memory("holder").unwrap();
+    holder.bind_fleet(fleet).unwrap();
+    let recorded: Vec<String> = (0..3).map(|n| claim_walk_note(&holder, &format!("note/recorded-{n}"))).collect();
+    holder.seal_local_batches().unwrap();
+    let oak = local_trim_member("oak", fleet);
+    push_all(&holder, "holder", &oak, fleet);
+    let (envelopes, claims) = tombstones_of(&oak, &recorded);
+    {
+        let mut connection = oak.connection.write();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h87aeaa1b47d9 owner=smallclaims::sync::worker_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+                 VALUES('checkpoint/stopped', 1, 'recording', 1)",
+                [],
+            )
+            .unwrap();
+        crate::store::checkpoint::record_checkpoint_tombstones_tx(&transaction, "checkpoint/stopped", &envelopes, &claims)
+            .unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h302a4fb16aef owner=smallclaims::sync::worker_tests TODO=stage-generation-and-keyed-reclamation */ "UPDATE checkpoints SET state='graph-changed' WHERE id='checkpoint/stopped'", []).unwrap();
+        transaction.commit().unwrap();
+        let transaction = connection.transaction().unwrap();
+        crate::store::checkpoint::delete_dropped_rows_tx(&transaction, &envelopes, &claims).unwrap();
+        transaction.rollback().unwrap();
+    }
+    for id in &recorded {
+        assert!(!crate::store::retired::claim_retired(&oak.readers.get(), id).unwrap(), "oak retired {id}");
+        assert!(oak.claim_by_id(id).unwrap().is_some(), "oak still holds {id}");
+    }
+
+    // A peer that walks oak's retired ranges learns nothing, and a fresh member that joins from
+    // both and then meets the holder takes the claims.
+    let elm = local_trim_member("elm", fleet);
+    fold_claim_ranges(&[&oak, &elm]);
+    walk_to_the_end(&oak, &elm, fleet);
+    let fresh = local_trim_member("fresh", fleet);
+    fold_claim_ranges(&[&fresh]);
+    walk_to_the_end(&oak, &fresh, fleet);
+    walk_to_the_end(&elm, &fresh, fleet);
+    push_all(&holder, "holder", &fresh, fleet);
+    push_all(&holder, "holder", &elm, fleet);
+    for id in &recorded {
+        assert!(!crate::store::retired::claim_retired(&elm.readers.get(), id).unwrap(), "elm learned {id}");
+        assert!(fresh.claim_by_id(id).unwrap().is_some(), "fresh refused {id}");
+        assert!(elm.claim_by_id(id).unwrap().is_some(), "elm refused {id}");
+    }
+
+    // Deleting commits the ledger rows with it.
+    {
+        let mut connection = oak.connection.write();
+        let transaction = connection.transaction().unwrap();
+        crate::store::checkpoint::delete_dropped_rows_tx(&transaction, &envelopes, &claims).unwrap();
+        transaction.commit().unwrap();
+    }
+    let connection = oak.readers.get();
+    for id in &recorded {
+        assert!(crate::store::retired::claim_retired(&connection, id).unwrap(), "{id}");
+    }
+    for envelope in &envelopes {
+        assert!(
+            crate::store::retired::envelope_retired(&connection, &envelope.writer, envelope.sequence, &envelope.envelope_hash)
+                .unwrap()
+        );
+    }
+}
+
+/// An older build's claim-range summary, query and answer carry no `retired` part. Each decodes,
+/// and the summary compares exactly as before; what an ordinary member sends has no such field.
+#[test]
+fn an_older_peers_claim_range_messages_decode_and_compare_as_before() {
+    use crate::replication::{ClaimRangeComparison, ClaimRangeQuery, ClaimRangeSummary};
+    fn older<T: serde::Serialize + serde::de::DeserializeOwned>(message: &T) -> T {
+        let mut value = serde_json::to_value(message).unwrap();
+        value.as_object_mut().unwrap().remove("retired").expect("the newer message has a retired part");
+        serde_json::from_value(value).unwrap()
+    }
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d4";
+    let source = local_trim_member("source", fleet);
+    let target = local_trim_member("target", fleet);
+    claim_walk_note(&source, "note/only-source");
+    retire_claim_ids(&source, &[format!("{:064x}", 7)]);
+    fold_claim_ranges(&[&source, &target]);
+
+    let summary = source.claim_range_summary().unwrap();
+    let from_older = older(&summary);
+    assert_eq!(from_older, ClaimRangeSummary { retired: None, ..summary.clone() });
+    let compared = target.compare_claim_ranges(&from_older).unwrap().unwrap();
+    assert!(compared.retired.is_none(), "nothing is compared that the peer did not send");
+    let mut newer = target.compare_claim_ranges(&summary).unwrap().unwrap();
+    assert!(newer.retired.is_some());
+    newer.retired = None;
+    assert_eq!(compared, newer, "the retained comparison is the same");
+
+    let query = ClaimRangeQuery {
+        tops: true,
+        retired: Some(Box::new(ClaimRangeQuery { tops: true, ..Default::default() })),
+        ..Default::default()
+    };
+    assert_eq!(older(&query), ClaimRangeQuery { retired: None, ..query.clone() });
+    let answer = ClaimRangeComparison { retired: Some(Box::default()), ..compared.clone() };
+    assert_eq!(older(&answer), compared);
+    for sent in [
+        serde_json::to_string(&from_older).unwrap(),
+        serde_json::to_string(&older(&query)).unwrap(),
+        serde_json::to_string(&compared).unwrap(),
+    ] {
+        assert!(!sent.contains("retired"), "{sent}");
+    }
+}
+
+#[test]
+fn a_retired_step_the_answer_left_out_is_asked_again() {
+    use crate::replication::ClaimRangeComparison;
+    let mut walk = ClaimWalk::finished("ours/theirs");
+    walk.follow_retired(&ClaimRangeComparison {
+        pair: "ours/theirs".into(),
+        same: true,
+        retired: Some(Box::new(ClaimRangeComparison { pair: "retired".into(), ..Default::default() })),
+        ..Default::default()
+    });
+    let query = walk.next_query().unwrap();
+    let asked = query.retired.clone().expect("the retired walk asks its tops");
+    assert!(asked.tops);
+    // The peer's retired ranges were folding, so its answer has no retired part.
+    walk.absorb(query, &ClaimRangeComparison { pair: "ours/theirs".into(), same: true, ..Default::default() });
+    assert_eq!(walk.next_query().and_then(|query| query.retired), Some(asked));
 }

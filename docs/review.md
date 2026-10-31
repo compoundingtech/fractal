@@ -8,11 +8,12 @@ conversation, and so that two reviewers given the same head reach the same verdi
 A change goes from idea to main in this order, and each agent does all of it for its own change:
 
 1. **Idea and development.** The author works on a branch and merges `main` into it (never rebases, never force-pushes).
-2. **Signed checks.** `scripts/st-test --all --push origin` runs every check on the head and signs what it ran. No push goes out
+2. **Signed checks.** `scripts/fractal-test --all --push origin` runs every check on the head and signs what it ran. No push goes out
    with a check unsigned; a check that fails or flakes is fixed first.
 3. **Signed review.** The review below runs on the signed head and produces a structured verdict, which is signed like a check.
 4. **Merge queue.** A head with every check signed and a signed review that is `GO` at **low** or **medium** risk is put in the
-   merge queue by its own author, following the queue rules below.
+   merge queue by its own author, following the queue rules below. A **medium** change that touches a risky area (see "Factory
+   read" below) is read by Factory first and is not queued by its author alone.
 
 There is **no central intake, curator or watcher** in this flow: nobody reads, approves or queues a change on its author's behalf.
 Each agent runs the review on its own change and queues its own change.
@@ -28,6 +29,11 @@ against `.st/review-verdict.schema.json` (`scripts/review-validate`); a review w
 nothing is signed**. The signature covers the whole artifact, the review's own output included, so what is signed is exactly what
 was said.
 
+**Status of the tools.** The risk script (`scripts/review-risk`), the schema and its validator
+(`.st/review-verdict.schema.json`, `scripts/review-validate`) and the runner (`scripts/review`) are all merged. The runner is
+shadow-first: it runs beside the Intake review and the two verdicts are compared; it replaces nothing until that comparison has been
+reported and accepted. The daily miss rate starts when the independent re-review exists.
+
 | Field | Meaning |
 | --- | --- |
 | `head` | the full 40-character commit the verdict is about; a verdict is void the moment the head moves |
@@ -41,7 +47,7 @@ was said.
 | `flags` | `public_contract`, `stored_format`, `trust_or_permission`, `global_view`, each `yes` or `no` with one sentence |
 | `read` | what was read in full, what was read as structure only, what was served from the review record |
 | `patch_ids` | the per-file patch-ids of the head's diff, which the next review's delta read starts from |
-| `answers` | for a round after the first: which earlier finding each change answers |
+| `answers` | for a round after the first: which earlier finding each change answers (empty for a delta read after a `GO`, which left none) |
 | `reviewer` | the model, its family and the harness that ran it |
 | `standard` | the digest of this document, so a verdict names the rule it was made under |
 | `text` | the full review text, as the reviewer wrote it |
@@ -66,7 +72,7 @@ All at one exact head:
    which includes a head that is only a merge of `main` with an empty `git show --remerge-diff`.
 2. **It merges cleanly.** `git merge-tree --write-tree origin/main <head>` succeeds. Whether a clean merge still breaks something
    that changed on `main` is judged by the checks signed on the merge (see "Behind main"), not guessed by the reviewer.
-3. **Every check is signed at this head** (`scripts/st-test --status`; or the merge of this head with `main`, where the protected
+3. **Every check is signed at this head** (`scripts/fractal-test --status`; or the merge of this head with `main`, where the protected
    files moved), and none is red; the required checks on GitHub agree. A skipped check is a pass only where its signed note says
    why it was skipped.
 4. **No flake.** A crate with a test that passed only on a retry is not signed in its own per-crate record, so on every path
@@ -89,7 +95,7 @@ All at one exact head:
 9. **Compatibility flags are right.** Any claim kind, claim field, client or wire change, schema change, new decision name,
    retention or replication change, or CLI contract change is flagged and raises the risk (see the rubric), with the rollout rule
    it needs (for example, daemons before clients).
-10. **Evidence and trust paths are read the hard way.** For `scripts/st-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`,
+10. **Evidence and trust paths are read the hard way.** For `scripts/fractal-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`,
     `scripts/ci-local`, `scripts/ci-linux`, workflows, rulesets, `.st/` and the store: who can influence the input, which version
     of the script runs (the base's or the tree under test), whether it fails open or closed, and what a buggy or hostile tree
     could make it sign.
@@ -104,6 +110,19 @@ All at one exact head:
 
 The verdict carries a risk, `low`, `medium` or `high`, and the reasons. Risk replaces asking a person: nothing that gates `main`,
 a deploy, a release or the merge queue waits for a person's approval. **Only `low` and `medium` may enter the merge queue.**
+
+**Factory read.** The review is a cheap extra reader, not a gate: replayed on twelve heads where a reviewer had found a blocking
+defect, `scripts/review` found it three times, and it misses mixed-version, concurrency, CI-queue and cost defects. So a **medium**
+change in one of these areas does not self-queue: its author sends the signed head to Factory for one read first. This is a lane rule
+the owner approved on top of the review (2026-10-30), not an intake step of the review itself: the review still reads, approves and queues
+nothing, and the author still queues their own change once Factory has read it. The areas are
+named in `.st/review-risk.json` under `factory_read`: replication and sync (smallclaims replication, the sync worker, claim ranges,
+inventory, the peer); store schema, trim and checkpoints; concurrency (watchers, locks, spawned background tasks, by path and by
+the lines added); CI and signing stages; and wire types shared between versions. `scripts/review-risk` lists the areas a change
+touches (`factory_read`) and `needs_factory_read` is true when the final risk is medium and an area is touched; the verdict carries
+both (`risk.deterministic.factory_read`, `risk.needs_factory_read`) and the runner prints `medium risk, needs Factory read (areas)`.
+The areas never change the risk level; they are read from the base, like the rest of the floor. Low changes and other mediums queue
+as before; high goes to a person as before.
 
 **High** — any one of these makes the change high:
 
@@ -208,7 +227,7 @@ files and lines actually read.
 
 - **Up to three** changes may be in the queue at once.
 - A change goes in the queue **alone** when it changes `.st/`, a workflow, a ruleset or repository setting, the evidence or
-  signing path (`scripts/st-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`, `scripts/ci-local`, `scripts/ci-linux`, the lane
+  signing path (`scripts/fractal-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`, `scripts/ci-local`, `scripts/ci-linux`, the lane
   scripts, `scripts/ci-rust-test-notes`), the store's core file, or a workspace-wide toolchain or dependency pin. A reviewer may
   also keep a change alone when it judges it risky (a reconcile or schema change), and says so in the verdict.
 - Everything else may **batch** when the changed files do not overlap.

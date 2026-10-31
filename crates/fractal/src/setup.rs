@@ -38,7 +38,7 @@ pub struct SetupArgs {
     /// Keep fractal running as a user service (default: true).
     #[arg(long, action = clap::ArgAction::Set)]
     pub service: Option<bool>,
-    /// Install st3, the st link and pty in ~/.local/bin (default: true).
+    /// Install Fractal (st3 and the st link) and pty in ~/.local/bin (default: true).
     #[arg(long, action = clap::ArgAction::Set)]
     pub install: Option<bool>,
     /// Start the daemon if stopped (default: true).
@@ -107,7 +107,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
                 return Ok(run(SetupArgs::default()).await?.initial_subject);
             } else if !daemon_ready(&config).await
                 && ask_bool(
-                    "The st daemon is not running. Start it?",
+                    "The Fractal daemon is not running. Start it?",
                     "--start",
                     None,
                     false,
@@ -142,6 +142,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         Config {
             access_mode: Some(fractal_drivers::access::AccessMode::Auto),
             seat_priority: None,
+            lanes: None,
             ..Config::default()
         }
     };
@@ -150,7 +151,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     let first_run = config.person.is_none();
     let previous_node = config.node.clone();
     let existing_store = config.state_dir.join("node-identity.json").exists()
-        || config.state_dir.join("claims.sqlite3").exists()
+        || config.store_path().exists()
         || config.fleet.is_some();
 
     let default_person = config
@@ -201,7 +202,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     config.node = node;
     config.validate()?;
     let service = ask_bool(
-        "Keep st running in the background (no admin rights needed)?",
+        "Keep Fractal running in the background (no admin rights needed)?",
         "--service",
         args.service,
         args.yes,
@@ -214,7 +215,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         args.start.unwrap_or(true)
     } else {
         ask_bool(
-            "Start the st daemon?",
+            "Start the Fractal daemon?",
             "--start",
             args.start,
             args.yes,
@@ -276,7 +277,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
                 !args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            say!("Start the st daemon and run {program} setup to begin onboarding.");
+            say!("Start the Fractal daemon and run {program} setup to begin onboarding.");
             None
         }
     } else {
@@ -313,7 +314,7 @@ async fn prepare_harness(
             Err(error)
                 if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
-                println!("The running daemon is older than this st; checking the login PATH from here.");
+                println!("The running daemon is older than this Fractal build; checking the login PATH from here.");
                 fractal_daemon::environment::available_harnesses()?
             }
             Err(error) => return Err(error),
@@ -371,7 +372,7 @@ async fn prepare_harness(
     };
     if chosen == "claude" {
         let install = ask_bool(
-            "Install the st Claude channel (no admin rights needed)?",
+            "Install the Fractal Claude channel (no admin rights needed)?",
             "--claude-channel",
             args.claude_channel,
             args.yes,
@@ -386,16 +387,19 @@ async fn prepare_harness(
         }
         // CLI plugin commands must see the same account login environment as the daemon.
         if let Err(error) = ensure_claude_channel(executable) {
+            if args.harness.is_some() || (!args.yes && found.len() > 1) {
+                anyhow::bail!("Claude channel installation failed: {error}");
+            }
             say!("Claude channel installation failed: {error}");
             return Ok(fallback_harness(&found));
         }
-        if fractal_drivers::claude_channel::st3_policy_available() {
+        if fractal_drivers::claude_channel::fractal_policy_available() {
             say!(
                 "Claude channel policy is present; seats use --channels plugin:st-channel@st."
             );
         } else {
             say!(
-                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. st accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy", args.program()
+                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. Fractal accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy", args.program()
             );
         }
     }
@@ -677,26 +681,88 @@ fn copy_executable(source: &Path, target: &Path) -> Result<()> {
 fn find_pty(executable: &Path) -> Result<PathBuf> {
     let sibling = executable
         .parent()
-        .context("st executable directory")?
+        .context("Fractal executable directory")?
         .join("pty");
     if sibling.is_file() {
         return Ok(sibling);
     }
     let environment = fractal_daemon::environment::snapshot()?;
     fractal_runtime::resolve_executable("pty", &environment)
-        .context("pty is missing; unpack the complete st archive (st3, st and pty) before setup")
+        .context("pty is missing; unpack the complete Fractal archive (fractal and pty) before setup")
+}
+
+/// Match the installers' positive alias-layout policy without executing inspected commands.
+fn guard_canonical_install(bin: &Path, path: Option<&std::ffi::OsStr>, named_instance: bool) -> Result<()> {
+    let absolute = std::path::absolute(bin)?;
+    let bin = fs::canonicalize(&absolute).unwrap_or(absolute);
+    let canonical = bin.join("fractal");
+    let legacy = bin.join("st3");
+    let links_to = |link: &Path, relative: &Path, absolute: &Path| {
+        fs::read_link(link).is_ok_and(|target| target == relative || target == absolute)
+    };
+    match fs::symlink_metadata(&canonical) {
+        Ok(metadata) => {
+            let owned = if metadata.file_type().is_symlink() {
+                links_to(&canonical, Path::new("st3"), &legacy)
+            } else {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    && ["st", "st3"].into_iter().all(|name|
+                        links_to(&bin.join(name), Path::new("fractal"), &canonical))
+            };
+            anyhow::ensure!(owned,
+                "setup: refusing to replace foreign fractal command: {}", canonical.display());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect canonical Fractal destination"),
+    }
+    // Named instances deliberately coexist with the login command on inherited PATH.
+    if named_instance {
+        return Ok(());
+    }
+    if let Some(path) = path {
+        for directory in std::env::split_paths(path) {
+            let directory = if directory.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                directory.as_path()
+            };
+            let Ok(directory) = fs::canonicalize(directory) else { continue };
+            if directory == bin {
+                continue;
+            }
+            let candidate = directory.join("fractal");
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => anyhow::ensure!(
+                    links_to(&candidate, &canonical, &legacy),
+                    "setup: refusing to install: PATH contains a foreign fractal command: {}",
+                    candidate.display()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("inspect Fractal command on PATH"),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // An instance always gets its own copies, below its own directory, so removing the
     // directory removes them and the default install is never the one that runs.
     let instance = fractal_daemon::instance::current();
+    // A login shell may omit this command even when its canonical link runs this image.
+    if instance.is_none()
+        && std::env::var_os("HOME").is_some_and(|home| {
+            let canonical = PathBuf::from(home).join(".local/bin/fractal");
+            canonical.is_symlink() && same_file(&canonical, executable)
+        })
+    {
+        return Ok(executable.into());
+    }
     // Keep managed installations (including the signed macOS app bundle) in place.
     if instance.is_none()
         && let Ok(environment) = fractal_daemon::environment::snapshot()
-        && fractal_runtime::resolve_executable("st", &environment)
-            .ok()
-            .is_some_and(|st| same_file(&st, executable))
+        && ["fractal", "st"].into_iter().any(|name|
+            fractal_runtime::resolve_executable(name, &environment)
+                .ok().is_some_and(|installed| same_file(&installed, executable)))
     {
         return Ok(executable.into());
     }
@@ -705,42 +771,54 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
         Some(instance) => instance.bin_dir(),
         None => home.join(".local/bin"),
     };
+    // Refuse collisions before any executable or alias can change. Signed-app
+    // upgrades belong to install-macos.py; managed setup above preserves them.
+    guard_canonical_install(&bin, std::env::var_os("PATH").as_deref(), instance.is_some())?;
     // Locate pty before changing any installed file.
     let pty = find_pty(executable)?;
     fs::create_dir_all(&bin)?;
-    let target = bin.join("st3");
+    let target = bin.join("fractal");
     let replacing = [
-        ("st3", fs::symlink_metadata(&target).is_ok() && !same_file(executable, &target)),
+        ("fractal", fs::symlink_metadata(&target).is_ok() && !same_file(executable, &target)),
         ("pty", fs::symlink_metadata(bin.join("pty")).is_ok() && !same_file(&pty, &bin.join("pty"))),
         (
             "st",
             fs::symlink_metadata(bin.join("st")).is_ok()
-                && fs::read_link(bin.join("st")).ok().as_deref() != Some(Path::new("st3")),
+                && fs::read_link(bin.join("st")).ok().as_deref() != Some(Path::new("fractal")),
+        ),
+        (
+            "st3",
+            fs::symlink_metadata(bin.join("st3")).is_ok()
+                && fs::read_link(bin.join("st3")).ok().as_deref() != Some(Path::new("fractal")),
         ),
     ]
     .into_iter()
     .filter_map(|(name, exists)| exists.then_some(name))
     .collect::<Vec<_>>();
     if replacing.is_empty() {
-        println!("Installing st3, st and pty in {}", bin.display());
+        println!("Installing Fractal (fractal, pty and temporary st/st3 aliases) in {}", bin.display());
     } else {
         println!(
-            "Installing st3, st and pty in {}, replacing the existing {}",
+            "Installing Fractal (fractal, pty and temporary st/st3 aliases) in {}, replacing the existing {}",
             bin.display(),
             replacing.join(", ")
         );
     }
     copy_executable(executable, &target)?;
     copy_executable(&pty, &bin.join("pty"))?;
-    let link = bin.join("st");
-    if fs::read_link(&link).ok().as_deref() != Some(Path::new("st3")) {
-        let pending = tempfile::tempdir_in(&bin)?;
-        symlink("st3", pending.path().join("st"))?;
-        fs::rename(pending.path().join("st"), &link)?;
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+    for name in ["st", "st3"] {
+        let link = bin.join(name);
+        if fs::read_link(&link).ok().as_deref() != Some(Path::new("fractal")) {
+            let pending = tempfile::tempdir_in(&bin)?;
+            symlink("fractal", pending.path().join(name))?;
+            fs::rename(pending.path().join(name), &link)?;
+        }
     }
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
     File::open(&bin)?.sync_all()?;
     record_installed_binaries(&bin)?;
-    say!("Installed st3, st and pty in {}", bin.display());
+    say!("Installed Fractal (fractal, pty and temporary st/st3 aliases) in {}", bin.display());
     Ok(target)
 }
 
@@ -755,9 +833,9 @@ fn record_installed_binaries(bin: &Path) -> Result<()> {
     let manifest = serde_json::json!({
         "version": 1,
         "source": "setup",
-        "files": crate::fractal::installed_binaries(vec![
-            bin.join("st3"), bin.join("st"), bin.join("pty"),
-        ]),
+        "files": [
+            bin.join("fractal"), bin.join("st3"), bin.join("st"), bin.join("pty"),
+        ],
     });
     let mut pending = tempfile::NamedTempFile::new_in(&data)?;
     pending.write_all(&serde_json::to_vec_pretty(&manifest)?)?;

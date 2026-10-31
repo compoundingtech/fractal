@@ -409,7 +409,7 @@ pub async fn publish_work_mission(
             "a mission output must contain exactly one mission",
         )));
     }
-    if !initial.subjects.is_empty() {
+    if !mission_only_subjects(&initial) {
         return Err(ApiError::bad(St3Error::new(
             "invalid-mission-output-intent",
             "a mission output can contain only its mission",
@@ -422,6 +422,12 @@ pub async fn publish_work_mission(
     let resolved_kdl =
         resolve_document_references(&request.intent.kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
+    if !mission_only_subjects(&intent) {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-mission-output-intent",
+            "a mission output can contain only its mission",
+        )));
+    }
     let mission = intent
         .missions
         .values()
@@ -436,19 +442,18 @@ pub async fn publish_work_mission(
             ),
         )));
     }
-    let mut publication = intent.clone();
-    publication.subjects.clear();
+    let publication = &intent;
     let mut planned = state
         .store
         .mission(
-            &publication,
+            publication,
             crate::model::IntentInput {
                 kdl: resolved_kdl,
                 source_name: request.intent.source_name,
             },
         )
         .map_err(ApiError::bad)?;
-    publication_refusals(&state, &publication)
+    publication_refusals(&state, publication)
         .await?
         .block(&mut planned);
     if !planned.blockers.is_empty() {
@@ -460,7 +465,7 @@ pub async fn publish_work_mission(
     state
         .store
         .apply(
-            &publication,
+            publication,
             &planned.subject_tokens,
             &format!("{}:publish", request.idempotency_key),
         )
@@ -551,12 +556,36 @@ pub async fn acknowledge_work(
     Ok(Json(result))
 }
 
+/// `?view=lease` asks a renewal to answer with the step's row view alone. The native driver
+/// renews each held step every minute and reads nothing from the answer, so folding the step's
+/// timing, summaries and wake for it only costs reads.
+#[derive(Debug, Default, Deserialize)]
+pub struct WorkActionQuery {
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
+impl WorkActionQuery {
+    pub(crate) fn lease_view(&self, action: &str) -> Result<bool, St3Error> {
+        match self.view.as_deref() {
+            None => Ok(false),
+            Some("lease") if action == "renew" => Ok(true),
+            Some(view) => Err(St3Error::new(
+                "invalid-work-view",
+                format!("`{view}` is not a view of `{action}`; only a renewal answers with `lease`"),
+            )),
+        }
+    }
+}
+
 pub async fn post_work_action(
     State(state): State<AppState>,
     AxumPath((action, subject)): AxumPath<(String, String)>,
+    Query(query): Query<WorkActionQuery>,
     bound: Option<Extension<BoundAgent>>,
     Json(mut request): Json<WorkRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    let lease_view = query.lease_view(&action).map_err(ApiError::bad)?;
     bind_work_incarnation(
         &state,
         bound.as_ref(),
@@ -581,7 +610,9 @@ pub async fn post_work_action(
             watched = Some(thread.watch(&actor));
         }
     }
-    let response = work_action_response(state.clone(), action, subject, request, None, None).await;
+    let response =
+        work_action_response_viewing(state.clone(), action, subject, request, None, None, lease_view)
+            .await;
     if response.is_err()
         && let Some(watch) = watched
     {

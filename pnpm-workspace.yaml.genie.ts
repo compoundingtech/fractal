@@ -20,8 +20,8 @@ export default pnpmWorkspaceYaml.root({
   overrides: {
     ...pnpmPolicy.overrides,
     ...diagnosticsSourceInputs.overrides,
-    // platform-node 4.0.0 declares shared ^4.0.0; the latest shared requires effect ^4.0.4.
-    '@effect/platform-node>@effect/platform-node-shared': '4.0.0',
+    // Keep platform-node's shared peer in the same Effect cohort as the consumers.
+    '@effect/platform-node>@effect/platform-node-shared': '4.0.3',
   },
   peerDependencyRules: {
     ...pnpmPolicy.peerDependencyRules,

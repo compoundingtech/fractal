@@ -214,7 +214,7 @@ fn seat_driver(root: &Path, socket: &Path, index: usize) -> Child {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     let (runtime_id, _) = seat(index);
-    fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         // Its own process group, so stopping the seat also stops the stand-in provider.
         .process_group(0)
         .current_dir(root.join("workspace"))
@@ -413,6 +413,9 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let ingesting = tokio::spawn(fractal_daemon::recorder_receipts::run(
         store.clone(),
@@ -597,6 +600,9 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     std::fs::create_dir_all(root.join("daemon")).unwrap();
     // The receipt consumer is part of the daemon's idle cost. Its own scans must

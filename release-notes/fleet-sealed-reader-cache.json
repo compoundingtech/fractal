@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Install fleet-generation triggers atomically by version and cover sealed-cache lifecycle invalidation (#2444).",
+  "replay": {
+    "status": "none",
+    "detail": "Retains main's sealed fleet cache and fold semantics; adds migration and lifecycle regression coverage without replacing the cache."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds fleet_generation.trigger_version and atomically installs complete claim, batch, envelope, signature, and anchor triggers only when that version changes, advancing the generation in the same transaction. Current-version opens do no fleet trigger DDL. Adds the covering claims_batch_kind index for bounded trigger predicates. No core schema-version change, claim rewrite, or persistent view cache; older builds retain the additive index and triggers."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or digest rule changes and no coordinated fleet upgrade required."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Fleet status and membership JSON retain their existing fields and sealed-reader semantics; no client or peer API changes."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "First open builds claims_batch_kind before serving requests. On a synthetic production-core schema with 2,000,000 claims in 20,000 batches, 256-byte JSON bodies and WAL/FULL defaults, CREATE INDEX plus commit/checkpoint took 3.150 seconds and left 229,084,392 physical WAL bytes before close. This exceeds the 100 ms writer target and measures only index creation, not full startup or a live-store forecast. Current-version trigger installation does no DDL; subsequent opens reuse the index."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or store repair steps required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The cache is process-local and discarded on restart; normal binary rollback remains unchanged."
+  }
+}

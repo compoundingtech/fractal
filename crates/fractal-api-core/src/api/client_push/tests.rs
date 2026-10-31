@@ -21,7 +21,10 @@ fn state(root: &std::path::Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
         owning_person: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 

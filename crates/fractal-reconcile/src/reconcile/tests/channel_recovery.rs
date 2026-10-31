@@ -85,19 +85,23 @@ fn attachment(store: &Store, incarnation: &str, attached: bool) -> u128 {
         .accepted_at_unix_ms
 }
 
+/// Whether recovery acted: it parked the seat, or it recorded a restart request, which it leaves
+/// to the ordinary restart path in the same evaluation. These tests call that path themselves.
 fn recover(
     reconciler: &Reconciler<FakeRuntime>,
     desired: &DesiredSubject,
     incarnation: &str,
     at: u128,
 ) -> Result<bool> {
-    reconciler.reconcile_claude_channel_recovery(
+    let requested = attempts(&reconciler.store).len();
+    let parked = reconciler.reconcile_claude_channel_recovery(
         desired,
         desired.member.as_ref().unwrap(),
         Some(&claude_seat_pty("orchid", "running", incarnation)),
         None,
         at,
-    )
+    )?;
+    Ok(parked || attempts(&reconciler.store).len() > requested)
 }
 
 fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
@@ -109,6 +113,153 @@ fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
             claim.body["fields"]["operation"] == super::super::channel_recovery::POLICY_OPERATION
         })
         .collect()
+}
+
+const POLICY_BANNER: &str = "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)\nInbound messages will be silently dropped\nHave an administrator set channelsEnabled: true in managed settings to enable";
+
+fn policy_launch(store: &Store, incarnation: &str) {
+    let token = store.selected_desired_token(SEAT).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), json!("start")),
+            ("desired_token".into(), json!(token)),
+            ("incarnation_id".into(), json!(incarnation)),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+#[test]
+fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_restart() {
+    let (store, runtime, reconciler, mut desired) = setup();
+    desired.member.as_mut().unwrap().restart = RestartType::Always;
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = format!("Claude Code v2.1.306\n{POLICY_BANNER}\n❯ ");
+    let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
+    assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
+    reconciler.record_member_reconcile_result(SEAT, Err(error)).unwrap();
+    assert!(store.member_reconcile_fault(SEAT, None).unwrap().unwrap().contains("channelsEnabled"));
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    assert!(attempts(&store).is_empty());
+    let fault = store.latest_observation(SEAT, "runtime.action.failed").unwrap().unwrap();
+    assert_eq!(fault.body["fields"]["action"], "claude-channel-policy-blocked");
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    // No screen or running process is needed to retain the permanent failure.
+    runtime.screen.lock().unwrap().clear();
+    assert!(restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_000,
+    ).unwrap_err().to_string().contains("channelsEnabled"));
+    assert!(attempts(&store).is_empty());
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.requested".into(),
+        actor: Some(SEAT.into()),
+        fields: BTreeMap::from([("action".into(), json!("restart"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert!(!restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_001,
+    ).unwrap());
+}
+
+#[test]
+fn channel_policy_banner_does_not_stop_an_attached_or_stale_incarnation() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    assert!(!recover(&reconciler, &desired, "predecessor", since).unwrap());
+    attachment(&store, "orchid-one", true);
+    assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
+    for screen in [
+        format!("❯ Please explain this error:\n> {}", POLICY_BANNER.replace('\n', "\n> ")),
+        format!("❯ Please explain this error:\n```\n{POLICY_BANNER}\n```"),
+        format!("❯ {POLICY_BANNER}"),
+        format!("❯ Please explain this error:\n{POLICY_BANNER}"),
+        format!("● This is the error you quoted:\n{POLICY_BANNER}"),
+        format!("```\n{POLICY_BANNER}\n```"),
+    ] {
+        let (store, runtime, reconciler, desired) = setup();
+        let since = attachment(&store, "orchid-one", false);
+        policy_launch(&store, "orchid-one");
+        *runtime.screen.lock().unwrap() = screen;
+        assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    }
+}
+
+// The quotation in #3999 is one line and includes a period after "dropped".
+const REPORTED_POLICY_BANNER: &str = /* sqlite-large-value: allow-for-now lv-h72967be8c2d9 owner=fractal_reconcile::reconcile::tests::channel_recovery TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-drivers/tests/fixtures/blocking-screens/claude-channel-policy-reported.txt");
+
+#[test]
+fn verbatim_and_wrapped_policy_banners_stop_only_in_provider_startup_chrome() {
+    for source in [POLICY_BANNER, REPORTED_POLICY_BANNER] {
+        for width in [usize::MAX, 80, 60, 40, 20] {
+            // Both fixture sources are ASCII. A PTY soft-wrap may split a word at
+            // the right edge, whereas Claude can also wrap at a space.
+            let wrapped = source.lines()
+                .flat_map(|line| line.as_bytes().chunks(width))
+                .map(|line| std::str::from_utf8(line).unwrap())
+                .collect::<Vec<_>>().join("\n");
+            for (screen, refusal) in [
+                (format!("Claude Code v2.1.306\n{wrapped}\n❯ "), true),
+                (format!("❯ Explain this error:\n{wrapped}"), false),
+                (format!("● You quoted:\n{wrapped}"), false),
+                (format!("> {}", wrapped.replace('\n', "\n> ")), false),
+                (format!("```\n{wrapped}\n```"), false),
+            ] {
+                let (store, runtime, reconciler, desired) = setup();
+                let since = attachment(&store, "orchid-one", false);
+                policy_launch(&store, "orchid-one");
+                *runtime.screen.lock().unwrap() = screen;
+                assert_eq!(
+                    recover(&reconciler, &desired, "orchid-one", since).is_err(),
+                    refusal, "width={width}, source={source:?}",
+                );
+                assert_eq!(runtime.stops.lock().unwrap().len(), usize::from(refusal));
+                assert!(attempts(&store).is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn predecessor_policy_banner_does_not_fence_the_replacement_declaration() {
+    let (store, runtime, reconciler, desired) = setup();
+    reconciler.reconcile_once().unwrap();
+    let initial_starts = runtime.starts.lock().unwrap().len();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    apply_source(
+        &store,
+        "version 2\nagent \"orchid\" { workspace \"/var/tmp\"; restart \"always\"; harness \"claude\" {} }",
+        "policy-replacement",
+    );
+    let replacement = store.desired_subjects().unwrap().remove(0);
+    assert_ne!(desired.member.as_ref().unwrap().workspace, replacement.member.as_ref().unwrap().workspace);
+    assert!(!recover(&reconciler, &replacement, "orchid-one", since).unwrap());
+    assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    // The normal launch-change path remains authoritative; no policy stop or fence is minted.
+    assert!(reconciler.declared_launch_changes(
+        &replacement, &claude_seat_pty("orchid", "running", "orchid-one"),
+    ).unwrap().is_some());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "exited", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.starts.lock().unwrap().len(), initial_starts + 1);
 }
 
 #[test]
@@ -154,6 +305,84 @@ fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation(
         Arc::new(Notify::new()),
     );
     assert!(!recover(&restarted, &desired, "orchid-one", since + 30_000).unwrap());
+}
+
+/// A restart that recovery requests is carried out in the pass that requests it, as a changed
+/// declaration is. Left to the next pass, it waited for the rest of the pass that wrote it, which
+/// took minutes on a loaded daemon.
+#[test]
+fn a_recovery_restart_is_carried_out_in_the_pass_that_requests_it() {
+    let (store, runtime, reconciler, _) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    smallclaims::store::set_thread_clock(Some(since + 10_000));
+    let pass = reconciler.reconcile_once();
+    smallclaims::store::set_thread_clock(None);
+    pass.unwrap();
+    assert_eq!(attempts(&store).len(), 1);
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// A park still ends its evaluation. The ordinary restart path does not run after it, so the last
+/// attempt is not completed as if its replacement had been observed, and nothing is stopped
+/// until the parked seat's next evaluation.
+#[test]
+fn a_recovery_park_still_ends_its_evaluation() {
+    let (store, runtime, reconciler, desired) = setup();
+    for (index, backoff) in [10_000, 20_000, 40_000].into_iter().enumerate() {
+        let incarnation = format!("orchid-{index}");
+        let since = attachment(&store, &incarnation, false);
+        assert!(recover(&reconciler, &desired, &incarnation, since + backoff).unwrap());
+    }
+    let last = attempts(&store).pop().unwrap();
+    attachment(&store, "orchid-parked", false);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-parked")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().len(), 1);
+    let completion = format!("agent-restart-completed:{}", last.id);
+    assert!(store.operation_claim(&completion).unwrap().is_none());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+}
+
+/// After a deploy each driver has to reach the new daemon again before its channel reads as
+/// attached, and a loaded daemon can take minutes to answer. A seat that was attached before
+/// this daemon started is charged no attempt inside the startup grace; after it, an unattached
+/// seat recovers as before.
+#[test]
+fn a_seat_attached_before_the_daemon_started_waits_out_the_startup_grace() {
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-one", true);
+    reconciler.started_at_unix_ms = attached_at + 1;
+    let since = attachment(&store, "orchid-one", false);
+    let grace_ends = attached_at + 1 + 10 * 60 * 1_000;
+    let (result, deadline) = smallclaims::touched::record_due(|| {
+        recover(&reconciler, &desired, "orchid-one", since + 10_000)
+    });
+    assert!(!result.unwrap());
+    assert_eq!(deadline, Some(grace_ends));
+    assert!(!recover(&reconciler, &desired, "orchid-one", grace_ends - 1).unwrap());
+    assert!(attempts(&store).is_empty());
+    assert!(recover(&reconciler, &desired, "orchid-one", grace_ends).unwrap());
+    assert_eq!(attempts(&store).len(), 1);
+}
+
+#[test]
+fn the_startup_grace_is_only_for_a_channel_attached_under_an_earlier_daemon() {
+    // Attached only after this daemon started: the usual ten seconds.
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-one", true);
+    reconciler.started_at_unix_ms = attached_at - 1;
+    let since = attachment(&store, "orchid-one", false);
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+
+    // A predecessor's attachment proves nothing about this incarnation's channel.
+    let (store, _, mut reconciler, desired) = setup();
+    let attached_at = attachment(&store, "orchid-zero", true);
+    let since = attachment(&store, "orchid-one", false);
+    reconciler.started_at_unix_ms = attached_at + 1;
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
 }
 
 #[test]
@@ -337,7 +566,7 @@ fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
     let since = attachment(&store, "orchid-one", false);
     recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap();
     let request = attempts(&store).pop().unwrap();
-    attachment(&store, "orchid-two", true);
+    let attached_at = attachment(&store, "orchid-two", true);
     store
         .append_claim(&ClaimInput {
             subject: SEAT.into(),
@@ -350,14 +579,17 @@ fn a_brief_automatic_recovery_does_not_reset_the_durable_attempt_budget() {
         })
         .unwrap();
     let since = attachment(&store, "orchid-two", false);
-    let fresh = Reconciler::new(
+    let mut fresh = Reconciler::new(
         store.clone(),
         runtime,
         "node".into(),
         Arc::new(Notify::new()),
     );
-    assert!(!recover(&fresh, &desired, "orchid-two", since + 10_000).unwrap());
-    assert!(recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
+    // The daemon restarted after the replacement attached, so it first waits out its startup
+    // grace; the attempt it then charges is still the second.
+    fresh.started_at_unix_ms = attached_at + 1;
+    assert!(!recover(&fresh, &desired, "orchid-two", since + 20_000).unwrap());
+    assert!(recover(&fresh, &desired, "orchid-two", attached_at + 1 + 10 * 60 * 1_000).unwrap());
     assert!(
         attempts(&store).last().unwrap().body["fields"]["reason"]
             .as_str()

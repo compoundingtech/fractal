@@ -221,9 +221,9 @@ pub fn install_from_config_path(mut config: Config, config_path: Option<&Path>) 
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
         fractal_runtime::isolation_mode() != fractal_runtime::Isolation::DegradedDetached,
-        "st service install needs a working systemd user manager and transient user scopes"
+        "Fractal service install needs a working systemd user manager and transient user scopes"
     );
-    let exe = env::current_exe().context("resolve the current st executable")?;
+    let exe = env::current_exe().context("resolve the current Fractal executable")?;
     #[cfg(target_os = "macos")]
     let exe = exe
         .canonicalize()
@@ -312,14 +312,14 @@ pub fn permissions_guidance() -> Result<String> {
     #[cfg(target_os = "macos")]
     {
         let executable = env::current_exe()
-            .context("resolve the current st executable")?
+            .context("resolve the current Fractal executable")?
             .canonicalize()
             .context("resolve the installed macOS app executable")?;
         Ok(macos_permission_guidance(&executable))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok("st does not need a macOS privacy approval on this host.\n".into())
+        Ok("Fractal does not need a macOS privacy approval on this host.\n".into())
     }
 }
 
@@ -341,13 +341,13 @@ pub fn open_permissions_settings() -> Result<()> {
 #[cfg(any(target_os = "macos", test))]
 fn macos_permission_guidance(executable: &Path) -> String {
     format!(
-        "st executable\t{}\n\
+        "Fractal executable\t{}\n\
 1. Open System Settings > Privacy & Security > Full Disk Access.\n\
-2. Add the st executable and enable it.\n\
+2. Add the Fractal executable and enable it.\n\
 3. Open System Settings > Privacy & Security > Developer Tools.\n\
-4. Add the st executable and enable it.\n\
-5. Run `st service restart` after an approval changes.\n\
-macOS assigns service-owned file and developer access to st, not to the terminal that installed it.\n\
+4. Add the Fractal executable and enable it.\n\
+5. Run `fractal service restart` after an approval changes.\n\
+macOS assigns service-owned file and developer access to Fractal, not to the terminal that installed it.\n\
 A launchd property list cannot grant these approvals.\n",
         executable.display()
     )
@@ -381,13 +381,13 @@ pub fn reset(mut config: Config) -> Result<()> {
     match fs::remove_dir_all(&config.state_dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("erase the st state directory"),
+        Err(error) => return Err(error).context("erase the Fractal state directory"),
     }
     if !config.socket.starts_with(&config.state_dir) {
         match fs::remove_file(&config.socket) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("erase the st socket"),
+            Err(error) => return Err(error).context("erase the Fractal socket"),
         }
     }
     for path in crate::startup::paths(&config.socket) {
@@ -401,7 +401,7 @@ pub fn reset(mut config: Config) -> Result<()> {
         match fs::remove_file(&config.client_gateway_socket) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("erase the st client gateway socket"),
+            Err(error) => return Err(error).context("erase the Fractal client gateway socket"),
         }
     }
     start_native_service()?;
@@ -424,7 +424,7 @@ pub fn uninstall() -> Result<()> {
 fn validate_reset_target(config: &Config) -> Result<()> {
     anyhow::ensure!(
         config.state_dir.is_absolute(),
-        "the st state directory must be absolute"
+        "the Fractal state directory must be absolute"
     );
     anyhow::ensure!(
         config.state_dir != Path::new("/"),
@@ -438,7 +438,7 @@ fn validate_reset_target(config: &Config) -> Result<()> {
     }
     anyhow::ensure!(
         config.state_dir.components().count() >= 3,
-        "the st state directory is too broad to erase"
+        "the Fractal state directory is too broad to erase"
     );
     Ok(())
 }
@@ -596,7 +596,7 @@ fn process_identity(pid: u32) -> Option<ProcessIdentity> {
     })
 }
 
-/// Whether `argv` is a st3 daemon: the program is `st3` or `st` and one of its arguments is `up`.
+/// Whether `argv` is a Fractal daemon (including transitional names) started with `up`.
 fn is_daemon_argv(argv: &[String]) -> bool {
     let Some(program) = argv.first() else {
         return false;
@@ -605,12 +605,12 @@ fn is_daemon_argv(argv: &[String]) -> bool {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    matches!(name, "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
+    matches!(name, "fractal" | "st3" | "st") && argv[1..].iter().any(|argument| argument == "up")
 }
 
 /// Stop the daemon that listens on `socket` when no service manager owns it: ask it to end,
 /// then force it after `grace`. Only the process that answers on this socket (or, on Linux, the one
-/// that holds its startup lock) is signalled, and only when it is a st3 daemon; a signal goes to
+/// that holds its startup lock) is signalled, and only when it is a Fractal daemon; a signal goes to
 /// the process whose start time was read first, never to a later process that reused its pid.
 /// Returns whether such a daemon was found and has ended.
 pub fn stop_daemon_at(socket: &Path, grace: std::time::Duration) -> Result<bool> {
@@ -632,7 +632,7 @@ fn stop_daemon_process(
     };
     anyhow::ensure!(
         !identity.ended && is_daemon_argv(&identity.argv),
-        "the process on the daemon socket (pid {pid}, {}) is not a st3 daemon; not stopping it",
+        "the process on the daemon socket (pid {pid}, {}) is not a Fractal daemon; not stopping it",
         identity.argv.join(" ")
     );
     let still_running =
@@ -646,7 +646,7 @@ fn stop_daemon_process(
             && std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound
         {
             return Err(std::io::Error::last_os_error())
-                .with_context(|| format!("signal the st daemon (pid {pid})"));
+                .with_context(|| format!("signal the Fractal daemon (pid {pid})"));
         }
         let deadline = std::time::Instant::now() + wait;
         while still_running() && std::time::Instant::now() < deadline {
@@ -993,7 +993,7 @@ fn uninstall_systemd_user() -> Result<()> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn unsupported() -> Result<()> {
-    bail!("st service is available only on Linux and macOS")
+    bail!("Fractal service is available only on Linux and macOS")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1099,7 +1099,7 @@ fn wait_for_socket_for(
             deadline = std::time::Instant::now() + unseen;
         } else if std::time::Instant::now() >= deadline {
             anyhow::bail!(
-                "the st service did not accept connections at {}",
+                "the Fractal service did not accept connections at {}",
                 socket.display()
             );
         }
@@ -1133,7 +1133,7 @@ pub fn render_systemd_user_unit(spec: &ServiceSpec) -> String {
     let instance_environment = systemd_instance_environment();
     format!(
         "[Unit]\n\
-Description=st claims graph daemon\n\
+Description=Fractal claims graph daemon\n\
 After=network.target\n\
 \n\
 [Service]\n\
@@ -1168,7 +1168,7 @@ fn systemd_environment_lines(variables: &[(String, String)]) -> String {
 
 pub fn render_systemd_replication_unit(spec: &ServiceSpec) -> String {
     render_systemd_program_unit(
-        "st authenticated replication worker",
+        "Fractal authenticated replication worker",
         &spec.replication_program_arguments(),
         spec,
     )
@@ -1205,6 +1205,50 @@ MemoryMax={}M\n\
 WantedBy=default.target\n",
         spec.memory_max_mb,
     )
+}
+
+/// Observe the worker through its supervisor, never through caller-supplied argv.
+pub(crate) fn replication_worker_pid() -> Result<u32> {
+    let service = lookup::native()?.replication;
+    #[cfg(target_os = "linux")]
+    let output = host_command("systemctl")
+        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
+        .output()?;
+    #[cfg(target_os = "macos")]
+    let output = host_command("launchctl")
+        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
+        .output()?;
+    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+    let text = std::str::from_utf8(&output.stdout)?;
+    #[cfg(target_os = "linux")]
+    let pid = text.trim().parse::<u32>()?;
+    #[cfg(target_os = "macos")]
+    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+        .context("replication worker has no supervised PID")?.parse::<u32>()?;
+    anyhow::ensure!(pid != 0, "replication worker is not running");
+    Ok(pid)
+}
+
+pub(crate) fn daemon_is_service_managed() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // A foreground fixture can inherit its runner's unrelated service cgroup.
+        Ok(daemon_service_cgroup(&fs::read_to_string("/proc/self/cgroup")?))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // launchd directly owns the daemon; a reparented foreground process also fails closed.
+        Ok(unsafe { libc::getppid() } == 1)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_service_cgroup(groups: &str) -> bool {
+    let old = service_name();
+    let new = old.replacen("st3", "fractal", 1);
+    groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
+        .filter_map(|path| path.trim_end_matches('/').rsplit('/').next())
+        .any(|unit| unit == old || unit == new || unit == "smalltalk.service")
 }
 
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
@@ -1337,8 +1381,8 @@ mod tests {
             std::time::Duration::from_secs(1),
             std::time::Duration::from_secs(1),
         )
-        .expect_err("a sleep is not an st3 daemon");
-        assert!(error.to_string().contains("not a st3 daemon"), "{error}");
+        .expect_err("a sleep is not a Fractal daemon");
+        assert!(error.to_string().contains("not a Fractal daemon"), "{error}");
         std::thread::sleep(std::time::Duration::from_millis(200));
         assert!(other.try_wait()?.is_none(), "the process was signalled");
         other.kill()?;
@@ -1347,8 +1391,10 @@ mod tests {
     }
 
     #[test]
-    fn a_daemon_is_st3_or_st_started_with_up() {
+    fn a_daemon_is_fractal_or_a_transitional_name_started_with_up() {
         let argv = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert!(is_daemon_argv(&argv("/opt/example/bin/fractal up --config c")));
+        assert!(!is_daemon_argv(&argv("fractal agents ls")));
         assert!(is_daemon_argv(&argv("/opt/example/bin/st3 up --config c")));
         assert!(is_daemon_argv(&argv("st up")));
         assert!(!is_daemon_argv(&argv("st3 agents ls")));
@@ -1430,39 +1476,40 @@ mod tests {
 
     #[test]
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
-        let config = Config {
-            node: "node-a".into(),
-            access_mode: None,
-            claude_primary_ownership: None,
-            claude_primary_ownership_observe: None,
-            seat_priority: None,
-            person: None,
-            fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
-            shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
-            state_dir: "/var/lib/st3".into(),
-            pty_root: Some("/var/lib/pty".into()),
-            socket: "/run/user/1000/st3.sock".into(),
-            client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
-            peer_listen: Some("0.0.0.0:31313".into()),
-            work_root: None,
-            peer_listen_allow_plain_http: true,
-            peers: vec![PeerConfig {
-                name: "node-b".into(),
-                url: "http://127.0.0.1:31314".into(),
-            }],
-            planner: crate::model::PlannerSpec::default(),
-            observations: crate::config::ObservationsConfig::default(),
-            github: crate::config::GithubConfig::default(),
-            changes: crate::changes::config::Config::default(),
-            checkpoint: crate::config::CheckpointConfig::default(),
-            trim: crate::config::TrimConfig::default(),
-            limits: crate::config::LimitsConfig::default(),
-            reconcile: crate::config::ReconcileConfig::default(),
-            codex_work_without_asking: None,
-            fleet: None,
-        };
+        let config = Config { node: "node-a".into(),
+        access_mode: None,
+        claude_primary_ownership: None,
+        claude_primary_ownership_observe: None,
+        seat_priority: None,
+        unlaned_seat: None,
+        lanes: None,
+        person: None,
+        fleet_id: Some("1f91ca65-7793-48cc-866e-ac15690130e1".into()),
+        shared_secret_file: Some("/var/lib/st3/fleet.secret".into()),
+        state_dir: "/var/lib/st3".into(),
+        store_dir: None,
+        pty_root: Some("/var/lib/pty".into()),
+        socket: "/run/user/1000/st3.sock".into(),
+        client_gateway_socket: "/run/user/1000/st3-client.sock".into(),
+        peer_listen: Some("0.0.0.0:31313".into()),
+        work_root: None,
+        peer_listen_allow_plain_http: true,
+        peers: vec![PeerConfig {
+            name: "node-b".into(),
+            url: "http://127.0.0.1:31314".into(),
+        }], planner: crate::model::PlannerSpec::default(), private_notes_catalogs: Vec::new(), observations: crate::config::ObservationsConfig::default(),
+        github: crate::config::GithubConfig::default(),
+        changes: crate::changes::config::Config::default(),
+        checkpoint: crate::config::CheckpointConfig::default(),
+        trim: crate::config::TrimConfig::default(),
+        limits: crate::config::LimitsConfig::default(),
+        reconcile: crate::config::ReconcileConfig::default(),
+        asks: crate::config::AsksConfig::default(),
+        codex_work_without_asking: None,
+        fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);
+        assert!(unit.contains("Description=Fractal claims graph daemon\n"));
         assert!(unit.contains("ExecStart=/usr/bin/st3 up --node node-a"));
         assert!(unit.contains("--state-dir /var/lib/st3"));
         assert!(unit.contains("--pty-root /var/lib/pty"));
@@ -1476,6 +1523,7 @@ mod tests {
         assert!(unit.contains("CPUWeight=1000\nIOWeight=1000\n"));
         assert!(unit.contains("KillMode=control-group"));
         let replication = render_systemd_replication_unit(&spec);
+        assert!(replication.contains("Description=Fractal authenticated replication worker\n"));
         assert!(replication.contains("replication-worker"));
         assert!(replication.contains("--peer-listen 0.0.0.0:31313 --peer-listen-allow-plain-http"));
         assert!(replication.contains("Nice=0"));
@@ -1529,7 +1577,7 @@ mod tests {
     #[test]
     fn macos_permission_guidance_names_the_exact_binary_and_manual_steps() {
         let guidance = macos_permission_guidance(Path::new("/Users/example/bin/st3"));
-        assert!(guidance.contains("st executable\t/Users/example/bin/st3"));
+        assert!(guidance.contains("Fractal executable\t/Users/example/bin/st3"));
         assert!(guidance.contains("Full Disk Access"));
         assert!(guidance.contains("Developer Tools"));
         assert!(guidance.contains("cannot grant"));
@@ -1671,4 +1719,14 @@ mod tests {
         assert_eq!(service_label(), "com.compoundingtech.st3");
         assert_eq!(replication_service_label(), "com.compoundingtech.st3.replication");
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn foreground_worker_enrollment_distinguishes_daemon_and_runner_services() {
+    assert!(daemon_service_cgroup("0::/user.slice/st3.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/fractal.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/smalltalk.service"));
+    assert!(!daemon_service_cgroup("0::/system.slice/actions.runner.service"));
+    assert!(!daemon_service_cgroup("0::/user.slice/fractal-test.scope"));
 }

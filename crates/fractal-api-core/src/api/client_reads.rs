@@ -743,7 +743,7 @@ pub async fn client_sessions_detail(
         })?;
         let id = session_id.as_str();
         let managed = crate::relay_trace::result(crate::relay_trace::Phase::Owner, || {
-            managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+            client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
         })
         .map_err(ApiError::internal)?;
         if let Some((_, _, origin)) = managed {
@@ -791,12 +791,35 @@ pub async fn client_sessions_detail(
     // Child transcripts are deliberately absent from the top-level session inventory.
     // Resolve their resource by the same parent/task identity used by timeline reads.
     let session_id = client_detail_id("session", &id);
-    if let Some(child) = crate::subagent_sessions::resolve_child(
-        state.native_session_home.as_deref(),
-        &session_id,
-    )
-    .map_err(ApiError::internal)?
-    {
+    if crate::subagent_sessions::child_parts(&session_id).is_some() {
+        let owner = client_v0::routing_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).map_err(ApiError::internal)?;
+        if let Some((_, _, Some(origin))) = owner
+            && origin != state.store.origin()
+        {
+            let remote_host = client_host_id(&origin);
+            let relay = state.client_relay.as_ref()
+                .ok_or_else(|| remote_unavailable_for_owner(&state, &remote_host))?;
+            if !client_v0::acting_party(&session) {
+                return Err(ApiError::bad(St3Error::new(
+                    "forbidden",
+                    "remote session detail requires a concrete person or agent",
+                )));
+            }
+            let value = relay.read(
+                &remote_host,
+                &crate::peer::ClientReadRequest {
+                    authority_actor: session.authority_actor.clone(),
+                    relay: None,
+                    request: crate::peer::ClientReadOperation::SessionDetail { session_id },
+                },
+            ).await.map_err(|error| {
+                client_v0::conversation_blocks::availability(remote_read_error(&remote_host, error))
+            })?;
+            return Ok(Json(value));
+        }
+        let child = client_v0::conversation_blocks::source(&state, &session_id, None)?;
         return Ok(Json(external_session_resource(child)));
     }
     client_detail(

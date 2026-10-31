@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn demo_environment_excludes_both_tui_configuration_spellings() {
+    for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
+        for prefix in ["ST3", "FRACTAL"] {
+            let name = format!("{prefix}_{suffix}");
+            assert!(DEMO_ENVIRONMENT_NAMES.contains(&name.as_str()), "{name} must not leak into the demo");
+        }
+    }
+}
+
+#[test]
+fn github_watch_line_shows_throttling_without_a_new_wire_state() {
+    let view = serde_json::json!({
+        "thread": "acme/garden#12", "state": "active",
+        "reason": "throttled: local observer budget reached, next slot at 1000 (Unix ms)"
+    });
+    let line = gh_watch_line(&view, false);
+    assert!(line.contains("active (throttled: local observer budget reached"));
+    assert!(line.contains("next slot at 1000"));
+    assert!(!line.contains("degraded"));
+}
+
+#[test]
 fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
     let value = "fabric://devbox/st3-client-v0";
     let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
@@ -38,12 +60,13 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 #[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
-        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
         "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
     ]).unwrap();
-    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes, ignored_actor } } = cli.command else {
         panic!("expected filtered repair dry-run");
     };
+    assert_eq!(ignored_actor.as_deref(), Some("agent/own"));
     assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
     assert_eq!(classes, ["revoked-legacy-runtime-start"]);
     let path = repair_plan_path(&subjects, &classes).unwrap();
@@ -52,6 +75,77 @@ fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     assert!(path.contains(&format!("classes={}",
         urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
     assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
+fn repair_actor_path_binds_the_literal_seat_before_requests() {
+    for arguments in [
+        vec!["st", "repair", "apply", "--as", "agent/own", "orpv0:token"],
+        vec!["st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/target",
+            "--class", "revoked-legacy-runtime-start"],
+        vec!["st", "conversations", "status", "--as", "agent/own", "--idempotency-key", "key"],
+    ] {
+        let own = Cli::try_parse_from(&arguments).unwrap();
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/peer"), None).is_err());
+        for actor in ["agent/peer", "person/other", "own", "requester"] {
+            let mut mismatched = arguments.clone();
+            let index = mismatched.iter().position(|arg| *arg == "--as").unwrap() + 1;
+            mismatched[index] = actor;
+            let cli = Cli::try_parse_from(mismatched).unwrap();
+            assert!(guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_err());
+        }
+    }
+    let absent = Cli::try_parse_from(["st", "repair", "apply", "orpv0:token"]).unwrap();
+    assert!(guard_mutating_cli_actor(&absent.command, Some("agent/own"), None).is_err());
+    assert!(guard_mutating_cli_actor(&absent.command, None, None).is_ok());
+    let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+    assert!(guard_mutating_cli_actor(&read.command, Some("agent/own"), None).is_ok());
+}
+
+#[test]
+fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
+    let store = Store::open_memory("repair-actor-test").unwrap();
+    let subjects = vec!["agent/target".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let mut plan = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], &subjects, &classes,
+    ).unwrap();
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_ok());
+    let mut item: fractal_daemon::model::OperationalRepairItem = serde_json::from_value(
+        serde_json::json!({
+            "id": "repair/test", "class": classes[0], "subject": "agent/unrelated",
+            "affected_subjects": [], "reason": "test"
+        })
+    ).unwrap();
+    plan.items.push(item.clone());
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+    item.subject = subjects[0].clone();
+    item.class = "unrelated-class".into();
+    plan.items = vec![item];
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+}
+
+#[test]
+fn repair_apply_guidance_preserves_actorless_humans_and_effective_agent_aliases() {
+    let human = fractal_drivers::contracts::env_with("ST_AGENT", &|_| None);
+    assert_eq!(repair_apply_guidance("orpv0:token", human.as_deref()),
+        "fractal repair apply orpv0:token");
+    for variable in ["ST_AGENT", "FRACTAL_AGENT"] {
+        let own = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
+            (name == variable).then(|| "agent/own".to_owned())
+        });
+        let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+        guard_mutating_cli_actor(&read.command, own.as_deref(), None).unwrap();
+        assert_eq!(repair_apply_guidance("orpv0:token", own.as_deref()),
+            "fractal repair apply --as agent/own orpv0:token", "{variable}");
+    }
+}
+
+#[test]
+fn repair_apply_actor_requests_use_only_the_new_attributed_route() {
+    assert_eq!(repair_apply_path(None), "/v1/repair/apply");
+    assert_eq!(repair_apply_path(Some("agent/own")), "/v1/repair/apply-attributed");
 }
 
 #[test]
@@ -140,7 +234,7 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
         json!({"id": "ada/claude/weekly", "kind": "budget", "status": "stale", "target": "100% allowance",
             "current": "40% used", "window": "weekly", "remaining_percent": 60.0,
             "resets_at_unix_ms": 86_400_000u64, "explain": "An allowance that resets."}),
-        json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 2 cores",
+        json!({"id": "cpu", "kind": "objective", "status": "no-data", "target": "≤ 1 core over the hour",
             "current": "not measured", "window": "1h", "remaining_percent": null, "explain": "x"}),
     ];
     let list = render_slo_list(&rows);
@@ -393,7 +487,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         node: "todo-liveness".into(), state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
+        native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
     };
     let path = root.path().join("api.sock");
     let socket = path.clone();
@@ -504,6 +598,17 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
+    assert_eq!(ClientMessage::Human.product_name(), "Fractal");
+    assert_eq!(ClientMessage::Stable.product_name(), "st");
+    for legacy in ["st", "st3"] {
+        assert_eq!(ClientMessage::Human.diagnostic_prefix(legacy), "fractal");
+        assert_eq!(ClientMessage::Stable.diagnostic_prefix(legacy), legacy);
+        assert_eq!(ClientMessage::for_output(true).diagnostic_prefix(legacy), legacy);
+    }
+}
+
+#[test]
 fn gate_subprocess_stderr_keeps_stable_client_errors() {
     const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -518,7 +623,7 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         let error = anyhow::Error::from(fractal_client::ClientError::Api(
             api.code.clone(), api.message.clone(), Box::new(api),
         ));
-        eprintln!("{}", cli_error_message(&error, false));
+        stderr_message("st", format_args!("{}", cli_error_message(&error, false)));
         let mut stalled = None;
         // Exercise the actual Resync notice sink, including duplicate suppression.
         for _ in 0..2 {
@@ -542,11 +647,41 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(stderr.trim(), if gate {
-            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+            "st: st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
         } else {
-            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+            "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
         });
     }
+}
+
+#[tokio::test]
+async fn an_unprepared_agents_roster_prints_its_own_code_and_says_to_retry() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("roster.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/roster-test",
+            "code": "agent-roster-not-ready",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let error = generated_client(&Endpoint::Unix(socket), None).unwrap()
+        .agents_list(None, Some(50), false).await.unwrap_err();
+    assert!(error.is_transient(), "{error:?}");
+    let error = anyhow::Error::new(error);
+    assert_eq!(cli_error_message(&error, false),
+        "Fractal is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    assert_eq!(plain_error(&error),
+        "st is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -812,7 +947,7 @@ fn missions_tree_fixture_renders_all_sections() {
 }
 
 #[test]
-fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
+fn a_conversation_reads_as_tui_shows_it_and_raw_keeps_every_entry() {
     let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h55886ab30a77 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude.json"
     ))
@@ -924,12 +1059,20 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
         {"account": "claude/bbbb", "weekly_percent": 50.0, "five_hour_percent": null, "exempt": false,
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
-    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": []}});
+    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
     let output_exempt = render_usage_report(&exempt, 24, None);
     assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
     assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
     assert!(
         output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  seats this node never stops at the weekly limit ([limits] keep) · agent/example/coordinator, agent/example/lead\n"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  1 of those seats are no longer declared and keep nothing; remove them from keep when convenient · agent/example/lead\n"),
         "{output_exempt}"
     );
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
@@ -1314,7 +1457,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
             "<smalltalk-message id=\"0123456789abcdef\" from=\"agent/run-1/wake.claude\" \
                  to=\"agent/run-1/wake.omp-2\" subject=\"Cross-harness consensus: idle\" \
                  sha256=\"{}\" graph=\"message/0123456789abcdef\">\nFACT QUARTZ\n</smalltalk-message>",
-            fractal_drivers::ding::st3_body_sha256("FACT QUARTZ")
+            fractal_drivers::ding::fractal_body_sha256("FACT QUARTZ")
         )
     );
     assert_eq!(omp["meta"]["messageId"], "message/0123456789abcdef");
@@ -1600,6 +1743,85 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
 }
 
 #[tokio::test]
+async fn pi_family_publication_verifies_the_exact_external_frame_path() {
+    use axum::{Json, Router, routing::post};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let client = Client::new(Endpoint::Unix(socket.clone()));
+    let store = std::sync::Arc::new(
+        Store::open(&root.path().join("graph.db"), "test").unwrap(),
+    );
+    store.append_claim(&ClaimInput {
+        subject: "agent/external".into(),
+        kind: "runtime.observed".into(),
+        actor: Some("agent/external".into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("external-incarnation")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let graph = store.clone();
+    let app = Router::new().route("/v1/agents/native-session", post(move |Json(report): Json<Value>| {
+        let store = graph.clone();
+        async move {
+            assert_eq!(report["subject"], "agent/external");
+            assert_eq!(report["actor"], "agent/external");
+            assert_eq!(report["incarnation_id"], "external-incarnation");
+            assert_eq!(report["session_id"], "external-native");
+            let record = store.append_claim(&ClaimInput {
+                subject: "agent/external".into(),
+                kind: "harness.session-file".into(),
+                actor: Some("agent/external".into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("agent".into(), report["subject"].clone()),
+                    ("incarnation_id".into(), report["incarnation_id"].clone()),
+                    ("session_id".into(), report["session_id"].clone()),
+                    ("path".into(), report["path"].clone()),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            Json(json!({"api_version":"st3.v1", "value":record}))
+        }
+    }));
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let selected = root.path().join("arbitrary-external-name.jsonl");
+    // A sibling with the same native ID must never rescue the reported file.
+    fs::write(root.path().join("fallback_external-native.jsonl"),
+        "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    let mut pending = PiFamilyReports {
+        native_session: Some(("external-native".into(), Some(selected.to_string_lossy().into_owned()))),
+        ..Default::default()
+    };
+    for content in [None, Some("{}\n"), Some("{\"type\":\"session\",\"id\":\"foreign\"}\n")] {
+        if let Some(content) = content { fs::write(&selected, content).unwrap(); }
+        pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+            .await.unwrap();
+        assert!(pending.native_session.is_some());
+        assert!(store.claims_for("agent/external", Some("harness.session-file")).unwrap().is_empty());
+    }
+    fs::write(&selected, "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+        .await.unwrap();
+    assert!(pending.native_session.is_none());
+    let claim = store.latest_claim("agent/external", Some("harness.session-file")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["path"], json!(fs::canonicalize(selected).unwrap()));
+    server.abort();
+}
+
+#[tokio::test]
 async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed_mail()
 {
     // The two providers share this pump but load their own native receipt ledgers.
@@ -1876,6 +2098,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 refilled_at_ms: 1_234,
             },
             claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
+            claude_attachment_answered: Some(Instant::now()),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -1902,6 +2125,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // Nor the daemon's first answer: the replacement's attach window counts from its own.
+    assert!(back.loop_state.claude_attachment_answered.is_none());
     // An unpushed attachment poll is not carried: the replacement image polls once at once.
     assert!(back.loop_state.claude_attachment_polled.is_none());
 }
@@ -1982,6 +2207,59 @@ fn agent_card_shows_the_member_reconcile_fault() {
     assert!(card.contains(
         "FAULT        render refuses to change tracked file .claude/settings.local.json"
     ));
+}
+
+fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
+    serde_json::from_value(serde_json::json!({
+        "kind": "agent", "id": "agent/garden/worker", "revision": "one",
+        "updated_at": "2026-10-21T04:37:42Z", "name": "garden/worker",
+        "state": "stopped", "reachability": "unreachable", "runtime_ids": [],
+        "end_reason": end_reason
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
+    let parked = stopped_agent(serde_json::json!({
+        "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
+        "reason": "the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)"
+    }));
+    let card = render_client_agent(&parked, &[], 0);
+    assert!(card.contains(
+        "STATE        stopped\nWHY          parked by st after it failed to start at 2026-10-21T04:37:42.469Z: the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)\n"
+    ), "{card}");
+    let by_person = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-person", "actor": "person/ada", "ended_at": "2026-10-22T09:00:00.000Z",
+        "reason": "Done for the week.\n\u{1b}[31mspoof"
+    }));
+    assert!(render_client_agent(&by_person, &[], 0).contains(
+        "WHY          stopped by person/ada at 2026-10-22T09:00:00.000Z: Done for the week. spoof\n"
+    ));
+    let by_run = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-mission", "actor": "mission-run/garden/one", "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    let unknown = stopped_agent(serde_json::Value::Null);
+    let page: ClientPage = serde_json::from_value(serde_json::json!({
+        "kind": "page", "collection": "agents",
+        "items": [by_run, unknown],
+        "page": {"limit": 50, "has_more": false}
+    }))
+    .unwrap();
+    assert_eq!(
+        render_client_agents(&page, false, false, "st agents ls"),
+        "AGENTS  2\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped, with no recorded reason\n"
+    );
+    // A running agent prints no stop line, even with an end reason from an earlier incarnation.
+    let mut running = stopped_agent(serde_json::json!({
+        "kind": "crashed", "exit_code": 1, "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    running.state = "running".into();
+    assert!(!render_client_agent(&running, &[], 0).contains("WHY"));
 }
 
 #[test]
@@ -2295,6 +2573,9 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2388,6 +2669,9 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2464,6 +2748,9 @@ async fn trace_wait_starts_after_existing_events() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
@@ -2538,7 +2825,7 @@ fn conversation_follow_is_explicit_and_bounded() {
 
 #[test]
 fn conversation_follow_emits_new_entries_and_revisions_once() {
-    let entry = |id: &str, sequence: u64, revision: u32| {
+    let entry = |id: &str, sequence: u64, revision: u64| {
         serde_json::from_value::<ClientTimelineEntry>(json!({
             "id": id,
             "sequence": sequence,
@@ -2557,7 +2844,7 @@ fn conversation_follow_emits_new_entries_and_revisions_once() {
     assert!(unseen_timeline_entries(&initial, &mut seen).is_empty());
     let changed = vec![
         entry("timeline-entry/b", 2, 1),
-        entry("timeline-entry/a", 1, 2),
+        entry("timeline-entry/a", 1, u64::from(u32::MAX) + 1),
     ];
     assert_eq!(
         unseen_timeline_entries(&changed, &mut seen),
@@ -2584,8 +2871,10 @@ fn every_cli_command_has_a_valid_help_surface() {
         );
         for line in help.render_long_help().to_string().lines() {
             // These describe real executable filenames, not the product identity.
-            if line.contains("Install st3, the st link")
-                || line.contains("Keep the installed st3, st,")
+            if line.contains("Install Fractal (st3 and the st link) and pty")
+                || line.contains(
+                    "Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty)",
+                )
             {
                 continue;
             }
@@ -2838,6 +3127,10 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const SCHEDULES_SOURCE: &str = include_str!("schedules_cli.rs");
     #[cfg(test)]
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
+    #[cfg(test)]
+    const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
+    #[cfg(test)]
+    const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -2855,6 +3148,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("validate", VALIDATE_SOURCE),
+        ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
     let main_source = /* sqlite-large-value: allow-for-now lv-h47a0a723f1b0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("main.rs");
@@ -3342,14 +3637,14 @@ fn work_detail_labels_a_reason_blocked_only_for_blocked_work() {
     let mut work = work.clone();
     work.blocked_reason = Some("the step's lease expired".into());
     work.state = "claimed".into();
-    let claimed = render_client_work_detail(&work);
+    let claimed = render_client_work_detail(&work, Some(false));
     assert!(!claimed.contains("Blocked:"), "{claimed}");
     assert!(
         claimed.contains("\nReason: the step's lease expired\n"),
         "{claimed}"
     );
     work.state = "blocked".into();
-    let blocked = render_client_work_detail(&work);
+    let blocked = render_client_work_detail(&work, Some(false));
     assert!(
         blocked.contains("\nBlocked: the step's lease expired\n"),
         "{blocked}"
@@ -3363,9 +3658,9 @@ fn work_detail_says_when_its_holder_was_nudged() {
         panic!("expected work fixture");
     };
     let mut work = work.clone();
-    assert!(!render_client_work_detail(&work).contains("Nudged:"));
+    assert!(!render_client_work_detail(&work, Some(false)).contains("Nudged:"));
     work.nudged_at_unix_ms = Some(1_791_581_505_000);
-    let rendered = render_client_work_detail(&work);
+    let rendered = render_client_work_detail(&work, Some(false));
     assert!(
         rendered.contains("\nNudged: 2026-10-09T21:31:45Z ("),
         "{rendered}"
@@ -3571,6 +3866,27 @@ fn provider_capacity_backoff_is_bounded_deterministic_and_increases() {
             <= PROVIDER_CAPACITY_MAX_BACKOFF_MS
                 + PROVIDER_CAPACITY_MAX_BACKOFF_MS.saturating_div(4)
     );
+}
+
+/// The model at capacity is retried whatever the turn shows; a 429 or a failing connection only
+/// once the seat is idle, since an active turn is still its harness's own to retry.
+#[test]
+fn a_provider_retry_is_owed_for_capacity_and_for_an_idle_rate_limit_or_connection() {
+    use fractal_drivers::harness_state::Activity;
+    assert_eq!(
+        provider_retry_cause(Activity::Idle, Some("providerCapacity")),
+        Some("providerCapacity")
+    );
+    for cause in ["rateLimited", "connection"] {
+        assert_eq!(provider_retry_cause(Activity::Idle, Some(cause)), Some(cause));
+        assert_eq!(provider_retry_cause(Activity::Active, Some(cause)), None, "{cause}");
+        assert_eq!(provider_retry_cause(Activity::Ended, Some(cause)), None, "{cause}");
+    }
+    assert_eq!(provider_retry_cause(Activity::Idle, Some("usageLimit")), None);
+    assert_eq!(provider_retry_cause(Activity::Idle, None), None);
+    let (waiting, exhausted) = provider_retry_reasons("rateLimited");
+    assert!(waiting.contains("429") && waiting.contains("resume this session"));
+    assert!(exhausted.contains("retry limit"));
 }
 
 #[test]
@@ -4238,6 +4554,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         wake: MessageWakeArgs::default(),
         print_kdl: false,
         idempotency_key: Some("refuse-a-person".into()),
+        allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
         let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();
@@ -4891,6 +5208,18 @@ fn wait_timeout_accepts_bounded_units_and_zero() {
     assert_eq!(parse_timeout("2m").unwrap(), Duration::from_secs(120));
     assert_eq!(parse_timeout("0").unwrap(), Duration::ZERO);
     assert!(parse_timeout("forever").is_err());
+}
+
+#[test]
+fn progress_eta_flag_is_not_an_execution_action_flag() {
+    assert!(Cli::try_parse_from([
+        "fractal", "work", "progress", "step-run/example", "--eta", "2h"
+    ]).is_ok());
+    for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "work", action, "step-run/example", "--eta", "2h"
+        ]).is_err(), "{action}");
+    }
 }
 
 #[test]
@@ -5588,6 +5917,9 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -5669,7 +6001,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     }).unwrap();
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
-        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
@@ -5677,6 +6009,9 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
@@ -5695,6 +6030,43 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
     assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
     server.abort();
+}
+
+#[test]
+fn generic_declaration_rendering_preserves_nested_agent_resource_references() {
+    use fractal_daemon::graph::{declared_resources, render_desired_node};
+    let source = r#"version 2
+agent "example/worker" {
+  workspace "/tmp"
+  command "sleep 1000"
+  resource "explicit" subject="resource/example/known" reason="Keep the explicit edge"
+  resource "unresolved" subject="resource/example/not-yet-published" reason="Keep unresolved work"
+}
+"#;
+    let original = fractal_daemon::parse_intent(source, "studio").unwrap();
+    let desired = &original.subjects["agent/example/worker"].desired;
+    let expected = declared_resources(desired);
+    assert_eq!(expected.len(), 2);
+    for tree in [
+        desired.clone(),
+        serde_json::json!({
+            "name": "host",
+            "arguments": ["studio"],
+            "properties": {},
+            "children": [desired],
+        }),
+    ] {
+        let rendered = render_desired_node(&tree).unwrap();
+        let parsed = fractal_daemon::parse_intent(
+            &format!("version 2\n{rendered}\n"),
+            "studio",
+        )
+        .unwrap();
+        assert_eq!(
+            declared_resources(&parsed.subjects["agent/example/worker"].desired),
+            expected,
+        );
+    }
 }
 
 #[test]
@@ -5751,7 +6123,7 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None).unwrap();
+    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
@@ -7296,7 +7668,7 @@ async fn a_projected_message_envelope_names_the_graph_recipient_and_exact_body_h
             "<smalltalk-message id=\"fact\" from=\"agent/run-1/wake.left\" \
                  to=\"agent/run-1/wake.right\" subject=\"Fact\" sha256=\"{}\" \
                  graph=\"message/fact\">\nFACT &lt;b&gt;QUARTZ&lt;/b&gt;\n</smalltalk-message>",
-            fractal_drivers::ding::st3_body_sha256("FACT <b>QUARTZ</b>")
+            fractal_drivers::ding::fractal_body_sha256("FACT <b>QUARTZ</b>")
         )
     );
 }
@@ -7524,7 +7896,7 @@ fn mission_follow_stops_for_completed_and_standing_runs() {
 }
 
 #[test]
-fn a_runtime_driver_retries_a_transient_st3_api_outage() {
+fn a_runtime_driver_retries_a_transient_fractal_api_outage() {
     let mut last_warning = None;
     tolerate_driver_api_outage(
         "agent/run/worker",
@@ -7581,6 +7953,9 @@ async fn serve_test_store(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -8328,6 +8703,327 @@ fn native_identity_rename_allows_generated_idempotency_key() {
 }
 
 #[test]
+fn harness_question_cli_reads_require_an_explicit_person() {
+    for command in [
+        vec!["fractal", "harness-questions", "list"],
+        vec!["fractal", "harness-questions", "show", "00000000000000000000000000000001"],
+    ] {
+        assert!(Cli::try_parse_from(command.clone()).is_err());
+        for actor in ["operator", "person/", "person/*", "agent/example"] {
+            let mut arguments = command.clone();
+            arguments.extend(["--as", actor]);
+            assert!(Cli::try_parse_from(arguments).is_err(), "{actor}");
+        }
+        let mut arguments = command;
+        arguments.extend(["--as", "person/operator"]);
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::HarnessQuestions { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn harness_question_cli_list_forwards_limit_and_encoded_cursor() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("questions.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = json!({
+            "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
+            "request_id":"request/alex-list", "code":"forbidden", "message":"fixture refusal",
+            "retryable":false, "details":{}
+        }).to_string();
+        stream.write_all(format!(
+            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(), body
+        ).as_bytes()).await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let cli = Cli::try_parse_from([
+        "fractal", "harness-questions", "list", "--as", "person/alex",
+        "--limit", "1", "--cursor", "opaque+/=",
+    ]).unwrap();
+    let Command::HarnessQuestions { command } = cli.command else { panic!("expected harness questions") };
+    assert!(run_harness_questions(&Endpoint::Unix(socket), command, true).await.is_err());
+    let request = server.await.unwrap();
+    assert!(request.starts_with(
+        "GET /v1/client/harness-questions?cursor=opaque%2B/%3D&limit=1 HTTP/1.1\r\n"
+    ), "{request}");
+}
+
+#[test]
+fn harness_answer_action_identity_is_retryable_and_question_scoped() {
+    let key = "harness-answer-retry-key";
+    let question = "harness-question/00000000000000000000000000000001";
+    assert_eq!(
+        harness_answer_action_id(key, question),
+        harness_answer_action_id(key, question)
+    );
+    assert_ne!(
+        harness_answer_action_id(key, question),
+        harness_answer_action_id(key, "harness-question/00000000000000000000000000000002")
+    );
+    assert_ne!(
+        harness_answer_action_id("ab", "c"),
+        harness_answer_action_id("a", "bc")
+    );
+}
+
+#[test]
+fn harness_answer_cli_requires_positions_file_explicit_person_key_and_fences() {
+    let arguments = [
+        "fractal", "harness-questions", "answer",
+        "harness-question/00000000000000000000000000000001",
+        "--as", "person/operator", "--answers-file", "answers.json",
+        "--idempotency-key", "harness-answer-retry-key",
+        "--revision", "claim/reviewed-observation", "--incarnation", "reviewed-incarnation",
+    ];
+    assert!(matches!(
+        Cli::try_parse_from(arguments).unwrap().command,
+        Command::HarnessQuestions { command: HarnessQuestionsCommand::Answer { .. } }
+    ));
+    for flag in ["--as", "--answers-file", "--idempotency-key", "--revision", "--incarnation"] {
+        let index = arguments.iter().position(|argument| *argument == flag).unwrap();
+        let missing = arguments[..index].iter().chain(&arguments[index + 2..]).copied();
+        assert!(Cli::try_parse_from(missing).is_err(), "{flag}");
+    }
+}
+
+#[test]
+fn harness_answer_clap_orders_explicit_fences_before_retry_key() {
+    let mut command = Cli::command();
+    command.build();
+    let answer = command.find_subcommand("harness-questions").unwrap()
+        .find_subcommand("answer").unwrap();
+    let options: Vec<_> = answer.get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .filter(|name| matches!(*name, "as" | "answers-file" | "revision" | "incarnation" | "idempotency-key"))
+        .collect();
+    assert_eq!(options, ["as", "answers-file", "revision", "incarnation", "idempotency-key"]);
+    for name in ["revision", "incarnation"] {
+        let argument = answer.get_arguments().find(|argument| argument.get_long() == Some(name)).unwrap();
+        assert!(argument.is_required_set());
+        assert!(argument.get_env().is_none());
+    }
+}
+
+#[tokio::test]
+async fn harness_question_cli_show_reads_detail_without_answering() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("question.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") { break; }
+        }
+        stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let command = HarnessQuestionsCommand::Show {
+        question: "00000000000000000000000000000001".into(),
+        person: "person/operator".into(),
+    };
+    assert!(run_harness_questions(&Endpoint::Unix(socket), command, true).await.is_err());
+    let request = server.await.unwrap();
+    assert!(request.starts_with("GET /v1/client/harness-questions/00000000000000000000000000000001 "));
+}
+
+#[tokio::test]
+async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("question.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let canonical = "harness-question/00000000000000000000000000000001";
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = String::from_utf8(request).unwrap();
+            let length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            }).unwrap_or(0);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            requests.push((headers, body));
+            let (status, response) = if index == 0 {
+                let mut capabilities: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc58fa3f9b3bb owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+                    "../../../docs/st3/client-v0/fixtures/capabilities.json"
+                )).unwrap();
+                capabilities["snapshot"]["id"] = json!("snapshot/fixture/42");
+                ("200 OK", capabilities)
+            } else {
+                ("409 Conflict", json!({
+                    "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
+                    "request_id":"request/question-answer", "code":"not-answerable",
+                    "message":"No native adapter is installed", "retryable":false,
+                    "details":{"reason":"adapter_missing"}
+                }))
+            };
+            let response = response.to_string();
+            stream.write_all(format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                response.len(),
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let answers_file = root.path().join("answers.json");
+    fs::write(&answers_file, r#"{"q0":{"positions":[1]}}"#).unwrap();
+    let key = "fixture-harness-answer-key";
+    let error = run_harness_questions(
+        &Endpoint::Unix(socket),
+        HarnessQuestionsCommand::Answer {
+            question: "00000000000000000000000000000001".into(),
+            person: "person/operator".into(),
+            answers_file,
+            revision: "claim/reviewed-observation".into(),
+            incarnation: "reviewed-incarnation".into(),
+            idempotency_key: key.into(),
+        },
+        true,
+    ).await.unwrap_err();
+    assert!(error.to_string().contains("NotAnswerable"), "{error:#}");
+    let requests = server.await.unwrap();
+    assert!(requests[0].0.starts_with("GET /v1/client/capabilities "));
+    assert!(requests[1].0.starts_with("POST /v1/client/actions "));
+    let action: Value = serde_json::from_slice(&requests[1].1).unwrap();
+    assert_eq!(action["id"], harness_answer_action_id(key, canonical));
+    assert_eq!(action["idempotency_key"], key);
+    assert_eq!(action["parameters"], json!({
+        "question":canonical, "answers":{"q0":{"positions":[1]}}
+    }));
+    let expected_fence = serde_json::to_value(ClientFence {
+        snapshot_id: "snapshot/fixture/42".into(),
+        subject_revisions: BTreeMap::from([(canonical.into(), "claim/reviewed-observation".into())]),
+        runtime_incarnation: Some("reviewed-incarnation".into()),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(action["fence"], expected_fence);
+}
+
+#[test]
 fn github_watch_continuation_keeps_the_agent_executable() {
     assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
+}
+
+    #[test]
+    fn work_detail_explains_managed_and_unmanaged_leases() {
+        let page = fixture_product_page(&["work"], false);
+        let ClientResource::Work(work) = &page.items[0] else {
+            panic!("expected work fixture");
+        };
+        let mut work = work.clone();
+        work.claimant = Some("agent/example".into());
+        work.claim_incarnation = Some("incarnation/current".into());
+        work.claim_expires_at_unix_ms = Some(62_001);
+        let managed = render_client_work_detail(&work, Some(true));
+        assert!(managed.contains("\nLease: The Fractal driver renews the lease on claimed Fractal work. A managed agent must not run a renewal loop.\n"));
+        assert!(!managed.contains("fractal work renew"));
+        let unmanaged = render_client_work_detail(&work, Some(false));
+        assert!(unmanaged.contains(&format!("\nLease: The lease expires at 1970-01-01T00:01:02.001Z. Renew it with: fractal work renew {} --as agent/example --incarnation incarnation/current\n", work.header.id)));
+        assert!(!unmanaged.contains("Fractal driver renews"));
+        work.claim_incarnation = None;
+        let unmanaged = render_client_work_detail(&work, Some(false));
+        assert!(unmanaged.contains(" --as agent/example\n"));
+        assert!(!unmanaged.contains("--incarnation"));
+    }
+
+
+#[tokio::test]
+async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
+    let client = Client::new(Endpoint::parse("fabric://unresolved/st3-client-v0").unwrap());
+    let page = fixture_product_page(&["work"], false);
+    let ClientResource::Work(work) = &page.items[0] else {
+        panic!("expected work fixture");
+    };
+    let mut work = work.clone();
+    work.claimant = Some("agent/example".into());
+    work.claim_incarnation = Some("incarnation/current".into());
+    work.claim_expires_at_unix_ms = Some(62_001);
+    let ownership = claim_has_driver(&client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
+    assert_eq!(ownership, None);
+    let rendered = render_client_work_detail(&work, ownership);
+    assert!(rendered.contains(&format!("WORK  {}", work.header.id)));
+    assert!(rendered.contains("Lease renewal ownership is unavailable."));
+    assert!(!rendered.contains("Renew it with:"));
+    assert!(!rendered.contains("The lease expires at"));
+}
+
+#[tokio::test]
+async fn the_signature_job_keeps_a_persisted_fault_whole_and_goes_on_after_a_resume() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-job").unwrap());
+    let fault = "inventory page: fixture defect";
+    store.fail_signature_migration(fault).unwrap();
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Each start used to wrap the stored fault in `bootstrap job stopped: …` again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(store.signature_migration().unwrap().fault.as_deref(), Some(fault));
+    assert!(!job.is_finished(), "a stopped job waits for a resume");
+    assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault));
+    for _ in 0..200 {
+        if store.signature_migration().unwrap().done() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(store.signature_migration().unwrap().done());
+    assert!(!job.is_finished(), "the job stays to drain later verdict backlogs");
+    job.abort();
+}
+
+#[tokio::test]
+async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-drain").unwrap());
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..3_000 {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h9837292e813d owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [format!("claim/{i:05}")]).unwrap();
+        }
+        // The trust roots these verdicts relied on have since changed.
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h03aebe910c9e owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES ('claim_candidate_verdict_roots','earlier-roots')", []).unwrap();
+        tx.commit().unwrap();
+    }
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Nothing is pending yet: the job finishes its startup pass and goes idle.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!store.verdicts_pending().unwrap());
+    store.judge_claims_slice(true).unwrap();
+    assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // An in-memory store shares one cache, so this read can meet the job's writer.
+    while store.verdicts_pending().unwrap_or(true) {
+        assert!(Instant::now() < deadline, "the idle job drains what the pass left");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!job.is_finished());
+    job.abort();
 }

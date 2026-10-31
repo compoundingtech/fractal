@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The default stalled-after of a run that reports to an agent moves from 30 minutes to 3 hours, so a quiet run's stalled report comes later unless its mission or `missions report-to` sets stalled-after. idle_nudge_after defaults to 15m instead of 30m; a config that sets it keeps its value. An older member does not raise quiet faults; only the host that evaluates a run raises them. Not tested against an older build."
+    "detail": "The default stalled-after of a run that reports to an agent moves from 30 minutes to 3 hours, so a quiet run's stalled report comes later unless its mission or `missions report-to` sets stalled-after. The default is part of a mission's normalized form, so a mission that reports to an agent without a stalled-after gets a new revision the next time it is applied. A run records its stall limit when it starts: a reporting run started before the upgrade keeps 30 minutes, so its quiet held steps are faulted after 30 minutes without progress; `st missions report-to RUN --stalled-after 3h` moves one. idle_nudge_after defaults to 15m instead of 30m; a config that sets it keeps its value. An older member does not raise quiet faults; only the host that evaluates a run raises them. Not tested against an older build."
   },
   "downtime": {
     "status": "none",

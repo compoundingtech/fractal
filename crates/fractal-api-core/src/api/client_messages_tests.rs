@@ -194,6 +194,7 @@ async fn messages_paging_legacy_shape_without_negotiation() {
             ]),
         );
     }
+    publish_selectors(&state);
     let expected = client_message_resources(&state.store, Some("person/alex"), true, None).unwrap();
     assert_eq!(expected.len(), 2, "the paired reader must receive both oversized resources");
     assert!(expected.iter().all(|item| item["title"].as_str().unwrap().len() == 600_000));
@@ -250,6 +251,7 @@ async fn messages_paging_legacy_shape_without_negotiation() {
             ("status".into(), json!("sent")),
         ]),
     );
+    publish_selectors(&state);
     let oversized = "/v1/client/messages?history=true&actor=person%2Frobin&limit=1";
     let (status, page) = paging_request(
         app.clone(), oversized, Some("legacy-reader"), None,
@@ -261,6 +263,14 @@ async fn messages_paging_legacy_shape_without_negotiation() {
     ).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert_eq!(error["code"], "response-too-large");
+}
+
+/// Publish pending message selectors, as the maintenance worker does. A commit folds them
+/// within a 10 ms budget, so on a busy host a large message can still be pending after its
+/// append, and a v2 page reads only through the published frontier, without it.
+fn publish_selectors(state: &AppState) {
+    while state.store.maintain_client_message_selectors().unwrap() {}
+    assert!(!state.store.client_message_selectors_pending().unwrap());
 }
 
 fn append_fixture_claim(
@@ -368,6 +378,8 @@ async fn collect_sql_pages(
     query: ClientListQuery,
     request_time: u128,
 ) -> Vec<Value> {
+    // Otherwise a pending message cuts the first page below the snapshot it was asked for.
+    publish_selectors(state);
     let snapshot = new_client_snapshot(state);
     let mut continuation = query.clone();
     let mut items = Vec::new();
@@ -535,6 +547,7 @@ async fn sql_message_pages_bound_complete_wire_bytes_and_traverse_maximum_conten
         for index in 0..201 {
             append_byte_budget_message(&state.store, index, &content, Some("image \"λ\"\\\n.png"));
         }
+        publish_selectors(&state);
         let now = client_now_ms();
         let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
         let snapshot = new_client_snapshot(&state);
@@ -586,6 +599,7 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
     // A supported folded attachment has no inline-body limit. Tune its ASCII
     // name using the real serialized response, not a guessed metadata allowance.
     append_byte_budget_message(&state.store, 0, "body", Some(""));
+    publish_selectors(&state);
     let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
     let snapshot = new_client_snapshot(&state);
     let (Extension(returned), Json(page)) = client_messages_sql_page_with_envelope(
@@ -600,6 +614,7 @@ async fn sql_message_page_counts_attachment_and_envelope_at_exact_boundary() {
         let state = super::tests::state(root.path());
         state.store.set_write_clock_at(accepted_at).unwrap();
         append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(padding + extra)));
+        publish_selectors(&state);
         let result = client_messages_sql_page_with_envelope(
             &state, new_client_snapshot(&state), &query, now, request_id, None,
         ).await;
@@ -619,6 +634,7 @@ async fn sql_message_page_refuses_oversized_single_item_without_skipping_it() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     append_byte_budget_message(&state.store, 0, "body", Some(&"x".repeat(CLIENT_MAX_RESPONSE_BYTES)));
+    publish_selectors(&state);
     let snapshot = new_client_snapshot(&state);
     let error = client_messages_sql_page(
         &state, snapshot,
@@ -628,6 +644,7 @@ async fn sql_message_page_refuses_oversized_single_item_without_skipping_it() {
     assert_eq!(error.code, "response-too-large");
     assert!(error.message.contains("cannot omit"));
     append_byte_budget_message(&state.store, 1, "small newer message", None);
+    publish_selectors(&state);
     let snapshot = new_client_snapshot(&state);
     let query = ClientListQuery { history: true, ..Default::default() };
     let (Extension(snapshot), Json(first)) =
@@ -646,6 +663,7 @@ async fn sql_message_pages_preserve_snapshot_fields_and_delivery_age_after_write
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     generated_fixture(&state.store, 29, 0);
+    publish_selectors(&state);
     let query = ClientListQuery { history: true, limit: Some(3), ..Default::default() };
     let now = client_now_ms();
     let expected = client_message_resources_at(&state.store, None, true, None, now).unwrap();
@@ -693,6 +711,7 @@ async fn sql_message_cursors_reject_changed_filters_and_limits() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::state(root.path());
     generated_fixture(&state.store, 23, 0);
+    publish_selectors(&state);
     let query = ClientListQuery { history: true, limit: Some(1), ..Default::default() };
     let snapshot = new_client_snapshot(&state);
     let (_, Json(first)) = client_messages_sql_page(&state, snapshot.clone(), &query).await.unwrap();
@@ -742,6 +761,7 @@ async fn sql_message_cursor_refreshes_presence_but_keeps_first_delivery_age() {
             ]),
         );
     }
+    publish_selectors(&state);
     let now = client_now_ms();
     let query = ClientListQuery { limit: Some(1), ..Default::default() };
     let (Extension(snapshot), Json(first)) = client_messages_sql_page_at(

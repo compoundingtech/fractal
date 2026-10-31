@@ -16,6 +16,15 @@ pub const HOME_IDLE_TEXT: &str = "No alerts right now.";
 /// missing or old: st is catching up with a peer, or stopped serving the list or its live stream.
 pub const HOME_UNKNOWN_TEXT: &str = "No alerts known — this view is out of date.";
 
+fn human_mission_label(mission: &Mission) -> String {
+    let mut label = mission.label();
+    if let Some(state) = label.strip_suffix(" · st does not say") {
+        let end = state.len();
+        label.replace_range(end.., " · Fractal does not say");
+    }
+    label
+}
+
 /// Whether the alerts shown (or their absence) can be out of date, and why.
 fn alerts_out_of_date(world: &World) -> Option<String> {
     let stale: Vec<&str> = world
@@ -101,7 +110,7 @@ pub fn agent_glyph(state: AgentState, spinner: &'static str) -> (&'static str, C
 /// st reports, marked so.
 pub fn agent_shown_word(agent: &Agent) -> String {
     match &agent.reported {
-        Some(state) => format!("{state} · older st"),
+        Some(state) => format!("{state} · older Fractal"),
         None => agent_word(agent.state).to_owned(),
     }
 }
@@ -312,6 +321,8 @@ pub struct Drafts<'a> {
     pub needs_words: Option<String>,
     /// "Chat about this": who it goes to, the draft, and the thread so far.
     pub chat: Option<Chat<'a>>,
+    /// A prompt's form: its mark, whether it has the keys, and a question's choices.
+    pub form: super::alerts::FormState<'a>,
 }
 
 pub struct Chat<'a> {
@@ -1303,35 +1314,28 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             );
         }
         AttentionKind::Prompt {
-            seat,
-            text: prompt,
-            answers,
-            ..
+            seat, text: prompt, ..
         } => {
             card.line(Line::from(vec![
                 span("waits  ", theme::dim()),
                 span(seat.clone(), theme::strong(theme::PERSON)),
             ]));
             card.blank();
-            card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
-            card.blank();
-            if answers.is_empty() {
-                card.wrap(
-                    &text::inline(
-                        "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
-            } else {
-                card.wrap(
-                    &text::inline(
-                        "The call it would make is the pending one in the seat's conversation: open the conversation to read it in full, then allow or deny it there. This clears when the prompt is gone, however it was answered.",
-                        theme::dim(),
-                    ),
-                    inner,
-                );
+            // A prompt the form asks in its own words is said once, as the form's question.
+            if !super::alerts::form_asks(world, item, prompt) {
+                card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
+                card.blank();
             }
+            // The same form the band in its conversation expands to, with the call in full.
+            super::alerts::prompt_form(
+                &mut card,
+                world,
+                item,
+                drafts.form,
+                inner,
+                None,
+                super::alerts::Place::Inbox,
+            );
         }
         AttentionKind::Login { text: login, seats } => {
             card.lines(text::markdown(&spaced(login), inner, theme::text()));
@@ -1345,7 +1349,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             card.blank();
             card.wrap(
                 &text::inline(
-                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    &format!("One sign-in in the seat's terminal ({}) fixes every seat; this clears when the next authenticated turn succeeds.", terminal_route()),
                     theme::dim(),
                 ),
                 inner,
@@ -1396,7 +1400,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         AttentionKind::Unplaced { text: body, why, .. } => {
             card.lines(text::markdown(body, inner, theme::text()));
             card.blank();
-            card.wrap(&text::inline(why, theme::dim()), inner);
+            card.wrap(&text::inline(&super::adapt::human_presentation(why), theme::dim()), inner);
             // Only the answers st lists for the row: a request's answer, never one guessed from
             // its kind, so a gate here is answered with st.
             if let Some(answer) = unplaced_answer(&item.actions) {
@@ -1456,7 +1460,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
     }
     if item.related.is_empty() && item.mission.is_none() && item.agent.is_none() {
         card.line(Line::from(span(
-            "st names no agent, mission or step for this item.",
+            "Fractal names no agent, mission or step for this item.",
             theme::dim(),
         )));
     }
@@ -1504,6 +1508,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             needs_words: None,
             confirm: None,
             chat: None,
+            form: Default::default(),
         };
         text_box(
             &mut card,
@@ -1573,7 +1578,7 @@ pub fn agent_order(world: &World) -> Vec<&Agent> {
 
 fn agent_group(agent: &Agent) -> &'static str {
     if agent.unmanaged {
-        return "found running · not started by st";
+        return "found running · not started by Fractal";
     }
     match agent.state {
         AgentState::NeedsYou => "waiting on you",
@@ -1615,6 +1620,27 @@ fn subagent_lines(agent: &Agent, indent: &str, width: usize) -> Vec<Line<'static
         .collect()
 }
 
+/// Reserve the standing marker before the shell truncates the row against its right columns.
+/// The last span is the name; tree callers include their final folder indent before fitting it.
+fn mark_standing(
+    agent: &Agent,
+    first: &mut Vec<Span<'static>>,
+    right: &[Span<'static>],
+    width: usize,
+) {
+    if agent.lifecycle != Some(fractal_client::AgentLifecycle::Standing) {
+        return;
+    }
+    const MARKER: &str = " \u{F0031}";
+    let prefix_width = first[..first.len() - 1].iter().map(Span::width).sum::<usize>();
+    let right_width = right.iter().map(Span::width).sum::<usize>();
+    let room = width.saturating_sub(prefix_width + right_width + 2 + text::width(MARKER));
+    if let Some(name) = first.last_mut() {
+        name.content = text::truncate(&name.content, room).into();
+    }
+    first.push(span(MARKER, theme::dim()));
+}
+
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
@@ -1645,19 +1671,22 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
         }
         let (glyph, color) = agent_glyph(agent.state, spinner);
         let path = agent.id.strip_prefix("agent/").unwrap_or(&agent.id);
+        let mut first = vec![
+            span(format!(" {glyph} "), theme::strong(color)),
+            span(agent.name.clone(), theme::bold()),
+        ];
+        let right = vec![
+            span(
+                agent.harness.name(),
+                theme::fg(harness_color(agent.harness)),
+            ),
+            span(format!(" {:>4}", agent.activity), theme::dim()),
+        ];
+        mark_standing(agent, &mut first, &right, width);
         items.push(Item::Row {
             index: ids.len(),
-            first: vec![
-                span(format!(" {glyph} "), theme::strong(color)),
-                span(agent.name.clone(), theme::bold()),
-            ],
-            right: vec![
-                span(
-                    agent.harness.name(),
-                    theme::fg(harness_color(agent.harness)),
-                ),
-                span(format!(" {:>4}", agent.activity), theme::dim()),
-            ],
+            first,
+            right,
             // What its step last reported leads; the path says who it is when nothing was said.
             second: match &agent.details.progress {
                 Some(progress) => vec![span(
@@ -1688,7 +1717,7 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
         .into_iter()
         .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
             Line::from(span(
-                "This host's st is older: agent states show as st reports them.",
+                "This host's Fractal is older: agent states show as Fractal reports them.",
                 theme::dim(),
             ))
         }))
@@ -1701,9 +1730,9 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
 /// state once the harness is signed in again, on the same run: no restart (Nathan, 2026-10-04).
 pub fn login_guidance(agent: &Agent) -> String {
     let how = match agent.harness {
-        Harness::Claude => "open its terminal (ctrl+]) and run /login".to_owned(),
+        Harness::Claude => format!("open its terminal ({}) and run /login", terminal_route()),
         Harness::Codex => format!("run `codex login` on {} (or in its terminal)", agent.host),
-        _ => "open its terminal (ctrl+]) and log it in".to_owned(),
+        _ => format!("open its terminal ({}) and log it in", terminal_route()),
     };
     let provider = match agent.harness {
         Harness::Claude => "Claude",
@@ -1880,7 +1909,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
             current = Some(mission.word);
             let (_, color) = word_style(mission.word, spinner);
             items.push(Item::Header {
-                title: mission.label(),
+                title: human_mission_label(mission),
                 count: missions
                     .iter()
                     .filter(|other| other.word == mission.word)
@@ -1939,7 +1968,7 @@ pub fn missions_list(world: &World, width: usize, spinner: &'static str, system:
                 .count()
         };
         let kinds = [
-            (count(|mission| mission.system), "from st"),
+            (count(|mission| mission.system), "from Fractal"),
             (
                 count(|mission| !mission.system && mission.word == Word::NotStarted),
                 "not started",
@@ -2010,7 +2039,7 @@ pub fn mission_detail(
     let inner = width.saturating_sub(4);
     doc.line(Line::from(vec![
         span(
-            format!(" {glyph} {} ", mission.label()),
+            format!(" {glyph} {} ", human_mission_label(mission)),
             Style::default()
                 .fg(theme::CRUST)
                 .bg(color)
@@ -2028,7 +2057,7 @@ pub fn mission_detail(
     ]));
     doc.line(Line::from(vec![
         span(format!(" {}", mission.id), theme::dim()),
-        span(format!("  ·  {}", mission.word.explain()), theme::fg(color)),
+        span(format!("  ·  {}", super::adapt::human_presentation(mission.word.explain())), theme::fg(color)),
     ]));
     if let Some(outcome) = &mission.outcome {
         doc.lines(text::wrap(
@@ -2180,7 +2209,7 @@ pub fn mission_kdl(world: &World, id: Option<&str>, width: usize) -> Doc {
         }
         None => doc.wrap(
             &[run(
-                "st does not send mission declarations to clients yet. Until it does, read it with: fractal missions show",
+                "Fractal does not send mission declarations to clients yet. Until it does, read it with: fractal missions show",
                 theme::dim(),
             )],
             width,
@@ -2409,9 +2438,9 @@ pub fn fleet_detail(world: &World, id: Option<&str>, width: usize, spinner: &'st
     if links.lines.is_empty() {
         links.line(Line::from(span(
             if machine.you_are_here {
-                "This is the machine Fractal TUI is talking to."
+                "This is the machine the Fractal terminal UI is talking to."
             } else {
-                "st reports no link to this machine."
+                "Fractal reports no link to this machine."
             },
             theme::dim(),
         )));
@@ -2655,7 +2684,7 @@ pub fn worktree_detail(
             });
             missions.line(Line::from(vec![
                 span(label, theme::fg(color)),
-                span(mission.label(), theme::fg(color)),
+                span(human_mission_label(mission), theme::fg(color)),
             ]));
         }
     }
@@ -2673,7 +2702,7 @@ pub fn worktree_detail(
 fn demo_banner(doc: &mut Doc, width: usize) {
     doc.lines(text::wrap(
         &[run(
-            "st does not track worktrees yet. Everything on this tab is invented.",
+            "Fractal does not track worktrees yet. Everything on this tab is invented.",
             theme::fg(theme::YELLOW),
         )],
         width,
@@ -2694,6 +2723,21 @@ fn demo_banner(doc: &mut Doc, width: usize) {
 }
 
 // ------------------------------------------------------------------ popovers
+
+/// The chord (with Ctrl) that opens an agent's actions menu from its conversation.
+pub const ACTIONS_CHORD: char = 'a';
+/// The actions menu's key for attaching the agent's terminal in its tab.
+pub const TERMINAL_ACTION: char = 't';
+
+/// How to get to an agent's terminal from where its conversation shows, said as the keys that
+/// do it: the actions menu, then its Terminal row. The Attach button lives only on a detached
+/// terminal pane, where Enter does the same.
+pub fn terminal_route() -> String {
+    format!(
+        "Ctrl+{} then {TERMINAL_ACTION} from the conversation",
+        ACTIONS_CHORD.to_ascii_uppercase()
+    )
+}
 
 /// The small card a clicked reference opens: enough to recognise the subject, and a way
 /// to go to it.
@@ -2723,7 +2767,11 @@ pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
     if agent.terminal {
-        rows.push(row('t', "Terminal", "attach its terminal (ctrl+] too)"));
+        rows.push(row(
+            TERMINAL_ACTION,
+            "Terminal",
+            "attach its terminal in this tab",
+        ));
     }
     rows.push(row('d', "Details", "what it is doing and what is queued (ctrl+d too)"));
     rows.push(row('f', "Find", "find in its conversation (ctrl+f too)"));
@@ -2837,10 +2885,10 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
         doc.line(Line::from(vec![
             span(format!("{glyph} "), theme::strong(color)),
             span(mission.title.clone(), theme::bold()),
-            span(format!("  {}", mission.label()), theme::fg(color)),
+            span(format!("  {}", human_mission_label(mission)), theme::fg(color)),
         ]));
         doc.line(Line::from(span(mission.id.clone(), theme::dim())));
-        doc.line(Line::from(span(mission.word.explain(), theme::fg(color))));
+        doc.line(Line::from(span(super::adapt::human_presentation(mission.word.explain()).into_owned(), theme::fg(color))));
         doc.blank();
         let (done, total) = mission.progress();
         doc.field(
@@ -2866,7 +2914,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 span(format!("{} ", step.name), theme::text()),
                 span(word, theme::fg(color)),
                 span(
-                    format!("  {}", step.owner.as_deref().unwrap_or("nobody")),
+                    format!("  {}", step.owner_identity().as_deref().unwrap_or("nobody")),
                     theme::dim(),
                 ),
             ]));
@@ -2918,7 +2966,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
 pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'static str) -> Doc {
     let mut doc = Doc::new();
     let details = &agent.details;
-    let unknown = || span("st has not said", theme::dim());
+    let unknown = || span("Fractal has not said", theme::dim());
     // A close control on the pane itself, not only on the header rule.
     let close = "× close";
     doc.targets.push(super::doc::Target {
@@ -2937,7 +2985,7 @@ pub fn agent_details(world: &World, agent: &Agent, width: usize, spinner: &'stat
     ]));
     if let Some(fault) = &details.fault {
         let mut inner = Doc::new();
-        inner.wrap(&text::inline(fault, theme::text()), width.saturating_sub(4));
+        inner.wrap(&text::inline(&super::adapt::human_presentation(fault), theme::text()), width.saturating_sub(4));
         doc.card("broken", theme::FAULT, true, inner, width);
         doc.blank();
     }
@@ -3220,12 +3268,14 @@ pub fn agents_tree(world: &World, spinner: &'static str, width: usize) -> Listin
         if let Item::Row {
             index,
             first,
+            right,
             children,
             ..
         } = item
             && let Some(agent) = agents.iter().find(|agent| agent.id == listing.ids[*index])
         {
             let indent = format!("{}  ", first.first().map_or("", |span| &*span.content));
+            mark_standing(agent, first, right, width);
             *children = subagent_lines(agent, &indent, width);
         }
     }
@@ -3253,7 +3303,7 @@ pub fn missions_tree(world: &World, spinner: &'static str, system: bool) -> List
                     span(path.last().cloned().unwrap_or_default(), theme::bold()),
                 ],
                 vec![span(
-                    format!("{} {done}/{total}", mission.label()),
+                    format!("{} {done}/{total}", human_mission_label(mission)),
                     theme::fg(color),
                 )],
             )
@@ -3415,8 +3465,191 @@ mod tree_tests {
     use super::*;
 
     #[test]
+    fn attention_identity_labels_named_st_are_not_product_names() {
+        let mut world = crate::ui::demo::test_world();
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("the demo world has attention items");
+        };
+        let item = items.first_mut().unwrap();
+        item.raised_by = Some("st".into());
+        item.kind = AttentionKind::Message { from: "st".into(), body: "hello".into() };
+        let id = item.id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, needs_words: None, chat: None, form: Default::default(),
+        };
+        let shown = home_detail(&world, Some(&id), 120, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("raised by st"), "{shown}");
+        assert!(shown.contains("from  st"), "{shown}");
+    }
+
+    #[test]
+    fn launch_assignee_labels_named_st_are_not_product_names() {
+        let mut world = crate::ui::demo::test_world();
+        let Load::Ready(items) = &mut world.attention else {
+            panic!("the demo world has attention items");
+        };
+        let item = items.first_mut().unwrap();
+        item.kind = AttentionKind::Launch {
+            planner: "planner".into(),
+            name: "audit".into(),
+            preview: Load::Ready(MissionPreview {
+                name: "audit".into(), goals: vec![], agents: vec![], workspace: String::new(),
+                steps: vec![PreviewStep {
+                    name: "scan".into(), assignee: "st".into(), after: vec![], asks_you: false,
+                }],
+            }),
+        };
+        let id = item.id.clone();
+        let drafts = Drafts {
+            text: None, cursor: 0, editing: false, confirm: None,
+            answering: None, needs_words: None, chat: None, form: Default::default(),
+        };
+        let shown = home_detail(&world, Some(&id), 120, &drafts)
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains(&format!("  {:<12}{:<18}", "scan", "st")), "{shown}");
+    }
+
+    #[test]
+    fn mission_copy_is_fractal_only_at_the_rendering_boundary() {
+        let mut world = crate::ui::demo::test_world();
+        let Load::Ready(missions) = &mut world.missions else {
+            panic!("the demo world has missions");
+        };
+        let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
+        mission.word = Word::Watching;
+        mission.steps[0].owner = Some("st".into());
+        mission.steps[0].owner_is_system = true;
+        let id = mission.id.clone();
+        let serialized = serde_json::to_value(&*mission).unwrap();
+        assert_eq!(serialized["steps"][0]["owner"], "st");
+        let shown = mission_detail(&world, Some(&id), 120, "", None, &Default::default())
+            .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+        assert!(shown.contains("Fractal keeps this open"), "{shown}");
+        assert!(shown.contains(" Fractal "), "{shown}");
+        let Load::Ready(missions) = &world.missions else {
+            unreachable!();
+        };
+        let mission = missions.iter().find(|mission| mission.id == id).unwrap();
+        assert_eq!(serde_json::to_value(mission).unwrap(), serialized);
+    }
+
+    #[test]
+    fn identity_labels_in_mission_steps_show_fallback_ids_only_once() {
+        for (owner_id, label) in [
+            ("person/ada", "person/ada"),
+            ("agent/example/unnamed", "agent/example/unnamed"),
+            ("agent/example/maintainer", "Maintainer"),
+        ] {
+            let mut world = crate::ui::demo::world();
+            let Load::Ready(missions) = &mut world.missions else {
+                panic!("the demo world has missions");
+            };
+            let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
+            mission.steps.truncate(1);
+            let step = &mut mission.steps[0];
+            step.owner = Some(label.into());
+            step.owner_id = Some(owner_id.into());
+            step.owner_is_system = false;
+            let expected = if label == owner_id {
+                owner_id.to_owned()
+            } else {
+                format!("{label} · {owner_id}")
+            };
+            assert_eq!(step.owner_identity().as_deref(), Some(expected.as_str()));
+            let id = mission.id.clone();
+            for width in [80, 120] {
+                let shown = mission_detail(&world, Some(&id), width, "", None, &Default::default())
+                    .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+                assert!(shown.contains(&expected), "{shown}");
+                assert_eq!(shown.matches(owner_id).count(), 1, "{shown}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_standing_seats_have_a_dim_anchor_in_both_agent_views() {
+        use fractal_client::AgentLifecycle::{Bounded, Owner, Standing, Unknown};
+
+        for lifecycle in [Some(Standing), Some(Owner), Some(Bounded), Some(Unknown), None] {
+            let mut world = super::super::demo::test_world();
+            let mut agent = world.agents.items()[0].clone();
+            agent.lifecycle = lifecycle;
+            agent.state = AgentState::Idle;
+            world.agents = Load::Ready(vec![agent]);
+            for listing in [agents_list(&world, "⠋", 60), agents_tree(&world, "⠋", 60)] {
+                let first = listing
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        Item::Row { first, .. } => Some(first),
+                        _ => None,
+                    })
+                    .unwrap();
+                let shown = first
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert_eq!(
+                    shown.contains('\u{F0031}'),
+                    lifecycle == Some(Standing),
+                    "{shown}"
+                );
+                if lifecycle == Some(Standing) {
+                    assert!(shown.ends_with("Atlas Builder \u{F0031}"), "{shown}");
+                    assert_eq!(first.last().unwrap().style, theme::dim());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrow_agent_row_truncates_its_name_before_its_standing_marker() {
+        let mut world = super::super::demo::test_world();
+        let mut agent = world.agents.items()[0].clone();
+        agent.lifecycle = Some(fractal_client::AgentLifecycle::Standing);
+        agent.name = "Atlas Builder 界界界".into();
+        world.agents = Load::Ready(vec![agent]);
+        for width in [20, 24, 28] {
+            for listing in [agents_list(&world, "⠋", width), agents_tree(&world, "⠋", width)] {
+                let (first, right) = listing
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        Item::Row { first, right, .. } => Some((first, right)),
+                        _ => None,
+                    })
+                    .unwrap();
+                let right_width = right.iter().map(Span::width).sum::<usize>();
+                // Exercise the shell's final truncation, not only the screen's name budget.
+                let fitted =
+                    super::super::truncate_spans(first, width.saturating_sub(right_width + 2));
+                let shown = fitted
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                assert!(shown.ends_with("… \u{F0031}"), "{width}: {shown}");
+                assert!(
+                    text::width(&shown) + right_width + 2 <= width,
+                    "{width}: {shown}"
+                );
+                let padding = " ".repeat(width.saturating_sub(text::width(&shown) + right_width + 1));
+                let row = format!(
+                    "{shown}{padding}{}",
+                    right
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                );
+                assert_eq!(text::width(&row), width - 1, "{row}");
+            }
+        }
+    }
+
+    #[test]
     fn a_working_step_says_when_its_idle_holder_was_nudged() {
-        let mut world = crate::ui::demo::world();
+        let mut world = crate::ui::demo::test_world();
         let Load::Ready(missions) = &mut world.missions else {
             panic!("the demo world has missions");
         };
@@ -3566,7 +3799,7 @@ mod tree_tests {
 
     #[test]
     fn an_agents_subagents_hang_beneath_its_row_and_are_never_selectable() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         for listing in [agents_list(&world, "⠋", 60), agents_tree(&world, "⠋", 60)] {
             let builder = listing
                 .ids
@@ -3604,7 +3837,7 @@ mod tree_tests {
 
     #[test]
     fn a_tree_has_one_line_per_folder_and_leaf_in_path_order() {
-        let listing = agents_tree(&super::super::demo::world(), "⠋", 40);
+        let listing = agents_tree(&super::super::demo::test_world(), "⠋", 40);
         let kinds = listing
             .items
             .iter()
@@ -3637,9 +3870,11 @@ mod mission_golden {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    // Regenerate after intended rendering changes with:
+    // STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui mission_golden
     #[test]
     fn mission_stories_golden() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let mut actual = String::new();
         for mission in world.missions.items() {
             for width in [40, 80, 120] {
@@ -3667,6 +3902,14 @@ mod mission_golden {
                     }
                 }
             }
+        }
+        if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/mission-stories.golden"),
+                &actual,
+            )
+            .unwrap();
+            return;
         }
         assert_eq!(
             actual,

@@ -100,6 +100,7 @@ impl Fence {
             token: hex::encode(token),
         }
     }
+
     /// Initial allocation is idempotent under this random request token. Reexec and reconnect
     /// carry the returned epoch; neither the client's clock nor a lost response changes ownership.
     pub async fn bind(&mut self, client: &Client) -> Result<()> {
@@ -113,18 +114,52 @@ impl Fence {
                     *self = bound;
                     return Ok(());
                 }
-                Err(error)
-                    if api_error_code(&error).is_some_and(|code| {
-                        !matches!(code, "internal" | "database-busy" | "database-locked" | "mailbox-session-starting" | "mailbox-authority-unavailable")
-                    }) =>
-                {
-                    return Err(error);
+                Err(error) => {
+                    let retrying = api_error_code(&error).is_none_or(retryable_mailbox_bind_code);
+                    if let Some((status, code, _, _)) = api_error_parts(&error)
+                        && mailbox_bind_refusal(status, code)
+                    {
+                        let action = if retrying { "retrying" } else { "not retrying" };
+                        let _ = write_driver_log(&self.subject, &format!("warning: delivery refused: {code} (HTTP {status}); {action}"));
+                    }
+                    if !retrying { return Err(error); }
+                    tokio::time::sleep(retry.failed(&error)).await;
                 }
-                Err(error) => tokio::time::sleep(retry.failed(&error)).await,
             }
         }
     }
 }
+
+fn retryable_mailbox_bind_code(code: &str) -> bool {
+    matches!(code, "internal" | "database-busy" | "database-locked"
+        | "mailbox-session-starting" | "mailbox-authority-unavailable"
+        | "mailbox-runtime-indeterminate")
+}
+
+/// Runtime indeterminacy needs an explicit diagnostic even though the channel retries it.
+pub fn mailbox_bind_refusal(status: u16, code: &str) -> bool {
+    (400..500).contains(&status)
+        && !matches!(status, 408 | 429)
+        && (!retryable_mailbox_bind_code(code) || code == "mailbox-runtime-indeterminate")
+}
+
+/// Driver notes never go to the terminal shared with the provider.
+pub fn write_driver_log(subject: &str, line: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let state_home = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .context("no state directory for driver warning")?;
+    let directory = state_home.join("st3");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600)
+        .open(directory.join("driver-api-warnings.log"))?;
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+    writeln!(file, "{at} {subject} {}", line.replace('\n', " "))?;
+    Ok(())
+}
+
 
 /// The daemon route a replication worker hands a read to when it must forward it.
 pub const CLIENT_READ_FORWARD_PATH: &str = "/v1/internal/client-read/forward";
@@ -1021,6 +1056,14 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.status == 404)
 }
 
+/// Exactly the answer a daemon without the route gives: Axum's 404 with no body. A 404 that says
+/// anything, malformed or not, is an answer from a route that exists.
+pub fn is_absent_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404 && error.empty)
+}
+
 /// The HTTP status an API call failed with, including an answer without an error body.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error
@@ -1100,6 +1143,8 @@ impl std::error::Error for ApiResponseError {}
 struct UnexpectedResponse {
     status: u16,
     body: String,
+    /// Whether the answer had no bytes at all; `body` is trimmed for display.
+    empty: bool,
 }
 
 impl fmt::Display for UnexpectedResponse {
@@ -1680,6 +1725,7 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     UnexpectedResponse {
         status,
         body: String::from_utf8_lossy(bytes).trim().to_owned(),
+        empty: bytes.is_empty(),
     }
     .into()
 }
@@ -1709,6 +1755,36 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bind_422_warns_and_keeps_retrying() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        if std::env::var_os("FRACTAL_BIND_WARNING_TEST").is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "client::tests::bind_422_warns_and_keeps_retrying", "--nocapture"])
+                .env("FRACTAL_BIND_WARNING_TEST", "1")
+                .env("XDG_STATE_HOME", root.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            let log = std::fs::read_to_string(root.path().join("st3/driver-api-warnings.log")).unwrap();
+            assert!(log.contains("delivery refused: mailbox-runtime-indeterminate (HTTP 422)"), "{log}");
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Endpoint::Http(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            let _ = stream.read(&mut bytes).await.unwrap();
+            let body = r#"{"code":"mailbox-runtime-indeterminate","message":"forced refusal","details":{}}"#;
+            stream.write_all(format!("HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        let mut fence = Fence::new("agent/example/refused-bind", "current", "delivery");
+        assert!(tokio::time::timeout(Duration::from_millis(250), fence.bind(&Client::new(endpoint))).await.is_err());
+        assert_eq!(fence.epoch, 0);
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn fabric_unix_http_roundtrip_carries_bearer_without_local_authority() {
@@ -2180,6 +2256,22 @@ mod tests {
             let base = Duration::from_secs(seconds);
             let pause = retry.failed(&error);
             assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
+        }
+    }
+    #[test]
+    fn mailbox_bind_retries_only_transient_authority_failures() {
+        for code in [
+            "internal",
+            "database-busy",
+            "database-locked",
+            "mailbox-session-starting",
+            "mailbox-authority-unavailable",
+            "mailbox-runtime-indeterminate",
+        ] {
+            assert!(retryable_mailbox_bind_code(code), "{code}");
+        }
+        for code in ["stale-mailbox-session", "unbound-mailbox", "forbidden"] {
+            assert!(!retryable_mailbox_bind_code(code), "{code}");
         }
     }
 
@@ -2726,6 +2818,22 @@ mod tests {
         runtime_id: &str,
         created_at: &str,
     ) -> std::thread::JoinHandle<Vec<u8>> {
+        pty_session_with_tail(
+            root,
+            runtime_id,
+            created_at,
+            pty_core::protocol::encode_exit(0),
+            false,
+        )
+    }
+
+    fn pty_session_with_tail(
+        root: &Path,
+        runtime_id: &str,
+        created_at: &str,
+        tail: Vec<u8>,
+        close: bool,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
         use std::io::{Read as _, Write as _};
         std::fs::create_dir_all(root).unwrap();
         std::fs::write(
@@ -2755,9 +2863,10 @@ mod tests {
                     stream
                         .write_all(&pty_core::protocol::encode_screen(b"straight from the pty"))
                         .unwrap();
-                    stream
-                        .write_all(&pty_core::protocol::encode_exit(0))
-                        .unwrap();
+                    stream.write_all(&tail).unwrap();
+                    if close {
+                        return received;
+                    }
                 }
             }
         })
@@ -2806,6 +2915,41 @@ mod tests {
         output.rewind().unwrap();
         output.read_to_string(&mut shown).unwrap();
         assert!(shown.contains("straight from the pty"), "{shown:?}");
+    }
+
+    #[tokio::test]
+    async fn a_local_attachment_loss_never_claims_that_the_child_exited() {
+        use std::io::{Read as _, Seek as _};
+        for tail in [Vec::new(), vec![12, 0, 0], vec![12, 0, 0, 0, 1, 0]] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("pty");
+            let session = pty_session_with_tail(
+                &root,
+                "worker",
+                "2026-09-29T08:00:00.000Z",
+                tail.clone(),
+                true,
+            );
+            let terminal = LocalTerminal {
+                subject: "agent/worker".into(),
+                runtime_id: "worker".into(),
+                incarnation_id: format!("{}:2026-09-29T08:00:00.000Z", std::process::id()),
+                pty_root: root,
+            };
+            let (io, _input, mut output) = silent_io();
+            let exit = attach_local_terminal_with_io(&terminal, io).await.unwrap();
+            session.join().unwrap();
+            let mut shown = String::new();
+            output.rewind().unwrap();
+            output.read_to_string(&mut shown).unwrap();
+            assert_eq!(exit, 1, "attachment tail {tail:?}: {shown:?}");
+            assert!(shown.contains("connection lost"), "{shown:?}");
+            assert!(!shown.contains("session ended"), "{shown:?}");
+            assert!(!shown.contains("exited with code"), "{shown:?}");
+            if tail.len() == 6 {
+                assert!(shown.contains("client too slow"), "{shown:?}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -2879,4 +3023,23 @@ mod tests {
             "a session the registry did not name must receive nothing"
         );
     }
+}
+
+#[cfg(test)]
+mod absent_route_tests {
+    use super::*;
+
+    /// Only Axum's empty 404 says a route is absent; a 404 with any body comes from a route that
+    /// exists, and another status is not about routes.
+    #[test]
+    fn only_an_empty_404_is_an_absent_route() {
+        // Through the decoder that builds the error from the answer's bytes.
+        let answer = |status, body: &[u8]| api_error(status, body);
+        assert!(is_absent_route(&answer(404, b"")));
+        assert!(!is_absent_route(&answer(404, b"not json")));
+        assert!(!is_absent_route(&answer(404, b"  \n")), "a body of whitespace is still a body");
+        assert!(!is_absent_route(&answer(500, b"")));
+        assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
+    }
+
 }

@@ -130,3 +130,43 @@ fn a_classifier_denial_is_an_alert_whose_answer_the_seat_hears() {
         "stale-fence"
     );
 }
+
+#[test]
+fn operational_failures_fold_again_only_when_their_claims_change() {
+    use fractal_store::store::attention_snapshot::OPERATIONAL_FAILURE_FOLDS;
+    let store = Store::open_memory("alder").unwrap();
+    let folds = || OPERATIONAL_FAILURE_FOLDS.with(std::cell::Cell::get);
+    let fail = |episode: &str| {
+        store
+            .record_operational_failure(
+                episode,
+                &AttentionRequest {
+                    reviewer: "person/avery".into(),
+                    title: format!("{episode} fault"),
+                    reason: "The disk needs attention.".into(),
+                    severity: "warning".into(),
+                    targets: vec![format!("daemon/{episode}")],
+                    actor: "daemon/runtime".into(),
+                    idempotency_key: episode.into(),
+                },
+            )
+            .unwrap()
+    };
+    fail("first");
+    fail("second");
+    store.operational_failures().unwrap();
+    let before = folds();
+    assert_eq!(store.operational_failure("first").unwrap().unwrap().status, "pending");
+    assert_eq!(store.operational_failures().unwrap().len(), 2);
+    assert_eq!(folds() - before, 0, "no failure claim changed");
+    let before = folds();
+    store
+        .recover_operational_failure("first", "The disk has room again.", "first-recovered")
+        .unwrap();
+    assert_eq!(store.operational_failure("first").unwrap().unwrap().status, "resolved");
+    assert_eq!(store.operational_failure("second").unwrap().unwrap().status, "pending");
+    assert!(folds() > before, "a recovery folds the episodes again");
+    let before = folds();
+    store.operational_failures().unwrap();
+    assert_eq!(folds() - before, 0);
+}

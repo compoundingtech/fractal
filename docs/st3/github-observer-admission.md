@@ -29,7 +29,44 @@ Core, GraphQL and search use separate request counters (including GitHub
 Enterprise `/api/graphql` and `/api/v3/search` path shapes without relaxing any
 existing transport-domain policy). These are NOT GraphQL points, search-provider
 or secondary-limit guarantees. Failed sends and conditional304s remain reserved.
-Refusal adds no reservation and returns the existing typed ProviderRateLimit.
+Refusal adds no reservation and returns a typed `LocalObserverBudget`, displayed
+as “local observer budget reached, next slot at T”, not a GitHub HTTP 429.
+For N/N-1 compatibility, non-fault local deferral uses the existing wire state
+`healthy` with `error_code=local-observer-budget`, reason and next deadline.
+It does not claim a successful provider read or change the last resource facts.
+Watch wire state remains `active`; its existing reason visibly says `throttled`
+and the next slot, including in `fractal gh ls`. No owner attention item is raised.
+`degraded` is not used because existing attention rules always escalate it.
+No new enum value or response field is required by older daemon/TUI/web/client readers.
+
+GitHub HTTP 429 and secondary-limit 403 responses honour `Retry-After` (seconds
+or HTTP date) and `x-ratelimit-reset`, using the latest future deadline. If neither
+header names a future deadline, the observer waits fifteen minutes; a stale
+primary reset cannot turn a secondary limit into a one-second polling loop.
+Every changed refusal deadline is persisted, including when the HTTP status and
+reason have not changed, so attention evaluates the latest reset rather than
+the first refusal's expired reset.
+
+Each REST page, check/status sub-request and GraphQL query (including a smaller
+query retried after a GraphQL execution error) passes admission separately.
+REST read redirects are followed explicitly, up to ten hops within the same API
+origin, with a new reservation and response attribution for each hop. Cross-origin
+redirects are refused rather than forwarding credentials. Mutations are sent once,
+without following redirects. Automatic transport retries are disabled in the
+observer and authorized gateway clients; an ordinary HTTP 5xx is not retried
+inside a send. A reservation can still correspond to no
+completed HTTP request when a connection fails, so the ledger remains a
+conservative attempt ceiling rather than proof of exact provider debits.
+
+Provider header history is separate: `STATE/github-admission.json.budget-history.json`
+retains the first actual `limit`, `used`, `remaining`, and reset sample for each
+resource/reset/minute, for up to 48 hours and at most 8,192 samples. These retain
+provider units: core requests and GraphQL points are never added together or
+inferred from each other's request counts. Sampling adds no HTTP request and
+publishes only a new minute/reset sample, not every response. The ring uses the
+existing bounded private-file publication path; corrupt history is not silently
+overwritten. A history I/O gap is visible in doctor and never changes admission
+or the actual HTTP outcome. The enforced reservation window remains 61 minutes.
 
 Counters are coalesced per minute/caller/resource, including unscoped traffic:
 a100000-call unscoped flood in one minute occupies one row and cannot consume
@@ -52,7 +89,7 @@ If-None-Match on revalidation and a304 preserves full bodies/page links. First
 reads and endpoints without ETags cannot supply a valid conditional header.
 GraphQL has no ETag revalidation. Its shared repository minimum is now5minutes
 (was60seconds), settled remains15minutes, explicit refresh remains explicit.
-This visibly affects st gh watch wakes and observer-backed PR/check/queue UI
+This visibly affects Fractal gh watch wakes and observer-backed PR/check/queue UI
 freshness, up to5minutes while settling. Curator's source page says live merge
 and ci-passed gates fetch current data and enqueue/merge are direct writes; this
 patch does not replace those live gates with cached PR facts. Consumer coverage
@@ -196,3 +233,84 @@ provider rate-limit errors retain their retry deadlines, including older receipt
 without a revision and after desired revision changes. This changes standing
 watch freshness to three minutes while active and up to ten minutes while quiet;
 it does not change direct merge/check gates or claim measured live savings.
+
+## Operator-supplied installation read source
+
+The optional daemon `[github].app_token_root = "/absolute/operator/supplied/path"`
+or explicit `ST3_GITHUB_APP_TOKEN_ROOT` environment input selects installation
+tokens for reads. The environment input overrides the config field. Relative
+roots are rejected. st3 never computes a platform root: Agent Policy's host facts
+are Linux `$XDG_RUNTIME_DIR/github-app-token` and macOS
+`$(getconf DARWIN_USER_TEMP_DIR)github-app-token`; the operator supplies the
+already-resolved absolute result. The external minter rollout depends on
+dotfiles#7401 and is not performed by this code change.
+
+For a repository's owner, read `ROOT/gh-ci/OWNER.token` and `OWNER.json` for
+metadata, branches/contents, PRs/reviews, checks/actions and open-PR GraphQL.
+Use `ROOT/github-ledger/OWNER.token` and `OWNER.json` for issue lists, issue
+comments/excerpts, issue watch preflight and Issue identity GraphQL. PR watch
+preflight and review excerpts use gh-ci. When either installation is selected,
+remembered opaque node IDs are partitioned by their recorded `ItemIdentity.pull`,
+never guessed from their bytes, and each partition gets its own minimal identity
+query and authorization. PAT-only batches retain the prior single mixed Issue/PR
+identity query and request count. Unconfigured local PAT observations also retain
+their existing repository-detail cache identity; installation and profile scopes
+remain qualified separately.
+
+Token files must be owner-owned regular mode0600 files, containing only the
+bare token with no whitespace or newline. Sidecars contain numeric
+`installation_id`, RFC3339 `expires_at`, a `permissions` object and
+`repository_selection` (`all` or `selected`). The minter owns atomic publication
+and refresh when less than15minutes remain from a60-minute lifetime. st3 reopens
+the supplied files per read batch, not once per daemon lifetime. A401 permits
+one bounded reload/read replay, then a transition PAT read if still rejected.
+No network retry is made for a failed transport or for a mutation.
+
+The existing Local/Authorized PAT transport remains the explicit route for
+every REST or GraphQL mutation; app availability never gates writes. Unconfigured
+roots keep existing PAT behavior. Read-only transition fallback increments the
+OTel COUNTER `st.github.auth.fallback`, labeled `github.owner`, `github.app` and
+`github.auth.fallback.reason`, and emits a warning. Reasons are `missing`
+(unconfigured/absent root or one missing file), `no-installation` (both owner
+files absent under an existing supplied root), `expired`, `unreadable`
+(including invalid sidecars/token format/permissions), `401`, and `unroutable`
+(an unrecognized redirected read endpoint that cannot retain app authority). Operators must
+use this explicit absence convention when publishing an owner's installation.
+These count source-selection fallback events, not GitHub charges; conditional
+cache hits can still encounter a missing source. Remove transition fallback only
+after one week with zero unintentional fallback across the enrolled owners.
+
+**Legacy status qualification:** neither app has statuses:read. An app GraphQL
+`statusCheckRollup` returns check runs without legacy `StatusContext` data, so
+repository PR detail reads retain a PAT-only combined commit-status GET, once
+per distinct head SHA in a read, through the existing ETag cache. Its source
+exception is observable as fallback reason `statuses`. Legacy status contexts
+are merged with app check runs before deriving check facts and required-check
+outcomes. Truncated status responses fail visibly rather than asserting missing
+contexts passed. This intentional status exception must be excluded from the
+one-week unintentional-fallback gate until installation permissions are separately
+approved and qualified. No statuses permission is assumed or added here.
+
+REST cache keys include the stable installation principal, permissions and
+repository-selection scope, not token bytes; rotation preserves cache identity.
+PAT and app bodies/ETags are separate. A401 PAT fallback drops the app's ETag
+and does not populate the app cache with a PAT representation.
+Same-origin numeric `/repositories/ID` redirect hops retain the selected
+installation. Other hops carry their effective source forward, strip validators
+on principal changes, and aggregate fallback/cache-ineligibility across the
+whole chain; a final PAT body is never cached under an earlier installation.
+Cache eligibility belongs to one HTTP request and its redirect chain, not the
+enclosing read batch. Intentional PAT status reads retain their own PAT cache
+and do not disable the GraphQL detail cache. Detail-cache admission aggregates
+only the explicit eligibility results of the GraphQL requests it contains.
+
+Local fixture tests cover supplied-root reads, endpoint selection, no-root PAT,
+rotation, expiry, invalid/unreadable/missing sources and reason counts,401 reload
+and fallback, separately authorized mixed identity pages, PAT-only writes and
+legacy-status merging. The same-origin redirect fixture verifies installation
+authorization and separate admission for each hop. No live migration is required.
+
+Response accounting runs once at the one-send transport boundary, including each
+initial installation401, reload401 and final PAT response; resource wrappers do
+not recount the final response. Artifact URL invalidation clears every stable
+principal-qualified cache entry for that exact URL, retaining unrelated URLs.

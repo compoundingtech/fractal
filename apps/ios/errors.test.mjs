@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { ClientError, appliedAnswer, isTransient, isTransientCode, notApplied, outcomeUnknown, plainError, plainMessage, promptGone, retryTransient } from '../../clients/typescript/fractal-client/index.ts';
 
-// st's errors read as sentences, as in the Rust client: no codes reach a person.
+// Fractal's errors read as sentences, as in the Rust client: no codes reach a person.
 assert.equal(plainMessage('stale-fence', 'the client snapshot changed before the action was submitted'), 'Fractal changed while this was on its way, so it was not applied');
-// A native prompt's refusal keeps st's own words: why it cannot be answered from here.
+// A native prompt's refusal keeps Fractal's own words: why it cannot be answered from here.
 assert.equal(plainMessage('stale-fence', 'that prompt is no longer waiting: it was answered or replaced'), 'that prompt is no longer waiting: it was answered or replaced');
 assert.equal(plainMessage('remote-unavailable', 'owner host/Juniper is temporarily unavailable; cached data remains usable'), 'Juniper cannot be reached right now');
 assert.equal(plainMessage('not-found', 'agent `agent/x` does not exist'), 'it is gone: agent `agent/x` does not exist');
@@ -18,7 +18,7 @@ assert.ok(isTransientCode(undefined) && isTransientCode('page-cursor-expired') &
 assert.ok(isTransientCode('terminal-unavailable') && !isTransientCode('terminal-ended'));
 assert.equal(plainMessage('terminal-ended', 'the terminal process exited'), 'the terminal ended: its process exited');
 assert.ok(notApplied(refused('stale-fence')) && !notApplied(new TypeError('Network request failed')), 'a lost answer may have applied');
-// A prompt st says is gone stays gone: its answer is never sent again; a race is.
+// A prompt Fractal says is gone stays gone: its answer is never sent again; a race is.
 const gone = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'stale-fence', message: 'that prompt is no longer waiting: it was answered or replaced', retryable: false, details: {} }, 422);
 assert.ok(promptGone(gone) && !promptGone(refused('stale-fence')));
 
@@ -36,7 +36,7 @@ let expiredTries = 0;
 await assert.rejects(retryTransient(8, async () => { expiredTries++; throw refused('idempotency-key-expired'); }));
 assert.equal(expiredTries, 1, 'an expired committed request must never be retried with a fresh key');
 
-// A send st may have taken, and one it never queued (the daemon says which in `details.applied`;
+// A send Fractal may have taken, and one it never queued (the daemon says which in `details.applied`;
 // a code this client does not know is still an error with that answer).
 const answered = (code, applied, status = 503) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'the database has not confirmed the send', retryable: false, details: { applied, action_id: 'action/a', idempotency_key: 'key/a' } }, status);
 const unconfirmed = answered('message-send-unconfirmed', 'unknown');

@@ -529,7 +529,7 @@ fn a_trim_that_would_change_the_graph_waits_for_a_person() {
     assert_eq!(status.trimmed, None);
     assert!(
         birch
-            .claims_for("daemon/birch", Some("daemon.diagnostic"))
+            .observations_for("daemon/birch", "daemon.diagnostic")
             .unwrap()
             .iter()
             .any(|claim| claim.body["fields"]["code"] == "checkpoint-trim-graph-changed")
@@ -590,7 +590,7 @@ fn a_repaired_original_held_by_one_node_does_not_split_the_verifications() {
     observe(&birch, 3);
     observe(&cedar, 2);
     let replacement = alder
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/alder".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -1232,4 +1232,69 @@ fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
         let indexes = (0..=node.index().unwrap()).collect::<Vec<_>>();
         crate::store::card_fold_tests_shared::assert_card_fold_parity(node, &indexes);
     }
+}
+
+/// Mark `writer`'s envelopes on `store` as received but not validated, or validated again.
+fn set_receipt(store: &Store, writer: &str, state: &str) {
+    store
+        .connection
+        .write()
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-hdea17c1f14d1 owner=fractal_store::store::checkpoint_agreement_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state=?2 WHERE writer=?1",
+            params![writer, state],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_node_holding_unvalidated_envelopes_before_the_cut_neither_seals_nor_proves() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let cut = newest_due_cut(context.now_unix_ms);
+    let [alder, birch] = ["alder", "birch"].map(|name| Store::open_memory(name).unwrap());
+    observe(&alder, 2);
+    observe(&birch, 2);
+    sync(&[&alder, &birch]);
+
+    // Alder received birch's envelopes but did not validate them: its sealed identities would
+    // name envelopes whose claims it does not hold, so its proof could not agree with birch's.
+    set_receipt(&alder, "birch", "pending");
+    // Every pass that holds back says so, naming how many and the oldest, so a node whose
+    // envelopes never validate does not stall the checkpoint silently.
+    let held_back = || {
+        let (pending, oldest_sequence): (u64, u64) = alder
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*), MIN(sequence) FROM replica_envelopes
+                 WHERE writer='birch' AND CAST(accepted_at_unix_ms AS INTEGER) < ?1",
+                [i64::try_from(cut).unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(pending > 0);
+        CheckpointAction::HeldBack {
+            checkpoint: checkpoint_name(cut),
+            pending,
+            oldest_writer: "birch".into(),
+            oldest_sequence,
+        }
+    };
+    for _ in 0..2 {
+        assert_eq!(step(&alder, &context), [held_back()], "sealed while holding unvalidated envelopes");
+    }
+    set_receipt(&alder, "birch", "validated");
+    assert_eq!(kinds(&step(&alder, &context)), ["sealed"]);
+    assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
+    sync(&[&alder, &birch]);
+
+    // Nor does it prove, once every seal matches, while an envelope before the cut is pending.
+    set_receipt(&alder, "birch", "pending");
+    assert_eq!(step(&alder, &context), [held_back()], "proved while holding unvalidated envelopes");
+    // An envelope whose validation failed is no more admitted than a pending one.
+    set_receipt(&alder, "birch", "degraded");
+    assert_eq!(step(&alder, &context), [held_back()], "proved while holding degraded envelopes");
+    set_receipt(&alder, "birch", "validated");
+    assert_eq!(alder.unvalidated_envelopes_before(cut).unwrap(), None);
+    assert_eq!(kinds(&step(&alder, &context)), ["verified"]);
 }

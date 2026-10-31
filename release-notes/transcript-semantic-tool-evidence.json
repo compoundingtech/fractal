@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Transcript tool rows classify recorded calls as read, run, edit, search, subagent, web, decision, todo, wait, message, schedule, terminal-input, skill or unknown, with a matching row glyph and title. Expanded task, search and web calls show their typed result inline; wait, message and skipped calls show their recorded semantic detail. Every call retains the raw input/output disclosure, its literal command when present, and the Open inspector action alongside semantic detail. Skipped calls are no longer counted as commands. A failure while loading development diagnostics now shows a Reload diagnostics bar instead of taking down the workspace.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No persisted schema change." },
+  "rules": { "status": "none", "detail": "Checkpoint rules are unchanged." },
+  "compatibility": { "status": "none", "detail": "No wire change. WorkKind keeps read, run and edit and adds search, subagent, web, decision, todo, wait, message, schedule, terminal-input, skill and unknown. WorkLogCall adds optional recorded evidence (toolName, callId, input, output, view, metadata, mediaType, skipped). Transcript adds an optional renderToolDetail(item, call) slot; omitting it keeps the kit preview." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

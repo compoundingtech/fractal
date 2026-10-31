@@ -138,7 +138,7 @@ pub(super) fn report_resync(
 ) {
     let message = ClientMessage::for_output(false).message(code, message);
     if stalled.as_deref() != Some(message.as_str()) {
-        eprintln!("st: {message} · trying again");
+        crate::stderr_message("st", format_args!("{message} · trying again"));
         *stalled = Some(message);
     }
 }
@@ -165,6 +165,9 @@ pub(super) async fn run_message(
     sync_message_projection(client).await?;
     match command {
         MessageCommand::Send(args) => {
+            if !args.print_kdl {
+                preflight_message_recipient(client, &args.to, args.allow_undeclared_recipient).await?;
+            }
             let attachments = if args.attach.is_empty() {
                 Vec::new()
             } else {
@@ -177,16 +180,14 @@ pub(super) async fn run_message(
             // The message has landed. A projection that misses it catches up on the next command;
             // failing here would invite a resend of a message that was sent.
             if let Err(error) = sync_message_projection(client).await {
-                eprintln!(
-                    "st: {} was sent (idempotency key {}), but the message projection was not refreshed: {}",
-                    receipt.message.subject,
-                    receipt.idempotency_key,
-                    plain_error(&error)
-                );
+                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
+                receipt.idempotency_key,
+                plain_error(&error)));
             }
             print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Status(args) => {
+            notice_ignored_read_actor(args.ignored_actor.as_deref());
             if let Some(key) = args.idempotency_key {
                 return print_message_key_status(client, &key, json_output).await;
             }
@@ -364,6 +365,8 @@ pub(super) async fn run_message(
         MessageCommand::Reply(args) => {
             let original = read_message(client, &args.reference).await?;
             let recipient = message_reply_recipient(&original, &args.from)?;
+            fractal_daemon::model::refuse_person_recipient(&normalize_message_subject(&recipient))
+                .map_err(|error| anyhow::anyhow!(error.message))?;
             let attachments = if args.attach.is_empty() {
                 Vec::new()
             } else {
@@ -385,6 +388,8 @@ pub(super) async fn run_message(
                     wake: args.wake,
                     print_kdl: args.print_kdl,
                     idempotency_key: args.idempotency_key,
+                    // The original message, not a fresh roster lookup, resolves a reply.
+                    allow_undeclared_recipient: true,
                 },
                 attachments,
             )

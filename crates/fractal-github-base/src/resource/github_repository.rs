@@ -22,8 +22,11 @@ use sha2::{Digest as _, Sha256};
 use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
-    github_client, github_graphql, github_json, github_listing,
+    github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_github;
 
 /// The data types a repository observer can emit.
 pub const DATA_TYPES: [&str; 5] = [
@@ -94,6 +97,10 @@ pub struct RepositoryCursor {
     identities: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
+    /// Where the open listing a resume reads for identities continues, when it had more pages
+    /// than one poll reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_next: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -173,6 +180,24 @@ fn finish_listing(
 struct ItemIdentity {
     number: u64,
     pull: bool,
+}
+
+/// The part of a repository cursor that rides in the observer's `observer.observed` claim: how
+/// far the observer has read items and comments. Every member keeps it, so a member that takes
+/// over polling, or lost its plugin database, reads on from there and misses nothing; what it
+/// reads again equals the recorded facts and delivers nothing; its first poll also reads the open
+/// listing once, for the identities of open items. The version maps, which are most of a
+/// cursor's bytes, stay with the member that polled. `None` when the observer has read nothing
+/// yet.
+pub fn replicated_cursor(cursor: &str) -> Option<String> {
+    let cursor = RepositoryCursor::parse(Some(cursor));
+    let position = RepositoryCursor {
+        items_since: cursor.items_since,
+        comments_since: cursor.comments_since,
+        ..RepositoryCursor::default()
+    };
+    (position != RepositoryCursor::default())
+        .then(|| serde_json::to_string(&position).expect("a repository cursor serializes"))
 }
 
 impl RepositoryCursor {
@@ -708,6 +733,39 @@ const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after:
 
 // GitHub can reject the combined query even when each 100-item read succeeds separately.
 // Keep closure/transfer lookups out of the expensive PR review and check-rollup query.
+const RESOLVED_ISSUES: &str = "query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
+    ... on Issue {
+      number url state stateReason updatedAt
+      timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
+        createdAt actor { login }
+        closer {
+          ... on PullRequest { url }
+          ... on Commit { url }
+        }
+      } } }
+    }
+  }
+}";
+
+const RESOLVED_PULLS: &str = "query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
+    ... on PullRequest {
+      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
+        createdAt closer {
+          ... on PullRequest { url }
+          ... on Commit { url }
+        }
+      } } }
+    }
+  }
+}";
+
+// A PAT can resolve both identity kinds in one page. Preserve that request count
+// when no installation is selected, including the unconfigured-source default.
 const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
   nodes(ids: $ids) {
     id
@@ -1321,6 +1379,11 @@ pub async fn observe_at(
     // How far the observer had read before this poll. Without one, this poll reads every open
     // item once; from then on it reads only what changed.
     let watermark = cursor.items_since.clone();
+    // A read position with nothing else is how far another member read, from the observer's
+    // claim: that member kept the identities. This poll learns them from the open listing once,
+    // and the polls after it read on until that listing ends.
+    let resuming = cursor.resume_next.is_some()
+        || (watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty());
     let mut items = BTreeMap::<u64, Item>::new();
     let mut more = false;
     let mut changed_open_pull = false;
@@ -1435,6 +1498,37 @@ pub async fn observe_at(
         if cursor.items_scan.is_none() {
             retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
         }
+        // Without them, an item that is open but unchanged since the position is unknown here:
+        // the detail reads would not ask about it, and a transfer would go unseen until it
+        // changes again.
+        if resuming && (fields.contains("pull_requests") || fields.contains("issues")) {
+            let next = cursor.resume_next.take();
+            let open = github_listing(
+                &client,
+                next.clone().unwrap_or_else(|| format!("{base}/issues?state=open&per_page=100")),
+                token,
+                if next.is_some() { Duration::ZERO } else { cache_for },
+                LISTING_PAGES,
+                true,
+            )
+            .await?;
+            more |= open.truncated;
+            // GitHub pages this listing by offset: an item that closes between two polls moves
+            // the rest back, so the first item past the boundary can be skipped. It is learned
+            // when it next changes, as any item was before this read existed.
+            cursor.resume_next = open.next.clone();
+            for issue in &open.values {
+                if let (Some(id), Some(number)) = (
+                    issue.get("node_id").and_then(Value::as_str),
+                    issue.get("number").and_then(Value::as_u64),
+                ) {
+                    cursor.identities.entry(id.into()).or_insert(ItemIdentity {
+                        number,
+                        pull: issue.get("pull_request").is_some(),
+                    });
+                }
+            }
+        }
 
         // A reaction changes no `updated_at`, so reactions on open items come from the open
         // listing. A first poll already read it.
@@ -1537,7 +1631,7 @@ pub async fn observe_at(
                     .as_ref()
                     .is_some_and(|after| *id <= after)
             }))
-            .cloned()
+            .map(|id| (id.clone(), cursor.identities[id].pull))
             .collect::<Vec<_>>();
         let details = open_pull_requests(
             &client,
@@ -1558,7 +1652,7 @@ pub async fn observe_at(
         )
         .await?;
         if details.identities_read > 0 {
-            cursor.detail_after = identities.get(details.identities_read - 1).cloned();
+            cursor.detail_after = identities.get(details.identities_read - 1).map(|(id, _)| id.clone());
         }
         for node in details.resolved.iter() {
             let Some(id) = node.get("id").and_then(Value::as_str) else {
@@ -1713,6 +1807,38 @@ pub async fn observe_at(
     })
 }
 
+/// Neither installation has statuses:read. An app-only rollup is not complete.
+fn merge_legacy_statuses(node: &mut Value, combined: &Value) -> Result<()> {
+    let statuses = combined.get("statuses").and_then(Value::as_array)
+        .context("the GitHub combined status response has no statuses")?;
+    anyhow::ensure!(combined.get("total_count").and_then(Value::as_u64).unwrap_or(statuses.len() as u64) <= statuses.len() as u64,
+        "the GitHub combined status response is truncated");
+    let commit = node.pointer_mut("/commits/nodes/0/commit")
+        .context("the GitHub pull request has no head commit for legacy statuses")?;
+    if commit.get("statusCheckRollup").is_none_or(Value::is_null) {
+        commit["statusCheckRollup"] = json!({"state": null, "contexts": {"nodes": []}});
+    }
+    let rollup = &mut commit["statusCheckRollup"];
+    let contexts = rollup.pointer_mut("/contexts/nodes").and_then(Value::as_array_mut)
+        .context("the GitHub check rollup has no contexts")?;
+    contexts.retain(|context| context["__typename"] != "StatusContext");
+    contexts.extend(statuses.iter().map(|status| json!({
+        "__typename": "StatusContext", "context": status["context"],
+        "state": status["state"].as_str().map(str::to_ascii_uppercase),
+    })));
+    if statuses.is_empty() { return Ok(()); }
+    let state = combined.get("state").and_then(Value::as_str);
+    anyhow::ensure!(matches!(state, Some("success" | "pending" | "failure" | "error")),
+        "the GitHub combined status response has no valid state");
+    let checks = rollup.get("state").and_then(Value::as_str);
+    rollup["state"] = json!(if matches!(state, Some("failure" | "error")) || matches!(checks, Some("FAILURE" | "ERROR")) {
+        "FAILURE"
+    } else if state == Some("pending") || matches!(checks, Some("PENDING" | "EXPECTED")) {
+        "PENDING"
+    } else { "SUCCESS" });
+    Ok(())
+}
+
 /// The repository's open pull requests as GraphQL last answered on this host. GraphQL has no
 /// conditional request, so it is asked again only when `changed` says the REST reads saw an open
 /// pull request change, while a pull request is settling, or once the last answer is old, and
@@ -1732,9 +1858,15 @@ async fn open_pull_requests(
     changed: bool,
     listed: &BTreeSet<u64>,
     emit_pulls: bool,
-    identities: &[String],
+    identities: &[(String, bool)],
 ) -> Result<RepositoryDetails> {
-    let key = format!("{api_base} {locator}");
+    let read_token = crate::github_http::read_auth(owner, "gh-ci", token);
+    let issue_token = crate::github_http::read_auth(owner, "github-ledger", token);
+    let key = if read_token.cache_principal() == "pat" && issue_token.cache_principal() == "pat" {
+        format!("{api_base} {locator}")
+    } else {
+        format!("{api_base} {locator} {} {}", read_token.cache_principal(), issue_token.cache_principal())
+    };
     let previous = {
         let mut checks = pull_request_checks()
             .lock()
@@ -1778,6 +1910,7 @@ async fn open_pull_requests(
     let mut page_size = PULL_REQUEST_PAGE_SIZE;
     let mut failed_size_ceiling = PULL_REQUEST_PAGE_SIZE + 1;
     let mut calls = 0;
+    let mut cacheable = true;
     loop {
         anyhow::ensure!(
             nodes.len() < OPEN_PULL_REQUEST_LIMIT,
@@ -1790,16 +1923,19 @@ async fn open_pull_requests(
             );
             calls += 1;
             tracing::debug!(owner, repository, page_size, "reading GitHub pull request page");
-            match github_graphql(
+            match github_graphql_with_cache_eligibility(
                 client,
                 api_base,
-                token,
+                &read_token,
                 OPEN_PULL_REQUESTS,
                 json!({"owner": owner, "name": repository, "after": after, "first": page_size}),
             )
             .await
             {
-                Ok(data) => data,
+                Ok((data, request_cacheable)) => {
+                    cacheable &= request_cacheable;
+                    data
+                }
                 Err(error)
                     if page_size > 1
                         && error.to_string().contains(
@@ -1826,23 +1962,26 @@ async fn open_pull_requests(
             .skip(identities_read)
             .take(100)
             .collect::<Vec<_>>();
-        if !ids.is_empty() {
+        let partitions: &[Option<bool>] = if matches!(read_token, GithubAuth::Read { .. }) || matches!(issue_token, GithubAuth::Read { .. }) {
+            &[Some(false), Some(true)]
+        } else { &[None] };
+        for partition in partitions {
+            let ids = ids.iter().filter(|(_, is_pull)| partition.is_none_or(|pull| *is_pull == pull))
+                .map(|(id, _)| id).collect::<Vec<_>>();
+            if ids.is_empty() { continue; }
             anyhow::ensure!(
                 calls < PULL_REQUEST_CALL_LIMIT,
                 "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
             );
             calls += 1;
-            let resolved_data =
-                github_graphql(client, api_base, token, RESOLVED_ITEMS, json!({"ids": ids}))
-                    .await?;
-            resolved.extend(
-                resolved_data
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+            let (auth, query) = match partition {
+                Some(true) => (&read_token, RESOLVED_PULLS),
+                Some(false) => (&issue_token, RESOLVED_ISSUES),
+                None => (&read_token, RESOLVED_ITEMS),
+            };
+            let (resolved_data, request_cacheable) = github_graphql_with_cache_eligibility(client, api_base, auth, query, json!({"ids": ids})).await?;
+            cacheable &= request_cacheable;
+            resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
         identities_read = identities.len().min(identities_read + 100).min(1000);
         if !emit_pulls {
@@ -1875,6 +2014,17 @@ async fn open_pull_requests(
             .min(PULL_REQUEST_PAGE_SIZE)
             .min(failed_size_ceiling - 1);
     }
+    if matches!(read_token, GithubAuth::Read { .. }) {
+        let mut statuses = BTreeMap::new();
+        for node in &mut nodes {
+            let Some(head) = node.get("headRefOid").and_then(Value::as_str).map(str::to_owned) else { continue; };
+            if !statuses.contains_key(&head) {
+                let payload = github_json(client, format!("{api_base}/repos/{owner}/{repository}/commits/{head}/status?per_page=100"), &read_token, cache_for).await?;
+                statuses.insert(head.clone(), payload.value);
+            }
+            merge_legacy_statuses(node, &statuses[&head])?;
+        }
+    }
     let mut required = BTreeMap::<String, Option<Vec<RequiredCheck>>>::new();
     for node in &nodes {
         if let Some(base) = node.get("baseRefName").and_then(Value::as_str)
@@ -1906,7 +2056,7 @@ async fn open_pull_requests(
     open.sort_by_key(|facts| facts.get("number").and_then(Value::as_u64));
     let open = Arc::new(open);
     let resolved = Arc::new(resolved);
-    pull_request_checks()
+    if cacheable { pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(
@@ -1919,7 +2069,7 @@ async fn open_pull_requests(
                 resolved: resolved.clone(),
                 emit_pulls,
             },
-        );
+        ); }
     Ok(RepositoryDetails {
         open,
         resolved,
@@ -2029,207 +2179,8 @@ async fn required_by_base(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parking_lot::Mutex;
+    use super::test_github::*;
     use crate::resource::{github_usage_report, spend_as};
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    /// Pulls served by the fake listing, with the largest page it accepts.
-    type PullPages = Option<(Vec<Value>, usize)>;
-
-    /// A GitHub that answers each path from a table, revalidates with ETags, answers GraphQL
-    /// with a fixed body or queued pages, and keeps every request it received.
-    #[derive(Clone, Default)]
-    struct FakeGithub {
-        routes: Arc<Mutex<HashMap<String, (String, String)>>>,
-        links: Arc<Mutex<HashMap<String, String>>>,
-        refused: Arc<Mutex<HashMap<String, String>>>,
-        graphql: Arc<Mutex<String>>,
-        graphql_pages: Arc<Mutex<HashMap<String, String>>>,
-        graphql_queue: Arc<Mutex<std::collections::VecDeque<Value>>>,
-        graphql_pulls: Arc<Mutex<PullPages>>,
-        reject_combined_details: Arc<Mutex<bool>>,
-        graphql_requests: Arc<Mutex<Vec<Value>>>,
-        requests: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl FakeGithub {
-        async fn start() -> (Self, String) {
-            let github = Self::default();
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            // cargo test shares the production caches between tests. A recycled TCP port
-            // must not let a new fixture reuse another fixture's REST or GraphQL state.
-            let scope = format!("/fixture/{}", uuid::Uuid::now_v7());
-            let base = format!("http://{}{scope}", listener.local_addr().unwrap());
-            let server = github.clone();
-            tokio::spawn(async move {
-                loop {
-                    let (mut stream, _) = listener.accept().await.unwrap();
-                    let server = server.clone();
-                    let scope = scope.clone();
-                    tokio::spawn(async move {
-                        let mut request = Vec::new();
-                        let mut chunk = [0_u8; 4096];
-                        let header_end = loop {
-                            let size = stream.read(&mut chunk).await.unwrap();
-                            request.extend_from_slice(&chunk[..size]);
-                            if let Some(end) =
-                                request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
-                            {
-                                break end + 4;
-                            }
-                            if size == 0 {
-                                return;
-                            }
-                        };
-                        // Route tables and request assertions use paths relative to this
-                        // fixture's API base; the client/cache still sees the unique scope.
-                        let head = String::from_utf8_lossy(&request[..header_end]).replacen(&scope, "", 1);
-                        let length = head
-                            .lines()
-                            .find_map(|line| {
-                                line.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|value| value.trim().parse::<usize>().unwrap())
-                            })
-                            .unwrap_or(0);
-                        while request.len() < header_end + length {
-                            let size = stream.read(&mut chunk).await.unwrap();
-                            request.extend_from_slice(&chunk[..size]);
-                        }
-                        let target = head.lines().next().unwrap().to_owned();
-                        server.requests.lock().push(head.clone());
-                        let respond = |status: &str, etag: Option<&str>, body: &str| {
-                            let etag =
-                                etag.map_or(String::new(), |etag| format!("ETag: {etag}\r\n"));
-                            let link = target.split(' ').nth(1)
-                                .and_then(|path| server.links.lock().get(path).cloned())
-                                .map_or(String::new(), |link| format!("Link: {link}\r\n"));
-                            format!(
-                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{etag}{link}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                                body.len()
-                            )
-                        };
-                        let response = if target.starts_with("POST /graphql ") {
-                            let request: Value =
-                                serde_json::from_slice(&request[header_end..header_end + length])
-                                    .unwrap();
-                            let combined = request["query"].as_str().is_some_and(|query| {
-                                query.contains("pullRequests(") && query.contains("nodes(ids:")
-                            });
-                            // Only the pull request listing pages; identity resolution is its own query.
-                            let listing = request["variables"].get("first").is_some();
-                            let keyed = request["variables"]["after"].as_str()
-                                .and_then(|after| server.graphql_pages.lock().get(after).cloned());
-                            let body = if combined && *server.reject_combined_details.lock() {
-                                r#"{"errors":[{"message":"Something went wrong while executing your query"}]}"#.to_owned()
-                            } else if let Some((pulls, max_size)) = server.graphql_pulls.lock().as_ref().filter(|_| listing) {
-                                let first = request["variables"]["first"].as_u64().unwrap() as usize;
-                                if first > *max_size {
-                                    json!({"errors": [{
-                                        "message": "Something went wrong while executing your query",
-                                    }]}).to_string()
-                                } else {
-                                    let after = request["variables"]["after"].as_str()
-                                        .map_or(0, |cursor| cursor.parse::<usize>().unwrap());
-                                    let end = (after + first).min(pulls.len());
-                                    let cursor = end.to_string();
-                                    pull_page(
-                                        json!(pulls[after..end]),
-                                        (end < pulls.len()).then_some(cursor.as_str()), json!([]),
-                                    ).to_string()
-                                }
-                            } else if let Some(body) = keyed {
-                                body
-                            } else if let Some(page) = listing
-                                .then(|| server.graphql_queue.lock().pop_front())
-                                .flatten()
-                            {
-                                page.to_string()
-                            } else {
-                                server.graphql.lock().clone()
-                            };
-                            server.graphql_requests.lock().push(request);
-                            respond("200 OK", None, &body)
-                        } else {
-                            let path = target.split(' ').nth(1).unwrap().to_owned();
-                            let route = server.routes.lock().get(&path).cloned();
-                            let refused = server.refused.lock().get(&path).cloned();
-                            match route {
-                                _ if refused.is_some() => respond(
-                                    refused.as_deref().unwrap(),
-                                    None,
-                                    r#"{"message":"Resource not accessible by integration"}"#,
-                                ),
-                                None => respond("404 Not Found", None, r#"{"message":"Not Found"}"#),
-                                Some((etag, _))
-                                    if head
-                                        .to_ascii_lowercase()
-                                        .contains(&format!("if-none-match: {}", etag.to_ascii_lowercase())) =>
-                                {
-                                    "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
-                                }
-                                Some((etag, body)) => respond("200 OK", Some(&etag), &body),
-                            }
-                        };
-                        stream.write_all(response.as_bytes()).await.unwrap();
-                    });
-                }
-            });
-            (github, base)
-        }
-
-        fn route(&self, path: &str, body: Value) {
-            let body = body.to_string();
-            let etag = format!(
-                "\"{}\"",
-                &hex::encode(Sha256::digest(body.as_bytes()))[..12]
-            );
-            self.routes.lock()
-                .insert(path.to_owned(), (etag, body));
-        }
-
-        /// Answer `path` with `status`, such as `403 Forbidden`.
-        fn refuse(&self, path: &str, status: &str) {
-            self.refused.lock()
-                .insert(path.to_owned(), status.to_owned());
-        }
-
-        fn open_pull_requests(&self, nodes: Value) {
-            *self.graphql.lock() = json!({"data": {"repository": {"pullRequests": {
-                "pageInfo": {"hasNextPage": false, "endCursor": null},
-                "nodes": nodes,
-            }}}})
-            .to_string();
-        }
-
-        fn resolved_nodes(&self, nodes: Value) {
-            let mut response: Value = serde_json::from_str(&self.graphql.lock()).unwrap();
-            response["data"]["nodes"] = nodes;
-            *self.graphql.lock() = response.to_string();
-        }
-
-        fn take_requests(&self) -> Vec<String> {
-            std::mem::take(&mut *self.requests.lock())
-                .into_iter()
-                .map(|request| request.lines().next().unwrap_or_default().to_owned())
-                .collect()
-        }
-    }
-
-    /// Make this host's last GraphQL answer for `acme/garden` at `base` older by `by`.
-    fn age_pull_request_check(base: &str, by: Duration) {
-        let mut checks = pull_request_checks()
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let key = format!("{base} acme/garden");
-        let key = if checks.contains_key(&key) {
-            key
-        } else {
-            format!("{key} issues")
-        };
-        let check = checks.get_mut(&key).expect("GraphQL was read");
-        check.at = check.at.checked_sub(by).expect("the clock reaches back");
-    }
 
     fn request(
         fields: &[&str],
@@ -2282,21 +2233,110 @@ mod tests {
         })
     }
 
-    fn pull_page(nodes: Value, after: Option<&str>, resolved: Value) -> Value {
-        json!({"data": {
-            "repository": {"pullRequests": {
-                "nodes": nodes,
-                "pageInfo": {"hasNextPage": after.is_some(), "endCursor": after},
-            }},
-            "nodes": resolved,
-        }})
+    #[tokio::test]
+    async fn pat_only_mixed_opaque_identities_keep_one_query_and_legacy_cache_identity() {
+        use crate::github_http::app_read::tests::server;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let fixture = server(move |authorization, _, body| {
+            recorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(authorization, "Bearer fixture-pat");
+            assert_eq!(body["query"], RESOLVED_ITEMS);
+            assert_eq!(body["variables"]["ids"], json!(["opaque-issue", "opaque-pull"]));
+            (reqwest::StatusCode::OK, json!({"data":{"nodes":[
+                {"id":"opaque-issue","state":"CLOSED"}, {"id":"opaque-pull","state":"MERGED"}
+            ]}}))
+        }).await;
+        let details = open_pull_requests(&reqwest::Client::new(), &fixture.base,
+            &GithubAuth::test("fixture-pat"), Duration::ZERO, "pat-fixture/repo",
+            ("pat-fixture", "repo"), true, true, &BTreeSet::new(), false,
+            &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(details.identities_read, 2);
+        assert_eq!(details.resolved.len(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&format!("{} pat-fixture/repo", fixture.base)));
+    }
+
+    #[tokio::test]
+    async fn installation_pages_split_opaque_identities_and_merge_pat_legacy_status_once_per_head() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        use reqwest::StatusCode;
+        let root = tempfile::tempdir().unwrap();
+        let owner = "mixed-fixture";
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(60);
+        install(root.path(), owner, "gh-ci", "fixture-ci", expires);
+        install(root.path(), owner, "github-ledger", "fixture-ledger", expires);
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let mut first = open_pull(1, "same-head", "SUCCESS");
+        let mut second = open_pull(2, "same-head", "SUCCESS");
+        for node in [&mut first, &mut second] {
+            node.pointer_mut("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+                .unwrap().as_array_mut().unwrap().retain(|context| context["__typename"] == "CheckRun");
+        }
+        let fixture = server(move |authorization, path, body| {
+            recorded.lock().push((authorization.to_owned(), path.to_owned(), body.clone()));
+            if path.contains("/commits/") {
+                assert_eq!(authorization, "Bearer fixture-pat");
+                return (StatusCode::OK, json!({"state":"failure", "total_count":1,
+                    "statuses":[{"context":"legacy/build","state":"failure"}]}));
+            }
+            let query = body["query"].as_str().unwrap();
+            if body["variables"].get("owner").is_some() {
+                assert_eq!(authorization, "Bearer fixture-ci");
+                (StatusCode::OK, json!({"data":{"repository":{"pullRequests":{
+                    "pageInfo":{"hasNextPage":false}, "nodes":[first, second]}}}}))
+            } else if body["variables"]["ids"] == json!(["opaque-issue"]) {
+                assert_eq!(authorization, "Bearer fixture-ledger");
+                assert_eq!(query, RESOLVED_ISSUES);
+                (StatusCode::OK, json!({"data":{"nodes":[{"id":"opaque-issue","state":"CLOSED"}]}}))
+            } else {
+                assert_eq!(authorization, "Bearer fixture-ci");
+                assert_eq!(query, RESOLVED_PULLS);
+                assert_eq!(body["variables"]["ids"], json!(["opaque-pull"]));
+                (StatusCode::OK, json!({"data":{"nodes":[{"id":"opaque-pull","state":"MERGED"}]}}))
+            }
+        }).await;
+        let details = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), true, true,
+            &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(details.identities_read, 2);
+        assert_eq!(details.resolved.len(), 2);
+        assert_eq!(details.open.len(), 2);
+        for pull in details.open.iter() {
+            assert_eq!(pull["checks_state"], "failure");
+            assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "legacy/build" && check["conclusion"] == "failure"));
+            assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "lint"));
+        }
+        let reused = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), false, false,
+            &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(reused.identities_read, 0, "intentional PAT status reads must preserve the GraphQL detail cache");
+        assert!(Arc::ptr_eq(&details.open, &reused.open));
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 4, "one PR query, two separately authorized identity queries, one PAT status read");
+        assert_eq!(requests.iter().filter(|(_, path, _)| path.contains("/status")).count(), 1);
+    }
+
+    #[test]
+    fn legacy_status_merge_preserves_checks_and_refuses_truncation() {
+        let mut pull = open_pull(1, "head", "SUCCESS");
+        merge_legacy_statuses(&mut pull, &json!({"state":"pending","total_count":0,"statuses":[]})).unwrap();
+        assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "SUCCESS");
+        merge_legacy_statuses(&mut pull, &json!({"state":"pending","total_count":1,
+            "statuses":[{"context":"legacy","state":"pending"}]})).unwrap();
+        assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "PENDING");
+        assert!(merge_legacy_statuses(&mut pull, &json!({"state":"success","total_count":2,"statuses":[]})).is_err());
     }
 
     async fn read_pull_pages(base: &str, identities: &[String]) -> Result<RepositoryDetails> {
+        let identities = identities.iter().map(|id| (id.clone(), false)).collect::<Vec<_>>();
         open_pull_requests(
             &reqwest::Client::new(), base, &GithubAuth::test("fixture-auth"),
             Duration::ZERO, "github/acme/garden", ("acme", "garden"),
-            true, true, &BTreeSet::new(), true, identities,
+            true, true, &BTreeSet::new(), true, &identities,
         )
         .await
     }
@@ -3091,6 +3131,109 @@ mod tests {
         );
     }
 
+    /// A member that resumes from another member's read position, as a claim carries it, learns
+    /// the open items' identities from the open listing once. An issue that was open and
+    /// unchanged since that position, then transferred, is reported moved on the first poll; the
+    /// poll after it does not read the open listing again.
+    #[tokio::test]
+    async fn resuming_from_a_read_position_learns_open_identities_once() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route(
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            json!([]),
+        );
+        github.route(
+            "/repos/acme/garden/issues?state=open&per_page=100",
+            json!([issue(5, "2026-09-01T00:00:00Z", json!({"node_id": "I_fern"}))]),
+        );
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([{"id": "I_fern", "state": "OPEN", "number": 77,
+            "url": "https://github.com/acme/greenhouse/issues/77"}]));
+        let position = replicated_cursor(
+            &json!({"items_since": "2026-09-10T00:00:00Z", "seen": {"items": "elsewhere"}}).to_string(),
+        )
+        .unwrap();
+        let first = observe_at(request(&["issues"], Some(&position), None), &base, Some(&GithubAuth::test("test")))
+            .await
+            .unwrap();
+        assert_eq!(item(&first.facts, "issues", 5)["moved_to"], "resource/github/acme/greenhouse/issue/77");
+        assert!(github.take_requests().iter().any(|request| request.contains("/issues?state=open&")));
+
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], first.cursor.as_deref(), Some(first.facts)), &base, Some(&GithubAuth::test("test")))
+            .await
+            .unwrap();
+        assert!(
+            !github.take_requests().iter().any(|request| request.contains("/issues?state=open&")),
+            "the open listing is read once"
+        );
+    }
+
+    /// A resume whose open listing is longer than one poll reads learns the identities on the
+    /// first pages, and the polls after it read on from where it stopped until the listing ends.
+    #[tokio::test]
+    async fn resuming_reads_a_long_open_listing_across_polls() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route(
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            json!([]),
+        );
+        let start = "/repos/acme/garden/issues?state=open&per_page=100";
+        for page in 1..=11 {
+            let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+            let values: Vec<_> = (0..100)
+                .map(|offset| {
+                    let number = (page - 1) * 100 + offset + 1;
+                    issue(number, "2026-09-01T00:00:00Z", json!({"node_id": format!("I_{number}")}))
+                })
+                .collect();
+            github.route(&path, json!(values));
+            if page < 11 {
+                github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+            }
+        }
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([]));
+        let position = replicated_cursor(
+            &json!({"items_since": "2026-09-10T00:00:00Z", "seen": {"items": "elsewhere"}}).to_string(),
+        )
+        .unwrap();
+        let auth = GithubAuth::test("test");
+        let first = observe_at(request(&["issues"], Some(&position), None), &base, Some(&auth))
+            .await
+            .unwrap();
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert!(cursor.identities.contains_key("I_1000"));
+        assert!(!cursor.identities.contains_key("I_1001"));
+        assert!(cursor.resume_next.as_deref().unwrap().ends_with("&page=11"));
+
+        github.take_requests();
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        let second = observe_at(request(&["issues"], first.cursor.as_deref(), Some(first.facts)), &base, Some(&auth))
+            .await
+            .unwrap();
+        let cursor = RepositoryCursor::parse(second.cursor.as_deref());
+        assert!(cursor.identities.contains_key("I_1100"));
+        assert!(cursor.resume_next.is_none());
+        let requests = github.take_requests();
+        assert_eq!(
+            requests.iter().filter(|request| request.contains("/issues?state=open&")).count(),
+            1,
+            "the second poll reads only the page the first stopped before"
+        );
+
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], second.cursor.as_deref(), Some(second.facts)), &base, Some(&auth))
+            .await
+            .unwrap();
+        assert!(
+            !github.take_requests().iter().any(|request| request.contains("/issues?state=open&")),
+            "once the listing ends it is not read again"
+        );
+    }
+
     #[tokio::test]
     async fn open_pull_request_execution_pages_keep_all_items_and_the_total_bound() {
         let (github, base) = FakeGithub::start().await;
@@ -3516,6 +3659,8 @@ mod tests {
     async fn continuously_changing_sweeps_fall_back_to_normal_polling_without_committing() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let at = "2026-09-10T00:00:00Z";
         let start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
         for page in 1..=11 {
@@ -3552,6 +3697,22 @@ mod tests {
             cursor = observation.cursor;
         }
         assert!(RepositoryCursor::parse(cursor.as_deref()).items_scan.is_none());
+    }
+
+    /// What rides in the claim is how far the observer read, never the version maps.
+    #[test]
+    fn a_replicated_cursor_keeps_only_how_far_the_observer_read() {
+        let cursor = json!({
+            "items_since": "2026-09-10T00:00:00Z", "comments_since": "2026-09-11T00:00:00Z",
+            "seen": {"items": "digest"}, "detail_after": "I_orchid",
+            "identities": {"I_orchid": {"number": 1, "pull": false}},
+        }).to_string();
+        assert_eq!(
+            replicated_cursor(&cursor).as_deref(),
+            Some(r#"{"items_since":"2026-09-10T00:00:00Z","comments_since":"2026-09-11T00:00:00Z"}"#),
+        );
+        assert_eq!(replicated_cursor(r#"{"seen":{"items":"digest"}}"#), None);
+        assert_eq!(replicated_cursor("not a cursor"), None);
     }
 
     #[test]
@@ -3774,6 +3935,8 @@ mod tests {
                  "created_at": "2026-09-10T05:00:00Z", "updated_at": "2026-09-10T05:00:00Z"},
             ]),
         );
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let cursor = serde_json::to_string(&RepositoryCursor {
             items_since: Some(since.into()),
             comments_since: Some(comments_since.into()),
@@ -3843,6 +4006,8 @@ mod tests {
     async fn every_comment_and_review_is_one_recent_entry_without_its_body() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let since = "2026-09-10T00:00:00Z";
         github.route(
             &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),

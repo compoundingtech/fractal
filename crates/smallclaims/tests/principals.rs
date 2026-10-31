@@ -2059,7 +2059,7 @@ fn a_restart_keeps_the_keys_and_rebuilds_the_same_verdicts() {
 fn founding_does_not_rewrite_already_sealed_unsigned_delegations() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let path = smallclaims::fleet::join::store_path(root);
+    let path = root.join("claims.sqlite3");
     let (existing, envelopes) = {
         let store = Store::open(&path, "studio", Arc::new(Plain)).unwrap();
         store
@@ -2123,7 +2123,7 @@ fn founding_does_not_rewrite_already_sealed_unsigned_delegations() {
 fn a_populated_standalone_store_founds_a_fleet_without_losing_unsealed_delegations() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
-    let path = smallclaims::fleet::join::store_path(root);
+    let path = root.join("claims.sqlite3");
     let keys = smallclaims::fleet::join::key_directory(root);
     let node_key = Arc::new(smallclaims::fleet::join::standalone_node_key(root).unwrap());
     let existing = {

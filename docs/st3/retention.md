@@ -1,6 +1,6 @@
 # Retention
 
-How long st keeps each claim kind is one policy file:
+How long Fractal keeps each claim kind is one policy file:
 [`crates/fractal-schema/retention.toml`](../../crates/fractal-schema/retention.toml). It names every
 registered claim kind once, with its class, where its writes go and, for a transition, its window.
 It also holds the checkpoint rules, in order: which claims of a kind a checkpoint may drop.
@@ -35,6 +35,17 @@ the registry.
 | `on-change` | `latest` | every write goes to the local observation log; a claim replicates only when the state changes |
 | `local` | `local` | only the local observation log of the node that made it |
 | `system-local` | `system-local` | local when the system writes it without an actor; replicated when a person or agent writes it as its actor |
+
+A kind whose claims carry a `code` can name some codes in `local_codes`: those writes go only to
+the local observation log, whatever `log` says, and every other code follows `log`.
+`harness.diagnostic` uses it. Its control codes stay replicated claims, because other members and
+control logic read them: login and update fences, the channel attach fence, admission, capacity
+retries, prompts and their answers, suspension, wake failures and stop deferrals. Its
+observability codes, such as render warnings, codex and pi driver failures and the Claude
+channel's initialization and receipt reports, are read only by people; they stay on the node that
+wrote them and go to OpenTelemetry. A code `local_codes` does not name stays a claim, so a new code
+replicates until someone classes it. An older member keeps replicating every code it writes, and
+this build stores those claims as before.
 
 The local observation log is trimmed by each node on its own, after `[observations] retention`
 (seven days by default); [Data authority](data-authority.md) describes it. A replicated claim is

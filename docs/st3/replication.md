@@ -1,6 +1,6 @@
-# st fleet replication
+# Fractal fleet replication
 
-Fleet replication is optional. A node outside a fleet is a complete local-only st system.
+Fleet replication is optional. A node outside a fleet is a complete local-only Fractal system.
 `st doctor` reports this default as `pass` with “no fleet is configured” and points to
 `st fleet create` or `st fleet join`. It reports “intentionally local-only after leaving its
 fleet” only when `st fleet leave` has recorded that explicit decision in `left-fleet.json`.
@@ -26,6 +26,8 @@ routes for backward compatibility. To let fleet preference select the carrier,
 remove the explicit override. Legacy operation without `fleet.toml` retains
 Tailscale-first automatic routing among locally available carriers.
 
+Fabric fleet readers accept `st3/fleet/<fleet>` and `fractal/fleet/<fleet>` for the same fleet; default writers still use `st3/fleet/<fleet>`.
+
 Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
 front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
@@ -38,8 +40,11 @@ transport, and rejects a carrier absent from the list. An already-first carrier
 is a no-op, including no service restart. Changes are locked, saved atomically,
 and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
-Installed services restart automatically; otherwise restart both `st3 daemon` and
-`st3 replication-worker` as instructed, including when using `--no-service`.
+Installed services restart automatically. Without services, start
+`fractal replication-worker` first, retain its PID, then start
+`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
+generation before listening; this option is refused for service-managed daemons. A manual
+worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
 preference and enabled transports unchanged.
@@ -47,13 +52,32 @@ preference and enabled transports unchanged.
 ## Local adapter membership and leave authority
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
-socket. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
+socket. Internal routes (`/v1/internal/...`) serve only the node's own processes: its
+replication worker, its adapters and its operator's CLI. They refuse seat callers, meaning a
+process running under an agent seat's harness, with `foreign-agent-actor`. A seat reads the
+fleet views it may see through public routes with the same answers: `GET /v1/fleet/status`,
+`/v1/fleet/membership`, `/v1/fleet/admission-residue` and `/v1/fleet/invites`. The CLI and the
+client use those first, and fall back to the internal route on a daemon that predates them. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
 `members`, and legacy removals. A member's `member_key` identifies its incarnation;
 names are not identity. `state = "current"` is application membership authority.
 An ended member is not authorized for ordinary replication or owner RPC, even if
 a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
+
+On Linux the daemon observes worker-only routes (`/v1/internal/replication/*`,
+`/v1/internal/seat-freshness`, `/v1/internal/seat-snapshot` and
+`/v1/internal/client-read/forward`) against the Unix connector's process
+generation. Services use the supervisor-observed worker; foreground operation
+uses the explicitly enrolled process. This preparatory observation logs
+would-refuse requests without changing route admission. On macOS no socket-bound
+process-generation witness is available: these routes retain existing admission
+and emit `unverified-platform`, not an authentication success. The unbound local
+caller authority gap remains open on macOS. `LOCAL_PEERPID` and `LOCAL_PEERTOKEN`
+resolve through a live numeric PID; after PID reuse they can attribute a surviving
+socket to the wrong worker. Operator fleet routes retain their existing local
+authority boundary.
+
 
 Adapters that retain a departing member's transport must instead make their
 decision from one `GET /v1/internal/fleet/leave-state` response:
@@ -292,6 +316,62 @@ a shared derived column and is digested with the document row. The fleet-size re
 260,000 claims and 10,000 document versions, then requires latest listings, history pages,
 lookup and cursor reads to finish within two seconds and verifies the indexed latest query plan.
 
+## Peer protocol capability negotiation
+
+Hosts roll out independently. A new peer operation, or a changed ID or wire format, MUST
+be gated on an explicit versioned capability before dispatch. Each forwarding hop checks
+its next hop independently. Missing capability data (including an older endpoint without
+discovery) means unsupported, not permission to probe the older closed-enum decoder.
+The caller MUST either use a genuinely compatible operation or return a typed refusal
+with actionable upgrade guidance; mixed versions are not globally unsupported, and an
+older peer must not become a generic “conversation unavailable” error.
+
+Owner-read relays discover capabilities through the existing authenticated, signed
+`GET /v1/peer/client-read` response's `capabilities` set (`id`, `version`, `state`).
+`session-detail-child-id` version 1, `state: granted`, binds the `session-detail`
+operation to three-field subagent child IDs: native parent, task ID, and root routing
+session. Relays require it for session detail and child conversation reads; absent or
+incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-too-old`
+with “This host runs an older Fractal version; update it to open subagent conversations.”
+No session-detail POST or changed child ID is sent to that peer.
+
+Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`, on which
+a seat's host pushes when it last heard its seats. A re-stamp that changes nothing stays in the
+host's local observation log, so this is how another member hears a resting seat.
+
+The push is reactive:
+- A commit on the host wakes its pusher. Within 10 seconds of that commit it reads the newest
+  local `harness.observed` of every seat its declarations place on it, in one statement.
+- It sends each other member, or configured peer, only the seats that changed since its last
+  push to that member. Every member is sent at once, directly, never through a relay hop. A push
+  names up to 2,048 seats, each with its incarnation and the time the host heard it.
+- It pushes only to a member whose own newest `daemon.started` advertises
+  `features.seat_freshness = 1`. A member whose `daemon.started` changed restarted, and gets
+  every seat again.
+- A failed push is retried a minute later, with or without a new commit, and the round runs once
+  when the daemon starts. Otherwise nothing is sent while nothing changes.
+
+The receiver takes a pushed time later than its own clock plus a minute as that time, so a host
+whose clock runs ahead can't keep a seat looking fresh. A bound harness is refused on the
+daemon's `/v1/internal/seat-freshness`: only the replication worker, which authenticated the
+sender, records a push. The receiver records a seat only when its declaration places the seat on
+the member that pushed it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
+recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed. The
+host retries it a minute later without waiting for a commit, then less often while it stays owed,
+doubling up to every 15 minutes. An agent card's freshness and a
+mail hold read the latest of the replicated report, the local log, and that time. The card's
+90-second rule ages it, so a host that stops pushing reads stale.
+
+A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
+re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
+route records nothing. Its peers read the replicated report, as before.
+
+Writers emit only three-field child IDs. At the link boundary, readers still accept
+two-field native-parent/task links because open or bookmarked links can outlive the
+gateway version that generated them. The reader derives the root routing session from
+the native parent (recursively for descendants), then uses the current internal shape.
+This does not add a legacy writer or relax transcript ownership and path validation.
+
 ## Rolling upgrades and waiting claims
 
 A registry difference never refuses an exchange. Admission checks the envelope signature,
@@ -320,7 +400,7 @@ replication activation after the daemon serves runs them on a read connection.
 
 Admission prepares each envelope before it takes the writer: it decodes the payload, checks
 the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
-classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+classifies without the store (Fractal's does), classifies its kinds and fields. The writer is held
 only for the checks that read stored state and the writes: the envelope row is still there and
 not dropped by a checkpoint, membership and signatures still admit it, earlier record states
 (a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
@@ -455,7 +535,7 @@ This projection is independent of the claim/resource vocabulary and replication 
 
 ## Add any machine
 
-Install st on the new machine and configure the person who operates it, as described in the
+Install Fractal on the new machine and configure the person who operates it, as described in the
 [README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
@@ -525,13 +605,33 @@ Fabric routes name the lasting remote endpoint: the worker creates or reacquires
 tunnel itself. Several peer entries may name the same member with distinct routes.
 Arbitrary DNS names and LAN/public HTTP peer URLs remain rejected. The listener refuses a
 wildcard, LAN or public address unless `peer_listen_allow_plain_http = true` (or
-`--peer-listen-allow-plain-http`) is set: st cannot tell whether such a path is encrypted,
+`--peer-listen-allow-plain-http`) is set: Fractal cannot tell whether such a path is encrypted,
 and the listener carries terminal input and attach grants as well as replication.
 Replication is plain HTTP, encrypted between hosts by Tailscale or a Fabric tunnel;
 the fleet secret and joined members' signatures still authenticate the exchange.
 See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
+
+The per-peer HTTP client retires pooled connections after ten idle seconds.
+The Axum listener enables keep-alive but configures no finite idle deadline:
+Hyper's nominal 30-second header-read default is inactive without a timer.
+TCP keepalive remains reqwest's default; it does not detect an established
+carrier stream that accepts TCP traffic but stops forwarding application bytes.
+
+A signed exchange that fails with a typed transport error or timeout before
+complete response headers is retried once using a new client with an empty pool.
+The retry retains the signed body and correlation ID. The protocol has no
+request nonce or timestamp window; identical active requests share a backend job
+by sender and body digest, and envelope receipt remains idempotent after completion.
+No retry occurs after response headers (including overload or refusal), during
+response-body reads, for application errors, or for other peer endpoints.
+Each HTTP send retains its twenty-second timeout, so two stalled sends can take
+forty seconds before route fallback/backoff. The enclosing five-minute overload
+poll deadline still bounds both sends; poll counts and retry delays are unchanged.
+The fallback cooldown and recent-peer retry waits begin after the final outcome,
+so this additional attempt can delay route fallback by up to twenty seconds.
+
 
 Only transport failures advance to the next configured route: connection failures,
 broken request/response streams (including typed TLS fatal alerts and bad records),
@@ -600,6 +700,24 @@ The main daemon owns the local API, projections, reconciliation, and runtime cha
 The `replication-worker` process owns peer HTTP, authentication, exchange, and admission.
 
 The service installer creates a separate systemd user service or launchd agent for the worker. A worker crash cannot stop the main daemon.
+
+Deploy the same build to the daemon and its **same-host worker**. Updating only
+the daemon does not upgrade the worker's exchange algorithm: an old initiating worker can
+still stall behind checkpoint-only ranges even when the daemon includes the recovery fix.
+Different fleet members may continue running different compatible builds.
+
+`/v1/health` exposes the daemon's existing `build.commit`. At startup the worker compares that
+identity and logs a warning on mismatch, or when an older daemon cannot report it;
+replication continues rather than introducing an outage during a coordinated rollout.
+The worker atomically records its build, PID and runtime process-start token in
+`STATE/replication-worker-build.json`, outside the replicated store. A failure to write this
+diagnostic file logs a warning without stopping replication.
+`st doctor`'s `replication-worker-build` check warns on a mismatch, a stale process identity,
+or a missing/unreadable report. Missing, empty and `unknown` build identities cannot be
+compared: neither a match nor skew is claimed unless both commits are known. Older workers
+without reports remain explicitly **unknown**. The runtime's existing start-token fencing
+detects PID reuse on Linux; other platforms retain the runtime's PID-based token limitation.
+The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
 
@@ -735,6 +853,8 @@ Each inventory says how many envelopes its sender takes in one exchange, 4,096 f
 Each exchange also carries a claim-range summary: claim-range protocol version 1, and the count and digest of every claim its sender retains. Two members can hold different envelopes and still retain the same claims, so a member compares the claims, not envelope histories or projection outputs. The digest comes from the store's range index (`claim_range_digests`), and a summary omits it while the index is still folding claims in. A member compares only a summary of the version it speaks with its own folded index, and records in the peer's sync status when it last compared and since when the claims have differed (`claims_compared_at_unix_ms`, `claims_differ_since_unix_ms`). Claims in flight differ for a while, so the difference is reported and gates nothing: it does not mark the pair diverged, end or hold a first sync, or start a repair. Missing claims still arrive through ordinary envelope transport. An older peer sends no summary and ignores this one, and is compared by envelopes alone.
 
 When the claims differ and an exchange moved no envelopes, the dialing worker walks the difference as the lowest-priority sync work, at most four round trips per exchange. Each round trip is an ordinary summary exchange whose inventory carries one bounded `claim_range_query`, and the peer answers in its exchange's `claim_ranges`: every non-empty top range (64 tops by the first six bits of a claim ID), then the leaves of at most 4 differing tops (4,096 leaves by the first three hex digits), then the IDs of at most 8 differing leaves (at most 4,096 IDs beyond the first leaf), then the envelopes carrying at most 512 claims the walker found it lacks. Those envelopes travel with the peer's ordinary exchange and are admitted like any other; no projection image or peer result is installed. A claim the walker has retired is never asked for, and a range the peer holds nothing in is not descended, since only the peer's claims can be missing here. A walk runs once for each pair of whole-set digests, so claims one side retired, or holds that the other lacks, cost one walk until either side's claims change; an answer from an index still folding claims in is asked again at the next exchange. A peer without the claim-range protocol ignores the query and is never walked.
+
+Between members that trim locally (`[trim] local`), the summary also carries `retired`: the same summary of the claim IDs the sender retired (`retired_claim_ids`, namespace 1 of the range index), sent only once that namespace has folded. A member that also trims locally compares it, and the walk descends the retired ranges beside the retained ones, in the same queries (`claim_range_query.retired`). A retired ID the peer lists and this member lacks is recorded as retired here when the answer arrives; nothing is fetched. So the set travels: a member never admits, asks for or serves a claim another member deleted, even when the claim comes from a member that still holds it or runs an older build. Recording one changes this member's retired digest, so an unfinished retired walk continues under the new pair. Ordinary members and older builds neither send nor read `retired`.
 
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
@@ -944,10 +1064,17 @@ It shows as `refused`, with the Fabric node and service, in `st replication stat
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
 
-The worker keeps a refused route selected and retries with normal peer backoff, as
-for other application errors; it does not bypass the refusal through a fallback
-route. A changed membership route retries immediately, and a later successful
-outbound exchange clears the refusal. Members that do not grant each other the
+A refused preferred route stays selected and retries with normal peer backoff, as
+for other application errors; the worker does not bypass the refusal through a fallback
+route. A refusal answers for its own route only. When the worker reached a refused
+route by failing over from the preferred one (a tailnet exchange broken by the member's
+restart, say), it holds that fallback route for 30 minutes and returns to the preferred
+route at once: the refusal adds nothing to the preferred route's backoff, and the held
+route is not redialed as if it were a network fault. The peer shows `refused` until an
+exchange over another route works, and then `up`; the refused attempt stays as its last
+failed exchange. A peer whose every usable route fails keeps the long, accumulating
+backoff. A changed membership route clears the hold and retries immediately, and a
+later successful outbound exchange clears the refusal. Members that do not grant each other the
 service can still converge through a common hub; the hub must grant and exchange
 with both leaves. The worker never changes Fabric grants itself.
 
@@ -1081,6 +1208,88 @@ for it; a daemon that never checks shows neither the line nor the row. A miss is
 other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
 replication check fails `st doctor` as above.
 
+### Answers across members
+
+A member that trims on its own (`[trim] local`) deletes claims its peers may still hold, so two
+members stop holding the same claims and their envelope and claim digests no longer settle a
+comparison. What must still agree is what readers answer. `smallclaims::answers`
+summarizes that per claim kind, at a cut, so members can compare it:
+
+- A kind's answer for one key, a subject and the writer that wrote it, is the key's newest claim
+  in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
+- A key counts once its newest claim is older than the cut. A key with a newer claim is still
+  moving and is left out; the cut never selects an older claim, which a trimmed member may no
+  longer hold. A member that computes before a key's newer claim arrives still counts the key,
+  so two members that computed minutes apart can differ only in such keys. Each kind also
+  reports `before_cut`, a digest over every key's newest claim older than the cut, moving keys
+  included: members that still hold those claims agree on it whenever they computed, and a kind
+  whose `before_cut` agrees is no difference. Where it does not, because one member trimmed a
+  moving key's older claim, the keys a narrowing lists carry each moving key, marked `moving`,
+  and a key moving on either member is no difference.
+- Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
+  keys and answers. `claims` is compared only between members that trim the same way, have
+  finished trimming the same checkpoint (`trimmed_cut_unix_ms`), and had no later trim
+  unfinished while they computed (`trim_unfinished`): a day's trim deletes claims older than the
+  answers cut, so two members that computed either side of it count different claims and answer
+  the same.
+- A claim that a `record.repaired` replaced counts nowhere. Whether a member still holds one
+  depends on whether it admitted or wrote it before the repair arrived (#4282), so the summary
+  leaves out every claim in `projection_digest_repaired_claims`.
+- Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
+  difference narrows to a bucket and then to its keys without listing a whole kind.
+
+A summary reads every claim on a reader connection, ten thousand claims per statement in index
+order, so no statement holds a read snapshot (and the WAL) for minutes: ten minutes or more on a
+store of three million claims. It is taken once a cut and kept, never per request. The
+property test `a_trim_that_keeps_each_newest_claim_answers_the_same` holds the trim invariant for
+random histories and cuts.
+
+Once a day each member compares its answers with every peer it dials. The cut is the start of the
+UTC day, and the check waits an hour into the day so replication has brought every member what
+was written before it. A member asks a peer only after an exchange with it moved nothing, over the
+signed peer route `/v1/peer/answers`, authenticated like an exchange. The daemon computes its
+answers on a thread of its own, answering `pending` until it has them, so a request never waits
+for a pass over the store. It keeps the summary for the rest of the cut's day, and beside its
+database (`claims.sqlite3.answers.json`, readable by its owner only), so a restart and every
+peer's ask at the same cut are answered from it rather than computed again; a new build computes
+again. The summary also records the newest claim admitted when it was computed. A claim keeps
+the time its origin accepted it, so a member that was offline replays claims older than the cut
+after the summary was taken; before answering from a kept summary the member looks for a claim
+admitted since that is older than the cut, a short range of the primary key, and computes again
+if it finds one. A claim accepted after the cut only moves its key.
+
+When a kind differs the member compares again two hours later. A difference that lasts two hours
+is narrowed:
+bucket digests for each differing kind, then the keys of the differing buckets, eight buckets a
+read; while every key found moves on one member, the next eight are read, until a key differs or
+every differing bucket is read. Up to eight claim kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
+where those compare, is no difference. The member records
+one `operational.failure` on its own `daemon/NODE` subject with the condition
+`answers-disagreement`, an episode per member pair, and a `reproduction` that names every
+differing kind with its counts and up to twenty keys, each with both members' answers. The fault
+goes to the agent `[trim] notify` names (`notify = "agent/..."`), or the fleet's fault agent
+without it. While the pair's fault is open, later differences add nothing; the first check of the
+pair that agrees ends it with `operational.recovered`. Each difference is a bug in trimming,
+replication or a reader: it becomes a failing test, then a fix. Nothing repairs it from a peer.
+
+A peer on a build without the route answers 404 and is not compared.
+
+Some readers fold a subject's claims rather than read its newest one. A trim can keep every
+key's newest claim and still change what they answer, by dropping an older claim they fold: a
+dropped credential transition moves a seat's needs-login since (#4237). So the daemon's summary
+also covers the readers the checkpoint proof reads (`checkpoint_rules::subject_answers`):
+current harness, status history, actual state and source, incarnations and working since,
+reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`) and step
+(`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
+`reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
+kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+A fold reader has no `before_cut`, so a member serving a kept summary first reads which counted
+subjects now have a claim at or after the cut, one index read each (0.1 s for 23,000 subjects on
+a store of 52 GB), marks them moving and counts the readers again without them. Two members that
+computed hours apart, such as either side of a restart onto a new build, then leave out the same
+seats: a seat whose held usage readings were flushed late moves on both.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
@@ -1187,7 +1396,7 @@ st replication checkpoint excuse node-c --reason "away for a week" --as person/o
 
 `plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
 runs there at a time. While another proof runs, as one does right after the daemon starts, the
-daemon holds the plan for up to a minute, and `st` asks again for up to four minutes more and
+daemon holds the plan for up to a minute, and Fractal asks again for up to four minutes more and
 prints that it is waiting. A proof still running after that is refused with
 `checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
 
@@ -1218,9 +1427,66 @@ sealing. Every participant must seal, so this stops trimming for the whole fleet
 checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
-and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
-it stops the old checkpoints on the other members until a person excuses it. No claim family is
-trimmed locally yet.
+and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
+members until a person excuses it.
+
+Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
+it captures the set before the cut, plans the drop with the same audited rules and guards a shared
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
+what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
+same operation, the same for every runtime reset and harness diagnostic (`LOCAL_TRIM_CONTEXT_KINDS`:
+the status-history rule judges a seat's harness observations with them, and keeps a transition a
+reset or a restored prompt depends on), the protections naming those claims, each writer's newest envelope, and the claims
+citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
+each cut first reads the claims that arrived since the last, in arrival order, committing each page
+with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
+sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
+drop as a capture of the whole store. Only the kinds in
+`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
+and the trimmed log: today `observer.observed` and `harness.observed`. Everything else is kept, as a protected claim is.
+An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
+fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
+raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
+admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
+envelopes atomic. One audited
+rule stays out because a reader reads the history it drops, which no projection digest covers:
+`resource.observed`'s keeps only the newest observation of a GitHub pull request, and a watch walks
+those observations back to find when the pull request left the merge queue. `harness.observed`
+joined once its rule kept the credential report where a seat's needs-login run begins (rules
+version 24, see #4237). Two checks stand in for the
+proof. A plan that would drop the newest claim of any subject and kind is refused before anything
+is recorded. While deleting, every chunk compares the projection digests before and after and
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
+an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
+trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+such a member, by the `[trim] notify` agent (`--as agent/...`). No other agent may: resuming past a
+stop is the safety decision. The stopped cut is set aside and the next day's cut goes on, and the
+resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
+disk cannot hold.
+Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
+and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
+at once. A member deletes at most `[trim] daily_claims` claims a day (100,000 unless set; about
+1.7 h of paced deletion on a 53 GB member). A cut that drops more stops at that count, stays
+`trimming`, and goes on the next day where it stopped; the next cut begins only after it finishes,
+with what the day has left, so a large first cut drains over several days instead of one long
+trim. The day's count is kept in `meta` (`local_trim_day`) in the deleting transaction, so a
+restart neither repeats nor exceeds it.
+
+On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
+what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
+the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
+recorded, was not a deletion and leaves it. From then on an identity enters the ledger only as it is
+deleted, in the deleting transaction, never when a cut records it: a cut that stops before trimming,
+or a chunk that rolls back, retires nothing a peer could learn. Admission then refuses a retired envelope or claim from
+any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
+peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
+held. It still syncs everything else with every peer as before. Turning the setting off stops
+reading the ledger as the authority. The retired claim IDs travel between such members by claim-range walk, as
+"Protocol" describes.
+
+`[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
+finds this member and a peer answering differently; see [Answers across members](#answers-across-members).
 
 ## Recovery
 
@@ -1283,8 +1549,9 @@ Success records omit `failure`. Older worker requests and older observations wit
 details remain readable and do not invent a cause. Carrier-only client sync notices
 remain unchanged; use replication-status JSON for the diagnostic details.
 
-For HTTP failures, `failure.correlation_id` identifies one request (each overload
-poll has its own ID), and `failure.client_stage` names the last observed client
+For HTTP failures, `failure.correlation_id` identifies one signed request including
+its optional fresh-connection retry (each overload poll has its own ID), and
+`failure.client_stage` names the last observed client
 boundary: `send-started`, `connected`, `headers-received`, or `pooled-or-unknown`.
 `connected` means request-scoped connector middleware observed a fresh connection;
 on a Fabric route this is the local tunnel connection, not proof that the remote
@@ -1299,17 +1566,26 @@ Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
 Fast successful clients log boundaries at DEBUG. A locally failed client exchange
 or one crossing five seconds promotes retained boundaries to INFO with their
 original timestamps; subsequent client boundaries remain INFO. The client emits
-`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`.
+`client-send-start`, `connect-done`, `client-fresh-retry`,
+`client-headers-received`, and `client-failed`.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.
 Search both hosts' journals for the ID from the failed record; no DEBUG logging
-is required. The summary includes `status`, `server_ingress_unix_ms`,
+is required. The summary includes `status`, `head_received_unix_ms`,
+`body_read_complete_unix_ms`, `request_body_bytes`, `server_ingress_unix_ms`,
 `server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
 `response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
 `backend_done: false` and absent backend timestamps mean no completed backend
 answer was observed at response handoff (for example an overload or early refusal).
 The server's individual boundaries remain DEBUG, including late backend completion.
+Head-received means the HTTP request head reached the route middleware, before
+Axum buffers the body. Body-read-complete means that buffering reached the end
+of the wire body; the byte count is compressed bytes when content encoding is used.
+An upload that errors, exceeds the body limit, or is cancelled before completion
+emits one INFO `replication exchange request body incomplete` record when dropped,
+with correlation ID, head arrival time, bytes read so far and `body_read_error`.
+A missing handler summary alone therefore does not prove a missing request head.
 Ingress means the handler entered after Axum extracted the body. Headers-ready
 means the signed/compressed response was handed to Axum, not that the socket write
 completed. A retained backend job records completion with its originating request

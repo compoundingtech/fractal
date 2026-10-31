@@ -519,8 +519,8 @@ mod tests {
     #[test]
     fn optional_patterns_preserve_existing_manifest_hash_inputs() {
         for source in [
-            include_str!("../../../examples/st3/custom-review.json"),
-            include_str!("../../../examples/st3/decision-tree.json"),
+            include_str!("../../../examples/fractal/custom-review.json"),
+            include_str!("../../../examples/fractal/decision-tree.json"),
         ] {
             let manifest: Manifest = serde_json::from_str(source).unwrap();
             manifest.validate().unwrap();

@@ -11,7 +11,8 @@ use fractal_daemon::MissionsStore;
 use super::adapt::{self, Extras};
 use super::direct;
 use super::glass::GlassWrite;
-use super::view::{Load, MissionPreview};
+use super::resource_sidebar::ArrangementV1 as _;
+use super::view::Load;
 use super::{AgentControl, Effect, Guard, Ui};
 use crate::feed::{self, Command, Inventories, Inventory, Window};
 use crate::model::{self, Collection, Model};
@@ -308,7 +309,7 @@ async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRea
         Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
         Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.human())),
         Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
-            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this st does not list its clients yet: its daemon needs an update".into(),
+            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this version of Fractal does not list its clients yet: its daemon needs an update".into(),
             error => error.human(),
         })),
         Inventory::Usage(hours) => {
@@ -360,10 +361,10 @@ fn usage_error(error: &fractal_client::ClientError) -> String {
     match error {
         // A daemon from before the read answers its path with a bare 404.
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
-            "This st does not serve usage yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         error => format!("Could not read usage: {}", error.human()),
     }
@@ -400,15 +401,16 @@ enum Fetched {
         /// How long st took to answer, so a slow st is not asked for more than the person scrolled to.
         took: Duration,
     },
-    Preview(String, Load<MissionPreview>),
-    /// A document's text, by the reference its pane names, or why it could not be read.
-    Document(String, Result<String, String>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
     AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
     Session(String, Result<Box<fractal_client::Session>, String>),
+    /// A document's page, a page of the documents list, and the documents a mission or step names.
+    Document(String, Result<fractal_client::DocumentContent, fractal_ui_model::documents::Unavailable>),
+    DocumentList(Option<String>, Result<fractal_client::DocumentsPage, fractal_ui_model::documents::Unavailable>),
+    DocumentReferences(String, Result<fractal_client::DocumentReferences, String>),
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
@@ -544,7 +546,6 @@ pub fn run(context: Context) -> Result<()> {
     // The session each conversation was last subscribed again for, so it is asked once.
     let mut resubscribed: BTreeMap<String, String> = BTreeMap::new();
     let mut sessions_requested = HashSet::new();
-    let mut preview_requested: HashSet<String> = HashSet::new();
     let mut body_requested: HashSet<String> = HashSet::new();
     let mut read_receipts = ReadReceipts::default();
     // Messages sent from here, shown at once until st reports them back.
@@ -568,6 +569,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.build = true;
     ui.live = true;
     ui.glasses = super::glass::Glasses::open(space, super::glass_store::path(&person));
+    ui.prune_place_history();
     // A space opens where this device left it.
     ui.show_focused();
     if std::env::args().any(|arg| arg == "--old") {
@@ -580,6 +582,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
     }
     let _guard = Guard::enter(true)?;
+    ui.keyboard_enhanced = _guard.enhanced;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
     if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
@@ -670,7 +673,7 @@ pub fn run(context: Context) -> Result<()> {
         let turn_started = Instant::now();
         // A program written over on disk while it runs is told to the person at once, and noted.
         if started.elapsed().as_secs().is_multiple_of(10) && super::lastrun::binary_replaced() {
-            ui.flash("st was updated on disk while this was running: restart it, the system may stop it");
+            ui.flash("Fractal was updated on disk while this was running: restart it, the system may stop it");
         }
         ui.tick = (started.elapsed().as_millis() / 100) as u64;
         if ui
@@ -727,11 +730,12 @@ pub fn run(context: Context) -> Result<()> {
                     extras.inventory_partial.clear();
                     inventory_sent = None; legacy_requested.clear(); legacy_pending.clear();
                     slo_stale = true; slo_reading = false; slo_history_asked.clear();
+                    // Another member's objectives are not this one's: drop them until it answers.
+                    extras.slo = Load::Loading; extras.slo_history.clear(); extras.slo_stale = None;
                     extras.live = false;
                     attached = None;
                     shown_tab = usize::MAX;
                     sessions_requested.clear();
-                    preview_requested.clear();
                     body_requested.clear();
                     changed = true;
                 }
@@ -743,10 +747,11 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
                     ui.resource_sidebar.writable = true;
                     ui.resource_sidebar.arrangements = items.into_iter().filter_map(|item| match item {
-                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted => Some(arrangement),
+                        Resource::Arrangement(arrangement) if arrangement.owner == person && !arrangement.deleted
+                            && matches!(arrangement.body, fractal_client::ArrangementBody::V1(_)) => Some(arrangement),
                         _ => None,
                     }).collect();
-                    if ui.resource_sidebar.arrangements.iter().any(|a| a.body.folders.values().any(|folder| folder.tombstone.is_none()))
+                    if ui.resource_sidebar.arrangements.iter().any(|a| a.v1().folders.values().any(|folder| folder.tombstone.is_none()))
                         && !ui.glasses.sidebar.configured {
                         ui.glasses.sidebar.shown = true;
                     }
@@ -962,13 +967,11 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Degraded(reason) => {
                     ui.quality.live(false);
                     // st answered; only its live stream is being replaced. Not offline, and
-                    // nothing on screen is cleared.
+                    // nothing on screen is cleared. Not flashed either: it reconnects by itself,
+                    // the bar says connecting meanwhile, and clicking it says why.
                     extras.live = false;
                     extras.offline = None;
                     extras.offline_since = None;
-                    ui.flash(format!(
-                        "Live stream lost ({reason}); st answers, reconnecting"
-                    ));
                     extras.degraded = Some(reason);
                     attached = None;
                     changed = true;
@@ -995,15 +998,6 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Protocol(key, width, height, protocol) => {
                     encoding.remove(&(key.clone(), width, height));
                     ui.content.install_protocol(key, width, height, protocol);
-                }
-                Fetched::Document(reference, result) => {
-                    ui.documents.insert(
-                        reference,
-                        match result {
-                            Ok(text) => Load::Ready(text),
-                            Err(why) => Load::Failed(why),
-                        },
-                    );
                 }
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
@@ -1092,9 +1086,6 @@ pub fn run(context: Context) -> Result<()> {
                         waiting
                     });
                 }
-                Fetched::Preview(id, preview) => {
-                    extras.previews.insert(id, preview);
-                }
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
@@ -1134,6 +1125,9 @@ pub fn run(context: Context) -> Result<()> {
                         Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
                     }
                 }
+                Fetched::Document(reference, outcome) => ui.documents.got(&reference, outcome),
+                Fetched::DocumentList(prefix, outcome) => ui.documents.listed(prefix.as_deref(), outcome),
+                Fetched::DocumentReferences(subject, outcome) => ui.documents.referenced(&subject, outcome),
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
                     if generation == resources_generation { match outcome {
@@ -1216,10 +1210,16 @@ pub fn run(context: Context) -> Result<()> {
                     match outcome {
                         Ok(rows) => {
                             extras.slo = Load::Ready(rows);
+                            extras.slo_stale = None;
                             // A chart open now is read again beside the fresh rows.
                             slo_history_asked.clear();
                         }
-                        Err(why) if matches!(extras.slo, Load::Ready(_)) => ui.flash(format!("Could not read objectives and budgets again: {why}")),
+                        Err(why) if matches!(extras.slo, Load::Ready(_)) => {
+                            // The rows stay, marked as the last reading, so a failed refresh is not
+                            // taken for a fresh all clear.
+                            ui.flash(format!("Could not read objectives and budgets again: {why}"));
+                            extras.slo_stale = Some(why);
+                        }
                         Err(why) => extras.slo = Load::Failed(why),
                     }
                 }
@@ -1270,21 +1270,50 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         resources_shown = showing_resources;
-        // A document is read once, when its pane is first shown.
-        if let Some(super::pane::Pane::Document(reference)) = ui.focused_pane()
-            && !ui.documents.contains_key(&reference)
+        // Documents on screen, the list, and the documents of a mission on screen: read once each
+        // through the client's document routes, the same ones web and the phone read.
         {
-            ui.documents.insert(reference.clone(), Load::Loading);
-            let reader = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                let outcome = reader
-                    .document_get(&reference)
-                    .await
-                    .map(|document| String::from_utf8_lossy(&document.value.bytes).into_owned())
-                    .map_err(|error| error.human());
-                let _ = tx.send(Fetched::Document(reference, outcome));
-            });
+            let shown = ui.shown_panes().into_iter().map(|(_, pane)| pane).collect::<Vec<_>>();
+            let background = if ui.palette_asks_documents() { vec![super::pane::Pane::Documents(None)] } else { Vec::new() };
+            let subjects = shown
+                .iter()
+                .filter_map(|pane| match pane {
+                    super::pane::Pane::Mission(Some(id)) => Some(ui.document_subjects(id)),
+                    _ => None,
+                })
+                .flatten()
+                .map(|(subject, _)| subject)
+                .collect::<Vec<_>>();
+            if !extras.live {
+                ui.documents.offline(&shown);
+            } else {
+                for want in ui.documents.wanted(&shown, &background, &subjects) {
+                    let reader = client.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn(async move {
+                        use super::documents::{PAGE, Want, unavailable};
+                        let fetched = match want {
+                            Want::Get(reference) => {
+                                let outcome = reader.document_get(&reference).await.map(|envelope| envelope.value).map_err(|error| unavailable(&error));
+                                Fetched::Document(reference, outcome)
+                            }
+                            Want::List { prefix, cursor } => {
+                                let outcome = reader
+                                    .documents_list(prefix.as_deref(), false, cursor.as_deref(), Some(PAGE))
+                                    .await
+                                    .map(|envelope| envelope.value)
+                                    .map_err(|error| unavailable(&error));
+                                Fetched::DocumentList(prefix, outcome)
+                            }
+                            Want::References(subject) => {
+                                let outcome = reader.document_references_get(&subject).await.map(|envelope| envelope.value).map_err(|error| error.human());
+                                Fetched::DocumentReferences(subject, outcome)
+                            }
+                        };
+                        let _ = tx.send(fetched);
+                    });
+                }
+            }
         }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
@@ -1429,60 +1458,6 @@ pub fn run(context: Context) -> Result<()> {
         for target in moved_sessions(&conversing, &model, &timelines, &mut resubscribed) {
             let _ = commands.send(Command::Resubscribe { target });
         }
-        if tab == 0
-            && let Some(id) = selected.clone()
-            && !preview_requested.contains(&id)
-            && let Some(item) = model
-                .attention()
-                .find(|item| item.header.id == id && item.attention_kind == "launch-approval")
-        {
-            preview_requested.insert(id.clone());
-            let client = client.clone();
-            let tx = fetched_tx.clone();
-            let source = item.source_id.clone();
-            let name = item
-                .mission_id
-                .clone()
-                .unwrap_or_else(|| item.title.clone())
-                .trim_start_matches("mission/")
-                .to_owned();
-            runtime.spawn(async move {
-                let preview = match client.launch_variants_list(&source, None, Some(50)).await {
-                    Err(error) => Load::Failed(format!("Could not load the proposed mission: {error}")),
-                    Ok(variants) => {
-                        let latest = variants
-                            .value
-                            .items
-                            .iter()
-                            .filter_map(|item| match item {
-                                Resource::LaunchVariant(variant) => Some(variant),
-                                _ => None,
-                            })
-                            .max_by_key(|variant| variant.ordinal);
-                        match latest {
-                            None => Load::Failed("The planner has not proposed a mission yet.".into()),
-                            Some(variant)
-                                if variant.normalized_mission.as_object().is_none_or(|fields| fields.is_empty()) =>
-                            {
-                                let mut reason = format!(
-                                    "The planner's latest candidate ({}) has no preview, so there is no mission to show yet.",
-                                    variant.status
-                                );
-                                for diagnostic in variant.diagnostics.iter().take(3) {
-                                    if let Some(message) = diagnostic.get("message").and_then(|value| value.as_str()) {
-                                        reason.push_str(&format!("\n• {message}"));
-                                    }
-                                }
-                                Load::Failed(reason)
-                            }
-                            Some(variant) => Load::Ready(adapt::preview(&name, &variant.normalized_mission)),
-                        }
-                    }
-                };
-                let _ = tx.send(Fetched::Preview(id, preview));
-            });
-        }
-
         // An unread-message item names its message; load the message itself.
         if tab == 0
             && let Some(id) = selected.clone()
@@ -1542,7 +1517,7 @@ pub fn run(context: Context) -> Result<()> {
                     ui.content.finish(key, Err("Offline · reconnect, then load again".into()));
                 }
                 ui.flash(if extras.degraded.is_some() {
-                    "Reconnecting to st · try again in a moment; nothing was queued"
+                    "Reconnecting to Fractal · try again in a moment; nothing was queued"
                 } else {
                     "Offline · reconnect before acting; nothing was queued"
                 });
@@ -1924,10 +1899,6 @@ pub fn run(context: Context) -> Result<()> {
         if changed {
             ui.content.index(&timelines);
             extras.conversations = conversations(&model, &person, &timelines, &failed, &conversing);
-            extras.pending_calls = timelines
-                .iter()
-                .map(|(agent, timeline)| (agent.clone(), adapt::pending_calls(&timeline.items)))
-                .collect();
             for entry in &pending {
                 if let Some(Load::Ready(entries)) = extras.conversations.get_mut(&entry.agent) {
                     entries.push(super::view::Entry {
@@ -2484,7 +2455,7 @@ async fn older_page(
         }
         cursor = page.cursor;
     }
-    Err("this session is too long to read further back here; st conversations timeline reads it all".into())
+    Err("this session is too long to read further back here; fractal conversations timeline reads it all".into())
 }
 
 /// How long a message st did not confirm waits before it is sent again by itself, for each time.
@@ -2580,7 +2551,7 @@ fn history_note(timeline: &fractal_conversation_ui::Timeline) -> Option<super::v
     } else if timeline.items.is_empty() {
         return None;
     } else {
-        "Start of this session · earlier ones: st conversations sessions".to_owned()
+        "Start of this session · earlier ones: fractal conversations sessions".to_owned()
     };
     Some(super::view::Entry {
         id: HISTORY_NOTE.into(),
@@ -2755,7 +2726,7 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
     let reply = client.arrangement_edit(
         format!("action/sidebar-{}", write.key), format!("sidebar-{}", write.key),
         Fence { snapshot_id: snapshot.id, ..Default::default() },
-        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone() },
+        fractal_client::ArrangementEditParameters { subject: write.subject.clone(), owner: write.owner.clone(), operations: write.operations.clone(), version: None },
     ).await?;
     anyhow::ensure!(matches!(reply.value.status, fractal_client::ActionStatus::Completed), "Sidebar edit is not completed.");
     Ok(())
@@ -2782,7 +2753,7 @@ async fn perform(
             agent_control(client, &agent, control).await?;
             Ok((
                 format!(
-                    "{} {}: asked st",
+                    "{} {}: asked Fractal",
                     control.verb(),
                     agent.trim_start_matches("agent/")
                 ),
@@ -2935,7 +2906,7 @@ async fn perform(
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
-            // downloads (ST3_DOWNLOADS or their download directory) where it has none.
+            // downloads (FRACTAL_DOWNLOADS, ST3_DOWNLOADS or their download directory) where it has none.
             let bytes = client.blob(&image.sha256, Some(&image.message)).await?;
             let dir = super::attach::dir()
                 .ok_or_else(|| anyhow::anyhow!("No place to keep the image (HOME is not set)"))?;
@@ -2943,11 +2914,11 @@ async fn perform(
             if super::attach::show(&kept) {
                 return Ok((format!("Opened {}", image.name.as_deref().unwrap_or("the image")), None));
             }
-            let downloads = super::attach::downloads()
+            let downloads = super::attach::downloads()?
                 .ok_or_else(|| anyhow::anyhow!("No place to save the image (HOME is not set)"))?;
             let path = super::attach::save(&downloads, &image, &bytes)?;
             Ok((
-                format!("Saved to {} · ST3_DOWNLOADS chooses where", path.display()),
+                format!("Saved to {} · FRACTAL_DOWNLOADS chooses where (ST3_DOWNLOADS also works)", path.display()),
                 None,
             ))
         }
@@ -3221,7 +3192,7 @@ mod tests {
         let start = Instant::now();
         let mut failing = BTreeMap::new();
         let mut errors = BTreeMap::new();
-        let why = "st did not answer".to_owned();
+        let why = "Fractal did not answer".to_owned();
         let stale = |errors: &BTreeMap<String, String>| {
             let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
             adapt::world(&Model::default(), "person/avery", &extras).stale
@@ -3238,7 +3209,7 @@ mod tests {
         // One that has lasted is said, in the stale note.
         note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER);
         assert_eq!(errors.get("machines"), Some(&why));
-        assert_eq!(stale(&errors), ["machines: st did not answer"]);
+        assert_eq!(stale(&errors), ["machines: Fractal did not answer"]);
 
         // A read that succeeds clears the error and the clock; the next failure starts over.
         note_legacy_read(&mut failing, &mut errors, "machines", None, start + feed::REPORT_AFTER * 2);
@@ -3270,7 +3241,7 @@ mod tests {
                 ));
             (outcome, said)
         };
-        let unsure = "st cannot tell yet which host runs this";
+        let unsure = "Fractal cannot tell yet which host runs this";
         // It works on the third try; each wait said why.
         let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
         assert_eq!(outcome, Ok(7));
@@ -3313,7 +3284,7 @@ mod tests {
 
     #[test]
     fn a_shells_attach_stops_retrying_once_its_tab_is_closed() {
-        let unsure = "st cannot tell yet which host runs this";
+        let unsure = "Fractal cannot tell yet which host runs this";
         let wanted = std::cell::Cell::new(true);
         let attempts = std::cell::Cell::new(0);
         let mut said = 0;
@@ -3577,7 +3548,7 @@ mod tests {
         timeline.older.loading = true;
         assert!(!super::wants_fill(&timeline, 0));
         timeline.older.loading = false;
-        timeline.older.failed = Some("st is slow".into());
+        timeline.older.failed = Some("Fractal is slow".into());
         assert!(!super::wants_fill(&timeline, 0));
         timeline.older.failed = None;
         timeline.has_more = false;
@@ -3719,7 +3690,7 @@ mod tests {
         assert_eq!(connecting_text(Duration::from_secs(3)), "connecting 3s");
         assert_eq!(
             connecting_text(Duration::from_secs(12)),
-            "connecting 12s, st is slow to answer"
+            "connecting 12s, Fractal is slow to answer"
         );
     }
 
@@ -3727,7 +3698,7 @@ mod tests {
     #[test]
     fn attach_deadline_retry_key_reopens_the_same_terminal() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut ui = Ui::new(crate::ui::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::test_world());
         ui.live = true;
         let agent = "terminal/attach-deadline-test";
         ui.open_in_glass(
@@ -3771,6 +3742,7 @@ mod tests {
             store_index,
             projection_version: "1".into(),
             created_at: "2026-10-16T11:00:00Z".into(),
+            published_at: None,
         }
     }
 
@@ -3787,7 +3759,7 @@ mod tests {
     }
 
     #[test]
-    fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
+    fn a_running_tui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
         use super::super::view::Link;
         let diverged = fractal_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
         let shown = running_world(Some(&diverged));
@@ -3851,7 +3823,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("requests");
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3879,7 +3851,7 @@ mod tests {
         let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(350));
         answer_open_requests(&mut ui, &mut inbox, true);
-        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for Fractal to know it");
         assert_eq!(inbox.waiting().count(), 1);
         inbox.waiting_since_for_test(&later, requests::GRACE);
         answer_open_requests(&mut ui, &mut inbox, true);
@@ -3892,7 +3864,7 @@ mod tests {
     fn a_name_another_process_wrote_cannot_put_control_characters_in_the_flash() {
         use super::super::pane::Pane;
         use super::super::requests::Place;
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3917,7 +3889,7 @@ mod tests {
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let mut assistant = world.agents.items()[0].clone();
         assistant.id = "agent/st/assistant".into();
         assistant.name = "Fractal Assistant".into();
@@ -3957,7 +3929,7 @@ mod tests {
 
     #[test]
     fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let mut missing = Some("agent/st/assistant".to_owned());
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut missing, true, true);
@@ -3985,7 +3957,7 @@ mod tests {
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
         use super::super::pane::Pane;
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         ui.open_home();
@@ -4083,6 +4055,9 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let path = socket.clone();
         let server = tokio::spawn(async move {
@@ -4128,7 +4103,7 @@ mod tests {
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
                 node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(),
+                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
@@ -4149,19 +4124,19 @@ mod tests {
         // Exact retry of the accepted create does not replace later register winners.
         save_sidebar(&client, &creation).await.unwrap();
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].position.value.key < found.body.folders[&first].position.value.key);
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].position.value.key < found.v1().folders[&first].position.value.key);
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], Some(second.clone()));
         save_sidebar(&client, &write(vec![Op::FolderDelete { id: second.clone() }])).await.unwrap();
         server.abort(); let _ = server.await; drop(store);
         let _ = std::fs::remove_file(&socket);
         let (_store, server) = serve(root.path(), &socket).await;
         let found = client.arrangements_get("avery", subject.rsplit('/').next().unwrap()).await.unwrap().value;
-        assert_eq!(found.body.folders[&first].name.value, "Renamed");
-        assert!(found.body.folders[&second].tombstone.is_some());
+        assert_eq!(found.v1().folders[&first].name.value, "Renamed");
+        assert!(found.v1().folders[&second].tombstone.is_some());
         assert_eq!(found.resolved.as_ref().unwrap().folders["agent/example/atlas"], None);
         // The unavailable subject remains placed in the registers; deleting a folder never deletes a resource.
-        assert!(found.body.placements.contains_key("agent/example/atlas"));
+        assert!(found.v1().placements.contains_key("agent/example/atlas"));
         server.abort();
     }
 
@@ -4190,6 +4165,9 @@ mod tests {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: Default::default(),
+                harness_question_sink: None,
+                assistant_receipts: Default::default(),
+                private_notes: Default::default(),
             };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
@@ -4560,7 +4538,7 @@ mod tests {
             fractal_conversation_ui::Density::Full,
         );
         let body_start = doc.messages[0].1.start as u16;
-        let ui = Ui::new(super::super::demo::world());
+        let ui = Ui::new(super::super::demo::test_world());
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(90, body_start)).unwrap();
         terminal
@@ -4614,6 +4592,9 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
@@ -4649,7 +4630,7 @@ mod tests {
                 images: Vec::new(),
             },
         };
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let agent = world.agents.items()[0].clone();
         let agent_id = agent.id.clone();
         world.agents = Load::Ready(vec![agent]);
@@ -4780,7 +4761,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         for child in [false, true] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             let target = if child {
                 "session/tester-child".to_owned()
@@ -4908,8 +4889,8 @@ mod tests {
             has_more: true,
             ..Default::default()
         };
-        timeline.older_failed("st did not answer".into());
-        assert!(note(timeline).starts_with("Could not load earlier entries: st did not answer"));
+        timeline.older_failed("Fractal did not answer".into());
+        assert!(note(timeline).starts_with("Could not load earlier entries: Fractal did not answer"));
         timeline = fractal_conversation_ui::Timeline {
             items,
             ..Default::default()
@@ -4991,7 +4972,7 @@ mod tests {
             text: "hello".into(),
             at: "10:17".into(),
             message_id: message_id.map(str::to_owned),
-            failed: unconfirmed.then(|| "st did not answer".into()),
+            failed: unconfirmed.then(|| "Fractal did not answer".into()),
             unconfirmed,
             effect: Effect::Send {
                 in_reply_to: None,
@@ -5074,7 +5055,7 @@ fn connecting_text(waited: Duration) -> String {
     match waited.as_secs() {
         0..2 => "connecting".into(),
         2..8 => format!("connecting {}s", waited.as_secs()),
-        seconds => format!("connecting {seconds}s, st is slow to answer"),
+        seconds => format!("connecting {seconds}s, Fractal is slow to answer"),
     }
 }
 

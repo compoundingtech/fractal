@@ -174,7 +174,7 @@ impl Host {
             "root".as_ref(),
             "-m".as_ref(),
             "0755".as_ref(),
-            std::ffi::OsStr::new(test_env!("CARGO_BIN_EXE_st3")),
+            std::ffi::OsStr::new(test_env!("CARGO_BIN_EXE_fractal")),
             st.as_os_str(),
         ]));
         let mut host = Self {
@@ -1068,7 +1068,7 @@ fn only_root_starts_a_tile_and_only_inside_its_unit() {
     // A st that someone other than root can change never runs as root in a tile's unit.
     let user_st = Command::new("sudo")
         .arg("-n")
-        .arg(test_env!("CARGO_BIN_EXE_st3"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal"))
         .args(["tiles", "run", "--registry"])
         .arg(&host.registry)
         .args([&a.name, "--", "true"])
@@ -1181,6 +1181,9 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
                 native_session_home: None,
                 owning_person: None,
                 planner_default: fractal_daemon::model::PlannerSpec::default(),
+                harness_question_sink: None,
+                assistant_receipts: Default::default(),
+                private_notes: Default::default(),
             },
             host.registry.clone(),
         );

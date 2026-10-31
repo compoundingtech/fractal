@@ -40,7 +40,7 @@ export type ConnectionState =
   | { readonly _tag: 'Closed' }
 
 /** Optional transport observations; the SDK does not depend on a telemetry backend. */
-export type St3Diagnostic =
+export type FractalDiagnostic =
   | { readonly _tag: 'Connection'; readonly state: ConnectionState }
   /** Locally admitted slots; neither socket send nor server admission/first observation. */
   | {
@@ -138,7 +138,7 @@ export const makeChannel = ({
   readonly socket?: CollectionSocketFactory
   readonly parentSpan?: () => Tracer.Span | undefined
   readonly commandTraceContext?: () => TraceContext | undefined
-  readonly onDiagnostics?: (event: St3Diagnostic) => void
+  readonly onDiagnostics?: (event: FractalDiagnostic) => void
   /** A subscribe command for registration `id` went out under generation wire id `wire`. */
   readonly onSubscribeSent?: (sent: { readonly id: string; readonly wire: string }) => void
   /** The connect probe's capabilities response envelope, before the socket is opened. */

@@ -142,10 +142,17 @@ pub(super) async fn run_work(
                     .to_owned(),
                 (None, None) => unreachable!("clap requires --reason or --request"),
             };
+            let deadline_ms = args
+                .deadline
+                .as_deref()
+                .map(|deadline| fractal_daemon::graph::parse_duration(deadline, true))
+                .transpose()?;
             let result: StepRunView = client
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        deadline_ms,
+                        default_answer: args.default_answer,
                         legacy_request: None,
                         person: args.person,
                         title: args.title,
@@ -167,6 +174,8 @@ pub(super) async fn run_work(
                 .post(
                     "/v1/work/ask",
                     &PersonAskRequest {
+                        deadline_ms: None,
+                        default_answer: None,
                         legacy_request: None,
                         person: args.person,
                         title: args.title,
@@ -308,13 +317,24 @@ pub(super) async fn run_work(
                 let ClientResource::Work(work) = &response.value else {
                     anyhow::bail!("`{normalized}` is not a work resource");
                 };
-                print!("{}", render_client_work_detail(work));
+                let driver_held = claim_has_driver(client, work.claimant.as_deref(), work.claim_incarnation.as_deref()).await;
+                print!("{}", render_client_work_detail(work, driver_held));
                 Ok(())
             }
         }
         WorkCommand::Claim(args) => post_work(client, "claim", args, json_output).await,
         WorkCommand::Renew(args) => post_work(client, "renew", args, json_output).await,
-        WorkCommand::Progress(args) => post_work(client, "progress", args, json_output).await,
+        WorkCommand::Progress(mut args) => {
+            if let Some(eta) = args.eta {
+                args.action.summary = Some(fractal_store::work_eta::summary(
+                    args.action.summary.as_deref(),
+                    &eta,
+                    args.action.actor.as_deref().context("a work action needs explicit --as")?,
+                    current_unix_ms()?,
+                )?);
+            }
+            post_work(client, "progress", args.action, json_output).await
+        }
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,
@@ -692,9 +712,10 @@ async fn post_work(
         print_value(&response, true)
     } else {
         if action == "claim" {
+            let driver_held = claim_has_driver(client, response.claimant.as_deref(), response.claim_incarnation.as_deref()).await;
             print!(
                 "{}",
-                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?)
+                render_step_run(&response, OutputStyle::stdout(), current_unix_ms()?, driver_held)
             );
             if let Some((node, documents)) = host_facts(client).await {
                 print!(

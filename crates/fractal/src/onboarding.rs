@@ -255,14 +255,27 @@ pub async fn start(
         .context("the built-in Fractal Assistant has no declaration")?;
     let claim: fractal_daemon::model::ClaimRecord = client.get(&format!("/v1/claims/by-id/{token}")).await?;
     let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
-    let mut agent = fractal_daemon::graph::render_desired_node(&desired.desired)?;
-    // Typed harnesses require a body even when the provider has no default flags.
-    if let Some(body) = agent.children_mut()
-        && let Some(harness) = body.get_mut("harness")
-        && harness.children().is_none()
-    {
-        harness.set_children(KdlDocument::new());
+    let mut uris = std::collections::BTreeMap::new();
+    for reference in fractal_daemon::graph::declared_resources(&desired.desired) {
+        let status: StatusResponse = client
+            .get(&format!(
+                "/v1/status?subject={}",
+                urlencoding::encode(&reference.subject)
+            ))
+            .await?;
+        if let Some(uri) = status
+            .subjects
+            .iter()
+            .find(|subject| subject.subject == reference.subject)
+            .and_then(|subject| subject.desired.as_ref())
+            .and_then(fractal_daemon::graph::declared_uri)
+        {
+            uris.insert(reference.subject, uri.to_owned());
+        }
     }
+    // Resolve URI edges without converting explicit subject edges; a missing resource
+    // retains its subject reference rather than silently dropping the customization.
+    let agent = fractal_daemon::graph::render_agent_node(&desired.desired, &uris)?;
     let mut run: KdlDocument = source.parse()?;
     run.nodes_mut()
         .retain(|node| node.name().value() != "agent");

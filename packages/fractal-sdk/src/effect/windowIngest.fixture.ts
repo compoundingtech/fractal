@@ -1,4 +1,4 @@
-import type { Agent, CollectionFrame, Resource, Snapshot } from '@fractal/client'
+import type { Agent, ResourceCollectionFrame, Resource, Snapshot } from '@fractal/client'
 
 export const snapshot: Snapshot = {
   id: 'snapshot/roster-perf',
@@ -18,7 +18,8 @@ export const agents: Agent[] = Array.from({ length: 200 }, (_, i) => ({
   runtime_ids: [],
   description: 'Realistic retained roster description. '.repeat(16),
 }))
-export const frame = (items: Resource[]): CollectionFrame => ({
+// This fixture is a legacy resource window, never a membership or revisioned publication frame.
+export const frame = (items: Resource[]): Extract<ResourceCollectionFrame, { kind: 'snapshot'; publication?: never }> => ({
   kind: 'snapshot',
   id: 'f1',
   collection: 'agents',

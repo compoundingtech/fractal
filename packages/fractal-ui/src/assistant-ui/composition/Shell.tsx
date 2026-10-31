@@ -127,6 +127,7 @@ export const usePersistedSize = (id: string, fallback: number) => {
 // Controlled header: the host supplies every displayed fact.
 export function ThreadHeader({
   folder,
+  breadcrumbLabel = 'Breadcrumb',
   title,
   status,
   statusLabel,
@@ -152,6 +153,7 @@ export function ThreadHeader({
 }: {
   /** Reported folder for the breadcrumb; omitted entirely when the host knows none. */
   folder?: string
+  breadcrumbLabel?: string
   title: string
   /** Observed agent status, never inferred from conversation lifecycle. */
   status?: AgentStatus
@@ -190,7 +192,7 @@ export function ThreadHeader({
       {sidebarCollapsed && onToggleSidebar !== undefined ? (
         <ChromeControl ref={sidebarToggleRef} icon="chevron-right" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={onToggleSidebar} {...(sidebarSheet === undefined ? {} : { popup: 'dialog' as const, expanded: sidebarSheet.open, ...(sidebarSheet.open ? { controls: sidebarSheet.id } : {}) })} />
       ) : null}
-      <nav aria-label="Breadcrumb" {...stylex.props(styles.breadcrumb)}>
+      <nav aria-label={breadcrumbLabel} {...stylex.props(styles.breadcrumb)}>
         {folder !== undefined ? <>
           <span {...stylex.props(styles.crumbFolder, narrow && styles.crumbFolderShrink, !narrow && styles.desktopFolder)}>{folder}</span>
           <span aria-hidden="true" {...stylex.props(styles.crumbSlash, !narrow && styles.desktopFolder)}>/</span>

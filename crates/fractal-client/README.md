@@ -1,7 +1,7 @@
 # fractal-client
 
 Reusable typed Rust client for `st3.client.v0`. It consumes versioned JSON projections and actions;
-it never parses st3 CLI output, KDL, Markdown, raw claim envelopes, or harness transcripts.
+it never parses Fractal CLI output, KDL, Markdown, raw claim envelopes, or harness transcripts.
 
 ```rust
 let client = fractal_client::Client::unix("/path/to/st3.sock");
@@ -33,6 +33,47 @@ Every manifest read and mutation has a named typed method; raw collection string
 parameters, and manually paired action discriminators are private implementation details.
 Mutation callers pass the latest response snapshot and exact resource fences. `ClientError::Api`
 preserves stable error codes such as `stale-fence`, `runtime-not-local`, and `cursor-gap`.
+
+Ordered membership uses `arrangement_membership_edit` with shared `OrderedMembershipOperation`
+place/remove values; root is an explicit `bucket: None`. Create a new folder-only arrangement
+with `ArrangementEditParameters.version: Some(2)`; absent version retains v1 creation.
+`ArrangementBody` decodes the explicit v1/v2 union and rejects unsupported versions.
+`arrangements_memberships(person_name, uuid, person, cursor, limit)` returns a typed,
+snapshot-bound `OrderedMembershipPage`. `subscribe_ordered_memberships` requires the
+arrangement subject and owning person; lifecycle changes update the held window.
+Membership frames arrive as `CollectionEvent::MembershipSnapshot` and `MembershipChanges`,
+with typed `OrderedMembership` rows rather than graph `Resource` values. Both carry a
+required `membership: OrderedMembershipState` for the whole container; a `MembershipChanges`
+with an unchanged window still reports new state after edits outside it. `changed_index` is an
+opaque host-local invalidation frontier scoped by `snapshot.host_id`, not a canonical revision
+or cross-host value. Decoding a place
+operation requires the bucket field; an omitted bucket is not normalized into a root move.
+Existing v1 placements are not migrated or editable through membership actions. Version 2 and
+membership surfaces require the `arrangements` capability at version 2. Refusals use typed
+codes including `unsupported-membership-container`, `invalid-membership-*`, and
+`invalid-arrangement-version`; a store-index change expires membership page cursors
+(`page-cursor-expired`).
+
+## Shared scenario fixtures
+
+`scenarios::load_index(path)` reads the shared world catalog (including cast and slice paths).
+`scenarios::load_slice(path)` reads a committed slice without embedding or pinning its bytes.
+Call `slice.rebased(now_epoch_ms)?` to shift only its declared instant pointers, then
+`slice.decode()?` to obtain located client-v0 models from both state and timeline.
+Roster decoding includes the session/device inventories; details decoding includes launches
+and launch variants. Resource wire values are boxed inside `WireValue`.
+Strict slices reject unknown object fields, enum cases and discriminated-union tags while
+preserving explicitly schema-declared open maps (including error details) and variant-specific
+constraints such as device variant requirements. Tolerant slices
+retain the production models' forward-compatible behavior. Diagnostic `unknown` repair
+witnesses never replace wire data. Replay offsets, durations and opaque content are not shifted.
+Object intersections are composed before closing their fields. Validation follows the kit's
+safe-integer and time-codec bounds, timestamp grammar, UTF-16 string lengths and ECMAScript
+whitespace; `uri-reference` is annotation-only. Integral numeric spellings such as `1.0` decode
+like `1`. Fields previously narrower than their schema's integer domain use `u64` for nonnegative
+domains and `i64` when negative values are permitted; explicitly bounded fields keep their types.
+Large capability versions, signed terminal cursor coordinates and terminal process exit codes
+therefore round-trip without truncation. Scenario validation still enforces schema bounds.
 
 ## Retained typed collection follows
 

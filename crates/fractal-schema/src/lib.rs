@@ -7,10 +7,14 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_plugin;
 pub mod glasses;
+pub mod lifecycle;
+pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
@@ -458,26 +462,34 @@ Each transaction records backfill progress in `meta` under `client_message_selec
 "#;
 
 impl Registry {
+    /// Covers the claim registry and the lifecycle policy registry declared beside it.
     pub fn digest(&self) -> String {
-        let bytes = serde_json::to_vec(self).expect("the schema registry is serializable");
+        let bytes = serde_json::to_vec(&(self, lifecycle::registry()))
+            .expect("the schema and lifecycle registries are serializable");
         hex::encode(Sha256::digest(bytes))
     }
 
     pub fn markdown(&self) -> String {
         let mut output = format!(
-            "# st3 schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
+            "# Fractal schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
             self.name,
             STORAGE_VERSION,
             storage_digest()
         );
         output.push_str("## Subject families\n\n| Family | Pattern | Client writable | Description |\n|---|---|---:|---|\n");
         for spec in self.subjects.values() {
+            // Registry descriptions are hashed compatibility data; branding belongs in this view.
+            let description = match spec.description.as_str() {
+                "An st3 daemon." => "A Fractal daemon.",
+                "A Small Talk message." => "A Fractal message.",
+                description => description,
+            };
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
                 spec.pattern,
                 if spec.client_writable { "yes" } else { "no" },
-                markdown_cell(&spec.description)
+                markdown_cell(description)
             ));
         }
         output.push_str("\nCustom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE.NAME`.\n\n");
@@ -707,6 +719,7 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
@@ -729,9 +742,14 @@ impl Registry {
                 }
             }
         }
-        if subject_spec.family == "arrangement" {
+        if kind == lifecycle::MEMBERSHIP_CLAIM {
+            ordered_membership::operations(subject, fields)?;
+        } else if subject_spec.family == "arrangement" {
             if kind != "arrangement.edited" {
-                return Err(error("claim-write-forbidden", "an arrangement requires arrangement.edited"));
+                return Err(error(
+                    "claim-write-forbidden",
+                    "an arrangement requires arrangement.edited or ordered-membership.edited",
+                ));
             }
             arrangements::operations_with_registry(subject, fields, self, replicated)?;
         }
@@ -781,6 +799,12 @@ impl Registry {
                 validate_value(kind, name, value, field)?;
                 self.validate_reference(kind, name, value, field)?;
             }
+        }
+        if kind == "uri.reference"
+            && let Some(uri) = facts.get("uri").and_then(Value::as_str)
+            && private_notes::claims(uri)
+        {
+            private_notes::PrivateNotesUri::parse(uri)?;
         }
         Ok(spec)
     }
@@ -1120,6 +1144,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_plugin::EVENT_FAMILY,
+            "github-event/RESOURCE/ITEM/NUMBER/KEY",
+            "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
@@ -1202,6 +1232,14 @@ fn build_registry() -> Registry {
 fn resource_specs() -> BTreeMap<String, ResourceSpec> {
     let mut resources = BTreeMap::new();
     resources.insert("arrangement".into(), resource("arrangement", "A person-owned per-register arrangement.", &[("owner", FieldSpec { immutable: true, ..required_reference_to(&["person"]) }), ("body", object())]));
+    resources.insert(
+        "uri.reference".into(),
+        resource(
+            "uri.reference",
+            "An external resource addressed by an opaque absolute URI.",
+            &[("uri", immutable_string())],
+        ),
+    );
     resources.insert(
         "vcs.repository".into(),
         resource(
@@ -1527,6 +1565,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            lifecycle::MEMBERSHIP_CLAIM,
+            &["arrangement"],
+            WritePolicy::OrdinaryClient,
+            Cardinality::Append,
+            Some("ordered-memberships"),
+            false,
+            &[],
+        ),
+        (
             "glass.upserted",
             &["glass"],
             WritePolicy::AuthorizedRequester,
@@ -1723,6 +1770,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.person-reassigned",
+            &["step-run"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
             "work.person-done",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -1841,6 +1897,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &["gate"],
         ),
         (
+            "gate.reviewer-reassigned",
+            &["gate-operation"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("gates"),
+            true,
+            &["gate"],
+        ),
+        (
+            "person.rename.completed",
+            &["person"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
+        ),
+        (
             "gate.result",
             &["gate-operation"],
             WritePolicy::CapabilityHolder,
@@ -1884,6 +1958,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_plugin::ITEM_STATE,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("resources"),
+            true,
+            &[],
+        ),
+        (
+            github_plugin::EVENT,
+            &[github_plugin::EVENT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("resources"),
+            true,
+            &[],
         ),
         (
             "observer.observed",
@@ -2922,6 +3014,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
+        github_plugin::EVENT => github_plugin::event_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -2997,7 +3091,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", string()),
             ("desired", object()),
         ],
-        "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
+        "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("version", integer()), ("action_id", string()), ("action_digest", string())],
+        "ordered-membership.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
         "glass.upserted" => &[
             ("body", object()),
             ("base_revision", string()),
@@ -3169,6 +3264,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("legacy_request", string()),
             ("requester_declaration", string()),
             ("request", object()),
+            ("deadline_unix_ms", integer()),
+            ("deadline_ms", integer()),
+            ("default_answer", string()),
         ],
         "work.person-done" | "work.person-cancelled" => &[
             ("attempt", integer()),
@@ -3177,6 +3275,15 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("key", string()),
             ("episode", string()),
             ("answer", object()),
+            ("resolved_by", string()),
+        ],
+        "work.person-reassigned" => &[
+            ("previous_person", reference()),
+            ("person", reference()),
+            ("run", reference()),
+            ("generation", reference()),
+            ("attempt", integer()),
+            ("episode", string()),
         ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
@@ -3310,6 +3417,17 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("finding_refs", required_array()),
             ("evidence", required_array()),
         ],
+        "gate.reviewer-reassigned" => &[
+            ("request", string()),
+            ("owner", reference()),
+            ("previous_reviewer", reference()),
+            ("reviewer", reference()),
+        ],
+        "person.rename.completed" => &[
+            ("old_person", reference()),
+            ("new_person", reference()),
+            ("report", object()),
+        ],
         "gate.result" => &[
             (
                 "verdict",
@@ -3413,6 +3531,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
             ("owner_host", required_string()),
             ("declaration", required_string()),
+            ("runtime_incarnation", string()),
+            ("desired_revision", string()),
             ("successor", reference_to(&["agent"])),
             ("transfer", string()),
         ],
@@ -4667,7 +4787,6 @@ mod tests {
     }
 
     #[test]
-
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {
@@ -4799,6 +4918,16 @@ mod tests {
                 BTreeMap::from([
                     ("state".into(), Value::String("unreachable".into())),
                     ("revision".into(), Value::String("claim/revision".into())),
+                    ("next_check_unix_ms".into(), Value::String("1000".into())),
+                ]),
+            ),
+            (
+                "observer/run/throttled",
+                "observer.state",
+                BTreeMap::from([
+                    ("state".into(), Value::String("healthy".into())),
+                    ("error_code".into(), Value::String("local-observer-budget".into())),
+                    ("reason".into(), Value::String("local observer budget reached, next slot at 1000 (Unix ms)".into())),
                     ("next_check_unix_ms".into(), Value::String("1000".into())),
                 ]),
             ),
@@ -4981,6 +5110,19 @@ mod tests {
             include_str!("../../../docs/st3/schema.md"),
             registry().markdown()
         );
+    }
+
+    #[test]
+    fn markdown_brands_subjects_without_changing_registry_descriptions() {
+        let registry = registry();
+        assert_eq!(registry.subjects["daemon"].description, "An st3 daemon.");
+        assert_eq!(registry.subjects["message"].description, "A Small Talk message.");
+        let markdown = registry.markdown();
+        assert!(markdown.starts_with("# Fractal schema registry\n"));
+        assert!(markdown.contains("A Fractal daemon."));
+        assert!(markdown.contains("A Fractal message."));
+        assert!(!markdown.contains("An st3 daemon."));
+        assert!(!markdown.contains("A Small Talk message."));
     }
 
     #[test]

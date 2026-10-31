@@ -428,6 +428,10 @@ pub fn open_outside_merge_queue(facts: &Value) -> bool {
         && !in_merge_queue(facts)
 }
 
+/// How many of a thread's newest observations a merge-queue check reads at most. A thread is
+/// observed only when it changes. A checkpoint keeps what such a check can read.
+pub const THREAD_SCAN: u32 = 400;
+
 /// One wake: its message subject, the key it was decided by, title, content and tags.
 pub struct Wake {
     pub subject: String,
@@ -874,9 +878,11 @@ pub fn watch_view(
         "state": state,
         "ended": ended.and_then(|ended| ended.get("reason")).cloned(),
         "reason": observer_state
-            .filter(|_| state == "degraded")
+            .filter(|observer| state != "ended" && (state == "degraded"
+                || observer["error_code"] == "local-observer-budget"))
             .and_then(|observer| observer.get("reason"))
-            .cloned(),
+            .and_then(Value::as_str)
+            .map(|reason| if state == "active" { format!("throttled: {reason}") } else { reason.to_owned() }),
         "title": facts.and_then(|facts| facts.get("title")).cloned(),
         "url": facts.and_then(|facts| facts.get("url")).cloned(),
         "thread_state": facts.and_then(|facts| facts.get("state")).cloned(),
@@ -893,6 +899,20 @@ mod tests {
             since_unix_ms: parse_rfc3339_ms("2026-09-10T05:00:00Z").unwrap(),
             until_unix_ms: None,
         }
+    }
+
+    #[test]
+    fn a_locally_throttled_watch_shows_its_next_slot_without_degradation() {
+        let observer = json!({
+            "state": "healthy", "error_code": "local-observer-budget",
+            "reason": "local observer budget reached, next slot at 1000 (Unix ms)",
+            "next_check_unix_ms": "1000"
+        });
+        let view = watch_view("watch/github/acme/garden/12/agent/node.test", &watch(), None, None, Some(&observer));
+        assert_eq!(view["state"], "active", "keep the existing watch wire vocabulary");
+        assert_eq!(view["reason"], "throttled: local observer budget reached, next slot at 1000 (Unix ms)");
+        let ended = json!({"reason": "ended"});
+        assert_eq!(watch_view("watch/test", &watch(), Some(&ended), None, Some(&observer))["state"], "ended");
     }
 
     fn entry(kind: &str, id: u64, at: &str) -> Value {

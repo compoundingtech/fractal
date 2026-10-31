@@ -255,8 +255,8 @@ pub async fn run(
                             let body = body(client, message).await?;
                             let attachments = crate::blobs::materialize_for_seat(client, subject, &agent_dir.join("attachments"), message).await?;
                             Ok::<_, anyhow::Error>(Some(fractal_drivers::ding::with_tag_notices(
-                                fractal_drivers::ding::st3_notification_with_metadata(&message.subject, &message.from, &message.to,
-                                    message.title.as_deref(), &body, &fractal_drivers::ding::st3_body_sha256(&body),
+                                fractal_drivers::ding::fractal_notification_with_metadata(&message.subject, &message.from, &message.to,
+                                    message.title.as_deref(), &body, &fractal_drivers::ding::fractal_body_sha256(&body),
                                     fractal_drivers::ding::NotificationMetadata {
                                         attachments: &attachments,
                                         assistant: message.assistant_metadata().as_ref(),
@@ -1401,13 +1401,13 @@ mod tests {
 
     #[test]
     fn claude_native_proof_requires_the_exact_envelope_in_a_user_record() {
-        let envelope = fractal_drivers::ding::st3_notification_text(
+        let envelope = fractal_drivers::ding::fractal_notification_text(
             "message/quartz",
             "person/eval",
             "agent/eval.worker",
             Some("Signal"),
             "QUARTZ SIGNAL",
-            &fractal_drivers::ding::st3_body_sha256("QUARTZ SIGNAL"),
+            &fractal_drivers::ding::fractal_body_sha256("QUARTZ SIGNAL"),
         );
         assert!(!native_receipt(
             &json!({"type":"assistant","message":{"role":"assistant","content":envelope}}),
@@ -1460,13 +1460,13 @@ mod tests {
     fn claude_revisits_native_proof_when_an_uncertain_body_becomes_available() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("native.jsonl");
-        let envelope = fractal_drivers::ding::st3_notification_text(
+        let envelope = fractal_drivers::ding::fractal_notification_text(
             "message/quartz",
             "person/eval",
             "agent/eval.worker",
             None,
             "QUARTZ SIGNAL",
-            &fractal_drivers::ding::st3_body_sha256("QUARTZ SIGNAL"),
+            &fractal_drivers::ding::fractal_body_sha256("QUARTZ SIGNAL"),
         );
         let record = json!({"type":"user","message":{"role":"user","content":envelope}});
         std::fs::write(&path, format!("{record}\n")).unwrap();

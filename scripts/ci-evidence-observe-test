@@ -222,7 +222,8 @@ else:
     git(tmp, 'init', '-q', str(empty))
     git(empty, 'commit', '-q', '--allow-empty', '-m', 'none')
     done = subprocess.run([*base, '--scratch', str(tmp / 'nokeys-scratch')], cwd=empty, capture_output=True, env=dict(ENV, VERIFIER_OK='1', PATH=f'{bin_dir}:{ENV["PATH"]}'))
-    assert done.returncode == 1 and 'no key list' in json.loads(done.stdout)['failures'][0]
+    failure = json.loads(done.stdout)['failures'][0]
+    assert done.returncode == 1 and 'git show' in failure and '.st/evidence-keys' in failure, failure
     print('passed: the key list comes from the checkout; a missing list fails full records closed')
 
     # Poll mode: what a timer runs. One state directory, runs observed once, failures capped.

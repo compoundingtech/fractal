@@ -36,6 +36,9 @@ const SLOTS: u64 = 12;
 const HOUR: Duration = Duration::from_secs(SLOT_SECONDS * SLOTS);
 /// Holders reported, by total hold time over the hour.
 const REPORTED: usize = 16;
+/// A writer hold longer than this logs one line naming its holder, so a stall can be attributed
+/// from the log alone.
+const LOGGED_HOLD: Duration = Duration::from_secs(1);
 
 /// Who asked for the writer or a read transaction. One pointer, so a queued write stays small.
 #[derive(Clone, Debug)]
@@ -48,8 +51,10 @@ struct Asked {
     /// The client that sent the request, when known.
     client: Option<Arc<str>>,
     at: &'static Location<'static>,
-    /// The `longest_during` scope this thread was in when it asked.
-    observer: Option<Arc<AtomicU64>>,
+    /// When it asked, so a hold can say how long its holder waited for the writer.
+    asked: Instant,
+    /// The `longest_during` or `holds_during` scope this thread was in when it asked.
+    observer: Option<Arc<Observed>>,
     /// The `Stages` scope this thread was in when it asked.
     stages: Option<Arc<Mutex<StageClock>>>,
 }
@@ -75,6 +80,7 @@ impl Holder {
             label,
             client,
             at,
+            asked: Instant::now(),
             observer,
             stages,
         }))
@@ -154,6 +160,8 @@ struct Record {
     holders: BTreeMap<Arc<str>, Vec<Slot>>,
     long_holds: VecDeque<Long>,
     long_reads: VecDeque<Long>,
+    /// The `WaitWatch`es open now.
+    watchers: Vec<std::sync::Weak<Mutex<Watched>>>,
 }
 
 fn us(duration: Duration) -> u64 {
@@ -201,6 +209,19 @@ impl Record {
         slot.over += u64::from(over);
         slot.total_us = slot.total_us.saturating_add(us(held));
         slot.max_us = slot.max_us.max(us(held));
+        self.watchers.retain(|watcher| watcher.strong_count() > 0);
+        // A hold ends on its writer's thread.
+        let writer = std::thread::current().id();
+        for watcher in self.watchers.iter().filter_map(std::sync::Weak::upgrade) {
+            let mut watched = watcher.lock().unwrap_or_else(PoisonError::into_inner);
+            if watched.writer != writer {
+                continue;
+            }
+            watched.holds += 1;
+            if watched.longest.as_ref().is_none_or(|(_, _, longest)| held > *longest) {
+                watched.longest = Some((holder.clone(), hold.kind, held));
+            }
+        }
         if over {
             push(&mut self.long_holds, Long {
                 holder: holder.clone(),
@@ -385,6 +406,29 @@ impl WriterHold {
     fn holder(&self) -> &Holder {
         self.longest.as_ref().map_or(&self.first, |(holder, _)| holder)
     }
+
+    /// Log one line for a hold over `LOGGED_HOLD`: who held the writer (a batch's longest write, or
+    /// a lend's borrower), for how long, and how long that holder waited to get it.
+    fn log_if_long(&self, held: Duration) {
+        if held <= LOGGED_HOLD {
+            return;
+        }
+        let holder = &self.holder().0;
+        let stages = self.stages.as_ref().map(|stages| {
+            stages.iter().map(|(stage, spent)| format!("{stage}={:.0}ms", ms(*spent))).collect::<Vec<_>>().join(",")
+        });
+        tracing::warn!(
+            holder = &*holder.label,
+            client = holder.client.as_deref().unwrap_or("-"),
+            at = %format_args!("{}:{}", holder.at.file(), holder.at.line()),
+            kind = self.kind.name(),
+            held_ms = ms(held).round() as u64,
+            waited_ms = ms(self.started.saturating_duration_since(holder.asked)).round() as u64,
+            writes = self.writes,
+            stages = stages.as_deref().unwrap_or("-"),
+            "a write held the store's writer over 1 s",
+        );
+    }
 }
 
 impl Drop for WriterHold {
@@ -411,8 +455,9 @@ impl Drop for WriterHold {
             }
         }
         if let Some(observer) = &self.holder().0.observer {
-            observer.fetch_max(us(held), Ordering::Relaxed);
+            observer.longest.fetch_max(us(held), Ordering::Relaxed);
         }
+        self.log_if_long(held);
         let over = super::record_store(StoreWork::WriterHold, held);
         let now = Instant::now();
         let wall = unix_ms();
@@ -452,23 +497,67 @@ impl Drop for ReadHold {
     }
 }
 
-thread_local! {static OBSERVER: RefCell<Option<Arc<AtomicU64>>> = const {RefCell::new(None)};}
+thread_local! {static OBSERVER: RefCell<Option<Arc<Observed>>> = const {RefCell::new(None)};}
+
+/// What a `holds_during` scope saw.
+#[derive(Debug, Default)]
+pub struct Observed {
+    /// The longest writer hold, in microseconds.
+    longest: AtomicU64,
+    /// What each paged writer hold covered, in the order the holds ended (`covered`).
+    pages: Mutex<Vec<(&'static str, usize)>>,
+}
+
+/// The writer holds work this thread asked for during a `holds_during` scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Holds {
+    /// The longest one, on the wall clock.
+    pub longest: Duration,
+    /// What each hold of a paged bulk path covered, as that path reported it: the unit (claims
+    /// sealed, envelopes received or admitted, claims projected, repairs applied) and how many.
+    pub pages: Vec<(&'static str, usize)>,
+}
+
+impl Holds {
+    /// The counts the holds reported in `unit`, one per hold.
+    pub fn pages_of(&self, unit: &str) -> Vec<usize> {
+        self.pages.iter().filter(|(of, _)| *of == unit).map(|(_, count)| *count).collect()
+    }
+}
 
 /// Run `work`, and return with its result the longest writer hold charged to work this thread
 /// asked for during it. Unlike the report, it does not depend on how many other holders the
 /// process has, so a test can bound one path while others run beside it.
 pub fn longest_during<T>(work: impl FnOnce() -> T) -> (T, Duration) {
-    struct Restore(Option<Arc<AtomicU64>>);
+    let (result, holds) = holds_during(work);
+    (result, holds.longest)
+}
+
+/// `longest_during`, with what each paged hold covered.
+pub fn holds_during<T>(work: impl FnOnce() -> T) -> (T, Holds) {
+    struct Restore(Option<Arc<Observed>>);
     impl Drop for Restore {
         fn drop(&mut self) {
             let previous = self.0.take();
             OBSERVER.with(|observer| *observer.borrow_mut() = previous);
         }
     }
-    let observed = Arc::new(AtomicU64::new(0));
+    let observed = Arc::new(Observed::default());
     let _restore = Restore(OBSERVER.with(|observer| observer.borrow_mut().replace(observed.clone())));
     let result = work();
-    (result, Duration::from_micros(observed.load(Ordering::Relaxed)))
+    let pages = std::mem::take(&mut *observed.pages.lock().unwrap_or_else(PoisonError::into_inner));
+    (result, Holds { longest: Duration::from_micros(observed.longest.load(Ordering::Relaxed)), pages })
+}
+
+/// A paged bulk path says what one writer hold covered: `count` of `unit`. It reports once per
+/// hold, from the thread that asked for the hold. Kept only inside a `holds_during` scope;
+/// anywhere else it is one thread-local read.
+pub fn covered(unit: &'static str, count: usize) {
+    OBSERVER.with(|observer| {
+        if let Some(observed) = observer.borrow().as_ref() {
+            observed.pages.lock().unwrap_or_else(PoisonError::into_inner).push((unit, count));
+        }
+    });
 }
 
 /// Stages a lend keeps; a later stage adds to `other`, the last.
@@ -699,6 +788,44 @@ pub fn report() -> Value {
     with_record(|record| record.report(now, wall))
 }
 
+struct Watched {
+    writer: ThreadId,
+    holds: u64,
+    longest: Option<(Holder, HoldKind, Duration)>,
+}
+
+/// The holds of one writer that end while it is open, such as the holds queued ahead of a caller
+/// that waits for that writer: how many, and the longest with its holder.
+pub struct WaitWatch(Arc<Mutex<Watched>>);
+
+impl WaitWatch {
+    /// Watch the writer that runs on thread `writer` (`WriterConnection::writer_thread`).
+    pub fn start(writer: ThreadId) -> Self {
+        let watched = Arc::new(Mutex::new(Watched { writer, holds: 0, longest: None }));
+        with_record(|record| record.watchers.push(Arc::downgrade(&watched)));
+        Self(watched)
+    }
+
+    /// The longest hold that ended since `start`, named as the window names a holder, with its
+    /// `kind`, `held_ms` and the number of `holds` that ended; `None` when none did.
+    pub fn blocked_by(self) -> Option<Value> {
+        let watched = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (holder, kind, held) = watched.longest.as_ref()?;
+        let mut row = holder.json();
+        row["kind"] = json!(kind.name());
+        row["held_ms"] = json!(ms(*held));
+        row["holds"] = json!(watched.holds);
+        Some(row)
+    }
+}
+
+impl Drop for WaitWatch {
+    fn drop(&mut self) {
+        let watched = Arc::as_ptr(&self.0);
+        with_record(|record| record.watchers.retain(|watcher| !std::ptr::eq(watcher.as_ptr(), watched)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,6 +835,7 @@ mod tests {
             label: label.into(),
             client: Some("member-b".into()),
             at: Location::caller(),
+            asked: Instant::now(),
             observer: None,
             stages: None,
         }))
@@ -759,6 +887,67 @@ mod tests {
         assert!(long[0]["at"].as_str().unwrap().contains("holds.rs"));
     }
 
+    /// The fields of each WARN event logged on this thread.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool { true }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id { tracing::span::Id::from_u64(1) }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            if *event.metadata().level() != tracing::Level::WARN { return; }
+            struct Fields(BTreeMap<String, String>);
+            impl tracing::field::Visit for Fields {
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.0.insert(field.name().into(), value.into());
+                }
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    self.0.insert(field.name().into(), format!("{value:?}"));
+                }
+            }
+            let mut fields = Fields(BTreeMap::new());
+            event.record(&mut fields);
+            self.0.lock().unwrap().push(fields.0);
+        }
+    }
+
+    #[test]
+    fn a_hold_over_one_second_logs_its_holder_and_wait_and_a_shorter_one_logs_nothing() {
+        // A lend that began `ago`, borrowed by a request that asked 300 ms before it began.
+        let lend = |ago: Duration| {
+            let started = Instant::now().checked_sub(ago).unwrap();
+            let mut hold = hold(HoldKind::Lend, "POST /v1/internal/replication/receive");
+            hold.started = started;
+            Arc::get_mut(&mut hold.first.0).unwrap().asked = started.checked_sub(Duration::from_millis(300)).unwrap();
+            hold
+        };
+        let warnings = Warnings::default();
+        tracing::subscriber::with_default(warnings.clone(), || drop(lend(Duration::from_millis(500))));
+        assert!(warnings.0.lock().unwrap().is_empty(), "a hold under 1 s logs nothing");
+        tracing::subscriber::with_default(warnings.clone(), || drop(lend(Duration::from_millis(1_200))));
+        let logged = warnings.0.lock().unwrap().clone();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let line = &logged[0];
+        assert_eq!(line["holder"], "POST /v1/internal/replication/receive");
+        assert_eq!(line["client"], "member-b");
+        assert!(line["at"].contains("holds.rs"), "{line:?}");
+        assert_eq!(line["kind"], "lend");
+        assert!(line["held_ms"].parse::<u64>().unwrap() >= 1_200, "{line:?}");
+        assert_eq!(line["waited_ms"], "300");
+        // A batch names its longest write, not the first one in it.
+        let mut batch = hold(HoldKind::Batch, "POST /v1/messages");
+        batch.ran(&holder("task replication.receive"), Duration::from_millis(1_100));
+        tracing::subscriber::with_default(warnings.clone(), || batch.log_if_long(Duration::from_millis(1_150)));
+        std::mem::forget(batch);
+        let logged = warnings.0.lock().unwrap().clone();
+        assert_eq!((logged.len(), logged[1]["holder"].as_str(), logged[1]["writes"].as_str()),
+            (2, "task replication.receive", "1"));
+    }
+
     #[test]
     fn a_scope_sees_the_longest_hold_its_thread_asked_for_and_nothing_after_it() {
         let ((), longest) = longest_during(|| {
@@ -772,6 +961,23 @@ mod tests {
         assert!(Holder::current().0.observer.is_none());
         let ((), unasked) = longest_during(|| {});
         assert_eq!(unasked, Duration::ZERO);
+    }
+
+    #[test]
+    fn a_scope_keeps_what_each_paged_hold_covered_and_nothing_outside_it() {
+        covered("claims", 9);
+        let ((), holds) = holds_during(|| {
+            for page in [64, 64, 12] {
+                let hold = WriterHold::start(HoldKind::Lend, &Holder::current());
+                covered("claims", page);
+                drop(hold);
+            }
+            covered("envelopes", 8);
+        });
+        assert_eq!(holds.pages_of("claims"), vec![64, 64, 12]);
+        assert_eq!(holds.pages_of("envelopes"), vec![8]);
+        let ((), unasked) = holds_during(|| {});
+        assert!(unasked.pages.is_empty());
     }
 
     #[test]

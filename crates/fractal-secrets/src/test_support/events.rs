@@ -1,4 +1,4 @@
-//! Test-side waits on the daemon's event log, the Rust twin of `scripts/st3_events.py`
+//! Test-side waits on the daemon's event log, the Rust twin of `scripts/fractal_events.py`
 //! (design: doc/fleet/factory/test-speed/evented-design, section 2).
 //!
 //! Take a [`Mark`] for a subject before the action under test, then wait from it. The log keeps

@@ -62,6 +62,7 @@ const build = (ctx: FactoryContext): Slices => {
   const roster: Slice<'roster'> = {
     kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
     state: {
+      sessions: [], devices: [],
       agents: [initial.agent], runtimes: [initial.runtime!], order: [builder.id],
       machines: [resources.machine(ctx, builder.host, [builder.runtime, builder.terminalRuntime], [mission.steps[1]!.work])],
     },
@@ -80,6 +81,7 @@ const build = (ctx: FactoryContext): Slices => {
   const details: Slice<'details'> = {
     kind: 'details', variant: 'default', source, decode: 'strict', loading: false,
     state: {
+      launches: [], launch_variants: [],
       missions: [resources.mission(ctx, mission, 'running', -30_000)],
       work: [work(0, 'failed', -30_000, 'w-red'), work(1, 'claimed', -25_000, 'w-bisect'), work(2, 'ready', -25_000, 'w-patch-ready'), work(3, 'ready', -25_000, 'w-retry-ready')],
     },

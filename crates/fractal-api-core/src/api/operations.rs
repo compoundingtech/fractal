@@ -244,14 +244,45 @@ pub async fn operational_repair_plan(
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
     Json(request): Json<OperationalRepairApplyRequest>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    if bound.is_some() || request.actor.is_some() {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            "the legacy repair route accepts only unbound token-only callers",
+        )));
+    }
+    apply_operational_repair_with_actor(state, request, None).await
+}
+
+/// A separate route makes an older token-only daemon refuse attributed applies
+/// before mutation, even if it would silently ignore an unknown actor field.
+pub async fn apply_attributed_operational_repair(
+    State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
+    Json(request): Json<OperationalRepairApplyRequest>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    let bound = bound.ok_or_else(|| ApiError::bad(St3Error::new(
+        "foreign-agent-actor",
+        "attributed repair apply requires an authenticated harness binding",
+    )))?;
+    apply_operational_repair_with_actor(state, request, Some(bound.0.0)).await
+}
+
+async fn apply_operational_repair_with_actor(
+    state: AppState,
+    request: OperationalRepairApplyRequest,
+    bound_actor: Option<String>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     let effect_state = state.clone();
     let result = blocking_action(move || {
         let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;
         let (_guards, evidence) = legacy_start_repair_evidence(&effect_state, &subjects, &classes)
             .map_err(legacy_start_proof_error)?;
-        effect_state.store.apply_operational_repair_with_legacy_starts(&request.token, &evidence)
+        effect_state.store.apply_operational_repair_with_legacy_starts(
+            &request.token, &evidence, bound_actor.as_deref(),
+        )
     }).await?;
     if result.applied != 0 {
         signal_changed(&state);
@@ -450,6 +481,18 @@ pub async fn get_usage(
         row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
     }
     if let Some((config, policy)) = policy {
+        // Entries of `keep` whose seat is no longer declared: they keep nothing. Only reported.
+        let kept = config.keep.clone();
+        let live = blocking_store({
+            let store = state.store.clone();
+            move || store.declared_seats(&kept)
+        })
+        .await?;
+        let retired_keep = config
+            .keep
+            .iter()
+            .filter(|seat| !live.contains(*seat))
+            .collect::<Vec<_>>();
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -462,6 +505,8 @@ pub async fn get_usage(
             "stop_at_weekly_percent": config.stop_at_weekly_percent,
             "exempt_accounts": config.exempt_accounts,
             "exempt_harnesses": config.exempt_harnesses,
+            "keep": config.keep,
+            "keep_retired": retired_keep,
         });
     }
     Ok(Json(report))
@@ -469,8 +514,27 @@ pub async fn get_usage(
 
 pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
-    let rows = blocking_store(move || slo_rows(&store)).await?;
+    let dir = crate::slo_history::dir(&state.state_dir);
+    let rows = blocking_store(move || {
+        let mut rows = slo_rows(&store)?;
+        add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
+        Ok(rows)
+    })
+    .await?;
     Ok(Json(json!({"as_of_unix_ms": client_now_ms() as u64, "rows": rows})))
+}
+
+/// Say on each budget how much will be used when it resets, at the rate the local history log
+/// shows for its recent past. A log that cannot be read leaves the row without a forecast: the
+/// list is still true, only less far-sighted.
+fn add_budget_forecasts(rows: &mut [Value], dir: &std::path::Path, now_unix_ms: u64) {
+    for row in rows {
+        let Some(basis) = crate::objectives::forecast_basis_ms(row, now_unix_ms) else { continue };
+        let Some(id) = row["id"].as_str().map(str::to_owned) else { continue };
+        if let Ok(readings) = crate::slo_history::read(dir, &id, now_unix_ms.saturating_sub(basis), now_unix_ms) {
+            crate::objectives::add_forecast(row, &readings, now_unix_ms);
+        }
+    }
 }
 
 /// What was left of one objective or budget across a period, from the local history log.
@@ -577,6 +641,16 @@ pub struct StatusQuery {
     harness_only: bool,
 }
 
+pub async fn resource_referrers(
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.declared_resource_referrers(&subject))
+        .await
+        .map(Json)
+}
+
 /// One subject's desired record. Each Claude seat's status line reads it on every render (every
 /// five seconds), which a full status reduction of the seat made a tenth of a core on a member.
 pub async fn get_desired(
@@ -599,17 +673,20 @@ pub async fn status(
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || {
-        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
+        let subject = query.subject.as_deref().map(|subject| {
+            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+        }).transpose()?;
+        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
             store.status_harness_only(subject)
         } else if query.history {
             store.status_history(
-                query.subject.as_deref(),
+                subject.as_deref(),
                 query.owner_run.as_deref(),
                 query.at_index,
             )
         } else {
             store.status_at(
-                query.subject.as_deref(),
+                subject.as_deref(),
                 query.owner_run.as_deref(),
                 query.at_index,
             )

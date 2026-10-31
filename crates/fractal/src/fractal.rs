@@ -1,24 +1,7 @@
-//! Legacy UI spelling and local browser-session launching.
-use std::ffi::{OsStr, OsString};
+//! Local browser-session launching and installed executable ownership.
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-
-/// Rewrite only the new program's UI spelling. All legacy invocations pass through untouched.
-pub fn dispatch(arguments: &mut [OsString]) {
-    let fractal = arguments
-        .first()
-        .and_then(|program| Path::new(program).file_name())
-        == Some(OsStr::new("fractal"));
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    // st and st3 retain their bare-program behavior and command spellings.
-    if !fractal {
-        return;
-    }
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-    if arguments.get(1).and_then(|argument| argument.to_str()) == Some("tui") {
-        arguments[1] = "ui".into();
-    }
-}
 
 /// Only exact installer-created symlinks belong to this installation.
 pub fn owns_alias(path: &Path) -> bool {
@@ -27,17 +10,135 @@ pub fn owns_alias(path: &Path) -> bool {
 }
 
 pub fn may_remove(path: &Path) -> bool {
-    path.file_name() != Some(OsStr::new("fractal")) || owns_alias(path)
+    if path.file_name() != Some(OsStr::new("fractal")) || owns_alias(path) {
+        return true;
+    }
+    // A physical canonical binary (or signed-app link) belongs to this uninstall
+    // only while it still identifies the executable running it. Never execute a
+    // replacement command or treat an arbitrary regular file as ours.
+    #[cfg(target_os = "linux")]
+    {
+        use fractal_drivers::reexec::ImageIdentity;
+        ImageIdentity::of(path).ok().zip(ImageIdentity::running().ok())
+            .is_some_and(|(installed, running)| installed == running)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_ownership::owns_running_image(path)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
 }
 
-/// Extend old setup manifests when an upgrade installed the new alias beside st3.
-/// Recheck recorded aliases too: a foreign replacement never belongs to uninstall.
+#[cfg(target_os = "macos")]
+mod macos_ownership {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::Path;
+
+    // Apple public ABI: https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h
+    // libc already supplies vnode_info_path; only these two region wrappers and
+    // the flavor constant are absent from the pinned version.
+    const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+
+    #[repr(C)]
+    struct RegionInfo {
+        protection: u32,
+        max_protection: u32,
+        inheritance: u32,
+        flags: u32,
+        offset: u64,
+        behavior: u32,
+        user_wired_count: u32,
+        user_tag: u32,
+        pages_resident: u32,
+        pages_shared_now_private: u32,
+        pages_swapped_out: u32,
+        pages_dirtied: u32,
+        ref_count: u32,
+        shadow_depth: u32,
+        share_mode: u32,
+        private_pages_resident: u32,
+        shared_pages_resident: u32,
+        obj_id: u32,
+        depth: u32,
+        address: u64,
+        size: u64,
+    }
+
+    #[repr(C)]
+    struct RegionWithPath {
+        region: RegionInfo,
+        vnode: libc::vnode_info_path,
+    }
+
+    // This dyld function is deprecated only in libc in favor of an extra Mach
+    // crate; it is the existing system ABI, and we need no additional dependency.
+    #[allow(deprecated)]
+    pub(super) fn owns_running_image(path: &Path) -> bool {
+        // SAFETY: dyld image zero is this process's executable. Its header is
+        // used only as an address for the read-only kernel region query.
+        let header = unsafe { libc::_dyld_get_image_header(0) };
+        if header.is_null() {
+            return false;
+        }
+        let address = header as usize as u64;
+        let mut info = std::mem::MaybeUninit::<RegionWithPath>::zeroed();
+        let size = libc::c_int::try_from(std::mem::size_of::<RegionWithPath>())
+            .expect("bounded Apple process-region ABI");
+        // SAFETY: info is aligned writable storage of exactly size bytes. A
+        // short/error response is never read, and zeroed vnode evidence refuses.
+        let read = unsafe {
+            libc::proc_pidinfo(libc::getpid(), PROC_PIDREGIONPATHINFO, address,
+                info.as_mut_ptr().cast(), size)
+        };
+        if read != size {
+            return false;
+        }
+        // SAFETY: the kernel returned the full structure, whose fields are
+        // integer values/arrays. Zero initialization also covers missing vnode data.
+        let info = unsafe { info.assume_init() };
+        let stat = &info.vnode.vip_vi.vi_stat;
+        if !address.checked_sub(info.region.address)
+            .is_some_and(|offset| offset < info.region.size)
+            || stat.vst_dev == 0 || stat.vst_ino == 0 || stat.vst_size <= 0
+            || stat.vst_mode & libc::S_IFMT != libc::S_IFREG
+        {
+            return false;
+        }
+        let Ok(installed) = std::fs::metadata(path) else { return false };
+        // Darwin dev_t is 32 bits; MetadataExt widens its signed representation.
+        let device_bits = installed.dev() & u64::from(u32::MAX);
+        installed.is_file() && device_bits == u64::from(stat.vst_dev)
+            && installed.ino() == stat.vst_ino
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn public_apple_region_abi_layout_matches_lp64() {
+            assert_eq!(std::mem::size_of::<RegionInfo>(), 96);
+            assert_eq!(std::mem::offset_of!(RegionInfo, address), 80);
+            assert_eq!(std::mem::offset_of!(RegionInfo, size), 88);
+            assert_eq!(std::mem::size_of::<libc::vinfo_stat>(), 136);
+            assert_eq!(std::mem::size_of::<libc::vnode_info_path>(), 1176);
+            assert_eq!(std::mem::size_of::<RegionWithPath>(), 1272);
+            assert_eq!(std::mem::offset_of!(RegionWithPath, vnode), 96);
+        }
+    }
+}
+
+/// Extend historical setup manifests when an upgrade installed the canonical name.
+/// Recheck recorded canonical paths too: a foreign replacement never belongs to uninstall.
 pub fn installed_binaries(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
     let recorded = files.len();
     for index in 0..recorded {
         if files[index].file_name() == Some(OsStr::new("st3")) {
             let alias = files[index].with_file_name("fractal");
-            if owns_alias(&alias) && !files.contains(&alias) {
+            if may_remove(&alias) && !files.contains(&alias) {
                 files.push(alias);
             }
         }
@@ -102,17 +203,16 @@ pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
-    fn route(input: &[&str]) -> Vec<OsString> {
-        let mut arguments = input.iter().map(OsString::from).collect::<Vec<_>>();
-        dispatch(arguments.as_mut_slice());
-        arguments
+    fn parse(input: &[&str]) -> crate::Cli {
+        use clap::Parser;
+        crate::Cli::try_parse_from(input).unwrap()
     }
 
     #[test]
     fn fractal_dispatch_no_arguments_keeps_onboarding_and_terminal_guards() {
-        let arguments = route(&["/bin/fractal"]);
-        assert_eq!(arguments, vec![OsString::from("/bin/fractal")]);
+        let arguments = [OsString::from("/bin/fractal")];
         for (stdin, stdout, seat, expected) in [
             (true, true, false, true),
             (false, true, false, false),
@@ -127,27 +227,33 @@ mod tests {
     }
 
     #[test]
-    fn fractal_dispatch_tui_reuses_ui_arguments() {
-        assert_eq!(
-            route(&["fractal", "tui", "--help"]),
-            vec![OsString::from("fractal"), "ui".into(), "--help".into()]
-        );
+    fn tui_alias_reuses_ui_arguments_with_global_endpoint() {
+        for arguments in [
+            &["fractal", "tui", "--demo"][..],
+            &["fractal", "--endpoint", "http://localhost:7410", "tui", "--demo"],
+            &["fractal", "tui", "--endpoint", "http://localhost:7410", "--demo"],
+        ] {
+            let cli = parse(arguments);
+            assert!(matches!(cli.command, crate::Command::Ui(options) if options.demo));
+            if arguments.contains(&"--endpoint") {
+                assert_eq!(cli.endpoint.as_deref(), Some("http://localhost:7410"));
+            }
+        }
     }
 
     #[test]
-    fn fractal_dispatch_cli_passthrough_and_legacy_are_unchanged() {
-        for input in [
-            &["fractal", "work", "ls"][..],
-            &["fractal", "agents", "ls"],
-            &["st"],
-            &["st3"],
-            &["st3", "tui"],
-        ] {
-            assert_eq!(
-                route(input),
-                input.iter().map(OsString::from).collect::<Vec<_>>()
-            );
-        }
+    #[cfg(target_os = "linux")]
+    fn canonical_executable_is_owned_only_while_it_identifies_the_running_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = directory.path().join("fractal");
+        let running = std::env::current_exe().unwrap();
+        std::os::unix::fs::symlink(&running, &canonical).unwrap();
+        assert!(may_remove(&canonical));
+        assert_eq!(installed_binaries(vec![canonical.clone()]), std::slice::from_ref(&canonical));
+        std::fs::remove_file(&canonical).unwrap();
+        std::fs::write(&canonical, b"foreign replacement").unwrap();
+        assert!(!may_remove(&canonical));
+        assert!(installed_binaries(vec![canonical]).is_empty());
     }
 
     #[test]
