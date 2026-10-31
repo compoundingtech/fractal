@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 mod browser;
 mod locator;
 mod strict;
+mod validation;
 pub use browser::{
     TaskBrowserStepV1, TaskClickEffectV1, TaskHumanKindV1, TaskRevealSourceKindV1,
     TaskRevealTriggerV1, TaskTextNodeV1,
@@ -40,15 +41,13 @@ fn invalid(message: impl Into<String>) -> TaskManifestError {
     TaskManifestError(message.into())
 }
 
-/// Parse closed wire shapes without losing duplicate keys or integer spelling.
-/// This checks the JSON boundary, not authentication or live grant authority.
+/// Strictly parse and cross-validate the closed v1 manifest scope.
+/// Successful schema validation does not authenticate or confer live authority.
 pub fn parse_task_manifest_v1(input: &[u8]) -> Result<TaskManifestV1, TaskManifestError> {
     let value = strict::parse_json(input).map_err(|error| invalid(error.to_string()))?;
     let manifest: TaskManifestV1 =
         serde_json::from_value(value).map_err(|error| invalid(error.to_string()))?;
-    if manifest.version != 1 {
-        return Err(invalid("manifest version must be 1"));
-    }
+    manifest.validate()?;
     Ok(manifest)
 }
 
