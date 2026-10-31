@@ -442,3 +442,36 @@ fn hook_metric_labels_are_bounded_and_a_non_application_has_no_counter_or_span()
         "WARN"
     );
 }
+
+/// Diagnostics, which stay in the local log (C4 for daemon.diagnostic, and 2c for observability
+/// codes of harness.diagnostic), export at their own severity with their code as an attribute, so
+/// a collector can filter on both; a diagnostic without a severity stays INFO.
+#[test]
+fn diagnostics_export_at_their_severity_with_their_code() {
+    let store = Store::open_memory("node-a").unwrap();
+    let diagnostic = |subject: &str, kind: &str, actor: Option<&str>, fields: Value| {
+        store.append_local_observations_for_test(&[ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: actor.map(str::to_owned),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }]);
+    };
+    diagnostic("daemon/node-a", "daemon.diagnostic", None, json!({"severity":"error", "code":"reconcile-failed", "reason":"invented"}));
+    diagnostic("daemon/node-a", "daemon.diagnostic", None, json!({"severity":"warning", "code":"kill-survivor", "reason":"invented"}));
+    let batch = store.local_observations_after(0, 10).unwrap();
+    let logs = otlp_logs("node-a", &batch);
+    let records = records(&logs);
+    let code = |record: &Value| {
+        record["attributes"].as_array().unwrap().iter()
+            .find(|attribute| attribute["key"] == "st3.code")
+            .map(|attribute| attribute["value"]["stringValue"].clone())
+    };
+    assert_eq!((records[0]["severityText"].clone(), records[0]["severityNumber"].clone()), (json!("ERROR"), json!(17)));
+    assert_eq!(code(&records[0]), Some(json!("reconcile-failed")));
+    assert_eq!((records[1]["severityText"].clone(), records[1]["severityNumber"].clone()), (json!("WARN"), json!(13)));
+    assert_eq!(code(&records[1]), Some(json!("kill-survivor")));
+}

@@ -154,7 +154,7 @@ fn following_links_goes_back_and_a_cycle_never_grows_the_trail() {
     // The page shows the way back, and back goes one document.
     assert_eq!(documents.previous(split, &shown), Some("doc/cycle/a"));
     let page = documents.page(&shown, documents.previous(split, &shown), 80, NOW);
-    assert_eq!(plain(&page)[0].trim_end(), " b back to doc/cycle/a");
+    assert_eq!(plain(&page)[0].trim_end(), " b  back to doc/cycle/a");
     assert_eq!(hit_on(&page, 0), Some(&Hit::Document(Tap::Back)));
     assert_eq!(documents.back(split, &shown).as_deref(), Some("doc/cycle/a"));
     assert_eq!(documents.back(split, "doc/cycle/a"), None, "the first stays");

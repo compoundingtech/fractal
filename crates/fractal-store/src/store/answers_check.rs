@@ -6,6 +6,7 @@
 //! fix. A later check of the same pair that agrees ends the fault.
 use super::*;
 use smallclaims::answers::AnswersCheck;
+use smallclaims::store::checkpoint::claims_of_kind_in_order;
 
 pub const ANSWERS_CONDITION: &str = "answers-disagreement";
 /// Every answers episode starts with this, so its failure and recovery read apart from the
@@ -29,6 +30,85 @@ pub fn episode(local: &str, peer: &str) -> String {
 /// The subjects whose answers fold claims rather than read one: seats (harness state, status
 /// history, working since) and steps (timing).
 const FOLDED_SUBJECTS: [&str; 2] = ["agent/", "step-run/"];
+
+/// Only production-reader-complete replacements may suppress a kind's inventory comparison.
+/// Other kinds keep their conservative inventory check, even when history counts can differ.
+const SLOT_READERS: [&str; 1] = ["observer.observed"];
+
+fn observation_slot(subject: &str, kind: &str) -> Result<String> {
+    // The observer production readers are subject-level, spanning every writer.
+    Ok(serde_json::to_string(&[subject, kind])?)
+}
+
+static ACTUAL_MOVED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
+    "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1
+     AND CAST(accepted_at_unix_ms AS INTEGER)>=?2 AND {ACTUAL_STATE_CLAIM}
+     AND {UNREPAIRED_CLAIM})",
+));
+
+fn actual_moved(connection: &Connection, subject: &str, cut: u128) -> Result<bool> {
+    // Bounded subject/cut keys; the result is one EXISTS boolean, never claim JSON.
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hba6a871032cc owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ &ACTUAL_MOVED)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5cede5425453 owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ params![subject, i64::try_from(cut)?], |row| row.get(0))?)
+}
+
+/// Only slots touched by post-cut claims move; another writer must not hide a stable slot.
+pub fn slot_reader_movement(
+    connection: &Connection, subjects: &BTreeSet<String>, cut: u128,
+) -> Result<smallclaims::answers::ReaderMoves> {
+    let mut moved = smallclaims::answers::ReaderMoves::new();
+    let mut cursor = connection.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='observer.observed'
+         AND CAST(accepted_at_unix_ms AS INTEGER)>=?2)",
+    )?;
+    for subject in subjects {
+        if !subject.starts_with("observer/") { continue; }
+        let kind = "observer.observed";
+        // Bounded subject/cut keys and a single EXISTS boolean.
+        let cursor_moved: bool = cursor.query_row(
+            /* sqlite-large-value: allow-for-now lv-h4bf037bf5361 owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ params![subject, i64::try_from(cut)?], |row| row.get(0),
+        )?;
+        if actual_moved(connection, subject, cut)? || cursor_moved {
+            moved.entry(format!("reader/slots/{kind}")).or_default()
+                .entry(subject.clone()).or_default().insert(observation_slot(subject, kind)?);
+        }
+    }
+    Ok(moved)
+}
+
+fn slot_reader_answers(
+    connection: &Connection,
+    cut: u128,
+) -> Result<BTreeMap<String, Vec<smallclaims::answers::AnswerKey>>> {
+    let mut readers = BTreeMap::new();
+    for kind in SLOT_READERS {
+        let subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind=?1 ORDER BY subject",
+        )?.query_map([kind], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut keys = Vec::new();
+        for subject in subjects {
+            let history = claims_of_kind_in_order(connection, &subject, kind)?;
+            let cursor_moving = history.last().is_some_and(|claim| claim.accepted_at_unix_ms >= cut);
+            let moving = cursor_moving || actual_moved(connection, &subject, cut)?;
+            let state = latest_actual(connection, &subject)?;
+            let cursor = resources::claimed_observer_cursor_at(connection, &subject)?;
+            if !moving && state.is_none() && cursor.is_none() { continue; }
+            let answer = json!({ "state": state, "cursor": cursor });
+            let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
+            keys.push(smallclaims::answers::AnswerKey {
+                subject: subject.clone(),
+                origin: observation_slot(&subject, kind)?,
+                claim: hex::encode(Sha256::digest(canonical.as_bytes())),
+                moving,
+            });
+        }
+        keys.sort();
+        // Empty entries advertise coverage, including when one member has no claims of the kind.
+        readers.insert(format!("slots/{kind}"), keys);
+    }
+    Ok(readers)
+}
 
 /// Every fold reader's answers at `cut`, for [`smallclaims::answers::FoldReaders`]. For each
 /// seat and step whose newest claim is older than the cut, it reads what the checkpoint proof
@@ -98,6 +178,7 @@ pub fn fold_reader_answers(
         }));
         keys.sort();
     }
+    readers.extend(slot_reader_answers(connection, cut)?);
     Ok(readers)
 }
 
@@ -176,9 +257,9 @@ impl Store {
             .collect::<Vec<_>>();
         let reason = format!(
             "{local} and {peer} answer differently from the claims before {cut} in {}. Each \
-             member counts, per kind, the newest claim of every subject and writer, which no \
-             trim deletes, so one of them holds a claim the other lacks or has deleted one it \
-             needs: turn each key into a failing test, then fix it. The reproduction names every \
+             member compares folded reader values where both support them, otherwise claim \
+             inventories. A differing inventory alone does not prove a differing reader answer. \
+             Turn each key into a failing test, then fix the cause. The reproduction names every \
              kind and key. Nothing repairs it from a peer.",
             named.join("; ")
         );

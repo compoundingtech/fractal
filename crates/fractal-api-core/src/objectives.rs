@@ -536,6 +536,11 @@ pub fn add_forecast(row: &mut Value, readings: &[(u64, f64)], now_unix_ms: u64) 
     let (Some(remaining), Some(resets_at)) = (row["remaining_percent"].as_f64(), row["resets_at_unix_ms"].as_u64()) else {
         return;
     };
+    // The log has one reading a minute, the row is live: a reset since the newest reading leaves
+    // only the last period's spending behind, which says nothing about the new one.
+    if readings.last().is_some_and(|(_, left)| remaining > left + RESET_JUMP_PERCENT) {
+        return;
+    }
     // Only what follows the last reset says anything about the next stretch.
     let from = readings
         .windows(2)
@@ -831,6 +836,18 @@ mod tests {
         assert_eq!(row["forecast_used_percent"], 8.2);
         assert_eq!(row["forecast_basis_minutes"], 16);
         assert!(row.get("runs_out_at_unix_ms").is_none(), "{row}");
+    }
+
+    #[test]
+    fn a_reset_since_the_newest_reading_leaves_no_forecast_until_there_is_history_after_it() {
+        let now = 10_000_000 + 60_000;
+        // Twenty minutes at 1% a minute down to 1% left, then the live row reads a fresh allowance.
+        let mut row = five_hour_budget(0.5, now);
+        add_forecast(&mut row, &minutely(now - 60_000, 20, |ago| 1.0 + ago as f64 * 4.0), now);
+        for field in ["forecast_used_percent", "forecast_basis_minutes", "runs_out_at_unix_ms"] {
+            assert!(row.get(field).is_none(), "{field}: {row}");
+        }
+        assert!(!row["explain"].as_str().unwrap().contains("At the rate"), "{row}");
     }
 
     #[test]
