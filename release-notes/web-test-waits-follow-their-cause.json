@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Two web tests stop depending on how fast a host runs. The replay browser e2e starts its wait for the conversation pane's module when the agent is selected, which is what requests it, instead of before the page loads. The scroll viewport story drives the eased return from a clock it controls and checks that half of the 200ms is on the way and the full 200ms is the end. Test-only change.",
+  "replay": {"status": "none", "detail": "Test-only change; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change; the components are unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery change."}
+}
