@@ -84,7 +84,9 @@ Overflow markers reach hidden tabs.
 Wheel right/down over a strip browses one whole tab right; wheel left/up browses left.
 This does not select a tab. Each split keeps its own temporary view; selecting another
 tab reveals it again if necessary. `‹N` / `N›` count the tabs outside that view.
-Overflow budgets keep a cell for activity, showing fewer whole tabs when needed.
+Every nonempty strip keeps activity on its visible agent tabs, down to one cell.
+If necessary, markers, the add button and other tabs yield first. Following a
+selection keeps that tab visible; manual scrolling may still hide the active tab.
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, and `Ctrl+D` shows the agent's details.
