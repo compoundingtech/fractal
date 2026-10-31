@@ -4433,10 +4433,11 @@ impl Ui {
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
-    const LEADER_KEYS: [(&'static str, &'static str); 15] = [
+    const LEADER_KEYS: [(&'static str, &'static str); 16] = [
         ("\\", "close this tab"),
         ("c", "the conversation (leave the terminal)"),
         ("t", "a new tab"),
+        ("r", "recent places"),
         ("l", "previous item needing you"),
         ("v", "split right"),
         ("x", "split below"),
@@ -4488,6 +4489,7 @@ impl Ui {
                 }
                 '[' | ']' => self.navigate_history(letter == ']'),
                 'l' => self.triage_next(false),
+                'r' => self.open_recent(),
                 _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
