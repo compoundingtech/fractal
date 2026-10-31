@@ -352,7 +352,8 @@ describe('mailbox provenance and server ordering', () => {
 
   // Two messages that arrived on the messages stream behind the same graph claim share their
   // sequence slot, and can share a millisecond: their content names its message, so each pairs
-  // with its own header. Content from an older daemon names none and pairs by slot, as before.
+  // with its own header. Content from an older daemon names none and pairs by slot, as before;
+  // two such messages in one slot still pair with whichever header came last, a limit it keeps.
   it.each([
     ['named content', true],
     ['an older daemon\'s content, alone in its slot', false],
