@@ -3,17 +3,17 @@
     "fractal": {
       "flake": false,
       "locked": {
-        "lastModified": 1793265987,
-        "narHash": "sha256-NMvavwH6h/oSg3IHzSzGggbe9T17XADaDKs3C5Lk5aA=",
+        "lastModified": 1793356367,
+        "narHash": "sha256-rclXT6Td8aQ8SgReWSrWr7p8Y8a7/Dt1csnBwkQsX9U=",
         "owner": "compoundingtech",
         "repo": "fractal",
-        "rev": "05b5f5d96c369a37c18766b4740b80959c320102",
+        "rev": "943445316e3738a1fc1ee58f676334b7ec684bf4",
         "type": "github"
       },
       "original": {
         "owner": "compoundingtech",
         "repo": "fractal",
-        "rev": "05b5f5d96c369a37c18766b4740b80959c320102",
+        "rev": "943445316e3738a1fc1ee58f676334b7ec684bf4",
         "type": "github"
       }
     },
