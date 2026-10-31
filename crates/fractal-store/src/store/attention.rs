@@ -838,12 +838,21 @@ impl Store {
             let (title, detail) = if let [seat] = names.as_slice() {
                 (
                     format!("{seat} on {host} needs you to log in"),
-                    format!("{seat} on {host} needs you to log in: attach (Ctrl+] in Fractal TUI) and {how}. A successful authenticated turn clears this alert automatically."),
+                    format!(
+                        "{seat} on {host} needs you to log in: attach (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane) and {how}. A successful authenticated turn clears this alert automatically."
+                    ),
                 )
             } else {
                 (
-                    format!("{} seats on {host} need you to log in to {login}", names.len()),
-                    format!("{} on {host} share the login {login}, which needs you to sign in again: attach to {} (Ctrl+] in Fractal TUI) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.", names.join(", "), first.subject),
+                    format!(
+                        "{} seats on {host} need you to log in to {login}",
+                        names.len()
+                    ),
+                    format!(
+                        "{} on {host} share the login {login}, which needs you to sign in again: attach to {} (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.",
+                        names.join(", "),
+                        first.subject
+                    ),
                 )
             };
             items.push(AttentionItemView {
