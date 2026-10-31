@@ -54,6 +54,7 @@ impl Daemon {
             planner_default: Default::default(),
             assistant_receipts: Default::default(),
             private_notes: Arc::new(Authority { catalogs: vec![root.join("catalog")] }),
+            harness_question_sink: None,
         }
     }
 

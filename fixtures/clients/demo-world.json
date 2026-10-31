@@ -143,6 +143,7 @@
         "agent": null,
         "blocked": null,
         "conversations": [],
+        "deadline": null,
         "id": "attention/scenario-fleet-mid-refactor-worker-typecheck",
         "kind": {
           "alert": true,

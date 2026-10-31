@@ -49,6 +49,9 @@ Use these documents for implementation details:
 - [Long messages](long-messages.md) explains document references for messages beyond the inline limit.
 - [Conversation search](conversation-search.md) describes searching normalized conversations and opening a match.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
+- [Plugin stores and the GitHub mirror](plugins.md) defines a plugin's local database, its graph
+  allowlist, the GitHub mirror and events, `vcs.item.state` and `github.event`, and
+  `/v1/plugins/github/*` with `st gh prs|pr|checks`.
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
 - [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
@@ -97,6 +100,8 @@ Use these documents for implementation details:
 - [Client v0 contract](client-v0/README.md) defines the shared TUI and mobile JSON, event, action,
   pairing, and terminal protocols.
 - [Device signing](device-signing.md) defines paired-client keys and signed requests.
+- [ChatGPT app](chatgpt-app.md) is the design for the ChatGPT app: composition boundaries, the
+  adapter's place beside the iOS app, and how any person installs it against their own daemon.
 - [Operational-state contract](operational-state/README.md) separates immutable history, current
   projection, and actor-specific actionable views and defines screen/CLI parity.
 

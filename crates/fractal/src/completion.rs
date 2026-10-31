@@ -1,6 +1,6 @@
 //! Runtime shell completion and short-name resolution for entity arguments.
 //!
-//! Contract: docs/st3/cli-completion/spec.md. The shell stub calls back into `st` on every TAB
+//! Contract: docs/st3/cli-completion/spec.md. The shell stub calls back into `fractal` on every TAB
 //! through clap_complete's `CompleteEnv`; each entity argument carries a [`Complete`] completer
 //! that lists the daemon's current entities of one [`Entity`] kind. Completion never waits for
 //! the daemon and never prints: any failure yields no candidates.

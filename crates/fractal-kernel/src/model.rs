@@ -1243,6 +1243,19 @@ pub struct ResourceObservationOutcome {
     #[serde(default)]
     pub observation_claim: Option<String>,
     pub message_subjects: Vec<String>,
+    /// The item resources this observation recorded, for the poller's plugin mirror. Never
+    /// serialized: an idempotent replay returns none, and the first call already mirrored them.
+    #[serde(skip)]
+    pub recorded_items: Vec<RecordedItem>,
+}
+
+/// One item resource an observation recorded: its subject, item kind, facts and claim.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordedItem {
+    pub subject: String,
+    pub kind: String,
+    pub facts: Value,
+    pub claim: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2013,6 +2026,12 @@ pub struct AttentionItemView {
     #[serde(default)]
     pub targets: Vec<String>,
     pub requested_at_unix_ms: u128,
+    /// When a person ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_unix_ms: Option<u128>,
+    /// The answer that then applies, `{id, label}`. Absent, the ask times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<Value>,
     #[serde(default)]
     pub actions: Vec<AttentionActionView>,
 }

@@ -16,7 +16,10 @@ For a proof, a uniquely named SQLite VFS wraps the platform default on proof con
 Every proof connection disables mmap. The VFS also prevents the SQLite sorter from mapping its temp file; sorter reads and writes stay wrapped. A refusal closes the connection without more SQL, then removes the disposable copy and sidecars with checked errors. Other processes may consume free space between checks, so `ENOSPC` remains an abort path and never a verification claim. A seal published before the proof attempt remains in place.
 
 Resumable capture staging keeps the default SQLite VFS and is charged one full live DB-size
-allowance up front. Its capture phases check available space at phase boundaries. A VFS refusal
+allowance up front. A capture scoped to the kinds a local cut drops is charged instead that image
+scaled by those kinds' share of the store's claims, times two, at least 1 GiB and at most the
+image: a 53 GB member whose scoped kinds hold 15% of its claims is charged about 16 GB and staged
+1.3 GB. The live reserve is unchanged. Its capture phases check available space at phase boundaries. A VFS refusal
 inside its transaction could prevent rollback and leave an unusable staging file. A later PR
 replaces the whole proof copy and puts `max_page_count` on construction.
 
