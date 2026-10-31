@@ -41083,6 +41083,10 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");
         assert_eq!(store.claims_for("github-event/repo/issue/1/closed", None).unwrap().len(), 1);
         let after_close = delivered();
+        // The same facts again: an unchanged look writes no snapshot and no state.
+        let (snapshots, states) = (count("resource.observed"), count("vcs.item.state"));
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1]), "c4b").await;
+        assert_eq!((count("resource.observed"), count("vcs.item.state")), (snapshots, states), "an unchanged look records nothing");
 
         // Polling moves to a member with no mirror. Its first look finds the title the graph
         // never recorded: that is a baseline, and nothing is delivered twice.
@@ -41095,7 +41099,7 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
             &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
         ).unwrap();
         let facts = listing("closed", "Orchid, renamed", &[1]);
-        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4")).is_some());
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4b")).is_some());
         assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
 
         // The graph moves on while this mirror and its cursor stay at the earlier look, as when
