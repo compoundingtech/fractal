@@ -217,6 +217,20 @@ impl Ui {
         true
     }
 
+    /// A paste while the popup is open filters it, one line typed at once, and never reaches
+    /// whatever is behind it. Returns true exactly when the popup took the paste.
+    pub(super) fn recent_paste(&mut self, text: &str) -> bool {
+        let Some(popup) = self.recent.popup.as_mut() else {
+            return false;
+        };
+        let line = text.lines().next().unwrap_or_default();
+        popup
+            .query
+            .extend(line.chars().filter(|ch| !ch.is_control()));
+        popup.filter();
+        true
+    }
+
     pub(super) fn draw_recent(&self, buf: &mut Buffer, area: Rect) {
         let Some(popup) = &self.recent.popup else {
             return;
@@ -225,7 +239,9 @@ impl Ui {
             return;
         }
         let width = area.width.saturating_sub(4).min(88);
-        let height = area.height.saturating_sub(2).min(22);
+        // Border, query, footer and at least the selected destination: the outer margin yields first,
+        // so the smallest accepted window still shows what Enter opens.
+        let height = area.height.saturating_sub(2).min(22).max(5);
         let rect = Rect {
             x: area.x + (area.width - width) / 2,
             y: area.y + (area.height - height) / 2,
@@ -751,5 +767,178 @@ mod tests {
             assert!(!ui.recent_open());
             assert!(!ui.terminal_focused());
         }
+    }
+
+    #[test]
+    fn minimum_window_keeps_the_selected_destination_visible_after_resize() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let shows_selected = |terminal: &Terminal<TestBackend>, label: &str| {
+            let buffer = terminal.backend().buffer();
+            let room = buffer
+                .area
+                .width
+                .saturating_sub(4)
+                .min(88)
+                .saturating_sub(4) as usize;
+            let shown: String = label.chars().take(room).collect();
+            (0..buffer.area.height).any(|y| {
+                let line: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                line.find(&shown).is_some_and(|at| {
+                    let x = line[..at].chars().count() as u16;
+                    buffer[(x, y)].bg == theme::ROW_SELECTED
+                })
+            })
+        };
+        let mut ui = places();
+        ui.open_recent();
+        ui.key(key(KeyCode::Down));
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert!(popup.selected > 0, "the selection is not the first row");
+        let entry = &popup.entries[popup.matches[popup.selected]];
+        let (label, target) = (entry.label.clone(), Pane::parse(&entry.place.pane).unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert!(shows_selected(&terminal, &label));
+        terminal.backend_mut().resize(20, 6);
+        for _ in 0..2 {
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+        }
+        assert_eq!(terminal.backend().buffer().area, Rect::new(0, 0, 20, 6));
+        assert!(
+            shows_selected(&terminal, &label),
+            "the selected destination stays visible at 20x6"
+        );
+        ui.key(key(KeyCode::Enter));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.focused_pane(), Some(target));
+
+        // Opening straight into the smallest accepted window shows the preselected destination.
+        ui.open_recent();
+        let popup = ui.recent.popup.as_ref().unwrap();
+        let entry = &popup.entries[popup.matches[popup.selected]];
+        let (label, target) = (entry.label.clone(), Pane::parse(&entry.place.pane).unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert!(shows_selected(&terminal, &label));
+        ui.key(key(KeyCode::Enter));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.focused_pane(), Some(target));
+    }
+
+    /// Over a real native terminal connection: leader r takes the program's focus, the popup
+    /// keeps the paste and the mouse, and closing it gives the focus back. Any byte that leaked
+    /// to the program would arrive ahead of the expected focus report.
+    #[test]
+    fn recent_popup_owns_paste_mouse_and_focus_over_a_native_attached_program() {
+        use crate::ui::{doc::Hit, pty::NativeTerminal};
+        use alacritty_terminal::term::TermMode;
+        use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+        use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+        use ratatui::{Terminal, backend::TestBackend};
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        fn input(peer: &mut UnixStream, reader: &mut PacketReader) -> Vec<u8> {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                assert!(Instant::now() < deadline, "no terminal input");
+                let mut bytes = [0u8; 1024];
+                let count = peer.read(&mut bytes).unwrap();
+                for packet in reader.feed(&bytes[..count]).unwrap() {
+                    if packet.type_ == MessageType::Data {
+                        return packet.payload;
+                    }
+                }
+            }
+        }
+        fn draw(ui: &Ui) {
+            let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+        }
+
+        let mut ui = places();
+        let id = ui.world.agents.items()[0].id.clone();
+        ui.open_in_glass(Pane::Agent(Some(id.clone())), Open::Tab);
+        ui.click(Hit::Attach);
+        assert!(ui.terminal_focused());
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        ui.terminal_view_mut(&id).unwrap().native =
+            Some(NativeTerminal::spawn(client, &id, "one".into(), 24, 80));
+        peer.write_all(&encode_packet(
+            MessageType::Screen,
+            b"\x1b[?1004h\x1b[?1003h\x1b[?1006h\x1b[?2004h",
+        ))
+        .unwrap();
+        let wanted = TermMode::FOCUS_IN_OUT | TermMode::MOUSE_MOTION | TermMode::BRACKETED_PASTE;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ui.native_terminal().unwrap().mode().contains(wanted) {
+            assert!(Instant::now() < deadline, "screen did not arrive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        draw(&ui);
+        let body = ui
+            .terminal_body
+            .get()
+            .expect("the attached program is drawn");
+        let mut reader = PacketReader::new();
+        ui.input_event(Event::FocusGained);
+        assert_eq!(input(&mut peer, &mut reader), b"\x1b[I");
+
+        ui.input_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        ui.input_event(Event::Key(key(KeyCode::Char('r'))));
+        assert!(ui.recent_open());
+        assert_eq!(
+            input(&mut peer, &mut reader),
+            b"\x1b[O",
+            "opening the popup takes the program's focus"
+        );
+
+        ui.input_event(Event::Paste("recent-alpha\nsecond line".into()));
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert_eq!(popup.query, "recent-alpha", "the paste filters the popup");
+        assert_eq!(popup.matches.len(), 1);
+
+        draw(&ui);
+        let (column, row) = (body.x + 2, body.y + 2);
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::ScrollDown,
+        ] {
+            let mouse = MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            ui.input_event(Event::Mouse(mouse));
+            ui.mouse(mouse);
+        }
+        ui.paste("direct".into());
+        assert_eq!(
+            ui.recent.popup.as_ref().unwrap().query,
+            "recent-alphadirect"
+        );
+        // The outer terminal's own focus changes stay with the popup too.
+        ui.input_event(Event::FocusLost);
+        ui.input_event(Event::FocusGained);
+        assert!(ui.recent_open() && ui.terminal_focused());
+
+        ui.input_event(Event::Key(key(KeyCode::Esc)));
+        assert!(!ui.recent_open());
+        assert_eq!(
+            input(&mut peer, &mut reader),
+            b"\x1b[I",
+            "closing the popup gives the focus back, and nothing reached the program before it"
+        );
     }
 }

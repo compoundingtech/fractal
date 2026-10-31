@@ -123,6 +123,8 @@ Enhanced Ctrl+Tab cycles recent places outside attached programs, not tabs. It c
 Control release only after such modifier releases have actually been observed; otherwise
 the same popup requires Enter. Ctrl+Shift+Tab cycles backward. Direct Ctrl+Tab remains
 program input while attached. Tabs keep quiet [ ] and Ctrl+PageUp/PageDown.
+The popup owns input until it closes: paste filters the list, mouse input does not reach the
+child, and the child receives focus-out followed by focus-in when input returns to it.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

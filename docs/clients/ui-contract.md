@@ -275,6 +275,9 @@ Once this terminal has actually reported a Control modifier release, releasing C
 that cycling selection; until then Ctrl+Tab uses the explicit Enter/Escape popup.
 Ctrl+^ and Ctrl+Tab both reach attached programs unchanged. Tabs retain [ ], Ctrl+PageUp
 and Ctrl+PageDown.
+While the popup is open, pasted text filters its rows and mouse input never reaches the
+underlying terminal. The child loses input focus until the popup closes. The selected
+destination remains visible even at the minimum supported viewport.
 
 
 
