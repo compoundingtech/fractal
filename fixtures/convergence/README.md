@@ -173,3 +173,13 @@ With v11 all 17 fixed seeds converge and trim (17/17 coverage), so the never-tri
 empty. Characterization used
 `cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
 (26 passed, 189.5 s).
+
+Under corpus v11 a wide audit of seeds 1–300 failed 15 seeds in `resource_observations`
+(#4426). A rebuild of the resource projection, which a replay or a checkpoint proof runs, kept
+only subjects with a `resource.observed` claim. So an item that only `vcs.item.state` claims
+describe lost its row on whichever node rebuilt. With the rebuild fixed, all 300 seeds converge.
+The 15 seeds are now fixed regression seeds: 27, 74, 106, 121, 130, 133, 179, 209, 241, 246,
+277, 281, 291, 293 and 294. Each of them trims, so the never-trim set stays empty. The audit
+used
+`CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
+(1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
