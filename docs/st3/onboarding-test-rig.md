@@ -13,8 +13,10 @@ scripts/onboarding-vm-test --help
 scripts/onboarding-mac-test --help
 ```
 
-The entry points default to Docker, an external Linux guest, and Tart respectively. Select a
-backend explicitly when changing that choice. The runner executes scenarios sequentially.
+Repository qualification follows the [review standard](../review.md#what-a-go-means), which
+requires native instances or VMs. Select `--backend incus` or `--backend external` for Linux;
+use Tart for macOS. The shared `onboarding-e2e` entry point defaults to a container backend,
+so select the VM backend explicitly. The runner executes scenarios sequentially.
 Use a fresh output directory for each attempt; an existing directory is refused.
 
 ## Candidate and harness boundaries
@@ -33,11 +35,8 @@ controls its own explicitly paid runs.
 
 ## Linux guests
 
-The Docker backend uses the runner's embedded clean-systemd image recipe; `--image` can name
-a prepared equivalent image. Its container uses privileges and supplies no guest-boot proof.
-The small-machine scenarios require Docker so the runner can enforce and inspect their
-actual memory limits.
-For a real disposable VM, prepare an account that already has Incus and KVM access, a default
+The small-machine scenarios currently depend on a container backend and are outside this
+VM procedure. For a disposable VM, prepare an account that already has Incus and KVM access, a default
 profile with a root disk and network, and capacity for one guest. The runner does not install
 host packages, initialize Incus, change host groups or use sudo. Image download, cloud-init and
 guest package installation require network access. Coordinate the VM with other host users.
