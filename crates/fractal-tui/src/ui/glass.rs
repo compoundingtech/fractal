@@ -3326,7 +3326,7 @@ impl Ui {
         match key.code {
             KeyCode::Char('q') if control => self.quit = true,
             // The agent's actions: restart, retire, suspend and the rest (Nathan, 2026-10-04).
-            KeyCode::Char('a') if control && conversation.is_some() => {
+            KeyCode::Char(screens::ACTIONS_CHORD) if control && conversation.is_some() => {
                 if let Some(agent) = &conversation {
                     self.popover = Some(format!("actions:{agent}"));
                 }
@@ -6970,6 +6970,96 @@ mod tests {
         assert!(screen(&ui).contains("Atlas Builder terminal"));
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.terminal_focused());
+    }
+
+    /// The conversation draws no Attach control, so its guidance names keys. Follow the keys the
+    /// rendered hint says, as the outer terminal delivers them, and the terminal must attach.
+    #[test]
+    fn the_conversations_terminal_hint_names_keys_that_attach_it() {
+        use crossterm::event::{Event, KeyEvent, MouseEvent};
+        let wide = |ui: &Ui| {
+            let mut terminal = Terminal::new(TestBackend::new(240, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let key = |ui: &mut Ui, code: KeyCode, modifiers: KeyModifiers| {
+            ui.input_event(Event::Key(KeyEvent::new(code, modifiers)));
+        };
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", agent)]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        // Enter in a conversation keeps its meaning: it never attaches.
+        key(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            ui.terminal.is_none() && !ui.editing,
+            "Enter alone never attaches"
+        );
+        // Expand the band with a click on its drawn toggle.
+        let shown = wide(&ui);
+        let hits = ui.frame.borrow().hits.clone();
+        assert!(
+            !hits.iter().any(|(_, hit)| matches!(hit, Hit::Attach)),
+            "the conversation draws no Attach control: {shown}"
+        );
+        let toggle = hits
+            .iter()
+            .find(|(_, hit)| matches!(hit, Hit::Alert(_, AlertTap::Toggle)))
+            .map(|(rect, _)| *rect)
+            .expect("the band draws its toggle");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            ui.input_event(Event::Mouse(MouseEvent {
+                kind,
+                column: toggle.x,
+                row: toggle.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        let shown = wide(&ui);
+        let route = shown
+            .lines()
+            .find_map(|line| {
+                line.split_once("answer it in the terminal (")
+                    .map(|(_, rest)| rest.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the band says how to reach the terminal: {shown}"));
+        let route = route.split(')').next().unwrap();
+        assert_eq!(route, screens::terminal_route(), "{shown}");
+        // Read the keys back from what is drawn, not from the code that drew them.
+        let (chord, rest) = route
+            .strip_prefix("Ctrl+")
+            .and_then(|route| route.split_once(" then "))
+            .unwrap_or_else(|| panic!("a chord then a key: {route}"));
+        let chord = chord.to_ascii_lowercase().chars().next().unwrap();
+        let action = rest.chars().next().unwrap();
+        key(&mut ui, KeyCode::Char(chord), KeyModifiers::CONTROL);
+        let menu = wide(&ui);
+        assert!(
+            menu.lines()
+                .any(|line| line.contains(&format!(" {action}  Terminal"))),
+            "the actions menu draws the hinted Terminal row: {menu}"
+        );
+        assert!(ui.terminal.is_none(), "opening the menu attaches nothing");
+        key(&mut ui, KeyCode::Char(action), KeyModifiers::NONE);
+        // The conversation's tab turns into its attached terminal, focused and drawn.
+        assert_eq!(tabs(&ui).2[0], vec![format!("terminal:{agent}")]);
+        assert_eq!(
+            ui.terminal.as_ref().map(|view| view.agent.as_str()),
+            Some(agent)
+        );
+        assert!(ui.terminal_focused());
+        assert!(screen(&ui).contains("demo terminal"));
     }
 
     #[test]
