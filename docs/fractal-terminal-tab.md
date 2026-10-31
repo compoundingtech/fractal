@@ -120,6 +120,12 @@ Tab navigation remains [ and ] (when not typing), and Ctrl+PageUp/PageDown.
 Ctrl+L triages outstanding Inbox items only outside attached programs; inside, it remains
 the program's clear-screen chord. Ctrl+\ then l visits the previous triage item without
 sending either leader key to the program. Enhanced Ctrl+Shift+L is the detached equivalent.
+Ctrl+^ (Ctrl+6, 0x1E) opens the recent-place popup when detached, on every terminal type.
+While attached it reaches the program unchanged (for example, Vim's alternate-file key).
+Ctrl+\ then r opens the popup over an attached program. It preselects the previous
+destination; Up/Down changes the selection, Enter opens, and Escape cancels.
+The popup owns input until it closes: paste and mouse input are swallowed rather than sent
+to the child, which receives focus-out followed by focus-in when input returns to it.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

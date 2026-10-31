@@ -679,6 +679,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
+        .route("/v1/agents/lane", get(agents::agent_lane))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -7113,6 +7114,7 @@ pub async fn guard_bound_request(
         "/v1/rules/",
         "/v1/repair",
         "/v1/signatures/",
+        "/v1/checkpoint/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))

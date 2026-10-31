@@ -4433,10 +4433,11 @@ impl Ui {
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
-    const LEADER_KEYS: [(&'static str, &'static str); 15] = [
+    const LEADER_KEYS: [(&'static str, &'static str); 16] = [
         ("\\", "close this tab"),
         ("c", "the conversation (leave the terminal)"),
         ("t", "a new tab"),
+        ("r", "recent places"),
         ("l", "previous item needing you"),
         ("v", "split right"),
         ("x", "split below"),
@@ -4488,6 +4489,7 @@ impl Ui {
                 }
                 '[' | ']' => self.navigate_history(letter == ']'),
                 'l' => self.triage_next(false),
+                'r' => self.open_recent(),
                 _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
@@ -7493,6 +7495,31 @@ mod tests {
         assert!(detail.contains("error budget left · last 24 hours"), "{detail}");
         assert!(detail.contains("Ninety-nine in a"), "{detail}");
         assert!(detail.contains("100% │"), "{detail}");
+        if std::env::var_os("SLO_PANE_SCREEN").is_some() {
+            println!("{detail}");
+        }
+    }
+
+    #[test]
+    fn usage_forecasts_each_budget_in_the_list_and_explains_it_on_selection() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        let shown = screen(&ui);
+        // The weekly budget runs out first (yellow, not red: it is not spent yet); the others end
+        // the period inside their allowance.
+        for text in ["94% used · out in 20h", "41% used · 72% by reset", "6% used · 18% by reset"] {
+            assert!(shown.contains(text), "the Usage list forecasts {text}:\n{shown}");
+        }
+        for _ in 0..40 {
+            if ui.selected_id().as_deref() == Some("slo/anthropic-weekly") {
+                break;
+            }
+            press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert_eq!(ui.selected_id().as_deref(), Some("slo/anthropic-weekly"));
+        let detail = screen(&ui);
+        assert!(detail.contains("runs out in 20h, before it resets"), "{detail}");
+        assert!(detail.contains("(from the last 1d)"), "{detail}");
         if std::env::var_os("SLO_PANE_SCREEN").is_some() {
             println!("{detail}");
         }

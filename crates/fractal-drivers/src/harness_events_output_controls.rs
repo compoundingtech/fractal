@@ -1095,23 +1095,23 @@ mod tests {
     }
 
     #[test]
-    fn shared_timeline_retention_keeps_4096_rows_and_prunes_only_the_oldest() {
+    fn shared_timeline_retention_keeps_row_slack_then_prunes_only_the_oldest() {
         let production = tempfile::tempdir().unwrap();
         let private = tempfile::tempdir().unwrap();
         prepare(production.path(), "omp");
         let (_, mut record, template, seq) = prepare(private.path(), "omp");
-        let history = (1..4096)
+        let history = (1..4352)
             .map(|sequence| retention_operation(&template, sequence))
             .collect::<Vec<_>>();
         for root in [production.path(), private.path()] {
             seed_retained_timeline(root, &history);
             let sizes = retained_timeline_sizes(root);
-            assert_eq!(sizes.len(), 4095);
+            assert_eq!(sizes.len(), 4351);
             assert!(sizes.iter().map(|row| row.1).sum::<u64>() < 2_097_152);
         }
         let production_before = pending_bytes(production.path());
         let private_before = pending_bytes(private.path());
-        for sequence in [4096, 4097] {
+        for sequence in [4352, 4353] {
             let operation = retention_operation(&template, sequence);
             record.next_sequence = sequence + 1;
             record.operations = vec![operation.clone()];
@@ -1133,8 +1133,8 @@ mod tests {
                 shared_timeline_image(private.path())
             );
             let sizes = retained_timeline_sizes(private.path());
-            assert_eq!(sizes.len(), 4096);
-            assert_eq!(sizes.first().unwrap().0, sequence - 4095);
+            assert_eq!(sizes.len(), if sequence == 4352 { 4352 } else { 4096 });
+            assert_eq!(sizes.first().unwrap().0, if sequence == 4352 { 1 } else { 258 });
             assert_eq!(sizes.last().unwrap().0, sequence);
             assert!(sizes.iter().map(|row| row.1).sum::<u64>() < 2_097_152);
             assert_eq!(
@@ -1145,8 +1145,8 @@ mod tests {
     }
 
     #[test]
-    fn shared_timeline_retention_keeps_exact_utf8_byte_limit_then_prunes_whole_rows() {
-        const LIMIT: usize = 2_097_152;
+    fn shared_timeline_retention_keeps_utf8_byte_slack_then_prunes_whole_rows() {
+        const LIMIT: usize = 2_097_152 + 131_072;
         let production = tempfile::tempdir().unwrap();
         let private = tempfile::tempdir().unwrap();
         prepare(production.path(), "omp");
@@ -1216,7 +1216,7 @@ mod tests {
     fn failed_output_event_restores_rows_pruned_by_shared_timeline_retention() {
         let root = tempfile::tempdir().unwrap();
         let (_, mut record, template, seq) = prepare(root.path(), "omp");
-        let history = (1..=4096)
+        let history = (1..=4352)
             .map(|sequence| retention_operation(&template, sequence))
             .collect::<Vec<_>>();
         seed_retained_timeline(root.path(), &history);
@@ -1227,8 +1227,8 @@ mod tests {
                 .sum::<u64>()
                 < 2_097_152
         );
-        let operation = retention_operation(&template, 4097);
-        record.next_sequence = 4098;
+        let operation = retention_operation(&template, 4353);
+        record.next_sequence = 4354;
         record.operations = vec![operation.clone()];
         let progress = [OutputProgress {
             operation: &operation,
@@ -1269,8 +1269,8 @@ mod tests {
         .unwrap();
         let sizes = retained_timeline_sizes(root.path());
         assert_eq!(sizes.len(), 4096);
-        assert_eq!(sizes.first().unwrap().0, 2);
-        assert_eq!(sizes.last().unwrap().0, 4097);
+        assert_eq!(sizes.first().unwrap().0, 258);
+        assert_eq!(sizes.last().unwrap().0, 4353);
     }
 
     #[test]
