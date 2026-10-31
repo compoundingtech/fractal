@@ -815,7 +815,8 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     }
     if (header && entry.type === 'content') {
       const message = header;
-      if (named !== undefined) headers.delete(named);
+      // Each header pairs once, by name or by adjacency.
+      headers.delete(str(message.message_id) ?? '');
       if (mail === message) mail = undefined;
       const text = cleanMessageText(contentText(entry.body), filters);
       const from = str(message.from) ?? '';

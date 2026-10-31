@@ -126,6 +126,8 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
     ['message/one', 'mail', 'one', 'one text'],
   ]);
   assert.deepEqual(mail([header('one', 'agent/example/birch'), content('one', false)]), [['message/one', 'mail', 'one', 'one text']]);
+  // A header pairs once, however it paired.
+  assert.deepEqual(mail([header('one', 'agent/example/birch'), content('one', false), content('one', true)]).map(([, kind]) => kind), ['mail', 'user']);
 }
 
 // A message spoken and transcribed carries Fractal's `dictated` tag; the app marks it.
