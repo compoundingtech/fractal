@@ -7,6 +7,7 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
 pub mod ordered_membership;
@@ -1143,6 +1144,12 @@ fn build_registry() -> Registry {
             false,
         ),
         (
+            github_plugin::EVENT_FAMILY,
+            "github-event/RESOURCE/ITEM/NUMBER/KEY",
+            "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
+            false,
+        ),
+        (
             "resource",
             "resource/NAME",
             "An observed external or durable fact bag.",
@@ -1951,6 +1958,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_plugin::ITEM_STATE,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("resources"),
+            true,
+            &[],
+        ),
+        (
+            github_plugin::EVENT,
+            &[github_plugin::EVENT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("resources"),
+            true,
+            &[],
         ),
         (
             "observer.observed",
@@ -2989,6 +3014,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
+        github_plugin::EVENT => github_plugin::event_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),

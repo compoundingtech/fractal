@@ -160,13 +160,24 @@ the exact `NEVER_TRIMS` set is empty. The remote characterization used
 That run observed every seed trim; its sole failed assertion was v9's obsolete
 expectation that seed 3 never trims. The per-seed equality remains enforced.
 
-`claims-v11.json` is generated the same way from the declared-waits registry on top of v10's
-person-repair registry
-(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`).
+`claims-v11.json` captures the registry that adds the GitHub plugin's two compact kinds,
+`vcs.item.state` on `resource` subjects and `github.event` on the new `github-event` family
+(docs/st3/plugins.md). Versions 1 through 10 stay frozen. Generate v11 from the merged
+registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`;
+do not hand-edit or overwrite v10. The generator names `github-event` subjects explicitly;
+each draw takes a fresh event key, since `github.event` is written once per subject. The
+simulation selects v11 and records its filename in audit summaries.
+
+With v11 all 17 fixed seeds converge and trim (17/17 coverage), so the never-trim set stays
+empty. Characterization used
+`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
+(26 passed, 189.5 s).
+
+`claims-v12.json` is generated the same way from the declared-waits registry on top of v11's
+(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`).
 It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
-kinds carry; nothing in v10 is removed. The simulation selects v11 and records that filename in its
-audit summary; v1 to v10 stay fixed. Every fixed seed converges; 16 of the 17 trim a checkpoint,
-and seed 144 converges without one, so `NEVER_TRIMS` is `[144]`. Claim generation shares the
-schedule's RNG, so regenerating v11 after a registry change on main can move this set. The
-characterization run used
-`cargo nextest run -p fractal -E 'test(convergence)'`.
+kinds carry; nothing in v11 is removed. The simulation selects v12 and records that filename in its
+audit summary; v1 to v11 stay fixed. Seeds 21 and 34 converge without a trim, so `NEVER_TRIMS` is
+`[21, 34]`. Claim generation shares the schedule's RNG, so a registry change on main can move this
+set. The characterization run used `cargo nextest run -p fractal -E 'test(convergence)'`.

@@ -15,13 +15,10 @@ use std::path::PathBuf;
 /// Live tab chrome. Never stored with the workspace: observations can change between frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TabBadge {
-    kind: &'static str,
     activity: &'static str,
     alerts: Option<usize>,
     ask: bool,
     needs_person: bool,
-    /// The original agent/mission needs-person projection, independent of alert volume.
-    attention_marker: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -57,16 +54,23 @@ impl TabStatuses {
             .collect();
         for agent in world.agents.items() {
             let activity = match agent.state {
-                AgentState::Working | AgentState::Compacting => ">",
-                AgentState::Idle => "-",
-                AgentState::Down | AgentState::Stopped | AgentState::Retired => "x",
-                AgentState::NeedsYou | AgentState::NeedsLogin => "◆",
+                AgentState::Working | AgentState::Compacting => "●",
+                AgentState::Idle | AgentState::NeedsYou | AgentState::NeedsLogin => "○",
+                AgentState::Down | AgentState::Stopped | AgentState::Retired => "×",
                 AgentState::Fault => "!",
                 AgentState::Starting | AgentState::Unknown => "~",
             };
-            status.agents.insert(agent.id.clone(), SubjectBadge {
-                activity, needs_person: activity == "◆", ..SubjectBadge::default()
-            });
+            status.agents.insert(
+                agent.id.clone(),
+                SubjectBadge {
+                    activity,
+                    needs_person: matches!(
+                        agent.state,
+                        AgentState::NeedsYou | AgentState::NeedsLogin
+                    ),
+                    ..SubjectBadge::default()
+                },
+            );
         }
         for mission in world.missions.items() {
             if mission.decision.is_some() {
@@ -119,51 +123,117 @@ impl TabStatuses {
 }
 
 impl TabBadge {
-    fn activity_label(self) -> &'static str {
-        if self.attention_marker && self.activity == "◆" { "" } else { self.activity }
+    fn attention(self) -> &'static str {
+        if self.ask {
+            "?"
+        } else if self.needs_person {
+            "◆"
+        } else {
+            ""
+        }
+    }
+
+    /// Match the shared truncator without allocating a temporary title for width queries.
+    fn title(title: &str) -> (&str, bool) {
+        use unicode_width::UnicodeWidthChar as _;
+        if text::width(title) <= 26 {
+            return (title, false);
+        }
+        let mut used = 0;
+        for (end, character) in title.char_indices() {
+            used += character.width().unwrap_or(0);
+            if used > 25 {
+                return (&title[..end], true);
+            }
+        }
+        (title, false)
     }
 
     fn width(self, title: &str, counts: bool) -> usize {
-        let count = if counts {
-            match self.alerts {
-                Some(count) if count > 0 => 2 + count.ilog10() as usize + 1,
-                None if !self.kind.is_empty() => 3,
-                _ => 0,
-            }
-        } else if self.needs_person && !self.ask && !self.attention_marker { 2 } else { 0 };
-        let prefix = text::width(self.kind) + text::width(self.activity_label())
-            + if self.ask { 2 } else { 0 } + count
-            + if self.attention_marker { 2 } else { 0 };
-        // Keep the pre-badge title budget (26 cells plus padding). Status chrome must not
-        // consume the last distinguishing characters of a title that previously fitted.
-        1 + prefix + usize::from(prefix > 0) + text::width(title).min(26) + 1
+        let attention = self.attention();
+        let count = if counts && !attention.is_empty() {
+            self.alerts
+                .filter(|count| *count > 1)
+                .map_or(0, |count| count.ilog10() as usize + 1)
+        } else {
+            0
+        };
+        let (title, truncated) = Self::title(title);
+        // Preserve the existing 26-cell title budget independently of status chrome.
+        2 + text::width(self.activity)
+            + text::width(title)
+            + usize::from(truncated)
+            + if attention.is_empty() { 0 } else { 2 + count }
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
-        let mut label = format!(" {}{}", self.kind, self.activity_label());
-        if self.ask {
-            label.push_str(" ?");
+        if width == 0 {
+            return String::new();
         }
-        if counts {
-            match self.alerts {
-                Some(count) if count > 0 => { let _ = write!(label, " ◆{count}"); }
-                None if !self.kind.is_empty() => label.push_str(" ◆?"),
-                _ => {}
-            }
-        } else if self.needs_person && !self.ask && !self.attention_marker {
-            label.push_str(" ◆");
+        let activity_width = text::width(self.activity);
+        if !self.activity.is_empty() && width <= activity_width {
+            return text::truncate(self.activity, width);
         }
-        // Preserve the existing standalone marker next to the subject's name. A count
-        // diamond or a type/activity glyph is not a replacement for this projection.
-        if self.attention_marker {
-            label.push_str(" ◆");
-        }
-        if label.len() > 1 {
-            label.push(' ');
-        }
-        label.push_str(title);
+        let (title, truncated) = Self::title(title);
+        let attention = self.attention();
+        let digits = if counts && !attention.is_empty() {
+            self.alerts
+                .filter(|count| *count > 1)
+                .map_or(0, |count| count.ilog10() as usize + 1)
+        } else {
+            0
+        };
+        let capacity = 2
+            + self.activity.len()
+            + title.len()
+            + if truncated { "…".len() } else { 0 }
+            + if attention.is_empty() {
+                0
+            } else {
+                1 + attention.len() + digits
+            };
+        let mut label = String::with_capacity(capacity);
         label.push(' ');
-        text::truncate(&label, width.min(self.width(title, counts)))
+        label.push_str(self.activity);
+        label.push_str(title);
+        if truncated {
+            label.push('…');
+        }
+        if !attention.is_empty() {
+            label.push(' ');
+            label.push_str(attention);
+            if counts && let Some(count) = self.alerts.filter(|count| *count > 1) {
+                let _ = write!(label, "{count}");
+            }
+        }
+        label.push(' ');
+        if text::width(&label) > width {
+            use unicode_width::UnicodeWidthChar as _;
+            // Padding may disappear, but truncation never consumes the activity glyph.
+            let (prefix_bytes, prefix_width) = if self.activity.is_empty() {
+                (0, 0)
+            } else {
+                (1 + self.activity.len(), 1 + activity_width)
+            };
+            let room = width - prefix_width;
+            let mut end = prefix_bytes;
+            if room > 0 {
+                let mut used = 0;
+                for (at, character) in label[prefix_bytes..].char_indices() {
+                    let cells = character.width().unwrap_or(0);
+                    if used + cells >= room {
+                        break;
+                    }
+                    used += cells;
+                    end = prefix_bytes + at + character.len_utf8();
+                }
+            }
+            label.truncate(end);
+            if room > 0 {
+                label.push('…');
+            }
+        }
+        label
     }
 }
 
@@ -217,6 +287,32 @@ pub(crate) struct Glasses {
     /// is still empty when st first sends the person's glasses, st's glass of that name is
     /// shown instead of keeping both.
     placeholder: Option<String>,
+    /// Where each split's tab strip starts, for the glass last drawn: this window only, never
+    /// stored. Drawing keeps it, so it is shared state behind a `RefCell`.
+    strips: RefCell<TabStrips>,
+}
+
+/// The tab strips of the glass last drawn, by split.
+#[derive(Debug, Default)]
+struct TabStrips {
+    glass: String,
+    views: Vec<StripView>,
+}
+
+/// Where one split's tab strip starts. It follows the tab in front until the wheel moves it,
+/// and again once another tab comes to the front.
+#[derive(Clone, Debug, Default)]
+struct StripView {
+    /// The first tab shown.
+    first: usize,
+    /// The tab in front when the strip was last drawn, by place and pane: another pane at the
+    /// same place (the front tab closed, its neighbor taking its place) is a new front tab.
+    /// None before its first draw.
+    current: Option<(usize, String)>,
+    /// Moved by the wheel since the tab in front last changed: kept where it is.
+    manual: bool,
+    /// The furthest the strip may start and still show its last tab whole, as last drawn.
+    most: usize,
 }
 
 /// A tab pressed with the mouse: it becomes a drag once the pointer moves with the button held;
@@ -628,6 +724,7 @@ impl Glasses {
             last_border: None,
             pending: BTreeMap::new(),
             placeholder,
+            strips: RefCell::default(),
         }
     }
 
@@ -2480,21 +2577,78 @@ impl Ui {
             });
             (title, self.tab_badge(tab, pane.as_ref()))
         }).collect();
-        let available = area.width.saturating_sub(x - area.x);
+        self.frame.borrow_mut().glass_strips.push((area, index));
+        // `+` and the narrowest tab worth showing beside it.
+        const ADD: u16 = 3;
+        const NARROWEST: u16 = 4;
+        // A hidden-tab marker takes its count, its arrow, a space and the gap after it.
+        let marker = if tabs.len() > 1 {
+            tabs.len().ilog10() as u16 + 4
+        } else {
+            0
+        };
+        // `+` keeps its place at the end while the tab in front and both markers still have room.
+        let strip_room = area.width.saturating_sub(x - area.x);
+        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
+            ADD
+        } else {
+            0
+        };
+        let available = strip_room - plus;
         let counts = tabs.iter().map(|(title, badge)| badge.width(title, true) + 1)
             .sum::<usize>() <= usize::from(available);
         // Reserve both overflow markers and a tab gap before shortening any label. A selected
         // tab must never consume the space needed to reach its hidden neighbors.
-        let marker = if tabs.len() > 1 { tabs.len().ilog10() as usize + 3 } else { 0 };
-        let label_width = if counts { usize::from(available) }
-            else { usize::from(available).saturating_sub(2 * marker + 1) };
-        let labels: Vec<_> = tabs.iter()
-            .map(|(title, badge)| (badge.label(title, label_width, counts), badge.needs_person))
+        let label_width = if counts {
+            usize::from(available)
+        } else {
+            usize::from(available.saturating_sub(2 * marker + 1))
+        };
+        // One cell belongs to the tab, even when chrome consumes the nominal budget.
+        // Fewer whole tabs are preferable to erasing their activity glyphs.
+        let label_width = label_width.max(usize::from(available > 0));
+        let labels: Vec<_> = tabs
+            .iter()
+            .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
             .collect();
         let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
-        let (first, last) = visible_tabs(&widths, group.current, area.width.saturating_sub(x - area.x));
-        // Tabs that do not fit are not lost: the strip scrolls to keep the one in front on
-        // screen, and a marker at each end counts the hidden ones and shows the nearest.
+        // Tabs that do not fit are not lost: a marker at each end counts the hidden ones and
+        // shows the nearest. The strip keeps its place, following the tab in front onto the
+        // screen, until the wheel moves it; then it stays put until another tab comes in front.
+        let (first, last) = {
+            let mut strips = self.glasses.strips.borrow_mut();
+            if strips.glass != glass.id {
+                strips.glass.clone_from(&glass.id);
+                strips.views.clear();
+            }
+            if strips.views.len() <= index {
+                strips.views.resize(index + 1, StripView::default());
+            }
+            let view = &mut strips.views[index];
+            let pane = group
+                .tabs
+                .get(group.current)
+                .map_or("", |tab| tab.pane.as_str());
+            let same = view
+                .current
+                .as_ref()
+                .is_some_and(|(at, shown)| *at == group.current && shown == pane);
+            if !same {
+                view.current = Some((group.current, pane.to_owned()));
+                view.manual = false;
+            }
+            let window = visible_tabs(
+                &widths,
+                group.current,
+                view.first,
+                !view.manual,
+                marker,
+                available,
+            );
+            view.first = window.first;
+            view.most = window.most;
+            (window.first, window.last)
+        };
         if first > 0 {
             let marker = format!("‹{} ", first);
             let width = text::width(&marker) as u16;
@@ -2502,8 +2656,19 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
             x += width;
         }
-        for (shown, (label, needs)) in labels.iter().enumerate().take(last + 1).skip(first) {
-            let needs = *needs;
+        // Where tabs must stop so the right marker and `+` (each after a gap) stay in the strip.
+        let hidden_after = labels.len().saturating_sub(last + 1);
+        let tail = if hidden_after > 0 {
+            // Reserve the marker actually drawn, not the total tab count's upper bound.
+            hidden_after.ilog10() as u16 + 5 + plus
+        } else if plus > 0 {
+            1 + plus
+        } else {
+            0
+        };
+        let stop = (area.x + area.width).saturating_sub(tail);
+        for (shown, (label, badge)) in labels.iter().enumerate().take(last + 1).skip(first) {
+            let needs = badge.needs_person;
             let style = match (shown == group.current, focused) {
                 (true, true) => Style::default()
                     .fg(theme::CRUST)
@@ -2515,8 +2680,21 @@ impl Ui {
                 _ => theme::fg(theme::OVERLAY0).bg(strip),
             };
             // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
-            let width = widths[shown].min((area.x + area.width).saturating_sub(x));
+            let width = widths[shown].min(stop.saturating_sub(x));
             buf.set_stringn(x, area.y, label, width as usize, style);
+            // What waits on the person keeps its colour on every tab, the one in front too.
+            if let Some(at) = attention_at(label, badge.attention()) {
+                let offset = text::width(&label[..at]) as u16;
+                if offset < width {
+                    buf.set_stringn(
+                        x + offset,
+                        area.y,
+                        &label[at..],
+                        usize::from(width - offset),
+                        style.fg(theme::PERSON),
+                    );
+                }
+            }
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
             x += width + 1;
         }
@@ -2551,6 +2729,49 @@ impl Ui {
                     theme::fg(theme::YELLOW).bg(strip),
                 );
             }
+        }
+    }
+
+    /// The split whose tab strip is under the pointer and on top there: nothing drawn over it
+    /// (Home, a popover, the palette or another hit) takes the wheel first.
+    pub(super) fn tab_strip_at(&self, column: u16, row: u16) -> Option<usize> {
+        if self.home_open() || self.palette_open() || self.popover.is_some() {
+            return None;
+        }
+        let info = self.frame.borrow();
+        let group = info
+            .glass_strips
+            .iter()
+            .rev()
+            .find(|(rect, _)| contains(*rect, column, row))?
+            .1;
+        match info
+            .hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| contains(*rect, column, row))
+        {
+            None | Some((_, Hit::GlassTab(..) | Hit::GlassTabMore(..) | Hit::GlassAdd(_))) => {
+                Some(group)
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// The wheel over a tab strip moves it one whole tab, as far as showing the last tab whole;
+    /// the tab in front stays as it is, even if it scrolls out of sight.
+    pub(super) fn scroll_tab_strip(&self, group: usize, forward: bool) {
+        let mut strips = self.glasses.strips.borrow_mut();
+        if strips.glass != self.glasses.glass().id {
+            return;
+        }
+        if let Some(view) = strips.views.get_mut(group) {
+            view.first = if forward {
+                (view.first + 1).min(view.most)
+            } else {
+                view.first.saturating_sub(1).min(view.most)
+            };
+            view.manual = true;
         }
     }
 
@@ -2597,12 +2818,9 @@ impl Ui {
     }
 
     fn tab_badge(&self, tab: &Tab, pane: Option<&Pane>) -> TabBadge {
-        let kind = match tab.kind() {
-            TabKind::Agent => "A",
-            TabKind::Mission => "M",
-            TabKind::Inbox => "I",
-            TabKind::Other => return TabBadge::default(),
-        };
+        if tab.kind() == TabKind::Other {
+            return TabBadge::default();
+        }
         let statuses = &self.tab_statuses;
         let subject = match pane {
             Some(Pane::Agent(Some(id)) | Pane::Terminal(id)) => statuses.agents.get(id),
@@ -2612,12 +2830,10 @@ impl Ui {
             _ => None,
         }.copied().unwrap_or_default();
         TabBadge {
-            kind,
             activity: if tab.kind() == TabKind::Agent && subject.activity.is_empty() { "~" } else { subject.activity },
             alerts: statuses.loaded.then_some(subject.alerts),
             ask: subject.ask,
             needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
-            attention_marker: subject.needs_person,
         }
     }
 
@@ -4435,32 +4651,71 @@ fn home_popover_rect(body: Rect) -> Rect {
     }
 }
 
-/// The first and last tab that fit in `room` cells, the one in front always among them: the
-/// strip stays where it is until the tab in front passes its end, then moves just enough. Each
-/// tab takes its width and a gap; the markers for hidden tabs are reserved from `room`.
-fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
-    const MARKER: u16 = 4;
+/// The tabs a strip shows whole in `room` cells, `first` to `last`, and `most`: the furthest it
+/// may start and still show its last tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TabWindow {
+    first: usize,
+    last: usize,
+    most: usize,
+}
+
+/// Where a strip shows its tabs, starting from `start`. Following, the tab in front comes on
+/// screen: the strip stays where it is until that tab passes an end, then moves just enough.
+/// Each tab takes its width and a gap; a `marker` for hidden tabs is reserved at each end.
+fn visible_tabs(
+    widths: &[u16],
+    current: usize,
+    start: usize,
+    follow: bool,
+    marker: u16,
+    room: u16,
+) -> TabWindow {
     let count = widths.len();
     if count == 0 {
-        return (0, 0);
+        return TabWindow {
+            first: 0,
+            last: 0,
+            most: 0,
+        };
     }
     let current = current.min(count - 1);
     let fits = |first: usize, last: usize| {
         let tabs: u16 = widths[first..=last].iter().map(|width| width + 1).sum();
-        let before = if first > 0 { MARKER } else { 0 };
-        let after = if last + 1 < count { MARKER } else { 0 };
+        let before = if first > 0 { marker } else { 0 };
+        let after = if last + 1 < count { marker } else { 0 };
         tabs + before + after <= room
     };
-    let mut first = 0;
-    // Move the start on until the front tab fits (it always shows, even alone and cut short).
-    while first < current && !fits(first, current) {
-        first += 1;
+    let mut most = count - 1;
+    while most > 0 && fits(most - 1, count - 1) {
+        most -= 1;
     }
-    let mut last = current;
-    while last + 1 < count && fits(first, last + 1) {
-        last += 1;
+    let mut first = start.min(most);
+    if follow {
+        // The front tab always shows, even alone and cut short.
+        first = first.min(current);
+        while first < current && !fits(first, current) {
+            first += 1;
+        }
     }
-    (first, last)
+    let last = (first..count)
+        .rev()
+        .find(|last| fits(first, *last))
+        .unwrap_or(first);
+    TabWindow { first, last, most }
+}
+
+/// Where the attention suffix (` ?2`, ` ◆`) starts in a tab's label, if the label still has it.
+fn attention_at(label: &str, attention: &str) -> Option<usize> {
+    if attention.is_empty() {
+        return None;
+    }
+    let body = label
+        .trim_end_matches(' ')
+        .trim_end_matches(|c: char| c.is_ascii_digit());
+    body.strip_suffix(attention)
+        .filter(|before| before.ends_with(' '))
+        .map(str::len)
 }
 
 /// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
@@ -4763,14 +5018,153 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_strip_snapshot_shows_kind_activity_counts_and_pending_ask() {
-        let ui = tab_badge_world();
-        assert_eq!(tab_badge_strip(&ui, 120),
-            "A> ? ◆2 Atlas A- Idle Ax Stopped M ? ◆2 Mission I ? ◆2 Inbox +");
+    fn tab_badge_agent_activity_states_keep_attention_on_the_right() {
+        for (state, glyph, attention) in [
+            (AgentState::Working, "●", false),
+            (AgentState::Compacting, "●", false),
+            (AgentState::Idle, "○", false),
+            (AgentState::Down, "×", false),
+            (AgentState::Stopped, "×", false),
+            (AgentState::Retired, "×", false),
+            (AgentState::Fault, "!", false),
+            (AgentState::Starting, "~", false),
+            (AgentState::Unknown, "~", false),
+            (AgentState::NeedsYou, "○", true),
+            (AgentState::NeedsLogin, "○", true),
+        ] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            next.attention = Load::Ready(Vec::new());
+            if let Load::Ready(agents) = &mut next.agents {
+                agents[0].state = state;
+            }
+            ui.set_world(next);
+            let tab = Tab::pane("agent:agent/a");
+            let badge = ui.tab_badge(&tab, Pane::parse(&tab.pane).as_ref());
+            assert_eq!(badge.activity, glyph, "{state:?}");
+            assert_eq!(
+                badge.label("Atlas", 80, true),
+                format!(" {glyph}Atlas{} ", if attention { " ◆" } else { "" }),
+                "{state:?}"
+            );
+        }
     }
 
     #[test]
-    fn tab_badge_keeps_projected_needs_person_marker_adjacent_to_agent_and_mission_names() {
+    fn tab_badge_attention_count_rules_and_display_widths() {
+        for (alerts, ask, needs_person, suffix) in [
+            (None, false, false, ""),
+            (Some(0), false, false, ""),
+            (Some(0), false, true, " ◆"),
+            (Some(1), false, true, " ◆"),
+            (Some(3), false, true, " ◆3"),
+            (Some(1), true, true, " ?"),
+            (Some(2), true, true, " ?2"),
+            (Some(12), true, true, " ?12"),
+        ] {
+            for activity in ["", "●", "○", "×", "!", "~"] {
+                let badge = TabBadge {
+                    activity,
+                    alerts,
+                    ask,
+                    needs_person,
+                };
+                assert_eq!(
+                    badge.label("Atlas", 80, true),
+                    format!(" {activity}Atlas{suffix} ")
+                );
+                for title in [
+                    "Atlas",
+                    "短い名前",
+                    "e\u{301}",
+                    "界".repeat(20).as_str(),
+                    "a".repeat(25).as_str(),
+                    "a".repeat(26).as_str(),
+                    "a".repeat(27).as_str(),
+                ] {
+                    for counts in [false, true] {
+                        let label = badge.label(title, usize::MAX, counts);
+                        assert_eq!(badge.width(title, counts), text::width(&label), "{label}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_truncation_protects_activity_before_padding_and_ellipsis() {
+        for activity in ["●", "○", "×", "!", "~"] {
+            let badge = TabBadge {
+                activity,
+                ..TabBadge::default()
+            };
+            for (width, expected) in [
+                (0, String::new()),
+                (1, activity.to_owned()),
+                (2, format!(" {activity}")),
+                (3, format!(" {activity}…")),
+                (4, format!(" {activity}A…")),
+            ] {
+                let label = badge.label("Atlas", width, false);
+                assert_eq!(label, expected);
+                assert_eq!(text::width(&label), width);
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_narrow_strips_keep_each_painted_agent_activity() {
+        for overflow in [false, true] {
+            for width in [12, 14, 18] {
+                let mut ui = tab_badge_world();
+                let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+                let agent = group.tabs[0].clone();
+                if overflow {
+                    // Cover a two-digit tab count and the smallest label budgets.
+                    group.tabs.resize(12, agent);
+                } else {
+                    group.tabs = vec![agent];
+                }
+                let area = Rect::new(0, 0, width, 1);
+                let mut buffer = Buffer::empty(area);
+                ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+                for (rect, hit) in &ui.frame.borrow().hits {
+                    if let Hit::GlassTab(0, index) = hit {
+                        let tab = &ui.glasses.glass().layout.groups()[0].tabs[*index];
+                        let badge = ui.tab_badge(tab, Pane::parse(&tab.pane).as_ref());
+                        if !badge.activity.is_empty() {
+                            let painted = (rect.x..rect.right())
+                                .map(|x| buffer[(x, 0)].symbol())
+                                .collect::<String>();
+                            assert!(
+                                painted.contains(badge.activity),
+                                "{width} cells, overflow={overflow}, tab {index}: |{painted}|"
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    ui.frame
+                        .borrow()
+                        .hits
+                        .iter()
+                        .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_strip_snapshot_shows_compact_activity_and_attention_suffixes() {
+        let ui = tab_badge_world();
+        assert_eq!(
+            tab_badge_strip(&ui, 120),
+            "●Atlas ?2 ○Idle ×Stopped Mission ?2 Inbox ?2 +"
+        );
+    }
+
+    #[test]
+    fn tab_badge_merges_projected_attention_and_questions_into_one_suffix() {
         for state in [AgentState::NeedsYou, AgentState::NeedsLogin] {
             let mut ui = tab_badge_world();
             let mut next = ui.world.clone();
@@ -4786,21 +5180,22 @@ mod tests {
                 let tab = Tab::pane(key);
                 let badge = ui.tab_badge(&tab, Pane::parse(key).as_ref());
                 let wide = badge.label(title, 80, true);
-                assert!(wide.contains("◆2"), "{wide}");
-                assert!(wide.contains(&format!("◆ {title}")), "{wide}");
+                assert_eq!(wide.matches('?').count(), 1, "{wide}");
+                assert!(wide.contains(&format!("{title} ?2")), "{wide}");
+                assert!(!wide.contains('◆'), "{wide}");
                 let compact = badge.label(title, 80, false);
-                assert!(!compact.contains("◆2"), "{compact}");
-                assert!(compact.contains(&format!("◆ {title}")), "{compact}");
+                assert!(compact.contains(&format!("{title} ? ")), "{compact}");
+                assert!(!compact.contains('2'), "{compact}");
             }
         }
     }
 
     #[test]
-    fn tab_badge_narrow_strip_drops_counts_before_type_and_question() {
+    fn tab_badge_narrow_strip_preserves_activity_after_dropping_attention_chrome() {
         let ui = tab_badge_world();
         let shown = tab_badge_strip(&ui, 18);
-        assert!(shown.starts_with("A> ?"), "{shown}");
-        assert!(!shown.contains("◆2"), "{shown}");
+        assert!(shown.starts_with('●'), "{shown}");
+        assert!(!shown.contains("?2"), "{shown}");
         assert!(shown.contains('›'), "hidden tabs remain reachable: {shown}");
     }
 
@@ -4815,11 +5210,14 @@ mod tests {
         let badge = ui.tab_badge(&tab, pane.as_ref());
         assert_eq!(badge.alerts, Some(0));
         assert!(!badge.ask);
-        assert_eq!(badge.label("Atlas", 28, true), " A> Atlas ");
+        assert_eq!(badge.label("Atlas", 28, true), " ●Atlas ");
         let mut next = ui.world.clone();
         next.attention = Load::Loading;
         ui.set_world(next);
-        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true), " A> ◆? Atlas ");
+        assert_eq!(
+            ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true),
+            " ●Atlas "
+        );
     }
 
     #[test]
@@ -4893,7 +5291,7 @@ mod tests {
             for width in [12, 14, 18] {
                 ui.frame.borrow_mut().hits.clear();
                 let shown = tab_badge_strip(&ui, width);
-                assert!(!shown.contains("◆2"), "{width}: {shown}");
+                assert!(!shown.contains("?2"), "{width}: {shown}");
                 if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
                 if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
                 for (rect, hit) in &ui.frame.borrow().hits {
@@ -4918,7 +5316,7 @@ mod tests {
             assert_eq!(ui.tab_badge(&tab, pane.as_ref()), before);
         }
         ui.set_world(ui.world.clone());
-        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).activity, "x");
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).activity, "×");
     }
 
     /// The focused group, the tab it shows (Home is group 0's 0), and every group's pane keys.
@@ -5326,7 +5724,7 @@ mod tests {
                 .lines()
                 .nth(2)
                 .unwrap()
-                .contains("◆ Atlas Builder"),
+                .contains("Atlas Builder ◆"),
             "it needs the person"
         );
         // Up and Down scroll the agent's pane; they never move to another agent.
@@ -5575,17 +5973,444 @@ mod tests {
     #[test]
     fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
         let widths = [10u16; 8];
+        let window = |current, start, follow, room| {
+            let window = visible_tabs(&widths, current, start, follow, 4, room);
+            (window.first, window.last)
+        };
         // Room for three tabs and a marker: 3 × 11 + 4 = 37. In the middle both ends need a
         // marker (8 cells), so only two tabs fit.
-        assert_eq!(visible_tabs(&widths, 0, 37), (0, 2));
-        assert_eq!(visible_tabs(&widths, 2, 37), (0, 2));
-        assert_eq!(visible_tabs(&widths, 3, 37), (2, 3));
-        assert_eq!(visible_tabs(&widths, 7, 37), (5, 7));
+        assert_eq!(window(0, 0, true, 37), (0, 2));
+        assert_eq!(window(2, 0, true, 37), (0, 2));
+        assert_eq!(window(3, 0, true, 37), (2, 3));
+        assert_eq!(window(7, 0, true, 37), (5, 7));
+        // Following from where it stands: still while the front tab shows, just enough past it.
+        assert_eq!(window(3, 2, true, 37), (2, 3));
+        assert_eq!(window(3, 4, true, 37), (3, 4));
+        // Moved by hand, it stays even with the front tab out of sight, but never past the
+        // place that shows the last tab whole.
+        assert_eq!(window(7, 1, false, 37), (1, 2));
+        assert_eq!(window(0, 7, false, 37), (5, 7));
+        assert_eq!(visible_tabs(&widths, 0, 0, false, 4, 37).most, 5);
         // Everything fits: no scrolling.
-        assert_eq!(visible_tabs(&widths, 7, 200), (0, 7));
+        assert_eq!(window(7, 0, true, 200), (0, 7));
+        assert_eq!(window(0, 3, false, 200), (0, 7));
         // A strip too small for even one tab still shows the front one.
-        assert_eq!(visible_tabs(&widths, 5, 5), (5, 5));
-        assert_eq!(visible_tabs(&[], 0, 50), (0, 0));
+        assert_eq!(window(5, 0, true, 5), (5, 5));
+        assert_eq!(
+            visible_tabs(&[], 0, 0, true, 4, 50),
+            TabWindow {
+                first: 0,
+                last: 0,
+                most: 0,
+            }
+        );
+    }
+
+    /// The badge strip's row as drawn, trimmed only at its end so the spacing shows.
+    fn tab_strip_row(ui: &Ui, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        ui.frame.borrow_mut().hits.clear();
+        ui.frame.borrow_mut().glass_strips.clear();
+        ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+        (0..width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// The tabs the hidden-tab markers show, before and after the drawn tabs.
+    fn strip_markers(ui: &Ui) -> (Option<usize>, Option<usize>) {
+        let info = ui.frame.borrow();
+        let shown: Vec<usize> = info
+            .hits
+            .iter()
+            .filter_map(|(_, hit)| match hit {
+                Hit::GlassTab(0, tab) => Some(*tab),
+                _ => None,
+            })
+            .collect();
+        let more: Vec<usize> = info
+            .hits
+            .iter()
+            .filter_map(|(_, hit)| match hit {
+                Hit::GlassTabMore(0, tab) => Some(*tab),
+                _ => None,
+            })
+            .collect();
+        let first = shown.iter().min().copied().unwrap_or(0);
+        let last = shown.iter().max().copied().unwrap_or(0);
+        (
+            more.iter().find(|tab| **tab < first).copied(),
+            more.iter().find(|tab| **tab > last).copied(),
+        )
+    }
+
+    /// Each marker counts exactly the tabs hidden on its side.
+    fn assert_marker_counts(ui: &Ui, row: &str, all: usize) {
+        let (before, after) = strip_markers(ui);
+        if let Some(target) = before {
+            assert!(row.starts_with(&format!(" ‹{} ", target + 1)), "|{row}|");
+        }
+        if let Some(next) = after {
+            assert!(row.contains(&format!(" {}›", all - next)), "|{row}|");
+        }
+    }
+
+    fn wheel(ui: &mut Ui, kind: MouseEventKind, column: u16) {
+        wheel_at(ui, kind, column, 0);
+    }
+
+    fn wheel_at(ui: &mut Ui, kind: MouseEventKind, column: u16, row: u16) {
+        ui.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn narrow_strip_reservations_keep_activity_with_and_without_overflow() {
+        for count in [1, 5, 12, 50] {
+            for width in [12, 14, 18] {
+                for current in [0, count / 2, count - 1] {
+                    let mut ui = tab_badge_world();
+                    let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+                    let agent = group.tabs[0].clone();
+                    group.tabs = vec![agent; count];
+                    group.current = current;
+                    let row = tab_strip_row(&ui, width);
+                    let info = ui.frame.borrow();
+                    let mut active_shown = false;
+                    for (rect, hit) in &info.hits {
+                        if let Hit::GlassTab(0, index) = hit {
+                            let start = usize::from(rect.x);
+                            let painted = row
+                                .chars()
+                                .skip(start)
+                                .take(usize::from(rect.width))
+                                .collect::<String>();
+                            assert!(rect.width > 0 && rect.right() <= width);
+                            assert!(
+                                painted.contains('●'),
+                                "{count} tabs, {width} cells, current={current}, tab {index}: |{row}|"
+                            );
+                            active_shown |= *index == current;
+                        }
+                    }
+                    assert!(active_shown, "{count} tabs, {width} cells: |{row}|");
+                    drop(info);
+                    assert_marker_counts(&ui, &row, count);
+                    if count == 1 {
+                        assert_eq!(strip_markers(&ui), (None, None));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_strip_render_widths() {
+        for width in [120u16, 60, 40] {
+            let mut ui = tab_badge_world();
+            let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+            let row = tab_strip_row(&ui, width);
+            println!("AFTER {width}: |{row}|");
+            assert!(
+                row.ends_with('+'),
+                "`+` stays reachable at {width}: |{row}|"
+            );
+            let (before, after) = strip_markers(&ui);
+            assert_eq!(before, None, "the first tab is in front: |{row}|");
+            assert_marker_counts(&ui, &row, all);
+            // The wheel moves a whole tab at a time; the tab in front stays as it is.
+            for _ in 0..all {
+                wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+                tab_strip_row(&ui, width);
+            }
+            let row = tab_strip_row(&ui, width);
+            println!("SCROLLED {width}: |{row}|");
+            assert_eq!(tabs(&ui).1, 0, "the wheel never changes the tab in front");
+            assert!(row.ends_with('+'), "|{row}|");
+            assert_marker_counts(&ui, &row, all);
+            let (scrolled_before, scrolled_after) = strip_markers(&ui);
+            assert_eq!(
+                scrolled_after, None,
+                "scrolled to the end, the last tab shows: |{row}|"
+            );
+            if after.is_some() {
+                assert!(
+                    scrolled_before.is_some(),
+                    "tabs scrolled past are counted: |{row}|"
+                );
+            } else {
+                assert_eq!(
+                    scrolled_before, None,
+                    "everything fits, nothing scrolls: |{row}|"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_wheel_moves_the_strip_a_whole_tab_and_clamps_at_both_ends() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+        let row = |ui: &Ui| tab_strip_row(ui, width);
+        row(&ui);
+        let after = strip_markers(&ui)
+            .1
+            .expect("at 40 cells some tabs are hidden");
+        // Right (or down) moves one tab; the first tab drops behind the left marker.
+        wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+        let shown = row(&ui);
+        assert_eq!(
+            strip_markers(&ui).0,
+            Some(0),
+            "one tab hidden before: |{shown}|"
+        );
+        assert!(shown.starts_with(" ‹1 "), "|{shown}|");
+        assert_marker_counts(&ui, &shown, all);
+        wheel(&mut ui, MouseEventKind::ScrollDown, 2);
+        let shown = row(&ui);
+        assert_eq!(strip_markers(&ui).0, Some(1), "down moves on as right does");
+        assert_marker_counts(&ui, &shown, all);
+        // Past the end it stops with the last tab whole.
+        for _ in 0..all * 2 {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            row(&ui);
+        }
+        let end = row(&ui);
+        assert_eq!(strip_markers(&ui).1, None, "the last tab shows: |{end}|");
+        assert_marker_counts(&ui, &end, all);
+        let hits = ui.frame.borrow().hits.clone();
+        let last = hits
+            .iter()
+            .find_map(|(rect, hit)| match hit {
+                Hit::GlassTab(0, tab) if *tab == all - 1 => Some(*rect),
+                _ => None,
+            })
+            .expect("the last tab is drawn");
+        let add = hits
+            .iter()
+            .find_map(|(rect, hit)| match hit {
+                Hit::GlassAdd(0) => Some(*rect),
+                _ => None,
+            })
+            .expect("`+` is drawn");
+        assert!(
+            last.right() < add.x && add.right() <= width,
+            "whole, not cut: |{end}|"
+        );
+        // Left (or up) comes back a tab at a time, and stops at the first tab.
+        let at_end = strip_markers(&ui).0.expect("tabs hidden before the end");
+        wheel(&mut ui, MouseEventKind::ScrollLeft, 2);
+        row(&ui);
+        assert_eq!(strip_markers(&ui).0, at_end.checked_sub(1));
+        for _ in 0..all * 2 {
+            wheel(&mut ui, MouseEventKind::ScrollUp, 2);
+            row(&ui);
+        }
+        let start = row(&ui);
+        assert_eq!(
+            strip_markers(&ui),
+            (None, Some(after)),
+            "back where it began: |{start}|"
+        );
+        assert_eq!(tabs(&ui).1, 0, "the tab in front never changed");
+    }
+
+    #[test]
+    fn the_strip_snaps_to_a_new_front_tab_only_when_it_is_out_of_sight() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+        tab_strip_row(&ui, width);
+        // Scrolled to the end, the tab in front (the first) is out of sight and stays so.
+        for _ in 0..all {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            tab_strip_row(&ui, width);
+        }
+        let end = tab_strip_row(&ui, width);
+        let target = strip_markers(&ui).0.expect("tabs hidden before");
+        let shows_first = ui
+            .frame
+            .borrow()
+            .hits
+            .iter()
+            .any(|(_, hit)| *hit == Hit::GlassTab(0, 0));
+        assert!(!shows_first, "|{end}|");
+        // A tab already in sight comes to the front without moving the strip.
+        ui.show_tab(all - 1);
+        let same = tab_strip_row(&ui, width);
+        assert_eq!(same, end, "still where the wheel left it");
+        assert_eq!(strip_markers(&ui).0, Some(target));
+        // A hidden one, from its marker, brings the strip just far enough to show it.
+        ui.click(Hit::GlassTabMore(0, target));
+        let shown = tab_strip_row(&ui, width);
+        assert_eq!(tabs(&ui).1, target);
+        assert_eq!(strip_markers(&ui).0, target.checked_sub(1), "|{shown}|");
+        assert!(
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::GlassTab(0, target))
+        );
+        // So does a hidden one chosen by key (the keys show tabs through `show_tab`).
+        for _ in 0..all {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            tab_strip_row(&ui, width);
+        }
+        ui.show_tab(0);
+        let shown = tab_strip_row(&ui, width);
+        assert_eq!(
+            strip_markers(&ui).0,
+            None,
+            "the first tab is back in sight: |{shown}|"
+        );
+        assert!(
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+        );
+    }
+
+    #[test]
+    fn the_wheel_elsewhere_still_scrolls_what_is_under_it() {
+        let mut ui = tab_badge_world();
+        screen(&ui);
+        let strip = ui.frame.borrow().glass_strips[0].0;
+        let first = ui.glasses.strips.borrow().views[0].first;
+        assert_eq!(ui.tab_strip_at(strip.x + 2, strip.y), Some(0));
+        assert_eq!(
+            ui.tab_strip_at(strip.x + 2, strip.y + 2),
+            None,
+            "only the strip's own row"
+        );
+        for kind in [MouseEventKind::ScrollRight, MouseEventKind::ScrollDown] {
+            ui.mouse(MouseEvent {
+                kind,
+                column: strip.x + 2,
+                row: strip.y + 2,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        let view = ui.glasses.strips.borrow().views[0].clone();
+        assert_eq!(
+            (view.first, view.manual),
+            (first, false),
+            "the wheel below the strip leaves it"
+        );
+    }
+
+    #[test]
+    fn the_strip_snaps_when_another_pane_takes_the_front_tabs_place() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+        tab_strip_row(&ui, width);
+        for _ in 0..all {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            tab_strip_row(&ui, width);
+        }
+        let end = tab_strip_row(&ui, width);
+        assert!(
+            strip_markers(&ui).0.is_some(),
+            "the front tab is scrolled away: |{end}|"
+        );
+        // The front tab's place now holds another pane, as when it closes and its neighbor
+        // moves up: the index is the same, but the tab in front is new.
+        ui.glasses.glass_mut().layout.group_mut(0).unwrap().tabs[0] = Tab {
+            pane: "agent:agent/b".into(),
+            title: Some("Other".into()),
+        };
+        assert_eq!(ui.glasses.glass().layout.groups()[0].tabs.len(), all);
+        let shown = tab_strip_row(&ui, width);
+        assert_eq!(tabs(&ui).1, 0);
+        assert_eq!(
+            strip_markers(&ui).0,
+            None,
+            "the new front tab is in sight: |{shown}|"
+        );
+        assert!(
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+        );
+    }
+
+    #[test]
+    fn each_split_scrolls_its_own_tab_strip() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let group = ui.glasses.glass().layout.groups()[0].clone();
+        ui.glasses.glass_mut().layout = Layout::Split {
+            split: Side::Below,
+            children: vec![Layout::Group(group.clone()), Layout::Group(group)],
+            ratio: None,
+        };
+        // Both strips drawn, one above the other, as a frame draws them.
+        let draw = |ui: &Ui| {
+            let area = Rect::new(0, 0, width, 2);
+            let mut buffer = Buffer::empty(area);
+            ui.frame.borrow_mut().hits.clear();
+            ui.frame.borrow_mut().glass_strips.clear();
+            for index in 0..2 {
+                let strip = Rect::new(0, index as u16, width, 1);
+                ui.tab_strip(&mut buffer, strip, ui.glasses.glass(), index);
+            }
+        };
+        // The tab a strip's left marker shows: the one just before its first drawn tab.
+        let hidden_before = |ui: &Ui, group: usize| {
+            let info = ui.frame.borrow();
+            let first = info
+                .hits
+                .iter()
+                .filter_map(|(_, hit)| match hit {
+                    Hit::GlassTab(at, tab) if *at == group => Some(*tab),
+                    _ => None,
+                })
+                .min()?;
+            info.hits.iter().find_map(|(_, hit)| match hit {
+                Hit::GlassTabMore(at, tab) if *at == group && *tab < first => Some(*tab),
+                _ => None,
+            })
+        };
+        draw(&ui);
+        assert_eq!((hidden_before(&ui, 0), hidden_before(&ui, 1)), (None, None));
+        // The wheel over the lower strip moves only that one.
+        wheel_at(&mut ui, MouseEventKind::ScrollRight, 2, 1);
+        draw(&ui);
+        assert_eq!(
+            (hidden_before(&ui, 0), hidden_before(&ui, 1)),
+            (None, Some(0))
+        );
+        // And over the upper one, only that one, by its own amount.
+        for _ in 0..2 {
+            wheel_at(&mut ui, MouseEventKind::ScrollRight, 2, 0);
+            draw(&ui);
+        }
+        assert_eq!(
+            (hidden_before(&ui, 0), hidden_before(&ui, 1)),
+            (Some(1), Some(0))
+        );
+        let fronts: Vec<usize> = ui
+            .glasses
+            .glass()
+            .layout
+            .groups()
+            .iter()
+            .map(|group| group.current)
+            .collect();
+        assert_eq!(fronts, [0, 0], "neither split's tab in front changed");
     }
 
     #[test]

@@ -8541,6 +8541,13 @@ pub fn local_retention(kind: &str) -> bool {
         .is_some_and(|spec| spec.retention == fractal_schema::Retention::Local)
 }
 
+/// Whether the retention policy names this claim's `code` as observability only, so it goes to
+/// the local observation log although its kind replicates. See `local_codes` in retention.toml.
+pub fn local_code(input: &ClaimInput) -> bool {
+    fractal_schema::retention::policy()
+        .local_code(&input.kind, input.fields.get("code").and_then(Value::as_str))
+}
+
 pub fn system_local_retention(kind: &str) -> bool {
     fractal_schema::registry()
         .claim(kind)
@@ -11341,6 +11348,17 @@ fn merge_actual_value(
     if let Value::Object(fields) = source {
         if kind == "resource.observed" {
             resources::merge_observation(merged, &fields);
+            return;
+        }
+        // A compact item state lays its facts over the item's observed facts, as the resource
+        // projection does, and names the item's kind when no observation did.
+        if kind == fractal_schema::github_plugin::ITEM_STATE {
+            if let Some(item_kind) = fields.get("item_kind") {
+                merged.entry("kind").or_insert_with(|| item_kind.clone());
+            }
+            if let Some(facts) = merged.entry("facts").or_insert_with(|| json!({})).as_object_mut() {
+                fractal_schema::github_plugin::overlay_item_state(facts, &fields);
+            }
             return;
         }
         let registry = fractal_schema::registry();
@@ -21372,7 +21390,9 @@ pub fn append_claim_with_commit_context(
     #[cfg(not(any(test, feature = "test-support")))]
     let older_build = false;
     if !older_build
-        && (local_retention(&input.kind) || (input.actor.is_none() && system_local_retention(&input.kind)))
+        && (local_retention(&input.kind)
+            || local_code(input)
+            || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
         let connection = graph.readers.get();
         admission(&connection)?;
