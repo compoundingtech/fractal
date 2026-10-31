@@ -3,3 +3,4 @@ record 20a982a394b9bc64c33c07e046d637a3622c951c genie-freshness 0 host/spindle 2
 record 4f579294316917ddca909776ea05f5412ddc32a3 ci-script-tests 0 host/spindle 2026-10-31T21:49:12Z
 record ec580960af673cb58c092aa94c294c9a8537d265 linux-gate 0 host/spindle 2026-10-31T22:11:51Z
 record 3b61745c6bc7c5bab55506a4165c4d958f7cb458 linux-clippy 0 host/spindle 2026-10-31T22:13:16Z
+record 40bdad2576d0b1ee426224ea4d0dfa5b6af4af22 fractal-web 0 host/spindle 2026-10-31T22:46:18Z
