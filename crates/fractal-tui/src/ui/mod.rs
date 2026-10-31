@@ -1125,11 +1125,12 @@ impl Ui {
     pub(crate) fn toggle_conversation_first(&mut self) {
         self.conversation_first = Some(!self.conversation_first());
         self.save_prefs();
-        self.flash(if self.conversation_first() {
-            "Conversation first: agents open on their conversation · Attach opens the terminal"
+        let said = if self.conversation_first() {
+            format!("Conversation first: agents open on their conversation · {} opens the terminal", screens::terminal_route())
         } else {
-            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation"
-        });
+            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation".to_owned()
+        };
+        self.flash(said);
     }
 
     /// Whether this device opens agents on their conversation instead of attaching.
@@ -3828,6 +3829,12 @@ impl Ui {
                 ),
             ],
         );
+        let actions_keys = format!("ctrl+{}", screens::ACTIONS_CHORD);
+        let terminal_keys = format!("{actions_keys} {} · enter", screens::TERMINAL_ACTION);
+        let terminal_what = format!(
+            "{} attaches the agent's terminal; Enter (or the Attach button) attaches a detached terminal pane; Ctrl+T twice leaves it",
+            screens::terminal_route()
+        );
         keys(
             &mut right,
             "a conversation (letters type; commands are chords)",
@@ -3838,7 +3845,7 @@ impl Ui {
                 ("ctrl+f", "find in this conversation"),
                 ("ctrl+r", "retry opening a failed conversation (outside the message box)"),
                 (
-                    "ctrl+a",
+                    actions_keys.as_str(),
                     "the agent's actions: restart, suspend, retire, terminal…",
                 ),
                 (
@@ -3861,10 +3868,7 @@ impl Ui {
                     "ctrl+\\",
                     "the leader, in a terminal too: a list of what to press next; Ctrl+\\ again closes the tab, c shows the conversation",
                 ),
-                (
-                    "Attach · enter",
-                    "Attach opens the agent's terminal; Enter attaches a detached terminal pane; Ctrl+T twice leaves it",
-                ),
+                (terminal_keys.as_str(), terminal_what.as_str()),
                 (
                     "opening an agent",
                     "attaches its terminal; \"Conversation first\" in the palette (ctrl+k) opens the conversation instead, on this device",
@@ -5658,7 +5662,7 @@ impl Ui {
                 self.open(&agent);
                 self.action_key('S');
             }
-            ('t', None) => {
+            (screens::TERMINAL_ACTION, None) => {
                 self.open(&agent);
                 self.open_terminal();
             }
