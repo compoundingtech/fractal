@@ -324,13 +324,14 @@ The push is reactive:
 - It pushes only to a member whose own newest `daemon.started` advertises
   `features.seat_freshness = 1`. A member whose `daemon.started` changed restarted, and gets
   every seat again.
-- A failed push is retried a minute later, with or without a new commit. Nothing is sent while
-  nothing changes.
+- A failed push is retried a minute later, with or without a new commit, and the round runs once
+  when the daemon starts. Otherwise nothing is sent while nothing changes.
 
 The receiver records a seat only when its declaration places the seat on the member that pushed
 it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
-recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed and
-goes out in the host's next round. An agent card's freshness and a
+recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed. The
+host retries it a minute later without waiting for a commit, then less often while it stays owed,
+doubling up to every 15 minutes. An agent card's freshness and a
 mail hold read the latest of the replicated report, the local log, and that time. The card's
 90-second rule ages it, so a host that stops pushing reads stale.
 
