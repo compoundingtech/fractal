@@ -66,3 +66,34 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   act(() => root.unmount())
   container.remove()
 })
+
+it('shows native OMP asks without attention, opens the terminal and clears the draft on native settlement', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  data.attention = []
+  const openTerminal = vi.fn()
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const call = {
+    _tag: 'ToolCall', id: 'item/native', callId: 'native', name: 'ask', status: 'running', callSeen: true,
+    input: { questions: [{ id: 'storage', question: 'Storage?', options: [{ label: 'SQLite', preview: '<script>text only</script>' }] }] },
+  }
+  const render = (items: readonly typeof call[]) =>
+    act(async () => root.render(<LiveAgentAlerts agentRef={seat} items={items} onOpenTerminal={openTerminal} />))
+  await render([call])
+  expect(container.querySelector('[data-testid="conversation-alerts"]')).not.toBeNull()
+  expect(container.querySelector('script')).toBeNull()
+  expect(container.querySelector('pre')?.textContent).toBe('<script>text only</script>')
+  expect(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(false)
+  await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"]')!.click())
+  expect(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(true)
+  expect([...container.querySelectorAll('button')].find(button => button.textContent === 'Send answers')?.disabled).toBe(true)
+  await click(container, 'Open terminal')
+  expect(openTerminal).toHaveBeenCalledOnce()
+  await render([{ ...call, input: { questions: [{ id: 'storage', question: 'Changed?', options: [{ label: 'New choice', preview: '' }] }] } }])
+  expect(container.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(false)
+  await render([{ ...call, status: 'success' }])
+  expect(container.querySelector('[data-testid="conversation-alerts"]')).toBeNull()
+  await act(async () => root.unmount())
+  container.remove()
+})
