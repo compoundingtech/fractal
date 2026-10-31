@@ -146,7 +146,9 @@ impl Ui {
             return;
         }
         let width = area.width.saturating_sub(4).min(88);
-        let height = area.height.saturating_sub(2).min(22);
+        // Border, query, footer and at least the selected destination: the outer margin yields first,
+        // so the smallest accepted window still shows what Enter opens.
+        let height = area.height.saturating_sub(2).min(22).max(5);
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
@@ -360,5 +362,58 @@ mod tests {
             assert!(!ui.recent_open());
             assert!(!ui.terminal_focused());
         }
+    }
+
+    #[test]
+    fn minimum_window_keeps_the_selected_destination_visible_after_resize() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let shows_selected = |terminal: &Terminal<TestBackend>, label: &str| {
+            let buffer = terminal.backend().buffer();
+            let room = buffer.area.width.saturating_sub(4).min(88).saturating_sub(4) as usize;
+            let shown: String = label.chars().take(room).collect();
+            (0..buffer.area.height).any(|y| {
+                let line: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                line.find(&shown).is_some_and(|at| {
+                    let x = line[..at].chars().count() as u16;
+                    buffer[(x, y)].bg == theme::ROW_SELECTED
+                })
+            })
+        };
+        let mut ui = places();
+        ui.open_recent();
+        ui.key(key(KeyCode::Down));
+        let popup = ui.recent.popup.as_ref().unwrap();
+        assert!(popup.selected > 0, "the selection is not the first row");
+        let entry = &popup.entries[popup.matches[popup.selected]];
+        let (label, target) = (entry.label.clone(), Pane::parse(&entry.place.pane).unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert!(shows_selected(&terminal, &label));
+        terminal.backend_mut().resize(20, 6);
+        for _ in 0..2 {
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+        }
+        assert_eq!(terminal.backend().buffer().area, Rect::new(0, 0, 20, 6));
+        assert!(
+            shows_selected(&terminal, &label),
+            "the selected destination stays visible at 20x6"
+        );
+        ui.key(key(KeyCode::Enter));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.focused_pane(), Some(target));
+
+        // Opening straight into the smallest accepted window shows the preselected destination.
+        ui.open_recent();
+        let popup = ui.recent.popup.as_ref().unwrap();
+        let entry = &popup.entries[popup.matches[popup.selected]];
+        let (label, target) = (entry.label.clone(), Pane::parse(&entry.place.pane).unwrap());
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        assert!(shows_selected(&terminal, &label));
+        ui.key(key(KeyCode::Enter));
+        assert!(!ui.recent_open());
+        assert_eq!(ui.focused_pane(), Some(target));
     }
 }
