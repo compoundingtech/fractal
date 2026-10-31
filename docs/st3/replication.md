@@ -1424,8 +1424,12 @@ with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only i
 sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
 drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
-and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is.
+An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
+fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
+raw record, signature and verdict rows and position), its ID goes into the retired ledger, and
+admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
+envelopes atomic. Two audited
 rules stay out because a reader reads the history they drop, which no projection digest covers.
 `harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
 needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,
