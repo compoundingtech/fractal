@@ -397,7 +397,9 @@
    "extra": []
   },
   "smallclaims": {
-   "extra": []
+   "extra": [
+    "crates/fractal"
+   ]
   }
  },
  "no_tests": [

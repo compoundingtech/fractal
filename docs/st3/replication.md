@@ -26,6 +26,8 @@ routes for backward compatibility. To let fleet preference select the carrier,
 remove the explicit override. Legacy operation without `fleet.toml` retains
 Tailscale-first automatic routing among locally available carriers.
 
+Fabric fleet readers accept `st3/fleet/<fleet>` and `fractal/fleet/<fleet>` for the same fleet; default writers still use `st3/fleet/<fleet>`.
+
 Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
 front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
