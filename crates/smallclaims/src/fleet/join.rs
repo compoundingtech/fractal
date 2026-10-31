@@ -759,7 +759,8 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
                 && sealed.sponsor_endpoints.iter().any(|endpoint|
                     endpoint["transport"] == "fabric"
                         && endpoint["node"] == pairing.gateway
-                        && endpoint["protocol"] == format!("st3/fleet/{}", code.fleet_id)),
+                        && endpoint["protocol"].as_str().is_some_and(|protocol|
+                            super::transport::is_fleet_fabric_protocol(protocol, &sealed.fleet_id))),
             "the authenticated sponsor answer does not bind the pairing gateway"
         );
         let saved = PairingRecovery {
@@ -1068,6 +1069,11 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_join_writes_configuration_only_after_helper_confirmation() {
+        pairing_join_with_protocol_prefix("st3/fleet/").await;
+        pairing_join_with_protocol_prefix("fractal/fleet/").await;
+    }
+
+    async fn pairing_join_with_protocol_prefix(prefix: &str) {
         let root = tempfile::tempdir().unwrap();
         let sponsor_dir = root.path().join("sponsor");
         let settings = MemberSettings {
@@ -1084,7 +1090,7 @@ mod tests {
         let node_id = "b".repeat(64);
         let endpoints = vec![serde_json::json!({
             "transport": "fabric", "node": gateway,
-            "protocol": format!("st3/fleet/{}", founded.fleet_id)
+            "protocol": format!("{prefix}{}", founded.fleet_id)
         })];
         store.publish_fleet_endpoints("listening", &endpoints, "test").unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

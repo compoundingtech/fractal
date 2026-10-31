@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 # Forwarded by fractal-daemon's feature of the same name; never enabled by a production build.
-test-support = ["fractal-reconcile/test-support"]
+test-support = ["fractal-reconcile/test-support", "tokio/test-util"]
 
 [dependencies]
 fractal-reconcile = { path = "../fractal-reconcile" }
