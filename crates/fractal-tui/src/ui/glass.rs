@@ -6463,6 +6463,7 @@ mod tests {
         // The front tab's place now holds another pane, as when it closes and its neighbor
         // moves up: the index is the same, but the tab in front is new.
         ui.glasses.glass_mut().layout.group_mut(0).unwrap().tabs[0] = Tab {
+            id: new_id(),
             pane: "agent:agent/b".into(),
             title: Some("Other".into()),
         };
