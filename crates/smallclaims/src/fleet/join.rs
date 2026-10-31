@@ -19,8 +19,8 @@ use super::file::{FleetFile, FleetMode};
 use super::handshake::{JoinRequest, JoinResponse, Joiner, SealedJoin, WriterHead, verify_response};
 use super::keys::MemberKey;
 use super::transport::{
-    Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_tool,
-    tailscale_addresses,
+    Fabric, Route, bindable_tailnet_addresses, local_addresses, parse_route, resolve_fabric_adapter,
+    resolve_tool, tailscale_addresses,
 };
 use crate::error::Error;
 use crate::store::{AdmittedStore, Runtime, Store, valid_fleet_node_name};
@@ -528,15 +528,11 @@ impl PairingHelper {
     fn launch(command: &str, executable: Option<&Path>) -> Result<Self> {
         use std::process::Stdio;
         use tokio::io::AsyncBufReadExt as _;
-        let executable = executable.map(Path::to_path_buf)
-            .or_else(|| std::env::var_os("ST_FABRIC_ADAPTER").map(PathBuf::from))
-            .or_else(|| {
-                std::env::current_exe().ok()
-                    .and_then(|exe| exe.parent().map(|parent| parent.join("st-fabric-adapter")))
-                    .filter(|path| path.is_file())
-            })
-            .or_else(|| resolve_tool(None, "st-fabric-adapter"))
-            .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
+        let executable = match executable {
+            Some(path) => Some(path.to_path_buf()),
+            None => resolve_fabric_adapter()?,
+        }
+        .context("st-fabric-adapter is unavailable; install it alongside st or set ST_FABRIC_ADAPTER")?;
         let mut child = tokio::process::Command::new(executable)
             .arg(command)
             .stdin(Stdio::piped())
