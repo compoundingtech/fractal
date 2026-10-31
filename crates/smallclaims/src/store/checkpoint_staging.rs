@@ -27,7 +27,7 @@ pub const STAGING_PAGE: i64 = 64;
 /// SQLite's page cache for the staging file, in KiB. Its sorter spills past it to disk.
 const STAGING_CACHE_KIB: i64 = 2_048;
 
-pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-ha255beb4781e owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h8db35ff8f8df owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS meta(
     id INTEGER PRIMARY KEY CHECK(id=1),
     identity TEXT NOT NULL,
@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS meta(
     bound INTEGER,
     plan TEXT
 );
+-- A row here lets the planner drop claims of an envelope it keeps: a local cut only.
+CREATE TABLE IF NOT EXISTS split_envelopes(id INTEGER PRIMARY KEY CHECK(id=1));
 -- A scoped capture's envelopes, numbered for its records phase to page through.
 CREATE TABLE IF NOT EXISTS scoped_envelopes(
     n INTEGER PRIMARY KEY, writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
@@ -1178,6 +1180,17 @@ impl StagedSet {
             rusqlite::params_from_iter(kinds),
         )?;
         transaction.execute(/* sqlite-large-value: allow-for-now lv-he7052689cff7 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Let the plan drop a claim whose envelope it keeps, and forget any plan made without that.
+    /// Only a member that trims locally does: the envelope stays whole and servable, and only
+    /// this member's own copies of the claim go. A shared checkpoint's envelopes stay atomic.
+    pub fn split_envelopes(&self) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h38a606664b66 owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO split_envelopes(id) VALUES (1)", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h0c9cd59bf805 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
         transaction.commit()?;
         Ok(())
     }

@@ -26,10 +26,12 @@ same bridge; a selected list that cannot be read or decoded refuses hosted
 execution. GC likewise resolves and prefetches main's selected `rust-test-inputs.json`
 before computing the per-crate keys it must retain.
 
-For keyed Clippy, the workflow source/generated `linux-clippy` environment and
-`scripts/ci-clippy-keyed` use `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`:
-the keyed caller supplies the policy path, and the stage resolves its checkout
-layout at execution time under this migration ARN. The linux-gate/rust-tests
+For keyed Clippy, the workflow source/generated `linux-clippy` environment
+uses `CI_KEYED_CLIPPY_POLICY=auto:.st/evidence-skip-policy.json`: the keyed
+caller supplies the policy path, and the stage resolves its checkout layout at
+execution time under this migration ARN. Locally, `scripts/ci-clippy-result`
+(linux-clippy's recorded command) resolves the same path the same way after
+the stage. The linux-gate/rust-tests
 static script closures contain no policy-file literal. This does not imply
 hosted dependency isolation: as on main, the hosted linux-clippy job still
 supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explicit
