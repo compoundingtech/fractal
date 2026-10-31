@@ -158,7 +158,7 @@ async fn a_member_records_the_freshness_a_host_pushes_for_its_own_seats_only() {
     let heard = |agent: &str, at: u64| SeatHeard { agent: agent.into(), incarnation_id: "one".into(), heard_at_unix_ms: at };
     let push = SeatFreshnessPush { seats: vec![heard(&ours, 1_000), heard(&theirs, 1_000)] };
     let ack = relay.push_seat_freshness(RECEIVER, &push, Duration::from_secs(10)).await.unwrap().unwrap();
-    assert_eq!(ack.recorded, [ours.clone()], "a member speaks only for the seats it hosts");
+    assert_eq!(ack.recorded, std::slice::from_ref(&ours), "a member speaks only for the seats it hosts");
     let relayed = receiver.extension::<RelayedFreshness>();
     assert_eq!(relayed.heard_at(&ours, "one"), Some(1_000));
     assert_eq!(relayed.heard_at(&theirs, "one"), None);
@@ -232,6 +232,44 @@ async fn a_seat_pushed_before_its_declaration_arrives_is_delivered_after_it_does
     let (_, heard) = host.local_harness_newest(&cedar).unwrap().unwrap();
     assert_eq!(receiver.extension::<RelayedFreshness>().heard_at(&cedar, "one"), Some(heard));
     assert!(round().await.pushed.is_empty(), "and now it is delivered");
+}
+
+/// The same ordering through the running pusher, with nothing driven by hand: a seat the member
+/// left unrecorded stays owed, so the pusher retries on its own and delivers it once the
+/// declaration arrives, though the host commits nothing more.
+#[tokio::test]
+async fn the_pusher_retries_an_owed_seat_until_its_declaration_arrives() {
+    let root = tempfile::tempdir().unwrap();
+    let host = Arc::new(Store::open(&root.path().join("host.db"), HOST).unwrap());
+    let cedar = declare(&host, "cedar", HOST);
+    report(&host, &cedar, "one");
+    let receiver = Arc::new(Store::open(&root.path().join("receiver.db"), RECEIVER).unwrap());
+    advertise(&Store::open_memory(RECEIVER).unwrap(), &host, true);
+    let url = worker(&serve(root.path(), app(receiver.clone(), RECEIVER, root.path())).await, fractal_routes(crate::api::raw_terminal_owner_splice)).await;
+    let (_, heard) = host.local_harness_newest(&cedar).unwrap().unwrap();
+    let index = host.index().unwrap();
+    crate::api::seat_freshness::spawn_seat_freshness_push(
+        host.clone(),
+        relay(root.path(), &[(RECEIVER, url)]),
+        HOST.into(),
+        crate::api::seat_freshness::SeatFreshnessPace {
+            coalesce: Duration::from_millis(20),
+            answer: Duration::from_secs(5),
+            retry: Duration::from_millis(100),
+            longest_retry: Duration::from_millis(200),
+        },
+    );
+    let relayed = receiver.extension::<RelayedFreshness>();
+    // The pusher's first round reaches the member before the declaration does.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(relayed.heard_at(&cedar, "one"), None);
+    receiver.import_replication(HOST, &host.export_replication(0).unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while relayed.heard_at(&cedar, "one").is_none() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(relayed.heard_at(&cedar, "one"), Some(heard), "the owed seat arrived with no new commit");
+    assert_eq!(host.index().unwrap(), index, "the host committed nothing meanwhile");
 }
 
 /// Pushes go to every member at once: members that never answer cost one timeout for the round,

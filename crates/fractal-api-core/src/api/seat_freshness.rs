@@ -15,8 +15,10 @@ use crate::store::RelayedFreshness;
 pub const SEAT_FRESHNESS_COALESCE: Duration = Duration::from_secs(10);
 /// How long one member may take to accept a push before this round moves on without it.
 pub const SEAT_FRESHNESS_ANSWER: Duration = Duration::from_secs(10);
-/// How soon a push that failed is tried again, even with no new commit.
+/// How soon a push that failed, or left a seat owed, is tried again, even with no new commit.
 const SEAT_FRESHNESS_RETRY: Duration = Duration::from_secs(60);
+/// The longest wait between retries while seats stay owed.
+const SEAT_FRESHNESS_LONGEST_RETRY: Duration = Duration::from_secs(15 * 60);
 
 /// Record a peer's push, through its replication worker, which authenticated `from`. Only seats
 /// whose declaration places them on `from` are recorded: a member speaks for its own seats.
@@ -90,11 +92,13 @@ pub struct SeatFreshnessPushed {
     members: BTreeMap<String, PushedTo>,
 }
 
-/// One round's outcome: the seats pushed to each member, and the members a push failed for.
+/// One round's outcome: the seats each member recorded, the members a push failed for, and those
+/// that left a sent seat unrecorded (its declaration had not reached them yet).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SeatFreshnessRound {
     pub pushed: BTreeMap<String, usize>,
     pub failed: BTreeSet<String>,
+    pub owed: BTreeSet<String>,
 }
 
 /// One round: read this node's seats' newest local reports, and push each capable member what
@@ -168,12 +172,17 @@ pub async fn push_seat_freshness(
                 }
             }
             // Only what the member recorded is delivered; the rest stays owed for the next round.
+            let sent = seats.len();
             let seats = seats.into_iter().filter(|seat| recorded.contains(&seat.agent)).collect::<Vec<_>>();
-            (member, seats, result)
+            let owed = result.is_ok() && seats.len() < sent;
+            (member, seats, result, owed)
         });
     }
     let mut round = SeatFreshnessRound::default();
-    for (member, seats, result) in futures_util::future::join_all(sends).await {
+    for (member, seats, result, owed) in futures_util::future::join_all(sends).await {
+        if owed {
+            round.owed.insert(member.clone());
+        }
         match result {
             Ok(Some(_)) => {
                 let start = starts[&member].clone();
@@ -217,9 +226,31 @@ pub fn seat_freshness_members(relay: &ClientRelay) -> Vec<String> {
         .collect()
 }
 
+/// How the pusher paces itself: the coalescing after a commit, the bound on each member's
+/// answer, and the retry of a failed or owed push, which doubles up to its longest while seats
+/// stay owed so a member that never records one is not asked every minute for ever.
+#[derive(Clone, Copy, Debug)]
+pub struct SeatFreshnessPace {
+    pub coalesce: Duration,
+    pub answer: Duration,
+    pub retry: Duration,
+    pub longest_retry: Duration,
+}
+
+impl Default for SeatFreshnessPace {
+    fn default() -> Self {
+        Self {
+            coalesce: SEAT_FRESHNESS_COALESCE,
+            answer: SEAT_FRESHNESS_ANSWER,
+            retry: SEAT_FRESHNESS_RETRY,
+            longest_retry: SEAT_FRESHNESS_LONGEST_RETRY,
+        }
+    }
+}
+
 /// Push this node's seats' freshness to the other members whenever it commits, in rounds at
-/// least [`SEAT_FRESHNESS_COALESCE`] apart; a round with a failed push is retried after
-/// [`SEAT_FRESHNESS_RETRY`] even with no new commit.
+/// least [`SEAT_FRESHNESS_COALESCE`] apart. A round that failed a member, or left a seat owed, is
+/// retried after [`SEAT_FRESHNESS_RETRY`] even with no new commit, then less often.
 pub fn start_seat_freshness_push(state: &AppState) {
     let Some(relay) = state.client_relay.clone() else {
         // Not in a fleet: no other member reads this node's re-stamps.
@@ -228,8 +259,11 @@ pub fn start_seat_freshness_push(state: &AppState) {
         }
         return;
     };
-    let store = state.store.clone();
-    let node = state.node.clone();
+    spawn_seat_freshness_push(state.store.clone(), relay, state.node.clone(), SeatFreshnessPace::default());
+}
+
+/// The pusher [`start_seat_freshness_push`] starts, at `pace`.
+pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: String, pace: SeatFreshnessPace) {
     let wake = Arc::new(tokio::sync::Notify::new());
     let observer = {
         let wake = Arc::clone(&wake);
@@ -238,17 +272,21 @@ pub fn start_seat_freshness_push(state: &AppState) {
     tokio::spawn(crate::task_cpu::account("seat_freshness.push", async move {
         let _observer = observer;
         let mut pushed = SeatFreshnessPushed::default();
-        let mut retry = false;
+        let mut retry: Option<Duration> = None;
+        // The first round needs no commit: what this node heard before it started is owed.
+        let mut first = true;
         loop {
-            if retry {
-                tokio::select! {
-                    () = wake.notified() => {}
-                    () = tokio::time::sleep(SEAT_FRESHNESS_RETRY) => {}
+            match retry {
+                _ if first => first = false,
+                Some(after) => {
+                    tokio::select! {
+                        () = wake.notified() => {}
+                        () = tokio::time::sleep(after) => {}
+                    }
                 }
-            } else {
-                wake.notified().await;
+                None => wake.notified().await,
             }
-            tokio::time::sleep(SEAT_FRESHNESS_COALESCE).await;
+            tokio::time::sleep(pace.coalesce).await;
             let members = seat_freshness_members(&relay);
             // Membership and advertisements arrive as commits too, so each round settles whether
             // every other member can hear this node's seats.
@@ -263,13 +301,14 @@ pub fn start_seat_freshness_push(state: &AppState) {
             if let Err(error) = flag.map_err(anyhow::Error::from).and_then(|result| result) {
                 eprintln!("st3: seat freshness: {error:#}");
             }
-            match push_seat_freshness(&store, &relay, &node, &members, &mut pushed, SEAT_FRESHNESS_ANSWER).await {
-                Ok(round) => retry = !round.failed.is_empty(),
+            let again = match push_seat_freshness(&store, &relay, &node, &members, &mut pushed, pace.answer).await {
+                Ok(round) => !round.failed.is_empty() || !round.owed.is_empty(),
                 Err(error) => {
                     eprintln!("st3: seat freshness push failed: {error:#}");
-                    retry = true;
+                    true
                 }
-            }
+            };
+            retry = again.then(|| retry.map_or(pace.retry, |after| (after * 2).min(pace.longest_retry)));
         }
     }));
 }
