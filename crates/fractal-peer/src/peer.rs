@@ -196,6 +196,19 @@ pub enum ClientReadOperation {
     GithubPlugin {
         path: String,
     },
+    /// The same read named by its parts, so the poller builds its path itself: `read` is
+    /// `pulls`, `pull`, `checks` or `events`. Capability `github-plugin` version 2.
+    GithubPluginRead {
+        owner: String,
+        repository: String,
+        read: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     /// The messages to and from one agent, as the host that owns the agent lists them.
     Messages {
         actor: String,
@@ -800,6 +813,7 @@ impl ClientRelay {
             }
             ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
             ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
+            ClientReadOperation::GithubPluginRead { .. } => Some(("github-plugin", 2)),
             _ => None,
         };
         if let Some((id, version)) = required {
@@ -1278,14 +1292,15 @@ fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejecte
     if matches!(operation, ClientReadOperation::Messages { .. }) {
         return messages_paging_unsupported();
     }
-    if matches!(operation, ClientReadOperation::GithubPlugin { .. }) {
+    if matches!(operation, ClientReadOperation::GithubPlugin { .. } | ClientReadOperation::GithubPluginRead { .. }) {
         let mut rejected = ClientReadRejected::new(
             "peer-too-old",
             StatusCode::UNPROCESSABLE_ENTITY,
             "This host runs an older Fractal version without the GitHub plugin's read API; update it to read its mirror.",
         );
         rejected.details.insert("capability".into(), "github-plugin".into());
-        rejected.details.insert("version".into(), 1.into());
+        let version = if matches!(operation, ClientReadOperation::GithubPluginRead { .. }) { 2 } else { 1 };
+        rejected.details.insert("version".into(), version.into());
         return rejected;
     }
     let mut rejected = ClientReadRejected::new(
@@ -1321,7 +1336,8 @@ async fn client_read_capabilities(
         serde_json::json!({"capabilities":[
             {"id":"messages-paging","version":2,"state":"granted"},
             {"id":"session-detail-child-id","version":1,"state":"granted"},
-            {"id":"github-plugin","version":1,"state":"granted"}
+            {"id":"github-plugin","version":1,"state":"granted"},
+            {"id":"github-plugin","version":2,"state":"granted"}
         ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -1553,6 +1569,11 @@ async fn receive_client_read(
                 ).into())
             }
             ClientReadOperation::GithubPlugin { path } => {
+                Ok(client.github_plugin_read(&path).await?)
+            }
+            ClientReadOperation::GithubPluginRead { owner, repository, read, number, state, limit } => {
+                let path = github_plugin_path(&owner, &repository, &read, number, state.as_deref(), limit)
+                    .map_err(|message| ClientReadRejected::new("validation-failed", StatusCode::UNPROCESSABLE_ENTITY, message))?;
                 Ok(client.github_plugin_read(&path).await?)
             }
             ClientReadOperation::HarnessInventory { agent_id, query } => {
@@ -2728,3 +2749,73 @@ mod timeline_relay_tests;
 
 #[cfg(test)]
 mod messages_paging_relay_tests;
+
+/// The poller's own path for a typed GitHub plugin read, or why its parts name none.
+pub fn github_plugin_path(
+    owner: &str,
+    repository: &str,
+    read: &str,
+    number: Option<u64>,
+    state: Option<&str>,
+    limit: Option<usize>,
+) -> std::result::Result<String, String> {
+    let name = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 100
+            && !part.chars().all(|c| c == '.')
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    };
+    if !name(owner) || !name(repository) {
+        return Err("a repository is OWNER/REPO".into());
+    }
+    if let Some(state) = state.filter(|state| !matches!(*state, "open" | "closed" | "all")) {
+        return Err(format!("state is open, closed or all, not {state}"));
+    }
+    let base = format!("/v1/plugins/github/repos/{owner}/{repository}");
+    let mut query = Vec::new();
+    if let Some(limit) = limit {
+        query.push(format!("limit={limit}"));
+    }
+    let path = match (read, number) {
+        ("pulls", None) => {
+            if let Some(state) = state {
+                query.push(format!("state={state}"));
+            }
+            format!("{base}/pulls")
+        }
+        ("pull", Some(number)) => format!("{base}/pulls/{number}"),
+        ("checks", Some(number)) => format!("{base}/pulls/{number}/checks"),
+        ("events", number) => {
+            if let Some(number) = number {
+                query.push(format!("number={number}"));
+            }
+            format!("{base}/events")
+        }
+        _ => return Err(format!("no GitHub plugin read `{read}` with that number")),
+    };
+    Ok(if query.is_empty() { path } else { format!("{path}?{}", query.join("&")) })
+}
+
+#[cfg(test)]
+mod github_plugin_path_tests {
+    use super::github_plugin_path;
+
+    #[test]
+    fn a_typed_read_names_only_the_plugins_routes() {
+        assert_eq!(
+            github_plugin_path("acme", "garden", "pulls", None, Some("all"), Some(20)).unwrap(),
+            "/v1/plugins/github/repos/acme/garden/pulls?limit=20&state=all"
+        );
+        assert_eq!(github_plugin_path("acme", "garden", "checks", Some(7), None, None).unwrap(), "/v1/plugins/github/repos/acme/garden/pulls/7/checks");
+        assert_eq!(github_plugin_path("acme", "garden", "events", Some(7), None, Some(5)).unwrap(), "/v1/plugins/github/repos/acme/garden/events?limit=5&number=7");
+        for (owner, repository, read, number, state) in [
+            ("acme", "..", "pulls", None, None),
+            ("acme/x", "garden", "pulls", None, None),
+            ("acme", "garden", "pull", None, None),
+            ("acme", "garden", "tree", None, None),
+            ("acme", "garden", "pulls", None, Some("merged")),
+        ] {
+            assert!(github_plugin_path(owner, repository, read, number, state, None).is_err(), "{owner}/{repository} {read}");
+        }
+    }
+}

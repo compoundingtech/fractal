@@ -1249,6 +1249,16 @@ pub struct ResourceObservationOutcome {
     pub recorded_items: Vec<RecordedItem>,
 }
 
+/// What a GitHub repository's poller lays beside one look it records, from its plugin mirror:
+/// each item's facts as the mirror holds them, which replace the graph's as what the look is
+/// compared and merged with, and whether the repository is in compact mode, where an item's
+/// change is recorded as `vcs.item.state` alone instead of a `resource.observed` snapshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MirroredPrior {
+    pub compact: bool,
+    pub items: std::collections::HashMap<String, Value>,
+}
+
 /// One item resource an observation recorded: its subject, item kind, facts and claim.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordedItem {
