@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::claim::ReplicaEnvelope;
 
 pub mod history;
+mod authentication;
 pub use history::{VerifiedHistory, verify_sealed_history};
 
 pub const BUNDLE_SCHEMA: &str = "fractal.rename-proof.v1";
