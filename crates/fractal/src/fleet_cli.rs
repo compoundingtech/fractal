@@ -127,18 +127,11 @@ fn read_code_without_echo() -> Result<String> {
 const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need st-fabric-adapter installed and \
      Fabric running with --runtime-peers; use --via tailscale for a Tailscale-only invitation";
 
-/// The pairing helper beside st, named by ST_FABRIC_ADAPTER, or on PATH. A configured
-/// path that is not a file counts as no helper, so `auto` invitations route around it.
-fn fabric_adapter() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("ST_FABRIC_ADAPTER") {
-        let path = PathBuf::from(path);
-        return path.is_file().then_some(path);
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("st-fabric-adapter")))
-        .filter(|path| path.is_file())
-        .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "st-fabric-adapter"))
+/// A configured path that is not a file counts as no helper, so `auto` invitations
+/// route around it. Conflicting environment overrides are errors, not absence.
+fn fabric_adapter() -> Result<Option<PathBuf>> {
+    Ok(fractal_daemon::fleet::transport::resolve_fabric_adapter()?
+        .filter(|path| path.is_file()))
 }
 
 /// The `--via` an invitation is created with. Without the pairing helper, a Fabric endpoint
@@ -611,7 +604,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             } else {
                 None
             };
-            let adapter = fabric_adapter();
+            let adapter = fabric_adapter()?;
             let mut via = args.via.clone();
             if adapter.is_none() && !args.migrate {
                 via = invite_via(&via, &member_endpoints(&client, &config.node).await?, false)?;
