@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Ctrl+L triages outstanding Inbox items in the focused split, ordered by urgency and age, with backward traversal and all-clear wrap feedback.",
+  "summary": "Ctrl+L triages outstanding Inbox items in the focused split: questions and requests first, then decisions, then failures, then other items. Within each class, oldest requested timestamp comes first; unknown timestamps follow known ones, with item ID breaking ties. Backward traversal and all-clear wrap feedback are available.",
   "replay": {"status": "none", "detail": "No runtime replay change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rules change."},
