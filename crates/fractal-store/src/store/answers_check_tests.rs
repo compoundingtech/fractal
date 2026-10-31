@@ -234,17 +234,22 @@ fn conservative_transport_inventory_keeps_legacy_recency_visible() {
 fn repaired_only_observer_is_absent_unless_its_production_cursor_survives() {
     let absent = Store::open_memory("alder").unwrap();
     let absent_answers = slot_reader_answers(&absent.readers.get(), 1_000).unwrap();
-    for cursor in [None, Some("first")] {
+    for (at, cursor) in [(100, None), (100, Some("first")), (2_000, None)] {
         let retained = Store::open_memory("alder").unwrap();
         let mut fields = json!({"status":"healthy"});
         if let Some(cursor) = cursor { fields["cursor"] = json!(cursor); }
-        let original = observation(&retained, "observer/example", "observer.observed", "alder", 100, fields);
+        let original = observation(&retained, "observer/example", "observer.observed", "alder", at, fields);
         retained.connection.write().execute(
             /* sqlite-large-value: allow-for-now lv-h4a2ed0ed1e0c owner=fractal_store::store::answers_check_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&original],
         ).unwrap();
         assert!(latest_actual(&retained.readers.get(), "observer/example").unwrap().is_none());
         assert_eq!(retained.claimed_observer_cursor("observer/example").unwrap().as_deref(), cursor);
         let retained_answers = slot_reader_answers(&retained.readers.get(), 1_000).unwrap();
-        assert_eq!(retained_answers == absent_answers, cursor.is_none());
+        assert_eq!(retained_answers == absent_answers, cursor.is_none() && at < 1_000);
+        if at >= 1_000 {
+            let keys = &retained_answers["slots/observer.observed"];
+            assert_eq!(keys.len(), 1);
+            assert!(keys[0].moving, "an empty post-cut answer must still hide its peer's stable key");
+        }
     }
 }

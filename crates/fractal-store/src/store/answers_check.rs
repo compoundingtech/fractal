@@ -93,7 +93,7 @@ fn slot_reader_answers(
             let moving = cursor_moving || actual_moved(connection, &subject, cut)?;
             let state = latest_actual(connection, &subject)?;
             let cursor = resources::claimed_observer_cursor_at(connection, &subject)?;
-            if state.is_none() && cursor.is_none() { continue; }
+            if !moving && state.is_none() && cursor.is_none() { continue; }
             let answer = json!({ "state": state, "cursor": cursor });
             let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
             keys.push(smallclaims::answers::AnswerKey {
