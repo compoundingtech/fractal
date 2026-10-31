@@ -5113,6 +5113,17 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         "--reason",
         "The fixture projection was checked.",
     ]);
+    let resumed = amber.st_json(&[
+        "replication",
+        "signatures",
+        "resume",
+        "--as",
+        PERSON,
+        "--reason",
+        "The fixture signature migration was checked.",
+    ]);
+    assert!(resumed["cleared"].is_null(), "{resumed}");
+    assert_eq!(resumed["migration"]["phase"], "done", "{resumed}");
     amber.restart().await;
     amber.wait_listening().await;
     cobalt.st_ok(&[
@@ -5845,3 +5856,215 @@ mission "orchard/release" state="ready" {
 
 #[path = "fleet/schedule_standby.rs"]
 mod schedule_standby;
+
+/// A GitHub with one repository, `fixture/app`, and one open pull request, #12, whose head is
+/// the value of `head`. Every other read answers an empty list, as the watch fixture's does.
+async fn fake_github_with_pull_request(head: std::sync::Arc<std::sync::Mutex<String>>) -> String {
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", http.local_addr().unwrap());
+    let issue = json!({"number": 12, "state": "open", "title": "Copper proof", "node_id": "PR_copper",
+        "html_url": "https://github.com/fixture/app/pull/12", "updated_at": "2026-10-01T00:00:00Z",
+        "created_at": "2026-10-01T00:00:00Z", "user": {"login": "fixture-author"}, "comments": 0,
+        "pull_request": {"url": "https://api.github.com/repos/fixture/app/pulls/12"}});
+    let listed = issue.clone();
+    let graphql_head = head.clone();
+    let app = axum::Router::new()
+        .route("/graphql", axum::routing::post(move || {
+            let head = graphql_head.lock().unwrap().clone();
+            async move {
+                let pull = json!({
+                    "id": "PR_copper", "number": 12, "title": "Copper proof",
+                    "url": "https://github.com/fixture/app/pull/12", "isDraft": false,
+                    "headRefOid": head, "headRefName": "agent/copper", "baseRefName": "main",
+                    "createdAt": "2026-10-01T00:00:00Z", "author": {"login": "fixture-author"},
+                    "reviewDecision": "REVIEW_REQUIRED", "mergeQueueEntry": null,
+                    "latestReviews": {"nodes": []},
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"nodes": [
+                        {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ]}}}}]},
+                });
+                axum::Json(json!({"data": {
+                    "repository": {"pullRequests": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [pull]}},
+                    "nodes": [{"id": "PR_copper", "state": "OPEN", "number": 12, "url": "https://github.com/fixture/app/pull/12"}],
+                }}))
+            }
+        }))
+        .fallback(axum::routing::get(move |uri: axum::http::Uri| {
+            let issue = listed.clone();
+            async move {
+                let path = uri.path();
+                axum::Json(if path == "/repos/fixture/app" {
+                    json!({"id": 77, "full_name": "fixture/app"})
+                } else if path.ends_with("/issues/12") {
+                    issue
+                } else if path.ends_with("/issues") {
+                    json!([issue])
+                } else if path == "/user" {
+                    json!({"login": "fixture-bot"})
+                } else {
+                    json!([])
+                })
+            }
+        }));
+    tokio::spawn(async move {
+        axum::serve(http, app).await.unwrap();
+    });
+    api
+}
+
+/// `st gh prs` as `actor` on `node`, as JSON, or null while it fails, as it does until the
+/// repository's observer is declared.
+fn gh_prs(node: &Node, actor: &str) -> Value {
+    let output = node.st(&["--json", "gh", "prs", "fixture/app", "--state", "all", "--as", actor]);
+    if !output.status.success() {
+        return Value::Null;
+    }
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
+/// repository.
+fn watch_fixture_app(node: &Node) {
+    let file = node.root.join("seat.kdl");
+    fs::write(&file, format!(
+        "version 2\nagent \"example/watch\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        node.name, node.root,
+    )).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+    let output = node
+        .command(&["gh", "watch", "fixture/app#12", "--as", "agent/example/watch"])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
+}
+
+/// The member that polls a repository answers `st gh prs|pr|checks` from its plugin mirror.
+/// Another member relays the read to it and shows the poller's mirror; with the poller down, it
+/// answers from its own graph and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
+    watch_fixture_app(&poller);
+    wait_until("the poller mirrors pull request 12", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
+    }).await;
+
+    let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
+    assert_eq!(pull["source"]["host"], "host/fixture-poller");
+    let checks = poller.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "a".repeat(40), "{checks}");
+    assert_eq!(checks["checks"]["heads"].as_array().unwrap().len(), 1);
+    let human = poller.st_ok(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(human.contains("from the GitHub plugin mirror on host/fixture-poller"), "{human}");
+
+    // A lost mirror refills from GitHub itself, not the graph, and serves full facts again;
+    // until then the poller answers from its graph and says so.
+    poller.stop();
+    let plugin = poller.state_dir().join("plugins/github");
+    for entry in fs::read_dir(&plugin).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_string_lossy().starts_with("github.sqlite3") {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the poller refills its lost mirror from GitHub", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move {
+            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+            answer["source"]["kind"] == "mirror"
+        }
+    }).await;
+    let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
+    assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
+    assert!(refilled["source"]["filled_at_unix_ms"].is_i64(), "{refilled}");
+
+    // Another member relays to the poller.
+    wait_until("the reader relays to the poller's mirror", 90, || {
+        let answer = gh_prs(&reader, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-poller" }
+    }).await;
+    let relayed = reader.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
+    assert_eq!(relayed["poller"], "host/fixture-poller");
+
+    // With the poller down, the reader answers from its graph and says why.
+    poller.stop();
+    let fallback = gh_prs(&reader, PERSON);
+    assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
+    assert_eq!(fallback["source"]["host"], "host/fixture-reader");
+    assert!(fallback["source"]["reason"].as_str().unwrap().contains("did not answer"), "{fallback}");
+    assert_eq!(fallback["pulls"][0]["number"], 12);
+    let checks = reader.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(checks["checks"]["heads"].is_null(), "the graph keeps no head history: {checks}");
+    let human = reader.st_ok(&["gh", "prs", "fixture/app", "--as", PERSON]);
+    assert!(human.contains("from host/fixture-reader's graph"), "{human}");
+    poller.start().await;
+}
+
+/// An older poller beside a member of this build: the member answers from its graph and says the
+/// poller runs a build without the plugin, and both keep replicating. Upgrading the poller in
+/// place refills its mirror from GitHub while it reads on from the history the older build
+/// recorded, and the member then relays
+/// to it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("b".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let member = anchor(root.path(), "fixture-member").await;
+    let mut poller = Node::new(root.path(), "fixture-old-poller");
+    poller.binary = old;
+    poller.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api)]);
+    let code = member.invite("fixture-old-poller", &[]);
+    let output = poller.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    poller.start().await;
+    watch_fixture_app(&poller);
+
+    wait_until("the member reads the old poller's pull request from its graph", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["pulls"][0]["number"] == 12 }
+    }).await;
+    let answer = gh_prs(&member, PERSON);
+    assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+    assert_eq!(answer["poller"], "host/fixture-old-poller");
+    assert!(answer["source"]["reason"].as_str().unwrap().contains("runs a build without the GitHub plugin"), "{answer}");
+    for node in [&member, &poller] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // The old poller's history, upgraded in place.
+    poller.stop();
+    poller.binary = PathBuf::from(st3());
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the upgraded poller refills its mirror from GitHub", 120, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
+    }).await;
+    wait_until("the member relays to the upgraded poller", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-old-poller" }
+    }).await;
+    let checks = member.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "b".repeat(40), "{checks}");
+}

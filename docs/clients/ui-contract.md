@@ -142,19 +142,27 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 
 Terminal workspace tabs derive presentation identity from their existing pane keys,
 like the web strip's `data-tab-kind` (never from the displayed or custom title).
-`A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
-reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
-`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
-open alerts in that subject's attention window, excluding informational updates and
-recently closed items; zero is omitted, and an unavailable window shows `◆?`.
-A separate `?` means live attention reports an open question prompt. Native question
-kind or an exact question-tool call identity establishes its type, independently of
-available client-answer actions (whose submission window can expire). Cached calls
-without an open live prompt never establish that a question is still pending.
+Agent tabs have one activity glyph immediately before the title: `●` working/compacting,
+`○` idle or awaiting a person or login, `×` down/stopped/retired, `!` fault, and `~`
+starting/unknown. Other tabs have no activity prefix; kind letters are not shown.
+One mauve attention suffix follows the title: `?` when an open item is a live question,
+otherwise `◆` when alerts or the subject's needs-person projection need attention.
+The suffix carries the open-alert count only above one (`?2`, `◆3`); zero and one
+have no digit, and a loading attention window has no count or placeholder.
+Counts exclude informational updates and recently closed items.
+Native question kind or an exact question-tool call identity establishes its type,
+independently of available client-answer actions (whose submission window can expire).
+Cached calls without an open live prompt never establish that a question is still pending.
 Mission tabs include current question prompts of agents assigned to that mission;
-Inbox includes all current question prompts. Counts disappear before
-type/activity/question identity when space is tight. Subject membership indexes are
-rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
+Inbox includes all current question prompts. Titles retain a 26-cell budget.
+Counts disappear first when space is tight, then the suffix; activity stays on the left.
+Subject membership indexes are rebuilt on observation updates, not per tab per frame.
+
+Each split has an independent, non-persisted tab-strip view. Wheel right/down over its
+strip moves the view one whole tab right; wheel left/up moves it left, without changing
+the active tab. The view clamps at the final full tab. Changing the active tab reveals
+it again if needed. Clickable `‹N` / `N›` markers count hidden tabs and activate the nearest
+hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace data.
 
 
 ### Now: what needs you
@@ -542,7 +550,7 @@ roster refresher already folds.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `presentation.state` and `because` (`crates/fractal-tui/src/ui/adapt.rs`); its derivation moved to `fractal-ui-model::agents` | Its labels still use mission titles from the missions window. |
-| Phone | `apps/ios/agentsView.ts` `agentState` (file 294 lines) | Ignores `blocked_on`, so every blocked seat reads as needs you; calls needs you "alert"; shows no next. |
+| Phone | Moved: `apps/ios/agentsView.ts` `agentState` reads `presentation.state`; a row without one reads `unknown` and shows its reported `state` as from an older Fractal (`agentReported`) | Calls needs you "alert"; shows no `because` and no next. |
 | Fractal | `apps/fractal-web/src/data/projections.ts` `activityOf`, `statusOf`; `web/sidebarRow.ts` | Its own status line and activity words; no shared states. |
 
 ### Attention row
@@ -584,8 +592,8 @@ agents.
 | | Derivation | Differs from this contract |
 |---|---|---|
 | Terminal UI | Reads `tier`, `kind`, `agent`, `raised_by` and `waiting` (`crates/fractal-tui/src/ui/adapt.rs` `attention()`); a row without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows Fractal's text as an unplaced card where its `alert` flag puts it, with no answer of its own; a message or a fault stays off Now. A launch card shows `launch` (`launch_preview()`), and a prompt's band shows `prompt`'s calls and offers allow only where `allow` says so (`prompt_calls()`, `alerts.rs`); an older Fractal that serves neither gets a card that says so, answered in the terminal. | Also withholds allow when the band cannot show the whole call in its four lines, as a client that cannot show the whole input offers deny only. |
-| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Home. Still its own: `pendingCalls`, `offeredAnswers` | Shows launch variants and diagnostics, with no step preview. |
-| Fractal | None live; `projections.ts` `attentionRefs` only | Nothing to delete. |
+| Phone | Reads `tier`, `kind` and `waiting` (`clients/typescript/fractal-views/homeView.ts` `homeKind`, `homeRows`; a feedback gate shows as a review); an item without a presentation (an older Fractal, or one not presented yet), or with a group or card it does not know, shows as unplaced where its `alert` flag puts it, never dropped; a message or a fault stays off Home. A prompt's calls and answers are `prompt`'s (`servedPrompt`, `servedAnswers`, `apps/ios/screens/Alerts.tsx`), and an older Fractal that serves none gets a card answered in the terminal | Shows launch variants and diagnostics, with no step preview. |
+| Fractal | `projections.ts` `attentionRefs`; its alerts read a prompt's calls from the conversation (`src/conversation/alerts/AgentAlerts.tsx`, with `homeView.ts` `pendingCalls`, `offeredAnswers`) | Moves to `prompt` with `servedPrompt` and `servedAnswers`; then `pendingCalls` and `offeredAnswers` are deleted. |
 
 Settled: `custom.*` kinds are Today requests, as in the terminal UI. Allow depends on
 `input_complete`; a client that cannot show the whole input offers deny only.

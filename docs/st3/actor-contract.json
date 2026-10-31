@@ -1002,6 +1002,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st gh checks": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
       "st gh comment": {
         "actor": "required",
         "accepts_person": true,
@@ -1029,6 +1038,24 @@
         "actor_environment": "ST_AGENT",
         "ignores_actor": false
       },
+      "st gh pr": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st gh prs": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
       "st gh unwatch": {
         "actor": "required",
         "accepts_person": true,
@@ -1045,6 +1072,33 @@
         "as_role": "actor",
         "alternate_actor_option": null,
         "actor_environment": "ST_AGENT",
+        "ignores_actor": false
+      },
+      "st harness-questions answer": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st harness-questions list": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st harness-questions show": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
         "ignores_actor": false
       },
       "st import ls": {
@@ -1571,6 +1625,15 @@
       },
       "st replication repair": {
         "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st replication signatures resume": {
+        "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
         "as_role": "actor",

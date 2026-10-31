@@ -660,17 +660,20 @@ pub async fn status(
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
     blocking_store(move || {
-        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &query.subject) {
+        let subject = query.subject.as_deref().map(|subject| {
+            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+        }).transpose()?;
+        let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
             store.status_harness_only(subject)
         } else if query.history {
             store.status_history(
-                query.subject.as_deref(),
+                subject.as_deref(),
                 query.owner_run.as_deref(),
                 query.at_index,
             )
         } else {
             store.status_at(
-                query.subject.as_deref(),
+                subject.as_deref(),
                 query.owner_run.as_deref(),
                 query.at_index,
             )
