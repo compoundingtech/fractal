@@ -1,11 +1,9 @@
 //! What readers answer from each claim kind, summarized so two members can compare.
 //!
-//! A member that trims on its own deletes claims its peers may still hold, so members no longer
-//! hold the same claims and their envelope and claim digests stop agreeing. What must still agree
-//! is what a reader answers. For every kind a trim may touch, the answer for one key, a subject
-//! and the writer that wrote it, is the key's newest claim in canonical order; a trim never
-//! deletes it. So for each kind this summarizes the newest claim of every key, and two members
-//! whose summaries differ disagree about what some reader answers.
+//! Trimming can remove superseded claims, including a writer's newest claim when a slot spans
+//! writers. Claim inventories are diagnostics, not proof of reader disagreement. The runtime
+//! supplies folded reader values for retention slots; when both members supply such a reader,
+//! its values replace the corresponding kind's inventory comparison.
 //!
 //! The summary is taken at a cut, so members compare the same history while new claims arrive.
 //! A key counts only once its newest claim is older than the cut: a key with a newer claim is
@@ -424,6 +422,14 @@ pub fn differing_kinds(
     kinds
         .into_iter()
         .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
+        .filter(|kind| {
+            let replacement = format!("{READER_PREFIX}slots/{kind}");
+            !(ours.kinds.contains_key(&replacement) && theirs.kinds.contains_key(&replacement))
+        })
+        .filter(|kind| {
+            !kind.starts_with("reader/slots/")
+                || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind))
+        })
         .filter_map(|kind| {
             let (a, b) = (ours.kinds.get(kind), theirs.kinds.get(kind));
             // A member that holds no claim of a kind answers as one that counts none of its keys.

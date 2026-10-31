@@ -6,6 +6,7 @@
 //! fix. A later check of the same pair that agrees ends the fault.
 use super::*;
 use smallclaims::answers::AnswersCheck;
+use smallclaims::store::checkpoint::claims_of_kind_in_order;
 
 pub const ANSWERS_CONDITION: &str = "answers-disagreement";
 /// Every answers episode starts with this, so its failure and recovery read apart from the
@@ -29,6 +30,62 @@ pub fn episode(local: &str, peer: &str) -> String {
 /// The subjects whose answers fold claims rather than read one: seats (harness state, status
 /// history, working since) and steps (timing).
 const FOLDED_SUBJECTS: [&str; 2] = ["agent/", "step-run/"];
+
+/// Claim kinds whose retention slots are the unit of observation, not the originating writer.
+const SLOT_READERS: [&str; 7] = [
+    "daemon.diagnostic", "harness.observed", "harness.todo.observed", "harness.usage",
+    "observer.observed", "resource.observed", "transport.observed",
+];
+
+fn slot_reader_answers(
+    connection: &Connection,
+    cut: u128,
+) -> Result<BTreeMap<String, Vec<smallclaims::answers::AnswerKey>>> {
+    let mut readers = BTreeMap::new();
+    for kind in SLOT_READERS {
+        let subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind=?1 ORDER BY subject",
+        )?.query_map([kind], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut keys = Vec::new();
+        for subject in subjects {
+            let claims = claims_of_kind_in_order(connection, &subject, kind)?;
+            let mut slots: BTreeMap<Vec<String>, Vec<&ClaimRecord>> = BTreeMap::new();
+            for claim in &claims {
+                let slot = checkpoint_rules::slot_of(claim).map_or_else(
+                    || vec![subject.clone(), kind.to_owned(), claim.origin.clone()],
+                    |(_, slot)| slot,
+                );
+                slots.entry(slot).or_default().push(claim);
+            }
+            for (slot, claims) in slots {
+                let moving = claims.iter().any(|claim| claim.accepted_at_unix_ms >= cut);
+                let answer = if kind == "harness.usage" {
+                    json!(Store::usage_summary_from_rows(claims.iter().map(|claim| Ok((
+                        claim.store_index, serde_json::to_string(&claim.body).unwrap_or_default(),
+                        claim.accepted_at_unix_ms.to_string(),
+                    ))), None)?)
+                } else {
+                    fold_latest_values(claims.iter().map(|claim| (kind.to_owned(), claim.body.clone())))?
+                        .unwrap_or(Value::Null)
+                };
+                let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
+                keys.push(smallclaims::answers::AnswerKey {
+                    subject: subject.clone(),
+                    // The wire's secondary key carries the explicit retention slot, not an
+                    // invented writer dimension. Include the rule's full slot to avoid collisions.
+                    origin: serde_json::to_string(&slot)?,
+                    claim: hex::encode(Sha256::digest(canonical.as_bytes())),
+                    moving,
+                });
+            }
+        }
+        keys.sort();
+        // Empty entries advertise coverage, including when one member has no claims of the kind.
+        readers.insert(format!("slots/{kind}"), keys);
+    }
+    Ok(readers)
+}
 
 /// Every fold reader's answers at `cut`, for [`smallclaims::answers::FoldReaders`]. For each
 /// seat and step whose newest claim is older than the cut, it reads what the checkpoint proof
@@ -98,6 +155,7 @@ pub fn fold_reader_answers(
         }));
         keys.sort();
     }
+    readers.extend(slot_reader_answers(connection, cut)?);
     Ok(readers)
 }
 
