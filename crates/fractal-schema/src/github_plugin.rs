@@ -160,7 +160,9 @@ pub fn item_state_updates(
 
 /// The value a compact fact takes over an item's `prior` value of it. `required_checks` is a
 /// summary: its state, source and failed names replace those of the prior object, and the rest
-/// (the checks it counts, their execution) stays. Every other compact fact replaces its prior.
+/// (the checks it counts, their execution) stays. That rest is the last snapshot's, and after a
+/// new head it may belong to an earlier one; the next look then sees a different execution and
+/// writes a snapshot. Every other compact fact replaces its prior.
 pub fn compact_fact_over(name: &str, prior: Option<&Value>, compact: &Value) -> Value {
     match (name, prior.and_then(Value::as_object), compact.as_object()) {
         ("required_checks", Some(prior), Some(summary)) => {

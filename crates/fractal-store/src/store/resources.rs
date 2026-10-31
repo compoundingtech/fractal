@@ -262,17 +262,9 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         if let Some((state_id, state, state_accepted)) = &item_state
             && (kind.is_empty() || state_accepted.parse::<u128>()? >= accepted.parse::<u128>()?)
         {
-            for (name, value) in fractal_schema::github_plugin::item_state_updates(state) {
-                match value {
-                    None => {
-                        facts.remove(name);
-                    }
-                    Some(value) => {
-                        let value = fractal_schema::github_plugin::compact_fact_over(name, facts.get(name), value);
-                        facts.insert(name.into(), value);
-                    }
-                }
-            }
+            let mut overlaid = std::mem::take(&mut facts).into_iter().collect::<serde_json::Map<_, _>>();
+            fractal_schema::github_plugin::overlay_item_state(&mut overlaid, state);
+            facts = overlaid.into_iter().collect();
             if kind.is_empty() {
                 kind = state.get("item_kind").and_then(Value::as_str).unwrap_or_default().to_owned();
                 if let Some(number) = subject.rsplit('/').next().and_then(|number| number.parse::<u64>().ok()) {
