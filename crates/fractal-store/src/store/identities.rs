@@ -505,7 +505,7 @@ fn reduce(transaction: &Transaction<'_>, clear: bool) -> Result<()> {
             if IdentityKind::of(&identity) != Some(kind) || IdentityKind::of(from) != Some(kind) || IdentityKind::of(to) != Some(kind) || fields["owner_host"].as_str() != Some(origin.as_str()) {
                 heads.get_mut(&identity).expect("inserted head").blocked = Some("conflict"); continue;
             }
-            let mut unavailable = match claim_by_id_tx(connection, &declaration)? {
+            let mut unavailable = match claim_by_id_tx(connection, declaration)? {
                 None => Some("pending-replication"),
                 Some(claim) if claim.subject != identity
                     || (kind == IdentityKind::Agent && claim.kind != "intent.desired")
