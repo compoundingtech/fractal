@@ -1,32 +1,10 @@
 {
-  "version": 1,
-  "summary": "Home Manager prestage checks inspect Darwin launchd commands instead of Linux-only systemd services",
-  "replay": {
-    "status": "none",
-    "detail": "Check-only correction; no claims, projections or caches change."
-  },
-  "schema": {
-    "status": "none",
-    "detail": "No stored-format changes."
-  },
-  "rules": {
-    "status": "none",
-    "detail": "Production modules and paths are unchanged. Common phase/config assertions and Linux command checks remain intact."
-  },
-  "compatibility": {
-    "status": "none",
-    "detail": "Pure evaluation checks the emitted stage plist's single wrapper argument and the completed launchd argument. Building the Darwin check additionally requires an unconditional migration-ready guard before exec in both selected generated wrappers, checks intended executable and PTY-root paths, and rejects removed/late-guard and wrong-path mutations. Consumer fixtures use a tiny nonexecuted package and no optional PTY package to avoid product/web/PTY build closures; the real module still generates the inspected wrappers. Evaluation alone does not prove wrapper contents, and this check does not prove product execution or web assets."
-  },
-  "downtime": {
-    "status": "none",
-    "detail": "No activation or service-manager operations are added."
-  },
-  "manual": {
-    "status": "none",
-    "detail": "No operator action is required. Darwin wrapper-content proof requires building the Darwin prestage check."
-  },
-  "recovery": {
-    "status": "none",
-    "detail": "Reverting only restores the inherited Darwin check failure; runtime behavior is unchanged."
-  }
+  "version": 1, "summary": "Fix Home Manager prestage checks on macOS without changing runtime behavior",
+  "replay": { "status": "none", "detail": "No claims, projections or caches change." },
+  "schema": { "status": "none", "detail": "No stored-format changes." },
+  "rules": { "status": "none", "detail": "Production paths and common/Linux checks are unchanged." },
+  "compatibility": { "status": "none", "detail": "Evaluation checks launchd command selection; Darwin builds inspect real generated guard/executable/PTY paths using tiny nonexecuted package fixtures, not product execution or web assets." },
+  "downtime": { "status": "none", "detail": "No activation or service-manager operations are added." },
+  "manual": { "status": "none", "detail": "No operator action; wrapper-content proof requires a Darwin check build." },
+  "recovery": { "status": "none", "detail": "Rollback only restores the inherited macOS check failure." }
 }
