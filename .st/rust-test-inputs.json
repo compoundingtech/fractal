@@ -229,8 +229,8 @@
   "fractal-kernel": {
    "extra": [
     ".config",
-    ".github/workflows/fleet.yml",
     ".fractal/evidence-policy.json",
+    ".github/workflows/fleet.yml",
     ".st/evidence-policy.json",
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
@@ -406,6 +406,7 @@
   },
   "smallclaims": {
    "extra": [
+    "crates/fractal",
     "crates/st3"
    ]
   },
