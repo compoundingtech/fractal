@@ -8,6 +8,10 @@ import { loadWorld } from '@fractal/scenarios'
 
 // Run in the web Nix shell: its Playwright driver and Chromium are also used by the kit gate.
 const started = performance.now()
+// When the pane's module is requested and answered, relative to the steps around it, so a timeout
+// on its response wait says which stage was slow. Printed with the result, passing or failing.
+const paneTimeline = []
+const mark = event => paneTimeline.push(`${event} +${Math.round(performance.now() - started)}ms`)
 const app = fileURLToPath(new URL('..', import.meta.url))
 const scenario = 'first-run-onboarding'
 const sentence = 'The first mission is running. Checking sprout now.'
@@ -182,13 +186,11 @@ try {
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
     await page.clock.runFor(offset - elapsed)
   }
-  // The dev server builds the pane's module on its first request, and a loaded host can take longer
-  // than the 10s a response wait allows. Build it here, outside the wait, so the wait below sees
-  // the page's own request answered from a built module. The script's 90-second deadline bounds this.
-  await server.warmupRequest('/src/web/ConversationPane.tsx')
-  const paneRequestedAt = Date.now()
-  const paneResponse = page.waitForResponse(response =>
-    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
+  const paneModule = response => new URL(response.url()).pathname.endsWith('/ConversationPane.tsx')
+  const paneResponse = page.waitForResponse(paneModule)
+  page.on('request', request => { if (paneModule(request)) mark('pane module requested') })
+  page.on('response', response => { if (paneModule(response)) mark('pane module answered') })
+  mark('navigation')
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   await roster.waitFor({ state: 'visible' })
   const replayStartedAt = await page.evaluate(() => Date.now())
@@ -205,11 +207,12 @@ try {
   await noUserFolders()
   await agentInProject()
   await advanceReplayTo(Math.floor((2000 + threadCreated.at_ms) / 2))
+  mark('agent selected')
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
   await (await paneResponse).finished()
-  console.log(`pane module answered ${Date.now() - paneRequestedAt}ms after its wait began`)
+  mark('pane response awaited')
   const pane = page.getByTestId('conversation-history-host')
   const transcript = page.getByTestId('transcript-scroll')
   while (!await pane.isVisible() || !await transcript.getByTestId('transcript-empty').isVisible()) {
@@ -274,4 +277,5 @@ try {
   process.removeListener('SIGTERM', onSigterm)
   await close()
   console.log(`REPLAY_E2E ${JSON.stringify({ seconds: Number(((performance.now() - started) / 1000).toFixed(2)), negativePassed, violations, errors })}`)
+  console.log(`REPLAY_E2E pane timeline: ${paneTimeline.join(', ')}`)
 }

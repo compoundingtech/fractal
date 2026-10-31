@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Two web tests stop depending on how fast a host runs. The replay browser e2e builds the conversation pane's module on the dev server before it waits for the page to request it, so the 10-second response wait no longer includes a cold build on a loaded host, and it prints how long the response took. The scroll viewport story drives the eased return from a clock it controls, with one branch for reduced motion and one that checks half of the 200ms is on the way and the full 200ms is the end. Test-only change.",
+  "summary": "Two web tests change. The replay browser e2e now prints when the conversation pane's module was requested and answered, relative to navigation and to selecting the agent, so a timeout on that response says which stage was slow; its checks and limits are unchanged. The scroll viewport story drives the eased return from a clock it controls, with one branch for reduced motion and one that checks half of the 200ms is on the way and the full 200ms is the end, so a loaded host cannot stretch the ease. Test-only change.",
   "replay": {"status": "none", "detail": "Test-only change; no replay or stored data changes."},
   "schema": {"status": "none", "detail": "No schema change."},
   "rules": {"status": "none", "detail": "No protocol or rule change."},
