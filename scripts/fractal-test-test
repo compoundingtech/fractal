@@ -391,7 +391,7 @@ class GovernedTest(unittest.TestCase):
             real = st_test.own_cap
             with mock.patch.dict(os.environ, dict(environment or {}, XDG_RUNTIME_DIR=tmp), clear=True), \
                     mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
-                    mock.patch.object(st_test.shutil, 'which', return_value='/usr/bin/systemd-run'), \
+                    mock.patch.object(st_test.shutil, 'which', lambda program: f'/usr/bin/{program}'), \
                     contextlib.redirect_stderr(io.StringIO()):
                 return st_test.governed(['check'], 'linux-gate')
 
@@ -399,9 +399,14 @@ class GovernedTest(unittest.TestCase):
         self.assertIn('--slice=builds.slice', governed, why)
         self.assertEqual(governed[-1], 'check')
 
+    def assert_in_place(self, governed, why):
+        # In place, and marked as in a build cap for a cargo front door that would otherwise move cargo into builds.slice.
+        self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
+        self.assertEqual(Path(governed[0]).name, 'env', why)
+
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
-        self.assertEqual(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), ['check'])
-        self.assertEqual(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), ['check'])
+        self.assert_in_place(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), 'lane')
+        self.assert_in_place(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), 'builds.slice')
 
     def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
         self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
@@ -424,10 +429,10 @@ class GovernedTest(unittest.TestCase):
 
     def test_limits_on_different_levels_inside_the_cap_together_are_a_cap(self):
         limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
-        self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
+        self.assert_in_place(self.governed_in(self.LANE, limits), 'memory and CPU on two levels')
         # A level without a memory controller still caps CPU: each file is read on its own.
         limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
-        self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
+        self.assert_in_place(self.governed_in(self.LANE, limits), 'no memory controller on the CPU level')
 
     def test_an_unreadable_cgroup_is_no_cap(self):
         self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
@@ -445,6 +450,7 @@ class StTest(unittest.TestCase):
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'host/box-1', '-f', str(key)], check=True)
         pub = key.with_suffix('.pub').read_text().split()
         self.home = tmp / 'home'
+        self.run_tmp = tmp / 'run-tmp'  # where runs make their TMPDIR (ST_TEST_TMP), not the host's /var/tmp
         (self.home / '.config/st').mkdir(parents=True)
         (self.home / '.config/st/evidence-sign.json').write_text(json.dumps(
             {'signer': 'host/box-1', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git'),
@@ -485,7 +491,7 @@ class StTest(unittest.TestCase):
         if command is not None:
             st_test.LOCAL['demo'] = command
         out, err = io.StringIO(), io.StringIO()
-        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, **(extra_env or {}))
+        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, ST_TEST_TMP=str(self.run_tmp), **(extra_env or {}))
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
@@ -1098,12 +1104,15 @@ class StTest(unittest.TestCase):
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
             target = self.pool() / 'target-0'
+            self.assertTrue((target / 'CACHEDIR.TAG').is_file())  # st-test made it before cargo ran, so it tags it as cargo would
             (target / 'junk').write_bytes(b'x' * 4096)
             with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
-                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
-                self.assertTrue((target / 'junk').exists())  # not a directory cargo made: never emptied
-                (target / 'CACHEDIR.TAG').write_text('Signature: 8a477f597d28d172789f06886806bc55\n')
-                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # cargo's, past the cap: emptied
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # past the cap: emptied
+                self.assertFalse((target / 'junk').exists())
+                self.assertTrue((target / 'CACHEDIR.TAG').is_file())  # and tagged again, so the next run can empty it too
+                (target / 'CACHEDIR.TAG').unlink()  # a pool target from before st-test tagged its targets
+                (target / 'junk').write_bytes(b'x' * 4096)
+                self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # the pool's own: emptied, tag or none
             self.assertFalse((target / 'junk').exists())
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': 'off'})[0], 0)
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'CARGO_TARGET_DIR': '/elsewhere'})[0], 0)
@@ -1111,6 +1120,88 @@ class StTest(unittest.TestCase):
             self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_EVIDENCE_TARGET': str(shared)})[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)  # builds nothing: no kept target
         self.assertEqual(seen.read_text().split(), [str(target)] * 3 + ['none', '/elsewhere', str(shared), 'none'])
+
+    def test_a_tagless_target_the_caller_made_is_never_emptied(self):
+        """ST_EVIDENCE_TARGET naming a directory st-test did not make, without cargo's tag, is left alone however big it is."""
+        self.commit('b.txt', 'two')
+        mine = self.home / 'mine'
+        mine.mkdir()
+        (mine / 'junk').write_bytes(b'x' * 4096)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+            self.assertEqual(self.run_st_test('--check', 'demo', command=['true'], extra_env={'ST_EVIDENCE_TARGET': str(mine)})[0], 0)
+        self.assertTrue((mine / 'junk').exists())
+        self.assertFalse((mine / 'CACHEDIR.TAG').exists())  # nor tagged: st-test tags only a directory it creates
+
+    def test_only_a_path_inside_the_pool_directory_is_the_pools_own(self):
+        """The pool's own targets are known by resolved path, not by a name prefix: the default shared target ~/.cache/st-test-target
+        starts like the pool directory ~/.cache/st-test, and a symlink or .. can point out of it. None of those is emptied untagged."""
+        pool = self.home / '.cache/st-test'
+        own = pool / 'pools/o-1/target-0'
+        own.mkdir(parents=True)
+        outside = self.home / '.cache/st-test-target'
+        outside.mkdir()
+        (outside / 'junk').write_bytes(b'x' * 4096)
+        link = pool / 'pools/o-1/target-9'
+        link.symlink_to(outside)
+        with mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True), mock.patch.dict(os.environ, {'HOME': str(self.home)}):
+            self.assertTrue(st_test.in_pool(own))
+            for path in (outside, pool / '..' / 'st-test-target', link, self.home):
+                self.assertFalse(st_test.in_pool(path), path)
+            with mock.patch.object(st_test, 'TARGET_MAX_GB', 1e-9):
+                for path in (outside, link):
+                    st_test.trim(path, owned=st_test.in_pool(path))
+        self.assertTrue((outside / 'junk').exists())
+
+    def test_the_checks_get_a_tmpdir_of_the_runs_own_that_is_removed_at_the_end(self):
+        """TMPDIR, TMP and TEMP name one short directory of the run's own, and nothing in it outlives the run."""
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$TMPDIR $TMP $TEMP" > {seen}; mkdir "$TMPDIR/nix-shell.abcdef"; touch "$TMPDIR/nix-shell.abcdef/left"']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        tmpdir, tmp, temp = seen.read_text().split()
+        self.assertEqual(tmpdir, tmp)
+        self.assertEqual(tmpdir, temp)
+        self.assertEqual(Path(tmpdir).parent, self.run_tmp)
+        self.assertRegex(Path(tmpdir).name, r'^st-test\.[a-z0-9_]{8}$')
+        self.assertFalse(Path(tmpdir).exists())
+        self.assertEqual(list(self.run_tmp.iterdir()), [])
+        self.assertNotEqual(os.environ.get('TMPDIR'), tmpdir)  # the caller's own TMPDIR is back
+        self.assertNotEqual(tempfile.gettempdir(), tmpdir)
+
+    def test_keep_keeps_the_runs_tmpdir_and_later_runs_leave_it(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', '--keep', command=['sh', '-c', f'echo "$TMPDIR" > {seen}; touch "$TMPDIR/left"'])
+        self.assertEqual(code, 0)
+        kept = Path(seen.read_text().strip())
+        self.assertIn(f'kept this run\'s TMPDIR {kept}', err)
+        os.utime(kept, (time.time() - 7200, time.time() - 7200))
+        self.commit('c.txt', 'three')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=['true'])[0], 0)
+        self.assertTrue((kept / 'left').exists())
+
+    def test_a_run_removes_the_tmpdir_a_gone_run_left_and_no_live_ones(self):
+        """A killed run's TMPDIR is removed by the next run; one whose run holds its lock, or that is too new to have been locked yet, is not."""
+        root = self.run_tmp
+        gone, live, new, other = root / 'st-test.gone0000', root / 'st-test.live0000', root / 'st-test.new00000', root / 'nix-shell.abcdef'
+        for path in (gone, live, new, other):
+            (path / 'nix-shell.abcdef').mkdir(parents=True)
+        readonly = gone / 'nix-shell.abcdef/store-copy'
+        readonly.mkdir()
+        (readonly / 'file').touch()
+        readonly.chmod(0o500)
+        old = time.time() - 7200
+        for path in (gone, live, other):
+            os.utime(path, (old, old))
+        held = os.open(live, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=['true'])[0], 0)
+        self.assertFalse(gone.exists())
+        self.assertTrue(live.exists())
+        self.assertTrue(new.exists())
+        self.assertTrue(other.exists())  # not a run's: only st-test.* directories are judged
 
     def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
         self.commit('b.txt', 'two')
@@ -1829,8 +1920,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_TEST_TREES': 'off'})[0], 0)
         path = Path(seen.read_text().strip())
         self.assertTrue(path.parent.name.startswith('st-test-'))
+        self.assertEqual(path.parent.parent.parent, self.run_tmp)  # in the run's TMPDIR
         self.assertFalse(path.exists())
         self.assertFalse((self.home / '.cache/st-test').exists())
+        self.assertEqual(list(self.run_tmp.iterdir()), [])
 
     def test_a_check_already_signed_for_this_tree_is_not_run_again(self):
         self.commit('b.txt', 'two')
@@ -2215,7 +2308,8 @@ class StTest(unittest.TestCase):
             path.write_text(recorder.format(calls=calls))
             path.chmod(0o755)
         env = {'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'XDG_RUNTIME_DIR': str(runtime), 'ST_EVIDENCE_GOVERN': 'on'}
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+        # An uncapped caller, whatever cgroup the test itself runs in: inside a seat's lane the check would run in place.
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'own_cap', return_value=None):
             code, out, err = self.run_st_test('--check', 'demo', extra_env=env)
             self.assertEqual(code, 0, err)
             # The scope alone: no stage ticket, whose holder the test guardian's cargo commands would queue behind (they detach).

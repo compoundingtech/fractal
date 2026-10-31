@@ -44,6 +44,8 @@ use crate::store::{
     CheckpointManifestRequest,
 };
 mod raw_lease;
+mod seat_freshness;
+pub use seat_freshness::*;
 
 /// The peer listener's shared state, with this node's daemon as the store.
 type PeerState = smallclaims::sync::PeerState<MainBackend>;
@@ -188,6 +190,11 @@ pub enum ClientReadOperation {
         sha256: String,
         message: String,
         offset: u64,
+    },
+    /// A read of the GitHub plugin's mirror on the member that polls the repository: `path` is
+    /// a `/v1/plugins/github/repos/...` path and query, answered from the owner's mirror alone.
+    GithubPlugin {
+        path: String,
     },
     /// The messages to and from one agent, as the host that owns the agent lists them.
     Messages {
@@ -792,6 +799,7 @@ impl ClientRelay {
                 Some(("session-detail-child-id", 1))
             }
             ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            ClientReadOperation::GithubPlugin { .. } => Some(("github-plugin", 1)),
             _ => None,
         };
         if let Some((id, version)) = required {
@@ -1270,6 +1278,16 @@ fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejecte
     if matches!(operation, ClientReadOperation::Messages { .. }) {
         return messages_paging_unsupported();
     }
+    if matches!(operation, ClientReadOperation::GithubPlugin { .. }) {
+        let mut rejected = ClientReadRejected::new(
+            "peer-too-old",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This host runs an older Fractal version without the GitHub plugin's read API; update it to read its mirror.",
+        );
+        rejected.details.insert("capability".into(), "github-plugin".into());
+        rejected.details.insert("version".into(), 1.into());
+        return rejected;
+    }
     let mut rejected = ClientReadRejected::new(
         "peer-too-old",
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1302,7 +1320,8 @@ async fn client_read_capabilities(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
         serde_json::json!({"capabilities":[
             {"id":"messages-paging","version":2,"state":"granted"},
-            {"id":"session-detail-child-id","version":1,"state":"granted"}
+            {"id":"session-detail-child-id","version":1,"state":"granted"},
+            {"id":"github-plugin","version":1,"state":"granted"}
         ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -1532,6 +1551,9 @@ async fn receive_client_read(
                     crate::client::api_error_code(&error).unwrap_or("remote-unavailable"),
                     StatusCode::CONFLICT, format!("{error:#}")
                 ).into())
+            }
+            ClientReadOperation::GithubPlugin { path } => {
+                Ok(client.github_plugin_read(&path).await?)
             }
             ClientReadOperation::HarnessInventory { agent_id, query } => {
                 let value = client.harness_inventory_get(&agent_id, &query).await?.value;
@@ -1977,6 +1999,8 @@ pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
             post(receive_client_read).get(client_read_capabilities).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
+        .route(SEAT_FRESHNESS_PATH,
+            post(seat_freshness::receive_seat_freshness).layer(DefaultBodyLimit::max(MAX_SEAT_FRESHNESS_BYTES)))
 }
 
 /// Serve a conversation owner's peer listener for tests, and return the client relay of a
@@ -2508,7 +2532,7 @@ mod tests {
         for (store, count) in [(&alder, 6), (&birch, 4)] {
             for index in 0..count {
                 store
-                    .append_claim(&ClaimInput {
+                    .append_as_older_build_for_test(&ClaimInput {
                         subject: format!("daemon/{}", store.origin()),
                         kind: "daemon.diagnostic".into(),
                         actor: None,

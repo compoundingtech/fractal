@@ -1278,7 +1278,7 @@ fn a_panic_while_the_writer_is_held_does_not_disable_the_store() {
     .join();
     assert!(panicked.is_err());
     store
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/node".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -8660,6 +8660,56 @@ fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
     assert_eq!(host_total(), tokens);
 }
 
+/// A current batch read folds every subject's held usage from one statement. A statement per
+/// subject made a cold roster rebuild cost one more statement per card: 3,916 statements for
+/// 3,011 cards, against 893 before. A subject that holds no reading costs nothing extra either.
+#[test]
+fn a_current_usage_batch_reads_the_held_usage_of_every_subject_at_once() {
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    // `held` subjects hold a second rollup on this node; `quiet` ones only replicated their first.
+    let measure = |held: usize, quiet: usize| {
+        let store = Store::open_memory("node").unwrap();
+        let subjects = (0..held + quiet).map(|seat| format!("agent/node.worker-{seat}")).collect::<Vec<_>>();
+        for (seat, subject) in subjects.iter().enumerate() {
+            store.append_latest_observation(&harness_state(subject, "working", start as u64), start).unwrap();
+            // The first reading replicates; the second waits for its hour, held on this node.
+            let readings: &[(u64, u128)] = if seat < held { &[(1, start), (2, start + 4_000)] } else { &[(1, start)] };
+            for &(tokens, at) in readings {
+                let rollup = ClaimInput {
+                    subject: subject.clone(),
+                    kind: "harness.usage".into(),
+                    actor: Some(subject.clone()),
+                    fields: BTreeMap::from([
+                        ("driver".into(), json!("codex")),
+                        ("incarnation_id".into(), json!("inc-1")),
+                        ("semantics".into(), json!("response_rollup")),
+                        ("model".into(), json!("example-model")),
+                        ("total_tokens".into(), json!(tokens)),
+                        ("observed_at_unix_ms".into(), json!(at as u64)),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("rollup:{subject}:{tokens}")),
+                };
+                store.append_latest_observation(&rollup, at).unwrap();
+            }
+        }
+        let at = Some(store.index().unwrap());
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let batch = store.usage_summaries_at(&subjects, at).unwrap();
+        let work = scope.finish();
+        for (seat, subject) in subjects.iter().enumerate() {
+            let expected = if seat < held { 2 } else { 1 };
+            assert_eq!(batch[subject].total_tokens, expected, "{subject} folds what it holds");
+        }
+        work.statements
+    };
+    let two = measure(2, 0);
+    assert_eq!(measure(12, 0), two, "a current batch read costs the same for 12 subjects holding readings as for 2");
+    assert_eq!(measure(2, 10), two, "and 10 subjects holding none add nothing");
+}
+
 /// A native binding that arrives while a newer rollup waits for its hour binds that reading when
 /// it replicates. The stop flush that binds an older, already replicated rollup must not drop it.
 #[test]
@@ -12249,4 +12299,222 @@ fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
     // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
     assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
     assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
+}
+
+/// A roster's freshness read takes every seat's newest local report in one statement: 12 seats
+/// cost what 2 do, and a seat with no local report adds nothing.
+#[test]
+fn the_newest_local_harness_report_of_many_seats_is_one_read() {
+    let measure = |reported: usize, silent: usize| {
+        let store = Store::open_memory("node").unwrap();
+        let subjects = (0..reported + silent).map(|seat| format!("agent/node.worker-{seat}")).collect::<Vec<_>>();
+        let start = now_ms();
+        for subject in subjects.iter().take(reported) {
+            store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+        }
+        let names = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let newest = store.local_harness_newest_many(&names).unwrap();
+        let work = scope.finish();
+        assert_eq!(newest.len(), reported);
+        for subject in subjects.iter().take(reported) {
+            assert_eq!(newest[subject], ("inc-1".to_owned(), start), "{subject}");
+            assert_eq!(store.local_harness_newest(subject).unwrap(), Some(newest[subject].clone()));
+        }
+        work.statements
+    };
+    let two = measure(2, 0);
+    assert_eq!(measure(12, 0), two, "12 seats cost what 2 do");
+    assert_eq!(measure(2, 10), two, "and 10 seats with no local report add nothing");
+}
+
+/// `daemon.diagnostic` is observability only, so it stays in the node's local observation log,
+/// from which `[observations.otlp]` exports it. Claims an older member replicates still arrive and
+/// are kept, and an upgraded node's own older claims stay readable beside its new local rows.
+#[test]
+fn daemon_diagnostics_stay_local_while_older_members_claims_still_arrive() {
+    let store = Store::open_memory("node").unwrap();
+    let diagnostic = |code: &str, reason: &str, key: Option<&str>| ClaimInput {
+        subject: "daemon/node".into(),
+        kind: "daemon.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("error")),
+            ("code".into(), json!(code)),
+            ("reason".into(), json!(reason)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: key.map(str::to_owned),
+    };
+    let legacy = |origin: &str, subject: &str, reason: &str| {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            origin,
+            subject,
+            "daemon.diagnostic",
+            None,
+            &json!({ "fields": { "severity": "error", "code": "reconcile-failed", "reason": reason }, "evidence": [] }),
+            &[],
+            None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    };
+    // Before the upgrade, this node replicated its own diagnostics.
+    legacy("node", "daemon/node", "before the upgrade");
+    let index_before = store.index().unwrap();
+    let inventory_before = store.replication_inventory().unwrap();
+
+    let first = diagnostic("reconcile-failed", "after the upgrade", Some("daemon-diagnostic:one"));
+    assert!(store.append_claim_outcome(&first).unwrap().1);
+    assert!(!store.append_claim_outcome(&first).unwrap().1, "a repeated key is the same diagnostic");
+    assert!(store.append_claim_outcome(&diagnostic("kill-survivor", "pid 7", None)).unwrap().1);
+    assert_eq!(store.index().unwrap(), index_before, "no claim was written");
+    assert_eq!(
+        store.replication_inventory().unwrap().envelopes,
+        inventory_before.envelopes,
+        "a diagnostic adds no envelope"
+    );
+    let local = store.local_observations_after(0, 10).unwrap();
+    assert_eq!(
+        local.iter().filter(|row| row.kind == "daemon.diagnostic").count(),
+        2,
+        "both diagnostics are in the local log the exporter reads"
+    );
+    // A writer comparing with the newest diagnostic sees the local one, not the older claim.
+    let newest = store.latest_observation("daemon/node", "daemon.diagnostic").unwrap().unwrap();
+    assert_eq!(newest.body["fields"]["code"], "kill-survivor");
+    let claims = store.claims_for("daemon/node", Some("daemon.diagnostic")).unwrap();
+    assert_eq!(claims.len(), 1, "the pre-upgrade claim stays");
+    assert_eq!(claims[0].body["fields"]["reason"], "before the upgrade");
+
+    // A key the node recorded as a claim before the upgrade still names that request: a retry
+    // gets the claim, with no new local row, and a changed request is refused.
+    let keyed = diagnostic("workspace-unavailable", "blocked", Some("daemon-diagnostic:before"));
+    let before = store.append_as_older_build_for_test(&keyed).unwrap();
+    let local_before = store.local_observations_after(0, 10).unwrap().len();
+    let (retried, created) = store.append_claim_outcome(&keyed).unwrap();
+    assert_eq!((retried.id, created), (before.id, false), "a retry gets the pre-upgrade claim");
+    assert_eq!(store.local_observations_after(0, 10).unwrap().len(), local_before);
+    let changed = diagnostic("workspace-unavailable", "permission denied", Some("daemon-diagnostic:before"));
+    assert_eq!(store.append_claim_outcome(&changed).unwrap_err().code, "idempotency-mismatch");
+
+    // An older member still replicates its diagnostics; this node stores them as before.
+    legacy("older-node", "daemon/older-node", "written by an older build");
+    let received = store.claims_for("daemon/older-node", Some("daemon.diagnostic")).unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].body["fields"]["reason"], "written by an older build");
+}
+
+fn harness_diagnostic(subject: &str, code: Option<&str>, reason: &str, key: Option<&str>) -> ClaimInput {
+    let mut fields = BTreeMap::from([
+        ("severity".into(), json!("error")),
+        ("reason".into(), json!(reason)),
+    ]);
+    if let Some(code) = code {
+        fields.insert("code".into(), json!(code));
+    }
+    ClaimInput {
+        subject: subject.into(),
+        kind: "harness.diagnostic".into(),
+        actor: None,
+        fields,
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: key.map(str::to_owned),
+    }
+}
+
+/// Step 2c of the claims-store breakup: a `harness.diagnostic` goes where its code's class says.
+/// A control code is a replicated claim, as before. An observability code (retention.toml
+/// `local_codes`) stays in the node's local observation log, from which `[observations.otlp]`
+/// exports it. A code the policy does not name, and a diagnostic with no code, stay claims.
+#[test]
+fn diagnostic_observability_codes_stay_local_while_control_codes_replicate() {
+    let store = Store::open_memory("node").unwrap();
+    let seat = "agent/alder";
+    // Before the upgrade, this node replicated every code.
+    let pre_upgrade = store
+        .append_as_older_build_for_test(&harness_diagnostic(seat, Some("codex-driver-failed"), "before the upgrade", None))
+        .unwrap();
+
+    let index = store.index().unwrap();
+    let envelopes = store.replication_inventory().unwrap().envelopes;
+    let failed = harness_diagnostic(seat, Some("codex-driver-failed"), "control socket closed", Some("codex-driver-failed:one"));
+    assert!(store.append_claim_outcome(&failed).unwrap().1);
+    assert!(!store.append_claim_outcome(&failed).unwrap().1, "a repeated key is the same diagnostic");
+    assert!(store.append_claim_outcome(&harness_diagnostic(seat, Some("render-warning"), "unknown key", None)).unwrap().1);
+    assert_eq!(store.index().unwrap(), index, "an observability code writes no claim");
+    assert_eq!(store.replication_inventory().unwrap().envelopes, envelopes, "and no envelope");
+    let local = store.local_observations_after(0, 10).unwrap();
+    assert_eq!(local.iter().filter(|row| row.kind == "harness.diagnostic").count(), 2);
+
+    for code in [Some("provider-capacity"), Some("claude-channel-attached"), Some("a-code-nobody-classed"), None] {
+        let (claim, created) = store
+            .append_claim_outcome(&harness_diagnostic(seat, code, "replicates", None))
+            .unwrap();
+        assert!(created);
+        assert!(claim.store_index > 0, "{code:?} is a replicated claim");
+    }
+    assert_eq!(store.index().unwrap(), index + 4);
+
+    // Readers that merge the local log see both; the claim log keeps only what replicates.
+    let merged = store.observations_for(seat, "harness.diagnostic").unwrap();
+    assert_eq!(merged.len(), 7);
+    assert!(merged.iter().any(|record| record.id == pre_upgrade.id), "the pre-upgrade claim stays");
+    let claims = store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    assert_eq!(
+        claims.iter().filter(|claim| claim.body["fields"]["code"] == "codex-driver-failed").count(),
+        1,
+        "only the pre-upgrade codex failure is a claim"
+    );
+
+    // A key recorded as a claim before the upgrade still names that request.
+    let keyed = harness_diagnostic(seat, Some("pi-handoff-failed"), "no channel", Some("pi-handoff-failed:before"));
+    let before = store.append_as_older_build_for_test(&keyed).unwrap();
+    let local_before = store.local_observations_after(0, 10).unwrap().len();
+    let (retried, created) = store.append_claim_outcome(&keyed).unwrap();
+    assert_eq!((retried.id, created), (before.id, false), "a retry gets the pre-upgrade claim");
+    assert_eq!(store.local_observations_after(0, 10).unwrap().len(), local_before);
+    let changed = harness_diagnostic(seat, Some("pi-handoff-failed"), "a different reason", Some("pi-handoff-failed:before"));
+    assert_eq!(store.append_claim_outcome(&changed).unwrap_err().code, "idempotency-mismatch");
+}
+
+/// Mixed versions, both ways, with no fleet barrier. A new member's control codes reach an
+/// older member exactly as before and its observability codes stay home; an older member's
+/// claims of every code still reach the new member and are kept.
+#[test]
+fn an_older_member_sees_control_diagnostics_as_before_and_still_sends_every_code() {
+    use super::fleet_admission_tests_shared_seats::{admit, key, node, sync};
+    let anchor = key();
+    let older_key = key();
+    let current = node("current", Some(&anchor), Some(&anchor));
+    admit(&current, "current", &anchor, "anchor", None);
+    admit(&current, "older", &older_key, "invite", None);
+    let older = node("older", Some(&older_key), Some(&anchor));
+    sync(&current, &older);
+
+    let control = current
+        .append_claim(&harness_diagnostic("agent/alder", Some("provider-capacity"), "rate limited", None))
+        .unwrap();
+    let observability = current
+        .append_claim(&harness_diagnostic("agent/alder", Some("claude-receipt-unavailable"), "no transcript", None))
+        .unwrap();
+    let admission = sync(&current, &older);
+    assert_eq!((admission.unknown, admission.invalid), (0, 0));
+    assert_eq!(older.claim_by_id(&control.id).unwrap().unwrap().body, control.body);
+    assert!(older.claim_by_id(&observability.id).unwrap().is_none());
+    assert!(older.observations_for("agent/alder", "harness.diagnostic").unwrap().iter().all(
+        |record| record.body["fields"]["code"] == "provider-capacity"
+    ));
+
+    // The older build writes observability codes as claims; they replicate and are kept.
+    let sent = older
+        .append_as_older_build_for_test(&harness_diagnostic("agent/birch", Some("claude-receipt-unavailable"), "older build", None))
+        .unwrap();
+    sync(&older, &current);
+    assert_eq!(current.claim_by_id(&sent.id).unwrap().unwrap().body, sent.body);
 }

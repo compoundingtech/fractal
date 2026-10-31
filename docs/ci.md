@@ -314,6 +314,14 @@ run, refuses a ci profile or override without that bound or looser than it, then
 test hangs: it must be killed, exit 100 and carry a `test timeout` failure in the JUnit report, which
 `scripts/ci-rust-test-result` counts as FAIL. It is a function in `ci-linux` rather than a script of its own because a new
 file the stage runs would have to join `.st/required-lanes.json`.
+
+The `fractal-api-client-v0` conversation-block tests have a stricter per-test nextest
+deadline of 60 seconds and no CI retries. Their blocking fold-coordination test also
+has a 30-second Tokio deadline when run with plain `cargo test`; the blocking work
+runs on a separate thread so a parked gate cannot prevent the deadline from firing.
+Conversation read budgets remain process-wide in production and are isolated by
+temporary-directory scope under test, just like the native fold cache.
+
 The messaging fault cases need the pinned historical st3 (`.github/messaging-compat-baseline.json`).
 CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separate nextest process, runs
 `scripts/messaging-compat-binary`, which prints the checksum-verified previous-release executable from

@@ -17,10 +17,31 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fractal_test_evidence import capture
+from fractal_test_evidence import capture, finish
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_failed_guardian_retains_omp_exit_and_stderr_after_runtime_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            root, evidence = directory / 'runtime', directory / 'evidence'
+            root.mkdir()
+            stderr = b'invented channel startup error\n'
+            status = b'ExitStatus(unix_wait_status(512))\nexit status: 2\n'
+            (root / 'omp-channel-stderr.log').write_bytes(stderr)
+            (root / 'omp-channel-exit.txt').write_bytes(status)
+            manifest = directory / 'manifest.jsonl'
+            manifest.write_text(json.dumps({'root': str(root), 'evidence': str(evidence)}) + '\n')
+            finish(manifest, 101)
+            self.assertFalse(root.exists(), 'guardian must clean up its stopped runtime')
+            self.assertTrue((evidence / 'omp-channel-stderr.log').is_file(),
+                            'failed cleanup discarded the actual OMP child stderr')
+            self.assertTrue((evidence / 'omp-channel-exit.txt').is_file(),
+                            'failed cleanup discarded the actual OMP child exit status')
+            self.assertEqual((evidence / 'omp-channel-stderr.log').read_bytes(), stderr)
+            self.assertEqual((evidence / 'omp-channel-exit.txt').read_bytes(), status)
+            self.assertEqual(json.loads((evidence / 'guardian.json').read_text())['exit'], 101)
+
     def test_adopted_exit_is_reaped_while_the_guardian_waits_for_owners(self):
         with tempfile.TemporaryDirectory(prefix="guardian-child-event-") as directory:
             root = Path(directory)

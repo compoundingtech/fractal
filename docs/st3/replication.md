@@ -26,6 +26,8 @@ routes for backward compatibility. To let fleet preference select the carrier,
 remove the explicit override. Legacy operation without `fleet.toml` retains
 Tailscale-first automatic routing among locally available carriers.
 
+Fabric fleet readers accept `st3/fleet/<fleet>` and `fractal/fleet/<fleet>` for the same fleet; default writers still use `st3/fleet/<fleet>`.
+
 Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
 front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
@@ -310,6 +312,34 @@ session. Relays require it for session detail and child conversation reads; abse
 incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-too-old`
 with “This host runs an older Fractal version; update it to open subagent conversations.”
 No session-detail POST or changed child ID is sent to that peer.
+
+Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`, on which
+a seat's host pushes when it last heard its seats. A re-stamp that changes nothing stays in the
+host's local observation log, so this is how another member hears a resting seat.
+
+The push is reactive:
+- A commit on the host wakes its pusher. Within 10 seconds of that commit it reads the newest
+  local `harness.observed` of every seat its declarations place on it, in one statement.
+- It sends each other member, or configured peer, only the seats that changed since its last
+  push to that member. Every member is sent at once, directly, never through a relay hop. A push
+  names up to 2,048 seats, each with its incarnation and the time the host heard it.
+- It pushes only to a member whose own newest `daemon.started` advertises
+  `features.seat_freshness = 1`. A member whose `daemon.started` changed restarted, and gets
+  every seat again.
+- A failed push is retried a minute later, with or without a new commit, and the round runs once
+  when the daemon starts. Otherwise nothing is sent while nothing changes.
+
+The receiver records a seat only when its declaration places the seat on the member that pushed
+it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
+recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed. The
+host retries it a minute later without waiting for a commit, then less often while it stays owed,
+doubling up to every 15 minutes. An agent card's freshness and a
+mail hold read the latest of the replicated report, the local log, and that time. The card's
+90-second rule ages it, so a host that stops pushing reads stale.
+
+A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
+re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
+route records nothing. Its peers read the replicated report, as before.
 
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the
@@ -1205,8 +1235,9 @@ if it finds one. A claim accepted after the cut only moves its key.
 
 When a kind differs the member compares again two hours later. A difference that lasts two hours
 is narrowed:
-bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
-kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+bucket digests for each differing kind, then the keys of the differing buckets, eight buckets a
+read; while every key found moves on one member, the next eight are read, until a key differs or
+every differing bucket is read. Up to eight claim kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
 its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
 where those compare, is no difference. The member records
 one `operational.failure` on its own `daemon/NODE` subject with the condition
@@ -1228,6 +1259,11 @@ reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`)
 (`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
 `reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
 kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+A fold reader has no `before_cut`, so a member serving a kept summary first reads which counted
+subjects now have a claim at or after the cut, one index read each (0.1 s for 23,000 subjects on
+a store of 52 GB), marks them moving and counts the readers again without them. Two members that
+computed hours apart, such as either side of a restart onto a new build, then leave out the same
+seats: a seat whose held usage readings were flushed late moves on both.
 
 ### First sync
 
@@ -1371,7 +1407,14 @@ members until a person excuses it.
 
 Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
-checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
+what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
+same operation, the protections naming those claims, each writer's newest envelope, and the claims
+citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
+each cut first reads the claims that arrived since the last, in arrival order, committing each page
+with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
+sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
+drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
 and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
 and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited

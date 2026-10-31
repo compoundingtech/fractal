@@ -552,6 +552,7 @@ class TransportScenarios(unittest.TestCase):
         client = bridge.Discord(TOKEN)
         error = urllib.error.HTTPError('https://discord.com/' + TOKEN, 429, TOKEN,
                                        {'Retry-After': '45'}, io.BytesIO(b'{"retry_after":60}'))
+        self.addCleanup(error.close)
         with patch.object(client.opener, 'open', side_effect=error) as opened, patch.object(bridge.time, 'monotonic', return_value=100):
             with self.assertRaises(bridge.Later) as caught:
                 client.request('POST', '/channels/303/messages', {})
@@ -565,6 +566,8 @@ class TransportScenarios(unittest.TestCase):
         client = bridge.Discord(TOKEN)
         for failure, kind in [(TimeoutError(TOKEN), bridge.Uncertain),
                               (urllib.error.HTTPError('https://discord.com/' + TOKEN, 401, TOKEN, {}, io.BytesIO(TOKEN.encode())), bridge.Stop)]:
+            if isinstance(failure, urllib.error.HTTPError):
+                self.addCleanup(failure.close)
             with patch.object(client.opener, 'open', side_effect=failure) as opened:
                 with self.assertRaises(kind) as caught:
                     client.request('POST', '/channels/303/messages', {})

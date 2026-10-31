@@ -138,8 +138,10 @@ pub(crate) mod tests {
     pub(crate) const FLEET: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
     fn now() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() }
     fn append(store: &Store, subject: &str, kind: &str, fields: Value) {
-        store.append_claim(&ClaimInput { subject: subject.into(), kind: kind.into(), actor: None,
-            fields: serde_json::from_value(fields).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None }).unwrap();
+        let input = ClaimInput { subject: subject.into(), kind: kind.into(), actor: None,
+            fields: serde_json::from_value(fields).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None };
+        // The fixture's notes are diagnostics as an older build replicated them.
+        if kind == "daemon.diagnostic" { store.append_as_older_build_for_test(&input) } else { store.append_claim(&input) }.unwrap();
     }
     pub(crate) fn advertise(store: &Store, feature: u8) {
         append(store, &format!("daemon/{}", store.origin), "daemon.started", json!({"status":"running","features":{"schedule_standby":feature}}));
