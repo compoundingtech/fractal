@@ -13,6 +13,8 @@ use crate::claim::ReplicaEnvelope;
 
 pub mod history;
 mod authentication;
+mod rename;
+pub use rename::verify_rename_proof;
 pub use history::{VerifiedHistory, verify_sealed_history};
 
 pub const BUNDLE_SCHEMA: &str = "fractal.rename-proof.v1";
