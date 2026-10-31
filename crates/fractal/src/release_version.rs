@@ -86,9 +86,9 @@ mod tests {
 
     #[test]
     fn macos_receipt_stays_outside_signed_bundle() {
-        assert_eq!(receipt_path(Path::new("/Applications/SmallTalk.app/Contents/MacOS/st3")),
+        assert_eq!(receipt_path(Path::new("/Applications/SmallTalk.app/Contents/MacOS/fractal")),
             Some(PathBuf::from("/Applications/SmallTalk.app.RELEASE.json")));
-        assert_eq!(receipt_path(Path::new("/opt/fractal/bin/st3")),
+        assert_eq!(receipt_path(Path::new("/opt/fractal/bin/fractal")),
             Some(PathBuf::from("/opt/fractal/bin/RELEASE.json")));
     }
 }
