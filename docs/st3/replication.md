@@ -42,8 +42,8 @@ and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
 Installed services restart automatically. Without services, start
 `fractal replication-worker` first, retain its PID, then start
-`fractal up --replication-worker-pid PID`. The daemon pins that process generation
-before listening; this option is refused for service-managed daemons. A manual
+`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
+generation before listening; this option is refused for service-managed daemons. A manual
 worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
@@ -65,7 +65,7 @@ a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
 
-Worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
 `/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) require the
 Unix connector's kernel-observed process generation to match the replication
 worker. Services use the supervisor-observed worker; foreground operation uses
@@ -74,7 +74,12 @@ Authentication precedes body decoding; unavailable process or supervisor
 evidence fails closed. Re-observation admits a restarted supervised worker
 and revokes its predecessor, including inherited connections.
 
-This boundary does not protect against same-UID service-manager takeover or
+On macOS these routes retain existing admission and emit `unverified-platform`,
+not an authentication success. The unbound local caller authority gap remains
+open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
+after PID reuse they can attribute a surviving socket to the wrong worker.
+
+This Linux boundary does not protect against same-UID service-manager takeover or
 ptrace of the trusted worker. User-service ownership and process debugging
 remain host trust assumptions; process pinning is not a separate-user sandbox.
 Operator fleet routes retain their existing local authority boundary.
