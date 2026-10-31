@@ -16798,6 +16798,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let unkept_cursors = self.unkept_cursors.clone();
         let github_plugin = self.github_plugin.clone();
         let refill_mirrors = self.refill_mirrors;
+        let poller_host = self.host.clone();
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -16938,7 +16939,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .and_then(crate::resource::replicated_cursor),
                             _ => observation.cursor.clone(),
                         };
-                        match store.record_resource_observation_outcome(
+                        let mirrored = (spec.provider == "github.repository")
+                            .then(|| mirrored_prior(&store, &github_plugin, &poller_host, &spec, &observation.facts))
+                            .flatten();
+                        match store.record_resource_observation_mirrored(
                             &observer_subject,
                             &revision,
                             refresh_attempt.as_deref(),
@@ -16948,6 +16952,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             observation.next_check_unix_ms,
                             &selected,
                             Some(&current),
+                            mirrored.as_ref(),
                         ) {
                             Ok((outcome, wrote)) => {
                                 if standing {
@@ -18571,6 +18576,51 @@ fn mirror_observation(
     if let Err(error) = plugin.mirror(&spec.resource, observer, &spec.locator, polled_from, cursor, &items) {
         tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
     }
+}
+
+/// What a repository's poller lays beside a look it records, from a filled mirror: each listed
+/// item's mirrored facts, and whether the repository is in compact mode. Compact mode, where an
+/// item's change is recorded as `vcs.item.state` alone, needs every member that depends on the
+/// repository's full item facts to advertise the GitHub plugin; it is decided again on each
+/// look, so a dependent of an older build turns snapshots back on. `None` without a filled
+/// mirror, or when reading it fails: the look is then recorded as before.
+fn mirrored_prior(
+    store: &Store,
+    plugin: &github_plugin_store::GithubPluginStore,
+    host: &str,
+    spec: &crate::model::ObserverSpec,
+    facts: &Value,
+) -> Option<crate::model::MirroredPrior> {
+    let read = || -> Result<Option<crate::model::MirroredPrior>> {
+        if !plugin.filled(&spec.resource)? {
+            return Ok(None);
+        }
+        let mut items = HashMap::new();
+        for (segment, field) in [("pull-request", "pull_requests"), ("issue", "issues")] {
+            for number in facts.get(field).and_then(Value::as_array).into_iter().flatten()
+                .filter_map(|item| item.get("number").and_then(Value::as_u64))
+            {
+                if let Some(item) = plugin.item(&spec.resource, number)? {
+                    items.insert(format!("{}/{segment}/{number}", spec.resource), item["facts"].clone());
+                }
+            }
+        }
+        let dependents = crate::GithubStore::repository_dependents(store, &spec.locator, &spec.resource)?;
+        let mut compact = true;
+        for member in dependents.iter().filter(|member| member.as_str() != host) {
+            let advertised = store.advertised_feature(member, "github_plugin")?;
+            if advertised.as_ref().and_then(Value::as_i64).is_none_or(|version| version < 1) {
+                tracing::debug!(resource = %spec.resource, member, "item snapshots continue: a dependent member does not advertise the GitHub plugin");
+                compact = false;
+                break;
+            }
+        }
+        Ok(Some(crate::model::MirroredPrior { compact, items }))
+    };
+    read().unwrap_or_else(|error| {
+        tracing::warn!(resource = %spec.resource, "the GitHub plugin mirror could not be read for a look; it is recorded from the graph: {error:#}");
+        None
+    })
 }
 
 /// Fill a repository's mirror from GitHub itself: one fresh look by the repository provider, as a
