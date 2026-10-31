@@ -293,6 +293,8 @@
       "identity-unknown",
       "lifecycle-unavailable",
       "retirement-upgrade-required",
+      "retire-revision-mismatch",
+      "retire-incarnation-mismatch",
       "invalid-custody-successor",
       "custody-pending",
       "attention-migrated",
@@ -1205,6 +1207,9 @@
         "status": { "enum": ["met", "missed", "no-data", "stale"] },
         "resets_at_unix_ms": { "type": ["integer", "null"], "minimum": 0 },
         "measured_at_unix_ms": { "type": "integer", "minimum": 0 },
+        "forecast_used_percent": { "type": "number", "minimum": 0, "maximum": 100, "description": "A budget's projected use when it resets, at the rate of its recent past (at most 100). Absent without enough recent readings." },
+        "forecast_basis_minutes": { "type": "integer", "minimum": 0, "description": "How many minutes of recent readings the forecast was fitted to." },
+        "runs_out_at_unix_ms": { "type": "integer", "minimum": 0, "description": "When the allowance runs out at that rate, present only when that is before it resets." },
         "explain": { "type": "string" }
       }
     },
@@ -1918,6 +1923,7 @@
             "nudged_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms", "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
             "waiting_on": { "type": ["string", "null"], "description": "What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`." },
             "waiting_since_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms", "description": "When the open declared wait began." },
+            "stalled_at_unix_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "epoch-ms", "description": "When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves." },
             "execution_elapsed_ms": { "type": "integer", "minimum": 0, "x-st-codec": "duration-ms" },
             "timeout_ms": { "type": ["integer", "null"], "minimum": 0, "x-st-codec": "duration-ms" },
             "blocked_reason": { "type": ["string", "null"] },
@@ -2906,7 +2912,7 @@
         "device": { "type": "string", "description": "The device the key was granted to, by the label it was given when it paired, such as `example phone (secure enclave)`. Absent for a key with no label." }
       }
     },
-    "TimelineContentBody": {"type": "object", "additionalProperties": false, "required": ["media_type"], "properties": {"media_type": {"type": "string"}, "text": {"type": "string"}, "attachment_id": {"$ref": "#/$defs/Id"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "anyOf": [{"required": ["text"]}, {"required": ["attachment_id"]}]},
+    "TimelineContentBody": {"type": "object", "additionalProperties": false, "required": ["media_type"], "properties": {"media_type": {"type": "string"}, "message_id": {"type": "string"}, "text": {"type": "string"}, "attachment_id": {"$ref": "#/$defs/Id"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}, "anyOf": [{"required": ["text"]}, {"required": ["attachment_id"]}]},
     "TimelineToolCallBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "name", "arguments"], "properties": {"call_id": {"type": "string"}, "name": {"type": "string"}, "arguments": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineToolResultBody": {"type": "object", "additionalProperties": false, "required": ["call_id", "status", "media_type", "content"], "properties": {"call_id": {"type": "string"}, "status": {"enum": ["success", "error"]}, "media_type": {"type": "string"}, "content": {}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
     "TimelineStatusBody": {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"$ref": "#/$defs/TimelineStatus"}, "detail": {"type": "string"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/TimelineBlock"}}}},
@@ -3085,7 +3091,7 @@
     "AgentRepository": {"type": "object", "additionalProperties": false, "required": ["path", "workspaces", "agent_ids"], "properties": {"path": {"type": "string"}, "workspaces": {"type": "array", "items": {"type": "string"}}, "agent_ids": {"type": "array", "items": {"type": "string"}}}},
     "HostRepositories": {"type": "object", "additionalProperties": false, "required": ["host_id", "repositories"], "properties": {"host_id": {"type": "string"}, "repositories": {"type": "array", "items": {"$ref": "#/$defs/AgentRepository"}}}},
     "AgentCreateParameters": {"type": "object", "additionalProperties": false, "required": ["name", "harness"], "properties": {"name": {"type": "string", "minLength": 1}, "harness": {"enum": ["claude", "codex", "pi", "omp", "opencode"]}, "host": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1}, "effort": {"type": "string", "minLength": 1}, "workspace": {"type": "string", "minLength": 1}, "repo": {"type": "string", "minLength": 1}, "base": {"type": "string", "minLength": 1}, "branch": {"type": "string", "minLength": 1}, "remove_at_run_end": {"type": "boolean"}, "description": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}},
-    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}}},
+    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}, "expect_revision": {"type": "string", "minLength": 1}}},
     "MessageSendRefusal": {"oneOf": [
       {"type":"object", "required":["variant","recipient"], "properties":{"variant":{"const":"Retired"},"recipient":{"$ref":"#/$defs/Id"},"successor":{"$ref":"#/$defs/Id"},"transfer":{"type":"string"}}},
       {"type":"object", "required":["variant","recipient","reason"], "properties":{"variant":{"const":"LifecycleUnavailable"},"recipient":{"$ref":"#/$defs/Id"},"reason":{"enum":["unavailable","conflict"]}}}

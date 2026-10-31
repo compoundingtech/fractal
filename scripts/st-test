@@ -732,6 +732,53 @@ def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     return f'{parts[cap]}: memory by {memory}, CPU by {cpu}' if memory and cpu else None
 
 
+def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """(slice, None) for the capped lane of the seat ST_AGENT names, or (None, why not). The daemon names the slice
+    (`st agents lane`), so the naming lives in one place; the kernel says whether that slice exists under this process's
+    user manager, in app-lanes.slice, holding a memory.max and a cpu.max. For a caller outside every build cap: a seat
+    that started st-test as a unit of its own outside its lane (2026-10-31, on a build host: a seat's signing runs, each
+    a systemd-run unit without --slice, built in builds.slice while its lane held only its harness)."""
+    agent = os.environ.get('ST_AGENT')
+    if not agent:
+        return None, None
+    st = os.environ.get('ST3_BIN') or shutil.which('fractal') or shutil.which('st')
+    if not st:
+        return None, 'no st on PATH to name its lane'
+    try:
+        named = subprocess.run([st, 'agents', 'lane', agent, '--json', '--daemon-wait', '0'], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return None, f'st did not name its lane ({error})'
+    if named.returncode:
+        reason = (named.stderr.strip().splitlines() or [f'exit {named.returncode}'])[-1]
+        return None, f'st did not name its lane ({reason})'
+    try:
+        lane = json.loads(named.stdout)['slice']
+    except (ValueError, KeyError, TypeError):
+        return None, 'st named no lane slice'
+    try:
+        text = Path(cgroup_file).read_text()
+    except OSError:
+        return None, 'its own cgroup is unreadable'
+    parts = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/').split('/')
+    manager = next((depth for depth, part in enumerate(parts) if re.fullmatch(r'user@\d+\.service', part)), None)
+    if manager is None:
+        return None, 'it runs under no user manager'
+    cgroup = Path(root, *parts[:manager + 1], 'app.slice', 'app-lanes.slice', lane)
+
+    def limited(file):
+        try:
+            return cgroup.joinpath(file).read_text().split()[0] != 'max'
+        except (OSError, IndexError):
+            return False
+
+    if not cgroup.is_dir():
+        return None, f'its lane {lane} is not on this host'
+    if not (limited('memory.max') and limited('cpu.max')):
+        return None, f'its lane {lane} holds no memory and CPU limit'
+    return lane, None
+
+
 def governed(argv, name):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
@@ -748,7 +795,11 @@ def governed(argv, name):
     name or an environment variable a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
     front door reads as "already in a build cap": without it, that front door moves each cargo command into builds.slice, out of
     the lane. A seat's harness has it from its lane, but a job the seat starts as a unit of its own in the lane does not inherit
-    it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice)."""
+    it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice).
+
+    A seat's caller outside every cap (ST_AGENT set: st-test started as a unit of the seat's own, outside its lane) runs
+    the check in a scope in the seat's capped lane (`seat_lane`), with the lane's variables, rather than in builds.slice
+    beside it. Without a capped lane, it takes builds.slice as before and says why."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     cap = own_cap()
@@ -758,6 +809,13 @@ def governed(argv, name):
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
+        lane, why = seat_lane()
+        if lane:
+            print(f'fractal-test: {name} runs in its seat\'s lane ({lane})', file=sys.stderr)
+            return [scope, '--user', '--scope', '--quiet', '--collect', f'--slice={lane}', '--property=OOMPolicy=continue', '--',
+                    shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1', f'FRACTAL_LANE_SLICE={lane}'] + argv
+        if why:
+            print(f'fractal-test: {name} runs in builds.slice, not its seat\'s lane: {why}', file=sys.stderr)
         return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
     print(f'fractal-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
     return argv

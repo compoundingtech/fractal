@@ -585,15 +585,15 @@ fn a_stall_is_a_deadline_on_the_run_not_a_scan() {
     fixture.passes(2);
     let started = fixture.store.mission_run(&run.id).unwrap().unwrap();
     let quiet_since = crate::reconcile::run_report::run_activity(&started);
-    // The run's own item is due when the default 30 minutes end, and not before.
+    // The run's own item is due when the default 3 hours end, and not before.
     assert_eq!(
         fixture.reconciler.incremental.next_due(&run.subject),
-        Some(quiet_since + 30 * MINUTE)
+        Some(quiet_since + 180 * MINUTE)
     );
     // A pass that finds nothing changed and nothing due leaves the run alone.
-    let _before = Clock::at(&fixture.store, quiet_since + 30 * MINUTE - 1);
+    let _before = Clock::at(&fixture.store, quiet_since + 180 * MINUTE - 1);
     assert!(!fixture.reconciler.incremental.needs(&run.subject, now_ms()));
-    let _due = Clock::at(&fixture.store, quiet_since + 30 * MINUTE);
+    let _due = Clock::at(&fixture.store, quiet_since + 180 * MINUTE);
     assert!(fixture.reconciler.incremental.needs(&run.subject, now_ms()));
 }
 
@@ -849,7 +849,7 @@ fn clearing_an_unreachable_reporter_closes_its_fault() {
     fixture.passes(2);
     let started = fixture.store.mission_run(&run.id).unwrap().unwrap();
     let quiet_since = crate::reconcile::run_report::run_activity(&started);
-    let _late = Clock::at(&fixture.store, quiet_since + 31 * MINUTE);
+    let _late = Clock::at(&fixture.store, quiet_since + 181 * MINUTE);
     fixture.passes(2);
     assert_eq!(fixture.faults(&run), ["faulted"]);
     fixture.report_to(&run, "person/requester", None, None, "absent-cleared");
@@ -982,7 +982,7 @@ async fn a_muted_retirement_parent_keeps_its_schedule_and_child_reports() {
     let root = tempfile::tempdir().unwrap();
     let child_revision = fixture
         .store
-        .mission_spec("watched-with-default-limit", None)
+        .mission_spec("watched", None)
         .unwrap()
         .unwrap()
         .revision;
@@ -1004,7 +1004,7 @@ mission "parent" state="ready" report-to="agent/node.reporter" report-stalls=#fa
     every "1h"
     anchor "{anchor}"
     catch-up "latest"
-    work {{ mission "watched-with-default-limit@{child_revision}"; workspace {:?} }}
+    work {{ mission "watched@{child_revision}"; workspace {:?} }}
   }}
 }}"#,
             root.path().display().to_string()

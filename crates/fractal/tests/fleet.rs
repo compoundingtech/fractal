@@ -149,6 +149,24 @@ impl Node {
         let pty = root.join("bin/pty");
         fs::write(&pty, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
+        // Private supervisor evidence, including replacement workers; never consult host services.
+        for (tool, script) in [
+            ("systemctl", "#!/bin/sh\ncase \"$*\" in\n*MainPID*) cat \"$HOME/../worker.pid\";;\n*'show st3-replication.service '*) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*' show '*) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n';;\n*) exit 1;;\nesac\n"),
+            ("launchctl", "#!/bin/sh\ncase \"$*\" in\n*com.compoundingtech.st3.replication*) printf 'state = running\\npid = '; cat \"$HOME/../worker.pid\";;\n*) exit 1;;\nesac\n"),
+        ] {
+            let mut script = script.to_owned();
+            if tool == "systemctl"
+                && let Ok(real) = fractal_runtime::resolve_executable(tool, &std::env::vars().collect())
+            {
+                // Preserve user-scope isolation without consulting real fleet service units.
+                script = script.replace("case \"$*\" in\n", &format!(
+                    "case \"$*\" in\n*'.scope'*|*show-environment*) exec '{}' \"$@\";;\n",
+                    real.to_string_lossy().replace('\'', "'\\''")));
+            }
+            let path = root.join("bin").join(tool);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
         for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
@@ -197,7 +215,7 @@ impl Node {
             .args(arguments)
             .current_dir(&self.root)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", format!("{}:{}", self.root.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -334,6 +352,7 @@ impl Node {
                 .spawn()
                 .unwrap(),
         );
+        fs::write(self.root.join("worker.pid"), self.worker.as_ref().unwrap().id().to_string()).unwrap();
     }
 
     fn stop_worker(&mut self) {
@@ -341,6 +360,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
     }
 
     fn stop(&mut self) {
@@ -352,6 +372,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
         let _ = fs::remove_file(self.socket());
     }
 
@@ -2931,8 +2952,7 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
-    // profiles (fish's config.fish among them) that put it on PATH.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2952,6 +2972,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "run",
                 "bin",
                 "bin/pty",
+                "bin/systemctl",
+                "bin/launchctl",
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
@@ -4919,6 +4941,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
                 .spawn()
                 .unwrap(),
         );
+        fs::write(traveller.root.join("worker.pid"), traveller.worker.as_ref().unwrap().id().to_string()).unwrap();
         for node in [&a, &b, &traveller] {
             wait_for_notes(node, &expected, 10, &[&a, &b, &traveller]).await;
         }
@@ -5922,6 +5945,40 @@ fn gh_prs(node: &Node, actor: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// Wait until `node` answers `st gh prs fixture/app` from its own mirror, which it fills from
+/// GitHub right after a look it recorded; until then it answers from its graph. A wait that runs
+/// out says which step it stopped at (#4470): the last answer's source and reason, what the
+/// poller's claims say its observer did, and the tail of its logs.
+async fn wait_for_mirror(node: &Node, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let answer = gh_prs(node, PERSON);
+        assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+        if answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Read without unwrapping, so a stopped daemon cannot hide this message.
+            let trace = node.st(&["--json", "trace", "show", "observer/github/fixture/app"]);
+            let claims = String::from_utf8_lossy(&trace.stdout).lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            let observer = |kind: &str| claims.iter()
+                .filter(|claim| claim["kind"] == kind)
+                .map(|claim| claim["body"].clone())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting until {what}: the last answer came from {}; the poller recorded {} looks; its observer's last state is {}\n{}",
+                answer["source"],
+                observer("observer.observed").len(),
+                observer("observer.state").last().unwrap_or(&Value::Null),
+                node.logs(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
 /// repository.
 fn watch_fixture_app(node: &Node) {
@@ -5953,10 +6010,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
     let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
     watch_fixture_app(&poller);
-    wait_until("the poller mirrors pull request 12", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
-    }).await;
+    wait_for_mirror(&poller, "the poller mirrors pull request 12").await;
 
     let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
@@ -5979,13 +6033,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     }
     poller.start().await;
     poller.wait_listening().await;
-    wait_until("the poller refills its lost mirror from GitHub", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move {
-            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
-            answer["source"]["kind"] == "mirror"
-        }
-    }).await;
+    wait_for_mirror(&poller, "the poller refills its lost mirror from GitHub").await;
     let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
     assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));

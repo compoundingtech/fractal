@@ -45,6 +45,19 @@ impl PeerProcessIdentity {
         self.pid
     }
 
+    /// Pin a process explicitly enrolled by the trusted launcher before listening.
+    pub fn capture_pid(pid: u32) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd as _;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            anyhow::ensure!(fd >= 0, "cannot pin enrolled worker: {}", std::io::Error::last_os_error());
+            Self::capture(pid, unsafe { OwnedFd::from_raw_fd(fd as i32) })
+        }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = pid; anyhow::bail!("worker process witnesses unavailable") }
+    }
+
     /// Refuse exited connectors and numeric PID reuse, even if their socket survives.
     pub fn validate(&self) -> Result<()> {
         #[cfg(target_os = "linux")]

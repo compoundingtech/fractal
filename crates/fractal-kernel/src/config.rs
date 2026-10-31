@@ -205,12 +205,16 @@ impl CheckpointConfig {
 /// other members until a person excuses this one. Off by default; nothing changes unless a
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
+/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
+/// that drops more goes on the next day where it stopped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_claims: Option<u64>,
 }
 
 impl TrimConfig {
@@ -227,6 +231,7 @@ impl TrimConfig {
             }),
             "trim.notify names one agent/... subject"
         );
+        anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
     }
 }
@@ -335,7 +340,7 @@ impl Default for ReconcileConfig {
     fn default() -> Self {
         Self {
             max_passes_per_minute: None,
-            idle_nudge_after: "30m".into(),
+            idle_nudge_after: "15m".into(),
             idle_nudge_quiet_watch: "2h".into(),
         }
     }
@@ -418,7 +423,7 @@ impl AsksConfig {
 }
 
 /// The default idle time before a nudge.
-pub const IDLE_NUDGE_AFTER_MS: u64 = 30 * 60_000;
+pub const IDLE_NUDGE_AFTER_MS: u64 = 15 * 60_000;
 /// The default time a wait holds after it last woke its seat.
 pub const IDLE_NUDGE_QUIET_WATCH_MS: u64 = 2 * 60 * 60_000;
 /// The daemon's idle-nudge settings. `after_ms` is `None` when nudges are off.
@@ -1498,10 +1503,10 @@ sekrets_profile = "nathan/daemon-gh"
     }
 
     #[test]
-    fn idle_nudges_default_to_thirty_minutes_and_a_two_hour_quiet_watch() {
+    fn idle_nudges_default_to_fifteen_minutes_and_a_two_hour_quiet_watch() {
         let config = Config::default();
         let settings = config.reconcile.idle_nudge().unwrap();
-        assert_eq!(settings.after_ms, Some(30 * 60_000));
+        assert_eq!(settings.after_ms, Some(15 * 60_000));
         assert_eq!(settings.quiet_watch_ms, 2 * 3_600_000);
         assert!(!toml::to_string(&config).unwrap().contains("[reconcile]"));
 
@@ -1586,6 +1591,9 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(config.trim.local);
         assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
+        let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
+        assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 
     #[test]

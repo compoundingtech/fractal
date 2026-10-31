@@ -3918,7 +3918,7 @@ mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#fals
     assert_eq!(created.body["fields"]["report_stalls"], false);
     assert_eq!(
         run_report_fields(&created.body),
-        Some(("agent/ops/watcher".into(), 1_800_000, false, false))
+        Some(("agent/ops/watcher".into(), 10_800_000, false, false))
     );
     // Omission inherits the pinned mission revision; it is not an implicit re-enable.
     let inherited = store
@@ -3994,7 +3994,7 @@ mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#fals
     assert!(latest.body["fields"].get("report_stalls").is_none());
     assert_eq!(
         run_report_fields(&latest.body),
-        Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+        Some(("agent/ops/watcher".into(), 10_800_000, false, true))
     );
     // Old client responses, requests and creation/change claims still mean stalls=true.
     let old_view = serde_json::json!({"run": run.subject, "report_to": "agent/ops/watcher",
@@ -4012,7 +4012,7 @@ mission "parent" state="ready" report-to="agent/ops/watcher" report-stalls=#fals
     let old_claim = json!({"fields": {"report_to": "agent/ops/watcher"}});
     assert_eq!(
         run_report_fields(&old_claim),
-        Some(("agent/ops/watcher".into(), 1_800_000, false, true))
+        Some(("agent/ops/watcher".into(), 10_800_000, false, true))
     );
 }
 

@@ -1,5 +1,5 @@
 //! A seat that holds claimed work, has finished its turn, and has nothing set to wake it is
-//! idle-holding. After `idle_nudge_after` (30 minutes by default) in that state, st sends it one
+//! idle-holding. After `idle_nudge_after` (15 minutes by default) in that state, st sends it one
 //! message naming each such step, its goal, its last progress, how long the seat has been idle and
 //! what it waits on, and asks it to continue, set a watch, or release the step. The nudge is
 //! recorded on each step it names.

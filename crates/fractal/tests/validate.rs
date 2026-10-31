@@ -3,8 +3,9 @@ use serde_json::{Value, json};
 const FIXTURE: &str = include_str!("fixtures/validate-revisions.kdl");
 // A mission revision is SHA-256 over the serialized normalized mission. Any change to that
 // serialization changes every published revision; update this literal only on purpose. The
-// fixture's schedule pins the same revision.
-const PINNED_REVISION: &str = "b283ff12e887f06fbeb2da3094b10f8fd2b9b7840f7af8031445b124829f25f7";
+// fixture's schedule pins the same revision. The fixture reports to an agent without a
+// stalled-after, so the default (3h since quiet claims, 30m before) is part of it.
+const PINNED_REVISION: &str = "41008d5f204b6853138a61dc4d3c1badf3deb110b2167dff3cbf6e8154d56370";
 
 #[test]
 fn declaration_mission_revision_is_pinned() {
