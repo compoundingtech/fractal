@@ -262,7 +262,7 @@ local_codes = [
 kind = "harness.observed"
 slot = ["incarnation_id"]
 require_slot = true
-keep = "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start"
+keep = "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start-and-the-report-ending-the-run-before"
 
 [[rules]]
 kind = "seat.status-history"
