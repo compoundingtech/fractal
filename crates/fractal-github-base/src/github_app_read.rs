@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
+#[cfg(test)]
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
@@ -76,8 +77,9 @@ pub fn fallback(owner: &str, app: &str, reason: &str) {
         *counters().lock()
             .entry((owner.into(), app.into(), reason.into())).or_default() += 1;
     }
-    static WARNINGS: LazyLock<Mutex<FallbackWarnings>> = LazyLock::new(Mutex::default);
-    let suppressed_count = WARNINGS.lock().emission(owner, app, reason, Instant::now());
+    static WARNINGS: LazyLock<std::sync::Mutex<FallbackWarnings>> = LazyLock::new(std::sync::Mutex::default);
+    let suppressed_count = WARNINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .emission(owner, app, reason, Instant::now());
     if let Some(suppressed_count) = suppressed_count {
         tracing::warn!(owner, app, reason, suppressed_count, "GitHub installation read using transition PAT fallback");
     }
