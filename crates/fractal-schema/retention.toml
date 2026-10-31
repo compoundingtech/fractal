@@ -76,6 +76,9 @@
 "gate.review-withdrawn" = { class = "durable" }
 "gate.reviewer-reassigned" = { class = "durable" }
 "github.posted" = { class = "durable" }
+# The GitHub plugin's keyed events and compact item state (docs/st3/plugins.md). Written only by a
+# repository's poller from step 3b of the plugin store; readers take the newest state per item.
+"github.event" = { class = "transition", window = "30d", pending = "no reader audit yet" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
 # Compact question identity, shape, status, positions and receipt stay indefinitely.
@@ -203,6 +206,7 @@
 "terminal.input.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "terminal.launch-geometry" = { class = "current", pending = "no reader audit yet" }
 "transport.observed" = { class = "current" }
+"vcs.item.state" = { class = "current", pending = "no checkpoint rule until the poller writes it (plugin store step 3b)" }
 "work.claimed" = { class = "durable" }
 "work.extended" = { class = "durable" }
 "work.failed" = { class = "durable" }

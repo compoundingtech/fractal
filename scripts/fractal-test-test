@@ -450,6 +450,7 @@ class StTest(unittest.TestCase):
         subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'host/box-1', '-f', str(key)], check=True)
         pub = key.with_suffix('.pub').read_text().split()
         self.home = tmp / 'home'
+        self.run_tmp = tmp / 'run-tmp'  # where runs make their TMPDIR (ST_TEST_TMP), not the host's /var/tmp
         (self.home / '.config/st').mkdir(parents=True)
         (self.home / '.config/st/evidence-sign.json').write_text(json.dumps(
             {'signer': 'host/box-1', 'ssh_key': str(key), 'scratch_repo': str(tmp / 'scratch.git'),
@@ -490,7 +491,7 @@ class StTest(unittest.TestCase):
         if command is not None:
             st_test.LOCAL['demo'] = command
         out, err = io.StringIO(), io.StringIO()
-        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, **(extra_env or {}))
+        env = dict(GIT_ENV, HOME=str(self.home), EVIDENCE_SIGN_NOW=DATE, ST_TEST_TMP=str(self.run_tmp), **(extra_env or {}))
         cwd = os.getcwd()
         os.chdir(self.work)
         try:
@@ -1150,6 +1151,57 @@ class StTest(unittest.TestCase):
                 for path in (outside, link):
                     st_test.trim(path, owned=st_test.in_pool(path))
         self.assertTrue((outside / 'junk').exists())
+
+    def test_the_checks_get_a_tmpdir_of_the_runs_own_that_is_removed_at_the_end(self):
+        """TMPDIR, TMP and TEMP name one short directory of the run's own, and nothing in it outlives the run."""
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "$TMPDIR $TMP $TEMP" > {seen}; mkdir "$TMPDIR/nix-shell.abcdef"; touch "$TMPDIR/nix-shell.abcdef/left"']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        tmpdir, tmp, temp = seen.read_text().split()
+        self.assertEqual(tmpdir, tmp)
+        self.assertEqual(tmpdir, temp)
+        self.assertEqual(Path(tmpdir).parent, self.run_tmp)
+        self.assertRegex(Path(tmpdir).name, r'^st-test\.[a-z0-9_]{8}$')
+        self.assertFalse(Path(tmpdir).exists())
+        self.assertEqual(list(self.run_tmp.iterdir()), [])
+        self.assertNotEqual(os.environ.get('TMPDIR'), tmpdir)  # the caller's own TMPDIR is back
+        self.assertNotEqual(tempfile.gettempdir(), tmpdir)
+
+    def test_keep_keeps_the_runs_tmpdir_and_later_runs_leave_it(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        code, _, err = self.run_st_test('--check', 'demo', '--keep', command=['sh', '-c', f'echo "$TMPDIR" > {seen}; touch "$TMPDIR/left"'])
+        self.assertEqual(code, 0)
+        kept = Path(seen.read_text().strip())
+        self.assertIn(f'kept this run\'s TMPDIR {kept}', err)
+        os.utime(kept, (time.time() - 7200, time.time() - 7200))
+        self.commit('c.txt', 'three')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=['true'])[0], 0)
+        self.assertTrue((kept / 'left').exists())
+
+    def test_a_run_removes_the_tmpdir_a_gone_run_left_and_no_live_ones(self):
+        """A killed run's TMPDIR is removed by the next run; one whose run holds its lock, or that is too new to have been locked yet, is not."""
+        root = self.run_tmp
+        gone, live, new, other = root / 'st-test.gone0000', root / 'st-test.live0000', root / 'st-test.new00000', root / 'nix-shell.abcdef'
+        for path in (gone, live, new, other):
+            (path / 'nix-shell.abcdef').mkdir(parents=True)
+        readonly = gone / 'nix-shell.abcdef/store-copy'
+        readonly.mkdir()
+        (readonly / 'file').touch()
+        readonly.chmod(0o500)
+        old = time.time() - 7200
+        for path in (gone, live, other):
+            os.utime(path, (old, old))
+        held = os.open(live, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.commit('b.txt', 'two')
+        self.assertEqual(self.run_st_test('--check', 'demo', command=['true'])[0], 0)
+        self.assertFalse(gone.exists())
+        self.assertTrue(live.exists())
+        self.assertTrue(new.exists())
+        self.assertTrue(other.exists())  # not a run's: only st-test.* directories are judged
 
     def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
         self.commit('b.txt', 'two')
@@ -1868,8 +1920,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', command=command, extra_env={'ST_TEST_TREES': 'off'})[0], 0)
         path = Path(seen.read_text().strip())
         self.assertTrue(path.parent.name.startswith('st-test-'))
+        self.assertEqual(path.parent.parent.parent, self.run_tmp)  # in the run's TMPDIR
         self.assertFalse(path.exists())
         self.assertFalse((self.home / '.cache/st-test').exists())
+        self.assertEqual(list(self.run_tmp.iterdir()), [])
 
     def test_a_check_already_signed_for_this_tree_is_not_run_again(self):
         self.commit('b.txt', 'two')

@@ -3528,6 +3528,42 @@ enum GhCommand {
     /// Record a comment or review this agent posted some other way, by its URL, as this agent's.
     /// A watch that already reported it woke the agent once.
     Own(GhOwnArgs),
+    /// List a repository's pull requests from the GitHub plugin's mirror on the member that polls
+    /// it. Another member relays the read there, or answers from its own graph and says why.
+    #[command(
+        after_help = "Examples:\n  fractal gh prs acme/garden\n  fractal gh prs acme/garden --state all --limit 100"
+    )]
+    Prs(GhPrsArgs),
+    /// Show one pull request's facts from the GitHub plugin's mirror.
+    #[command(after_help = "Examples:\n  fractal gh pr acme/garden#12\n  fractal gh pr https://github.com/acme/garden/pull/12 --json")]
+    Pr(GhReadArgs),
+    /// Show one pull request's checks: its current required checks and every head it has had.
+    #[command(after_help = "Examples:\n  fractal gh checks acme/garden#12")]
+    Checks(GhReadArgs),
+}
+
+#[derive(Args)]
+struct GhPrsArgs {
+    /// OWNER/REPO, or the repository URL.
+    repository: String,
+    /// open, closed or all.
+    #[arg(long, default_value = "open")]
+    state: String,
+    /// The most pull requests to list, newest first (at most 500).
+    #[arg(long, default_value_t = 30)]
+    limit: usize,
+    /// Read as this person or agent. Reading another member's mirror relays the read as them.
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: Option<String>,
+}
+
+#[derive(Args)]
+struct GhReadArgs {
+    /// OWNER/REPO#NUMBER, or the pull request URL.
+    thread: String,
+    /// Read as this person or agent. Reading another member's mirror relays the read as them.
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -5657,7 +5693,31 @@ async fn run(cli: Cli) -> Result<()> {
             };
             change_cli::run(&client, arguments, cli.json).await
         }
-        Command::Gh { command } => run_gh(&client, command, cli.json).await,
+        Command::Gh { command } => {
+            let reader = match &command {
+                GhCommand::Prs(args) => Some(args.actor.as_deref()),
+                GhCommand::Pr(args) | GhCommand::Checks(args) => Some(args.actor.as_deref()),
+                _ => None,
+            };
+            match reader {
+                // A read relayed to the poller is made as a person or agent.
+                Some(actor) => {
+                    let actor = actor.map(str::to_owned).or_else(|| config.person.clone());
+                    let named = match (&endpoint, actor) {
+                        (Endpoint::Unix(socket), Some(actor)) if actor.starts_with("agent/") => {
+                            Client::unix_agent(socket, actor)?.with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        }
+                        (Endpoint::Unix(socket), Some(actor)) => {
+                            Client::unix_as(socket, parse_person_subject(&actor).map_err(anyhow::Error::msg)?)?
+                                .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true)
+                        }
+                        _ => client.clone(),
+                    };
+                    run_gh(&named, command, cli.json).await
+                }
+                None => run_gh(&client, command, cli.json).await,
+            }
+        }
         Command::Lanes { command } => {
             run_lanes(&client, config.person.as_deref(), command, cli.json).await
         }
@@ -5968,7 +6028,7 @@ fn guard_mutating_cli_actor(
             GhCommand::Unwatch(args) => Some(args.actor.as_str()),
             GhCommand::Comment(args) => Some(args.actor.as_str()),
             GhCommand::Own(args) => Some(args.actor.as_str()),
-            GhCommand::Ls(_) => None,
+            GhCommand::Ls(_) | GhCommand::Prs(_) | GhCommand::Pr(_) | GhCommand::Checks(_) => None,
         },
         Command::Devices(args) => match args.command.as_ref() {
             Some(DevicesCommand::Pair { assistant: Some(_), .. })
@@ -6015,6 +6075,75 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
         String::new()
     };
     format!("{}{agent}  {state}{until}{title}", text("thread"))
+}
+
+/// `OWNER/REPO` from `OWNER/REPO` or a repository URL.
+fn gh_repository(text: &str) -> Result<String> {
+    let trimmed = text
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("github.com/")
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    let mut parts = trimmed.split('/');
+    let (Some(owner), Some(repository), None) = (parts.next(), parts.next(), parts.next()) else {
+        anyhow::bail!("name a repository as OWNER/REPO, not {text}");
+    };
+    anyhow::ensure!(!owner.is_empty() && !repository.is_empty(), "name a repository as OWNER/REPO, not {text}");
+    Ok(format!("{owner}/{repository}"))
+}
+
+/// One pull request as one line: number, state, checks, review and queue, then its title.
+fn gh_pull_line(pull: &Value) -> String {
+    let text = |name: &str| pull.get(name).and_then(Value::as_str).unwrap_or_default();
+    let state = if pull.get("merged") == Some(&Value::Bool(true)) {
+        "merged"
+    } else if pull.get("draft") == Some(&Value::Bool(true)) && text("state") == "open" {
+        "draft"
+    } else {
+        text("state")
+    };
+    let checks = pull
+        .get("required_checks_state")
+        .or_else(|| pull.pointer("/required_checks/state"))
+        .and_then(Value::as_str)
+        .or_else(|| pull.get("checks_state").and_then(Value::as_str))
+        .unwrap_or("unknown");
+    let mut line = format!("#{:<6} {:<7} checks {:<8}", pull["number"], state, checks);
+    if !text("review_decision").is_empty() {
+        line.push_str(&format!(" {}", text("review_decision").to_ascii_lowercase()));
+    }
+    if let Some(position) = pull.pointer("/merge_queue/position").filter(|value| !value.is_null()) {
+        line.push_str(&format!(" queued #{position}"));
+    }
+    if !text("title").is_empty() {
+        line.push_str(&format!("  {}", text("title")));
+    }
+    line
+}
+
+fn gh_required_checks(required: &Value) -> String {
+    let state = required["state"].as_str().unwrap_or("unknown");
+    match required["failed"].as_array().filter(|failed| !failed.is_empty()) {
+        Some(failed) => format!(
+            "{state} ({})",
+            failed.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+        ),
+        None => state.to_owned(),
+    }
+}
+
+/// Where an answer came from: the poller's mirror, or this member's graph and why.
+fn gh_source_line(answer: &Value) -> String {
+    let source = &answer["source"];
+    let host = source["host"].as_str().unwrap_or("this member");
+    match source["kind"].as_str() {
+        Some("mirror") => format!("(from the GitHub plugin mirror on {host})"),
+        _ => format!(
+            "(from {host}'s graph: {})",
+            source["reason"].as_str().unwrap_or("the poller's mirror was not read")
+        ),
+    }
 }
 
 const GH_UNWATCH_HINT: &str = "To stop: st gh unwatch";
@@ -6118,6 +6247,100 @@ async fn run_gh(client: &fractal_daemon::client::Client, command: GhCommand, jso
                 recorded["id"],
                 recorded["thread"].as_str().unwrap_or_default()
             );
+        }
+        GhCommand::Prs(args) => {
+            let locator = gh_repository(&args.repository)?;
+            let answer: Value = client
+                .get(&format!(
+                    "/v1/plugins/github/repos/{locator}/pulls?state={}&limit={}",
+                    urlencoding::encode(&args.state),
+                    args.limit
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let pulls = answer["pulls"].as_array().cloned().unwrap_or_default();
+            if pulls.is_empty() {
+                println!("No {} pull requests.", args.state);
+            }
+            for pull in &pulls {
+                println!("{}", gh_pull_line(pull));
+            }
+            println!("{}", gh_source_line(&answer));
+        }
+        GhCommand::Pr(args) => {
+            let thread = fractal_daemon::github_watch::ThreadRef::parse(&args.thread)?;
+            let answer: Value = client
+                .get(&format!("/v1/plugins/github/repos/{}/{}/pulls/{}", thread.owner, thread.repository, thread.number))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let Some(pull) = answer.get("pull").filter(|pull| !pull.is_null()) else {
+                println!("No pull request {thread} is recorded.");
+                println!("{}", gh_source_line(&answer));
+                return Ok(());
+            };
+            let facts = &pull["facts"];
+            let text = |name: &str| facts.get(name).and_then(Value::as_str).unwrap_or("");
+            println!("{thread}  {}", text("title"));
+            println!("{}", gh_pull_line(facts));
+            if !text("url").is_empty() {
+                println!("{}", text("url"));
+            }
+            if let Some(required) = facts.get("required_checks").filter(|value| !value.is_null()) {
+                println!("required checks: {}", gh_required_checks(required));
+            }
+            println!("{}", gh_source_line(&answer));
+        }
+        GhCommand::Checks(args) => {
+            let thread = fractal_daemon::github_watch::ThreadRef::parse(&args.thread)?;
+            let answer: Value = client
+                .get(&format!(
+                    "/v1/plugins/github/repos/{}/{}/pulls/{}/checks",
+                    thread.owner, thread.repository, thread.number
+                ))
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&answer)?);
+                return Ok(());
+            }
+            let Some(checks) = answer.get("checks").filter(|checks| !checks.is_null()) else {
+                println!("No pull request {thread} is recorded.");
+                println!("{}", gh_source_line(&answer));
+                return Ok(());
+            };
+            println!(
+                "{thread}  head {}  checks {}",
+                checks["head_sha"].as_str().map_or("unknown", |sha| sha.get(..12).unwrap_or(sha)),
+                checks["checks_state"].as_str().unwrap_or("unknown")
+            );
+            if let Some(required) = checks.get("required_checks").filter(|value| !value.is_null()) {
+                println!("required: {}", gh_required_checks(required));
+            }
+            for check in checks["checks"].as_array().into_iter().flatten() {
+                let text = |name: &str| check.get(name).and_then(Value::as_str).unwrap_or("");
+                let outcome = if text("conclusion").is_empty() { text("status") } else { text("conclusion") };
+                println!("  {:<10} {}", outcome, text("name"));
+            }
+            match checks["heads"].as_array() {
+                Some(heads) if heads.len() > 1 => {
+                    println!("earlier heads:");
+                    for head in heads.iter().skip(1) {
+                        println!(
+                            "  {}  {}",
+                            head["head_sha"].as_str().map_or("", |sha| sha.get(..12).unwrap_or(sha)),
+                            head["required_checks"]["state"].as_str().or(head["checks_state"].as_str()).unwrap_or("unknown")
+                        );
+                    }
+                }
+                Some(_) => {}
+                None => println!("earlier heads: unknown here"),
+            }
+            println!("{}", gh_source_line(&answer));
         }
         GhCommand::Ls(args) => {
             let agent = if args.all {
@@ -6694,7 +6917,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":1,"seat_freshness":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto)}),
             ),
             ("status".into(), Value::String("running".into())),
@@ -6791,6 +7014,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         notify.clone(),
         event_notify.clone(),
         recorder.map(|installation| installation.directory),
+        config.unlaned_seat.clone(),
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_lanes(config.lanes_enforced()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
@@ -6905,6 +7129,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     fractal_daemon::api::start_native_session_discovery(&state);
     // Nor does the first agents roster read fold every agent's card.
     fractal_daemon::api::start_agent_roster(&state);
+    fractal_daemon::api::seat_freshness::start_seat_freshness_push(&state);
     // Pairing-secret expiry cleanup runs even with no attention readers or publications.
     fractal_daemon::api::start_push_registration_cleanup(&state);
     // Nor does an attention window fold every person's attention.

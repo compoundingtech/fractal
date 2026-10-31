@@ -92,6 +92,7 @@ use crate::model::IntentInput;
 use crate::store::Store;
 
 pub mod wire_names;
+pub mod seat_freshness;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -112,6 +113,7 @@ mod harness_health_controls;
 mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
+mod github_plugin;
 mod github_watch;
 pub mod harness_events;
 mod harness_questions;
@@ -806,6 +808,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
+        // crate::peer::SEAT_FRESHNESS_INTERNAL_PATH; the cost inventory reads route literals.
+        .route("/v1/internal/seat-freshness", post(seat_freshness::seat_freshness))
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
@@ -900,6 +904,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/github/watches", get(github_watch::watches))
         .route("/v1/github/comment", post(github_watch::comment))
         .route("/v1/github/own", post(github_watch::own))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls", get(github_plugin::pulls))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
         .route("/v1/work", get(work::list_work))
@@ -3213,6 +3221,8 @@ fn overlay_agent_resources_at(
 ) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
+        let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subjects.iter().map(String::as_str).collect::<Vec<_>>())?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
@@ -3226,11 +3236,10 @@ fn overlay_agent_resources_at(
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            // The seat's host also hears the re-stamps that stay local, in one seek per card.
-            let heard_at = match &harness {
-                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness)?),
-                None => None,
-            };
+            // The seat's host also hears the re-stamps that stay local, read for every card at once.
+            let heard_at = harness
+                .as_ref()
+                .map(|harness| heard.heard_at(store, item["id"].as_str().unwrap_or_default(), harness));
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
@@ -3268,12 +3277,31 @@ fn overlay_agent_resources_at(
     })
 }
 
-/// When this node last heard the seat's harness: its replicated report, or on the seat's host the
-/// newest local re-stamp of the same incarnation, whichever is later. Re-stamps that change nothing
-/// stay in the host's local log, so without it the host's own cards read a resting seat stale.
+/// When this node last heard the seat's harness: its replicated report; on the seat's host the
+/// newest local re-stamp of the same incarnation; elsewhere the seat's host's latest answer about
+/// it (`seat_freshness`), whichever is latest. Re-stamps that change nothing stay in the host's
+/// local log, so without them a resting seat reads stale.
 pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
-    let local = store.local_harness_observed_at(subject, &harness.incarnation_id)?;
-    Ok(local.map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)))
+    Ok(HeardSeats::read(store, &[subject])?.heard_at(store, subject, harness))
+}
+
+/// The local log's newest harness report of many seats, read in one statement, so a roster's
+/// cards cost one query rather than one per card.
+pub struct HeardSeats(std::collections::HashMap<String, (String, u128)>);
+
+impl HeardSeats {
+    pub fn read(store: &Store, subjects: &[&str]) -> anyhow::Result<Self> {
+        Ok(Self(store.local_harness_newest_many(subjects)?))
+    }
+
+    /// [`heard_at`] from the seats read here.
+    pub fn heard_at(&self, store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> u128 {
+        let local = self.0.get(subject).filter(|(of, _)| *of == harness.incarnation_id).map(|(_, at)| *at);
+        let relayed = store
+            .extension::<crate::store::RelayedFreshness>()
+            .heard_at(subject, &harness.incarnation_id);
+        harness.observed_at_unix_ms.max(local.unwrap_or(0)).max(relayed.unwrap_or(0))
+    }
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.
@@ -7123,7 +7151,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":1},
     })))
 }
 

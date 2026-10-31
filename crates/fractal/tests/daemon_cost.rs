@@ -329,6 +329,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/answers-check",
         "records a daily answers check; writes only when a fault opens or ends",
     ),
+    (
+        "POST /v1/internal/seat-freshness",
+        "records a peer's seat freshness push in memory: one declarations read, no write",
+    ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
     ("POST /v1/launches/{id}/submit", "planning session"),
@@ -717,6 +721,36 @@ const PROBES: &[Probe] = &[
             .end_watch(&thread.watch(&fixture.subjects.seats[0]), "unwatched", None)
             .map(|ended| json!({"ended": ended}))
             .map_err(|error| error.message)
+    }),
+    // The GitHub plugin's reads: which member polls the repository, then, answering from this
+    // member's graph, its recorded items or events. The mirror is the poller's own file.
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", None)
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", Some(1))
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .repository_items("resource/github/acme/garden", Some(1))
+            .map(|items| json!(items.len()))
+            .map_err(|error| error.to_string())
+    }),
+    direct("GET /v1/plugins/github/repos/{owner}/{repo}/events", |store, _, _| {
+        store.repository_observers().map_err(|error| error.message)?;
+        store
+            .github_events("resource/github/acme/garden", None, 50)
+            .map(|events| json!(events.len()))
+            .map_err(|error| error.to_string())
     }),
     get("GET /v1/health", "/v1/health"),
     get("GET /v1/schema", "/v1/schema"),
