@@ -1244,7 +1244,7 @@ enum MissionViewCommand {
     /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
     /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
     Blocked {
-        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 15m).
         #[arg(long)]
         quiet: Option<String>,
     },
