@@ -830,6 +830,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(fleet::fleet_admission_residue),
         )
         .route("/v1/internal/fleet/status", get(fleet::fleet_status))
+        // Fleet views a seat may read: internal routes refuse seat callers.
+        .route("/v1/fleet/status", get(fleet::fleet_status))
+        .route("/v1/fleet/membership", get(fleet::fleet_membership_view))
+        .route("/v1/fleet/admission-residue", get(fleet::fleet_admission_residue))
+        .route("/v1/fleet/invites", get(fleet::fleet_invite_list))
         .route(
             "/v1/internal/fleet/invites",
             get(fleet::fleet_invite_list).post(fleet::fleet_invite_create),
@@ -7023,6 +7028,9 @@ fn is_bound_actor(store: &Store, actor: &str, bound_identity: &str) -> Result<bo
     }
 }
 
+/// The prefix of the routes only this node's own processes call.
+pub const INTERNAL_ROUTE_PREFIX: &str = "/v1/internal/";
+
 pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
@@ -7031,6 +7039,14 @@ pub async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
+    // Internal routes serve this node's own processes: its replication worker and its operator's
+    // CLI. A seat's harness reads fleet views through their public routes instead.
+    if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
+        )));
+    }
     if request.method() == axum::http::Method::GET
         && !client_v0::administrative_get(&request) {
         return Ok(request);

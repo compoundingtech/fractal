@@ -695,9 +695,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         }
         FleetCommand::Invites { all, command } => match command {
             None => {
-                let invites: Vec<fractal_daemon::store::FleetInviteView> = client
-                    .get(&format!("/v1/internal/fleet/invites?all={all}"))
-                    .await?;
+                let invites: Vec<fractal_daemon::store::FleetInviteView> = fleet_read(&client, &format!("invites?all={all}")).await?;
                 if json_output {
                     return print_value(&invites, true);
                 }
@@ -894,7 +892,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             // Holding the fleet's envelopes is not enough when this node admitted some the fleet
             // fenced: its claims then differ from every other member's.
             let residue: Vec<smallclaims::store::FleetAdmissionResidue> =
-                client.get("/v1/internal/fleet/admission-residue").await?;
+                fleet_read(&client, "admission-residue").await?;
             if let Some(fenced) = render_fenced_admissions(&residue) {
                 anyhow::bail!("{}\nbut {fenced}", render_first_sync(&first, now_ms()));
             }
@@ -969,7 +967,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             Ok(())
         }
         FleetCommand::Status => {
-            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus = fleet_read(&client, "status").await?;
             if json_output {
                 return print_value(&status, true);
             }
@@ -1061,8 +1059,19 @@ async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::Fil
     tokio::task::spawn_blocking(move || fractal_daemon::config::FleetFile::lock_settings(&state_dir)).await?
 }
 
+/// Read a fleet view through its public route, or, from a daemon built before it had one, the
+/// internal route it replaced. Internal routes refuse seat callers; a seat may read these views.
+pub(crate) async fn fleet_read<T: serde::de::DeserializeOwned>(client: &Client, route: &str) -> Result<T> {
+    match client.get(&format!("/v1/fleet/{route}")).await {
+        Err(error) if fractal_daemon::client::is_absent_route(&error) => {
+            client.get(&format!("/v1/internal/fleet/{route}")).await
+        }
+        result => result,
+    }
+}
+
 async fn member_endpoints(client: &Client, node: &str) -> Result<Vec<Value>> {
-    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = fleet_read(client, "membership").await?;
     let member = view
         .members
         .iter()
@@ -1328,7 +1337,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         let mut file = fractal_daemon::config::FleetFile::load(&config.state_dir)?
             .context("this machine has not migrated yet")?;
         if args.finish {
-            let status: fractal_daemon::api::FleetStatus = client.get("/v1/internal/fleet/status").await?;
+            let status: fractal_daemon::api::FleetStatus = fleet_read(client, "status").await?;
             let waiting = config
                 .peers
                 .iter()
