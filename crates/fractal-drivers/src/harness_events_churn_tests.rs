@@ -62,6 +62,20 @@ fn timeline_prunes_in_batches_and_readers_see_the_original_window() {
     assert_eq!(visible.operations.len(), 4096);
     assert_eq!(visible.operations[0].sequence, 258);
     assert_eq!(visible.next_sequence, 4354);
+    // The byte bound applies even when the row count is far below its limit.
+    let mut large = visible.operations.last().unwrap().clone();
+    large.body = json!({"text":"x".repeat(8192)});
+    let size = serde_json::to_vec(&large).unwrap().len();
+    let batch = vec![large.clone(); 260];
+    write_timeline(root.path(), &record, &batch).unwrap();
+    let visible = read_timeline(root.path()).unwrap().unwrap();
+    assert!(visible.operations.len() < 260);
+    assert!(visible.operations.iter().map(|op| serde_json::to_vec(op).unwrap().len()).sum::<usize>() <= 2097152);
+    write_timeline(root.path(), &record, &vec![large; 20]).unwrap();
+    let bytes: usize = open(root.path()).unwrap().query_row(
+        "SELECT SUM(length(CAST(body AS BLOB))) FROM timeline", [], |row| row.get(0),
+    ).unwrap();
+    assert!(bytes <= 2097152, "crossing byte slack prunes a batch of {size}-byte rows");
 }
 
 #[test]

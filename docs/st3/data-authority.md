@@ -134,6 +134,9 @@ publishes a backlog. Admission binds the Unix peer to its seat and checks the pu
 inside the daemon's writer transaction. Source runtime, spool sequence, claim kind and usage
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
+Byte-identical snapshot reports leave both the snapshot and event queue untouched after ownership
+validation. WAL commits retain full synchronization and SQLite's default 1,000-page automatic
+checkpoint threshold; closing a short-lived producer or reader does not force a checkpoint.
 
 Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
 at most 64 per thread. At either limit a thread evicts its least recently used connection;
@@ -148,8 +151,10 @@ The outbox is transport recovery state, not graph authority. The daemon retains 
 observation under its existing local/latest/durable policy. Producer snapshots remain local
 coalescing and ownership evidence; timeline producers read only the previous matching entry and
 latest status instead of parsing/replacing a retained JSON log. That auxiliary timeline history
-is bounded to 4,096 operations and 2 MiB, independently of unacknowledged events. An outbox with 64 MiB of pending payload
-rejects a producer transaction and reports the failure rather than dropping queued events.
+is exposed as at most 4,096 operations and 2 MiB, independently of unacknowledged events.
+Physical retention permits up to 256 additional operations or 128 KiB before deleting a batch;
+readers do not expose that slack. An outbox with 64 MiB of pending payload rejects a producer
+transaction and reports the failure rather than dropping queued events.
 An evidence deadline queues derived unknown once after fifteen minutes without fresh state;
 a concurrent heartbeat supersedes that deadline. Native transcripts and session bindings retain
 their existing source paths.
