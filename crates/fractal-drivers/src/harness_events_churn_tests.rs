@@ -162,11 +162,14 @@ fn automatic_checkpoints_bound_wal_across_5000_short_lived_producers() {
         assert_no_open_spool_connections(root.path());
         let bytes = wal.metadata().unwrap().len();
         assert!(bytes > 0, "producer close must retain the WAL");
-        assert!(bytes <= bound, "WAL {bytes} exceeded {bound} at report {report}");
+        if report < 5 || report % 250 == 249 {
+            eprintln!("short-lived producer report={report} wal_bytes={bytes}");
+        }
         peak = peak.max(bytes);
     }
     assert_eq!(pending(root.path(), 6000).unwrap().len(), 5001);
     eprintln!("5000 short-lived producers: peak_wal_bytes={peak} bound={bound} autocheckpoint_pages={pages} page_size={page_size}");
+    assert!(peak <= bound, "WAL high-water mark {peak} exceeded {bound}");
 }
 
 #[test]
