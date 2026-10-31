@@ -1944,6 +1944,7 @@ pub trait MissionsStore {
                 &resource_preparation::Fence,
                 resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
             )>,
+            mirrored: Option<&crate::model::MirroredPrior>,
         ) -> Result<Option<(ResourceObservationOutcome, bool)>, St3Error>;
     fn authoring_review_owner(&self, discovery: &str) -> Result<Option<String>>;
     fn pending_schedule_work_requests(&self, subject: &str) -> Result<Vec<ClaimRecord>>;
@@ -6822,6 +6823,7 @@ impl MissionsStore for Store {
                 &resource_preparation::Fence,
                 resource_preparation::Prepared<Result<resource_preparation::Inputs, St3Error>>,
             )>,
+            mirrored: Option<&crate::model::MirroredPrior>,
         ) -> Result<Option<(ResourceObservationOutcome, bool)>, St3Error> {
         let facts = canonical_json_value(facts);
         let operation_hash = canonical_hash(&(
@@ -6858,7 +6860,7 @@ impl MissionsStore for Store {
                     cached.store(true, std::sync::atomic::Ordering::Relaxed);
                     return serde_json::from_str(&response).map(|outcome| Some((outcome, false))).map_err(internal);
                 }
-                let resource_preparation::Inputs { active_subscriptions, normalized_observation, previous, baseline, repository_facts, legacy_collections, changed_fields, repository_changed_fields, recorded_items, discovered, observer_health_is_current, subscription_states, changed, should_record } = match preparation {
+                let resource_preparation::Inputs { active_subscriptions, normalized_observation, previous, baseline, repository_facts, legacy_collections, changed_fields, repository_changed_fields, recorded_items, discovered, observer_health_is_current, subscription_states, changed, should_record, compact } = match preparation {
                     Some((fence, mut prepared)) => {
                         if !fence.current(self, transaction, &prepared) {
                             return Ok(None);
@@ -6866,7 +6868,7 @@ impl MissionsStore for Store {
                         prepared.value.take().expect("validated preparation has a value")?
                     }
                     None => resource_preparation::inputs(transaction, observer, desired_revision,
-                        attempt, resource, &facts, subscriptions)?,
+                        attempt, resource, &facts, subscriptions, mirrored)?,
                 };
                 let resource_kind = normalized_observation.get("kind").cloned()
                     .expect("a normalized resource observation has a kind");
@@ -7027,24 +7029,77 @@ impl MissionsStore for Store {
                         .as_ref()
                         .map(|claim| vec![claim.id.clone()])
                         .unwrap_or_default();
-                    let claim = append_first_receipt_claim_tx(
-                        transaction,
-                        &self.origin,
-                        &subject,
-                        "resource.observed",
-                        None,
-                        &json!({"fields": {
-                            "kind": kind,
-                            "facts": item_facts,
-                            "observer": observer,
-                            "baseline": false,
-                            "changed_fields": item_changed_fields,
-                        }, "evidence": evidence}),
-                        &predecessors,
-                        Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
-                        &mut receipt_key,
-                    )
-                    .map_err(internal)?;
+                    // The item's compact state is recorded whenever it changes. In compact mode it
+                    // is the item's only record, so a delivered item always has one to pin; otherwise
+                    // it sits beside the full snapshot.
+                    let compact_state = item_facts
+                        .as_object()
+                        .and_then(|facts| fractal_schema::github_plugin::compact_item_state(kind, observer, facts));
+                    let newest_state = fractal_store::store::resources::newest_item_state(transaction, &subject)
+                        .map_err(internal)?;
+                    let state_changed = compact_state.as_ref().is_some_and(|state| {
+                        newest_state.as_ref().is_none_or(|(_, newest, _)| {
+                            // Which alias observer wrote it is no change of state.
+                            state.iter().filter(|(name, _)| *name != "observer")
+                                .ne(newest.iter().filter(|(name, _)| *name != "observer"))
+                        })
+                    });
+                    let record_state = |transaction: &rusqlite::Transaction<'_>,
+                                        batches: &mut ObservationBatches,
+                                        receipt_key: &mut Option<&str>,
+                                        state: &serde_json::Map<String, Value>| {
+                        let predecessors = latest_claim_id_tx(transaction, &subject)
+                            .map_err(internal)?
+                            .into_iter()
+                            .collect::<Vec<_>>();
+                        append_first_receipt_claim_tx(
+                            transaction,
+                            &self.origin,
+                            &subject,
+                            fractal_schema::github_plugin::ITEM_STATE,
+                            None,
+                            &json!({"fields": state, "evidence": evidence}),
+                            &predecessors,
+                            Some(&batches.for_kind(transaction, &self.origin, fractal_schema::github_plugin::ITEM_STATE)?),
+                            receipt_key,
+                        )
+                        .map_err(internal)
+                    };
+                    let claim = match &compact_state {
+                        Some(state) if compact => {
+                            if state_changed || deliver || newest_state.is_none() {
+                                record_state(transaction, &mut batches, &mut receipt_key, state)?
+                            } else {
+                                let (id, _, _) = newest_state.as_ref().expect("an unchanged state has a newest claim");
+                                claim_by_id_tx(transaction, id).map_err(internal)?
+                                    .ok_or_else(|| St3Error::new("internal", "the newest item state is gone"))?
+                            }
+                        }
+                        _ => {
+                            let observed = append_first_receipt_claim_tx(
+                                transaction,
+                                &self.origin,
+                                &subject,
+                                "resource.observed",
+                                None,
+                                &json!({"fields": {
+                                    "kind": kind,
+                                    "facts": item_facts,
+                                    "observer": observer,
+                                    "baseline": false,
+                                    "changed_fields": item_changed_fields,
+                                }, "evidence": evidence}),
+                                &predecessors,
+                                Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
+                                &mut receipt_key,
+                            )
+                            .map_err(internal)?;
+                            if let Some(state) = compact_state.as_ref().filter(|_| state_changed) {
+                                record_state(transaction, &mut batches, &mut receipt_key, state)?;
+                            }
+                            observed
+                        }
+                    };
                     mirrored_items.push(crate::model::RecordedItem {
                         subject: subject.clone(),
                         kind: kind.to_owned(),

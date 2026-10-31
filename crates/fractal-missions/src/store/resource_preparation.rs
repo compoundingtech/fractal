@@ -30,6 +30,8 @@ pub struct Inputs {
     pub subscription_states: BTreeMap<String, (bool, &'static str, bool)>,
     pub changed: bool,
     pub should_record: bool,
+    /// Record each item's change as `vcs.item.state` alone (see [`crate::model::MirroredPrior`]).
+    pub compact: bool,
 }
 
 pub struct Observation<'a> {
@@ -39,6 +41,8 @@ pub struct Observation<'a> {
     pub resource: &'a str,
     pub facts: &'a Value,
     pub subscriptions: &'a [(String, SubscriptionSpec)],
+    /// The poller's mirror for a GitHub repository, when it has a filled one.
+    pub mirrored: Option<&'a crate::model::MirroredPrior>,
 }
 
 pub fn inputs(
@@ -49,10 +53,11 @@ pub fn inputs(
     resource: &str,
     facts: &Value,
     subscriptions: &[(String, SubscriptionSpec)],
+    mirrored: Option<&crate::model::MirroredPrior>,
 ) -> Result<Inputs, St3Error> {
     fractal_store::store::completion_state::flush(transaction).map_err(internal)?;
     read_inputs(transaction, Observation {
-        observer, desired_revision, attempt, resource, facts, subscriptions,
+        observer, desired_revision, attempt, resource, facts, subscriptions, mirrored,
     })
 }
 
@@ -61,7 +66,7 @@ pub fn read_inputs(
     transaction: &Connection,
     observation: Observation<'_>,
 ) -> Result<Inputs, St3Error> {
-    let Observation { observer, desired_revision, attempt, resource, facts, subscriptions } = observation;
+    let Observation { observer, desired_revision, attempt, resource, facts, subscriptions, mirrored } = observation;
     let mut active_subscriptions = Vec::new();
     for (subject, expected) in subscriptions {
         let Some(desired) = current_desired_row_tx(transaction, subject).map_err(internal)? else {
@@ -147,8 +152,13 @@ pub fn read_inputs(
             let observation =
                 fractal_store::store::resources::preparation_observation(transaction, &subject)
                     .map_err(internal)?;
-            let recorded = observation.actual
-                .and_then(|actual| actual.get("facts").cloned());
+            // A filled mirror holds what the poller last saw of the item, including what compact
+            // mode no longer records in the graph, such as its comments.
+            let recorded = match mirrored {
+                Some(mirrored) => mirrored.items.get(&subject).cloned()
+                    .or_else(|| observation.actual.and_then(|actual| actual.get("facts").cloned())),
+                None => observation.actual.and_then(|actual| actual.get("facts").cloned()),
+            };
             let observed_at = observation.observed_at;
             recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));
         }
@@ -237,5 +247,6 @@ pub fn read_inputs(
         subscription_states,
         changed,
         should_record,
+        compact: mirrored.is_some_and(|mirrored| mirrored.compact),
     })
 }
