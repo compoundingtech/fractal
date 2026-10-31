@@ -641,7 +641,9 @@ pub fn rule_keep(
 /// their newest carriers.
 pub fn resource_observed_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     let len = claims.len();
-    let facts = |claim: &ClaimRecord| fields(claim).and_then(|fields| fields.get("facts")).filter(|facts| facts.is_object());
+    fn facts(claim: &ClaimRecord) -> Option<&Value> {
+        fields(claim).and_then(|fields| fields.get("facts")).filter(|facts| facts.is_object())
+    }
     if claims.iter().any(|claim| facts(claim).is_none()) {
         return (0..len).collect();
     }
