@@ -2695,7 +2695,7 @@ impl Ui {
         };
         // `+` keeps its place at the end while the tab in front and both markers still have room.
         let strip_room = area.width.saturating_sub(x - area.x);
-        let mut plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
+        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
             ADD
         } else {
             0
@@ -2788,7 +2788,6 @@ impl Ui {
                 first = group.current;
             }
             last = first;
-            plus = 0;
             tail = 0;
             labels[first].0 = tabs[first]
                 .1
@@ -2842,7 +2841,7 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
-        if plus > 0 && x + 3 <= area.x + area.width {
+        if !bare && x + 3 <= area.x + area.width {
             buf.set_stringn(x, area.y, " + ", 3, theme::dim().bg(strip));
             self.hit(
                 Rect {
@@ -6279,6 +6278,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tab_strip_add_button_uses_spare_space_after_two_short_tabs() {
+        let mut ui = tab_badge_world();
+        ui.world.attention = Load::Ready(Vec::new());
+        ui.refresh_tab_statuses();
+        let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+        group.tabs.truncate(2);
+        group.tabs[0].title = Some("A".into());
+        group.tabs[1].title = Some("B".into());
+        let row = tab_strip_row(&ui, 14);
+        assert_eq!(row, "  ●A   ○B   +");
+        assert_eq!(strip_markers(&ui), (None, None));
+        assert!(ui.frame.borrow().hits.iter().any(|(rect, hit)| {
+            matches!(hit, Hit::GlassAdd(0)) && rect.width == 3 && rect.right() <= 14
+        }));
+        println!("SPARE 14: |{row}|");
     }
 
     #[test]

@@ -43,6 +43,15 @@ test('native Fabric parsing, roundtrip and pre-dial routing guards', async () =>
         const endpoint = `fabric://${target}/st3-client-v0`;
         assert.equal(FabricEndpoint.parse(endpoint).toString(), endpoint);
     }
+    for (const target of ['DEVBOX', 'dev-box.local', 'a'.repeat(64)]) {
+        assert.equal(FabricEndpoint.parse(`fabric://${target}/fractal-client-v0`).toString(), `fabric://${target}/st3-client-v0`);
+    }
+    for (const service of ['st3-client-v0', 'fractal-client-v0']) {
+        for (const suffix of ['/', '?x', '#fragment', '\n', '\r\n', '/extra']) {
+            assert.throws(() => FabricEndpoint.parse(`fabric://box/${service}${suffix}`));
+        }
+        assert.throws(() => FabricEndpoint.parse(`prefixfabric://box/${service}`));
+    }
     for (const endpoint of ['fabric:', 'fabric://box', 'fabric://box/other', 'fabric://user@box/st3-client-v0', 'fabric://box/st3-client-v0?token=x']) {
         assert.throws(() => FabricEndpoint.parse(endpoint));
     }
@@ -89,6 +98,22 @@ test('trusted names resolve case-insensitively and ambiguity/refusal fail closed
         const direct = fixture(`node-${index}`, [], socket);
         assert.equal(await native.FabricEndpoint.parse(`fabric://${target}/st3-client-v0`).dial(direct), socket);
         assert.deepEqual(JSON.parse(fs.readFileSync(direct.calls, 'utf8').trim()), ['dial', hex, 'st3-client-v0', '--json']);
+    }
+});
+
+test('both URI names dial the same exposed gateway service for names and NodeIDs', async () => {
+    const node = 'd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a';
+    const socket = path.join(root, 'gateway.sock');
+    for (const service of ['st3-client-v0', 'fractal-client-v0']) {
+        for (const target of ['Box', node]) {
+            const gateway = fixture(`gateway-${service}-${target}`, [{ node, name: 'Box' }], socket);
+            assert.equal(await native.FabricEndpoint.parse(`fabric://${target}/${service}`).dial(gateway), socket);
+            const calls = fs.readFileSync(gateway.calls, 'utf8').trim().split('\n').map(JSON.parse);
+            assert.deepEqual(calls, [
+                ...(target === 'Box' ? [['peers', '--json']] : []),
+                ['dial', node, 'st3-client-v0', '--json'],
+            ]);
+        }
     }
 });
 
