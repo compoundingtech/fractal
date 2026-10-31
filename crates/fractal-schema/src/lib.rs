@@ -18,6 +18,7 @@ pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
+pub mod task_grants;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
