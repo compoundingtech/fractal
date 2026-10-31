@@ -206,7 +206,7 @@ agree on a checkpoint only when they run the same rules. In summary:
 | `loop.state` | subject | the first and last claim of each run of equal (status, round); the first claim carrying the loop's items |
 | `subscription.mission-deferred` | subject, request | every claim while the request is open; once a start, failure, cancellation or release closes it, the newest |
 | `observer.observed`, `daemon.diagnostic`, `transport.observed` | subject (and code, or origin) | the newest |
-| `resource.observed` written by an observer | subject | the newest |
+| `resource.observed` written by an observer | subject | the newest; the newest of each `attribution_only` value; the earliest that names an opener; for a pull request, every observation back to and including the newest one that is not open outside the merge queue, or the newest 400 when there is none, and any accepted at the same time as that one (the merge-queue check walks back that far); every observation of a resource any of them describes in flat facts (rules version 23) |
 | `runtime.action.*` with no actor, `render.applied`, `runtime.readiness-deadline-reached` | subject (and action, incarnation, status) | the newest; only claims dated at least five days before the cut go |
 | `sekret.called`, `sekret.exited`, `sekret.refused`, `sekret.changed` written before they became local observations | subject | the newest; only claims dated at least five days before the cut go |
 | `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |

@@ -428,6 +428,10 @@ pub fn open_outside_merge_queue(facts: &Value) -> bool {
         && !in_merge_queue(facts)
 }
 
+/// How many of a thread's newest observations a merge-queue check reads at most. A thread is
+/// observed only when it changes. A checkpoint keeps what such a check can read.
+pub const THREAD_SCAN: u32 = 400;
+
 /// One wake: its message subject, the key it was decided by, title, content and tags.
 pub struct Wake {
     pub subject: String,

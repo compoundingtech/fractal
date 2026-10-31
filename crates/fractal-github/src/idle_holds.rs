@@ -13,9 +13,7 @@ use anyhow::Result;
 use rusqlite::{OptionalExtension as _, params};
 use serde_json::{Value, json};
 
-/// How many of a thread's newest observations a merge-queue check reads at most. A thread is
-/// observed only when it changes.
-const THREAD_SCAN: u32 = 400;
+use crate::github_watch::THREAD_SCAN;
 
 const QUEUE_EXIT_SQL: &str = "SELECT json_extract(body, '$.fields.facts'), accepted_at_unix_ms,
              CASE WHEN json_extract(body, '$.fields.attribution_only') IN (1,'true') THEN 1 ELSE 0 END
