@@ -1007,6 +1007,14 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon has no such route: it answered 404 with no error body, as a daemon
+    /// from before the route does. A typed refusal, another status, or a malformed answer to a
+    /// route that exists is not this.
+    pub fn is_missing_route(&self) -> bool {
+        matches!(self, Self::Protocol(message)
+            if message.strip_prefix("HTTP 404").is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit())))
+    }
+
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
     /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
     /// with the same key, again). Any other answer, or none, says nothing.
@@ -3749,7 +3757,7 @@ impl Client {
         // Internal routes refuse seat callers; a daemon from before the public route answers
         // only the internal one.
         match self.get("/v1/fleet/membership").await {
-            Err(ClientError::Api(ErrorCode::NotFound, ..) | ClientError::Protocol(_)) => {
+            Err(error) if error.is_missing_route() => {
                 self.get("/v1/internal/fleet/membership").await
             }
             result => result,
