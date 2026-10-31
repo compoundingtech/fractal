@@ -162,7 +162,7 @@ impl Ui {
         let width = area.width.saturating_sub(4).min(88);
         // Border, query, footer and at least the selected destination: the outer margin yields first,
         // so the smallest accepted window still shows what Enter opens.
-        let height = area.height.saturating_sub(2).min(22).max(5);
+        let height = area.height.saturating_sub(2).clamp(5, 22);
         let rect = Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
