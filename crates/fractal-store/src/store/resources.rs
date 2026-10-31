@@ -133,7 +133,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h90834f2dfb3a owner=fractal_store::store::resources TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations", [])?;
-    transaction.execute(/* sqlite-large-value: allow-for-now lv-h50e1e155e04d owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind='resource.observed'", [])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hc7341ef4a6ad owner=fractal_store::store::resources TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO local_resource_projection_pending SELECT DISTINCT subject FROM claims WHERE kind IN ('resource.observed','vcs.item.state')", [])?;
     rebuild_preparation(transaction)?;
     flush(transaction)
 }
@@ -1092,6 +1092,25 @@ END;
         assert_eq!(current(&store, subject)["facts"]["required_checks"],
             json!({"state": "pass", "source": "rules", "checks": ["build"], "execution": {"run": 4}}));
         assert_eq!(store.latest_actual_value(subject).unwrap().unwrap()["facts"]["required_checks"]["execution"], json!({"run": 4}));
+    }
+
+    /// A full rebuild, as a replay or a checkpoint proof runs, keeps the row of an item that only
+    /// compact states describe, as a node that took the same claims in another order holds it.
+    #[test]
+    fn a_rebuild_keeps_an_item_described_only_in_compact_state() {
+        let store = Store::open_memory("item-state-rebuild").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/8";
+        item_state(&store, subject, json!({"state": "open", "draft": true, "head_sha": "d"}));
+        let before = current(&store, subject);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            rebuild(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(current(&store, subject), before);
+        assert_eq!(projection_digest::tables(&store.readers.get()).unwrap(),
+                   projection_digest::oracle(&store.readers.get()).unwrap());
     }
 
     /// A store that ran an older build's triggers while it took compact states, as after a

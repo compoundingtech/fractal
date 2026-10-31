@@ -212,7 +212,11 @@ OMP imports use the same strict resume handshake, with `ST3_NATIVE_RESUME_SESSIO
 holding the native session ID and `ST3_NATIVE_RESUME_PATH` pinning the absolute
 transcript path. The driver validates the transcript header, links the transcript
 and its artifacts into the managed inventory without copying them, and launches OMP with that exact
-path. Missing or mismatched transcripts fail the launch rather than starting anew.
+path. When the inventory already holds other entries but no link to the pinned transcript, the driver
+leaves the inventory as it is and resumes the pinned path itself. Missing or mismatched transcripts
+fail the launch rather than starting anew; a missing one refuses as `transcript-missing`.
+A seat suspended on one host and resumed on another drops the pinned path, which names the source
+host's file, and resumes by native ID from the inventory its snapshot restored.
 The pair bootstraps an imported or repaired agent until an incarnation-bearing
 durable `harness.session-file` binding records a `desired_token` naming the
 declaration that introduced or last changed the pair, or a canonically later

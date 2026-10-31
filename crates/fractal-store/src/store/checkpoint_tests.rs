@@ -1980,6 +1980,44 @@ fn an_observed_item_keeps_its_latest_state_and_every_version_still_read_by_id() 
     let _ = (requested, latest, authored);
 }
 
+/// A mission request names the observation that discovered it in `discovery`, and the reconciler
+/// reads that observation by its ID, even when the request cites other evidence or none. A later
+/// observation of the item does not replace it.
+#[test]
+fn an_observation_a_mission_request_names_as_its_discovery_stays() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/pull-request/7";
+    let observed = |head: &str| {
+        draft(
+            "resource.observed",
+            item,
+            json!({
+                "kind": "vcs.pull-request",
+                "facts": {"number": 7, "head_sha": head, "state": "open"},
+                "observer": "observer/run/garden/repository",
+                "baseline": false,
+                "changed_fields": ["head_sha"],
+            }),
+        )
+    };
+    let replaced = sealed.add("alder", T + 1, observed("aaaa"));
+    let discovery = sealed.add("alder", T + 2, observed("bbbb"));
+    sealed.add(
+        "birch",
+        T + 3,
+        draft(
+            "subscription.mission-requested",
+            "subscription/run/garden/reviews",
+            json!({"mission": "mission/review", "resource": item, "resource_input": "source",
+                "workspace": ".", "discovery": discovery}),
+        ),
+    );
+    let latest = sealed.add("alder", T + 4, observed("cccc"));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&replaced]), "the discovery stays while its request names it");
+    let _ = latest;
+}
+
 #[test]
 fn checkpoint_identity_reads_of_sealed_batches_do_not_wait_for_the_writer() {
     let store = Arc::new(Store::open_memory("checkpoint-writer-test").unwrap());
@@ -2342,7 +2380,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 21);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 22);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2360,6 +2398,7 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                      harness-question.observed slot=subject {questions}\n"
                 ),
             )
+            .replace("mission-run-input,", "mission-run-input,request-discovery,")
             .replace(
                 "\nguards=",
                 "\nreader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas,cost-complete-single-currency\nguards=",
