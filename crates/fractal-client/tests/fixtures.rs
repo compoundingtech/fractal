@@ -1245,3 +1245,22 @@ fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() 
     let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(),changes);
 }
+
+#[tokio::test]
+async fn a_relayed_plugin_read_refuses_paths_outside_the_plugin_routes() {
+    let client = Client::unix(Path::new("/nonexistent/fractal-plugin-read.sock"));
+    let refused = |result: &Result<serde_json::Value, ClientError>| {
+        matches!(result, Err(ClientError::Protocol(message)) if message.contains("not a GitHub plugin read"))
+    };
+    for path in [
+        "/v1/plugins/github/repos/acme/../garden/pulls",
+        "/v1/plugins/github/repos/./acme/garden/pulls",
+        "/v1/client/agents",
+        "/v1/plugins/github/repos/acme/garden/pulls#12",
+    ] {
+        assert!(refused(&client.github_plugin_read(path).await), "{path}");
+    }
+    // A dotted value in the query names no segment: the read is sent, and finds no daemon here.
+    let sent = client.github_plugin_read("/v1/plugins/github/repos/acme/garden/events?after=a..b").await;
+    assert!(sent.is_err() && !refused(&sent), "{sent:?}");
+}

@@ -91,8 +91,12 @@ impl Ui {
             Hit::Document(super::documents::Tap::More) => "more documents [m]".into(),
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
-            Hit::GlassTab(..) => "show tab; drag to move/split; middle-click closes".into(),
-            Hit::GlassTabMore(..) => "more tabs: show the next hidden tab [Tab]".into(),
+            Hit::GlassTab(..) => {
+                "show tab; wheel scrolls tabs; drag to move/split; middle-click closes".into()
+            }
+            Hit::GlassTabMore(..) => {
+                "more tabs: show the next hidden tab [Tab]; wheel scrolls without selecting".into()
+            }
             Hit::GlassAdd(_) => "new tab [Ctrl+T]".into(),
             Hit::PaletteChoice(_) => format!("open {label}"),
         };
