@@ -5,7 +5,26 @@ fn setup() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     enable(root.path(), "runtime").unwrap();
     crate::harness_state::claim(root.path(), "agent/test", "omp", "provider").unwrap();
+    // claim's ownership/coalescing reads can retain a reader in this thread's LRU.
+    READ_CONNECTIONS.with(|connections| {
+        connections.borrow_mut().retain(|entry| entry.path != database_path(root.path()));
+    });
+    assert_no_open_spool_connections(root.path());
     root
+}
+
+fn assert_no_open_spool_connections(root: &Path) {
+    let paths = [database_path(root), root.join(format!("{DATABASE}-wal")),
+        root.join(format!("{DATABASE}-shm"))];
+    READ_CONNECTIONS.with(|connections| {
+        assert!(connections.borrow().iter().all(|entry| !paths.contains(&entry.path)));
+    });
+    #[cfg(target_os = "linux")]
+    for fd in std::fs::read_dir("/proc/self/fd").unwrap().flatten() {
+        if let Ok(path) = std::fs::read_link(fd.path()) {
+            assert!(!paths.contains(&path), "spool still open via {}: {}", fd.path().display(), path.display());
+        }
+    }
 }
 
 #[test]
@@ -131,6 +150,7 @@ fn automatic_checkpoints_bound_wal_across_5000_short_lived_producers() {
     assert_eq!(pages, 1000);
     assert_eq!(connection.pragma_query_value(None, "synchronous", |row| row.get::<_, u64>(0)).unwrap(), 2);
     drop(connection);
+    assert_no_open_spool_connections(root.path());
     // The automatic threshold is checked after commit. Reserve 32 extra frames
     // for a small report transaction crossing that threshold, including splits.
     let bound = 32 + (pages + 32) * (page_size + 24);
@@ -139,6 +159,7 @@ fn automatic_checkpoints_bound_wal_across_5000_short_lived_producers() {
     for report in 0..5000 {
         let body = serde_json::to_vec(&json!({"incarnation":"provider", "report":report})).unwrap();
         write_snapshot(root.path(), "harness-todo", &body).unwrap();
+        assert_no_open_spool_connections(root.path());
         let bytes = wal.metadata().unwrap().len();
         assert!(bytes > 0, "producer close must retain the WAL");
         assert!(bytes <= bound, "WAL {bytes} exceeded {bound} at report {report}");
@@ -170,6 +191,7 @@ fn committed_events_replay_after_process_exit_without_sqlite_close() {
         .args(["--exact", "harness_events::churn_tests::crash_producer_helper", "--nocapture"])
         .env("ST_TEST_CRASH_OBSERVATION_DIR", root.path()).status().unwrap();
     assert!(status.success());
+    assert_no_open_spool_connections(root.path());
     let events = pending(root.path(), 100).unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[1].payload["tasks"][0], "committed-before-exit");
