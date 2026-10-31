@@ -8,7 +8,7 @@ use super::{
 };
 
 fn text(value: &str) -> Result<(), TaskManifestError> {
-    if value.trim().is_empty() || value.chars().any(char::is_control) {
+    if super::ecma_blank(value) || value.chars().any(char::is_control) {
         return Err(invalid("text must be nonblank and contain no control characters"));
     }
     Ok(())

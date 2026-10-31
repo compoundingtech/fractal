@@ -141,3 +141,21 @@ fn fill_secret_read_only_scope_is_requester_only() {
     value["readers"].as_array_mut().unwrap().push(json!({"principal":"agent/other","peerHost":"peer","inventoryIds":["password"],"maxUses":1})); refuse(value.clone());
     value["writes"][0]["fields"].as_array_mut().unwrap().push(json!({"inventoryId":"password","kind":"secret"})); check(value).unwrap();
 }
+
+#[test]
+fn general_text_shares_ecmascript_blank_set_but_still_forbids_controls() {
+    let whitespace = "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
+    for c in whitespace.chars() {
+        assert!(crate::task_grants::ecma_blank(&c.to_string()));
+        assert!(text(&c.to_string()).is_err());
+    }
+    assert!(!crate::task_grants::ecma_blank("\u{85}"));
+    assert!(text("\u{85}x").is_err()); // C1 control, not blank content.
+    assert!(text("\u{feff}x").is_ok());
+    for pointer in ["/title", "/requester/run", "/requester/step", "/requester/incarnation",
+        "/provider/name", "/provider/browserProfile", "/writes/0/vaultId", "/writes/0/itemId"] {
+        let mut value = fixture();
+        *value.pointer_mut(pointer).unwrap() = json!("\u{feff}");
+        refuse(value);
+    }
+}
