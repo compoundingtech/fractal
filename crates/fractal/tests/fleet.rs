@@ -5922,6 +5922,36 @@ fn gh_prs(node: &Node, actor: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// Wait until `node` answers `st gh prs fixture/app` from its own mirror, which it fills from
+/// GitHub right after a look it recorded; until then it answers from its graph. A full suite on a
+/// capped lane can hold either step up, so the wait has the bound daemon startup has, and a wait
+/// that runs out says which step it stopped at: the last answer's reason, and what the poller's
+/// claims say its observer did.
+async fn wait_for_mirror(node: &Node, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(150);
+    loop {
+        let answer = gh_prs(node, PERSON);
+        assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+        if answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let claims = node.claims().await;
+            let observer = |kind: &str| claims.iter()
+                .filter(|claim| claim["subject"] == "observer/github/fixture/app" && claim["kind"] == kind)
+                .map(|claim| claim["body"].clone())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting until {what}: the last answer came from {}; the poller recorded {} looks; its observer's last state is {}",
+                answer["source"],
+                observer("observer.observed").len(),
+                observer("observer.state").last().unwrap_or(&Value::Null),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
 /// repository.
 fn watch_fixture_app(node: &Node) {
@@ -5953,10 +5983,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
     let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
     watch_fixture_app(&poller);
-    wait_until("the poller mirrors pull request 12", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
-    }).await;
+    wait_for_mirror(&poller, "the poller mirrors pull request 12").await;
 
     let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
@@ -5979,13 +6006,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     }
     poller.start().await;
     poller.wait_listening().await;
-    wait_until("the poller refills its lost mirror from GitHub", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move {
-            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
-            answer["source"]["kind"] == "mirror"
-        }
-    }).await;
+    wait_for_mirror(&poller, "the poller refills its lost mirror from GitHub").await;
     let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
     assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
@@ -6000,7 +6021,15 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
     assert_eq!(relayed["poller"], "host/fixture-poller");
 
-    // With the poller down, the reader answers from its graph and says why.
+    // With the poller down, the reader answers from its graph and says why. Every read so far
+    // came through the relay, so first wait until the poller's looks have replicated to that graph.
+    wait_until("the reader's graph holds pull request 12", 150, || {
+        let client = reader.client();
+        async move {
+            client.get::<Value>("/v1/plugins/github/repos/fixture/app/pulls?state=all&local=1").await
+                .is_ok_and(|answer| answer["source"]["kind"] == "graph" && answer["pulls"][0]["number"] == 12)
+        }
+    }).await;
     poller.stop();
     let fallback = gh_prs(&reader, PERSON);
     assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");

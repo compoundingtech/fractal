@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Make the fleet GitHub plugin read test wait until the reader's graph holds the pull request before it stops the poller, and give its mirror waits the bound daemon startup has, with the stage a timed-out wait stopped at. Removes a flake under load (#4470). Test-only change.",
+  "replay": {"status": "none", "detail": "Test-only change; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change; the product is unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery change."}
+}
