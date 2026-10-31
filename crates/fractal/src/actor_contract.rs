@@ -208,6 +208,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn harness_question_contract_requires_an_explicit_person_for_every_command() {
+        let value = generate(super::super::Cli::command());
+        for path in [
+            "st harness-questions list",
+            "st harness-questions show",
+            "st harness-questions answer",
+        ] {
+            let command = &value["contract"]["commands"][path];
+            assert_eq!(command["actor"], "required", "{path}");
+            assert_eq!(command["accepts_person"], true, "{path}");
+            assert_eq!(command["actor_environment"], Value::Null, "{path}");
+            assert_eq!(command["as_role"], "actor", "{path}");
+        }
+    }
+
     fn assert_reviewed_configured_person_families(command: clap::Command) {
         let inventory = super::super::read_contract_inventory_for_command(command);
         let paths = inventory["commands"].as_array().unwrap();

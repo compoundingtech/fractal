@@ -57,19 +57,24 @@ async fn main() -> anyhow::Result<()> {
         daemon_bench::NODE,
     )?);
     let socket = root.join("st3.sock");
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: daemon_bench::NODE.into(),
-    state_dir,
-    pty_root: root.join("pty"),
-    pty_binary: daemon_bench::stub_pty(root),
-    fleet_id: Some(daemon_bench::FLEET.into()),
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: Some(root.join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: daemon_bench::NODE.into(),
+        state_dir,
+        pty_root: root.join("pty"),
+        pty_binary: daemon_bench::stub_pty(root),
+        fleet_id: Some(daemon_bench::FLEET.into()),
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server =
         tokio::spawn(
