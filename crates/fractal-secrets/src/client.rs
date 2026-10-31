@@ -1056,6 +1056,14 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.status == 404)
 }
 
+/// Exactly the answer a daemon without the route gives: Axum's 404 with no body. A 404 that says
+/// anything, malformed or not, is an answer from a route that exists.
+pub fn is_absent_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404 && error.body.is_empty())
+}
+
 /// The HTTP status an API call failed with, including an answer without an error body.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error
@@ -3011,5 +3019,21 @@ mod tests {
             session.join().unwrap().is_empty(),
             "a session the registry did not name must receive nothing"
         );
+    }
+}
+
+#[cfg(test)]
+mod absent_route_tests {
+    use super::*;
+
+    /// Only Axum's empty 404 says a route is absent; a 404 with any body comes from a route that
+    /// exists, and another status is not about routes.
+    #[test]
+    fn only_an_empty_404_is_an_absent_route() {
+        let answer = |status, body: &str| anyhow::Error::from(UnexpectedResponse { status, body: body.into() });
+        assert!(is_absent_route(&answer(404, "")));
+        assert!(!is_absent_route(&answer(404, "not json")));
+        assert!(!is_absent_route(&answer(500, "")));
+        assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
     }
 }

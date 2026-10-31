@@ -922,6 +922,9 @@ impl TerminalStream {
     }
 }
 
+/// The error a daemon's empty 404 decodes to: it has no such route.
+const MISSING_ROUTE: &str = "HTTP 404 with no body: the daemon has no such route";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("st client API error {0:?}: {1}")]
@@ -939,8 +942,7 @@ impl ClientError {
     /// from before the route does. A typed refusal, another status, or a malformed answer to a
     /// route that exists is not this.
     pub fn is_missing_route(&self) -> bool {
-        matches!(self, Self::Protocol(message)
-            if message.strip_prefix("HTTP 404").is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit())))
+        matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
     }
 
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
@@ -2729,6 +2731,11 @@ impl Client {
                     error.message.clone(),
                     Box::new(error),
                 ));
+            }
+            // Any other route an older daemon does not have answers Axum's empty 404: say so
+            // distinctly, so a caller can fall back without mistaking a broken answer for it.
+            if status == 404 && bytes.is_empty() {
+                return Err(ClientError::Protocol(MISSING_ROUTE.into()));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
                 .or_else(|decode| core_api_error(&bytes).ok_or(decode))

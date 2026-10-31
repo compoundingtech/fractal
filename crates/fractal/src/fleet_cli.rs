@@ -1063,7 +1063,7 @@ async fn lock_fleet_settings(state_dir: &std::path::Path) -> Result<std::fs::Fil
 /// internal route it replaced. Internal routes refuse seat callers; a seat may read these views.
 pub(crate) async fn fleet_read<T: serde::de::DeserializeOwned>(client: &Client, route: &str) -> Result<T> {
     match client.get(&format!("/v1/fleet/{route}")).await {
-        Err(error) if fractal_daemon::client::is_missing_route(&error) => {
+        Err(error) if fractal_daemon::client::is_absent_route(&error) => {
             client.get(&format!("/v1/internal/fleet/{route}")).await
         }
         result => result,

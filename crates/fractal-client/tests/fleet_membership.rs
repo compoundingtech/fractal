@@ -60,3 +60,11 @@ async fn a_refusal_from_the_public_route_is_not_hidden() {
     assert!(!error.is_missing_route(), "{error}");
     assert_eq!(internal.load(Ordering::SeqCst), 0, "no fallback");
 }
+
+#[tokio::test]
+async fn a_404_with_a_body_from_the_public_route_is_not_taken_as_missing() {
+    let (_root, client, internal) = daemon("HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: 8\r\n\r\nnot json").await;
+    let error = client.fleet_membership().await.unwrap_err();
+    assert!(!error.is_missing_route(), "{error}");
+    assert_eq!(internal.load(Ordering::SeqCst), 0, "no fallback");
+}
