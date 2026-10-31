@@ -1,10 +1,8 @@
 //! Read-only installation routing. The operator, not st3, resolves the host token root.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-#[cfg(test)]
-use std::sync::LazyLock;
-#[cfg(test)]
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
@@ -37,6 +35,40 @@ fn counters() -> &'static Mutex<Counts> {
     &COUNTERS
 }
 
+const FALLBACK_WARNING_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Default)]
+struct FallbackWarnings {
+    owners: HashMap<String, HashMap<String, HashMap<String, WarningWindow>>>,
+}
+
+struct WarningWindow {
+    emitted_at: Instant,
+    suppressed: u64,
+}
+
+impl FallbackWarnings {
+    /// `now` is injected so the hourly boundary can be tested without sleeping.
+    /// Only new keys allocate; repeated selections borrow the existing strings.
+    fn emission(&mut self, owner: &str, app: &str, reason: &str, now: Instant) -> Option<u64> {
+        if let Some(window) = self.owners.get_mut(owner)
+            .and_then(|apps| apps.get_mut(app))
+            .and_then(|reasons| reasons.get_mut(reason))
+        {
+            if now.duration_since(window.emitted_at) < FALLBACK_WARNING_INTERVAL {
+                window.suppressed = window.suppressed.saturating_add(1);
+                return None;
+            }
+            window.emitted_at = now;
+            return Some(std::mem::take(&mut window.suppressed));
+        }
+        self.owners.entry(owner.into()).or_default()
+            .entry(app.into()).or_default()
+            .insert(reason.into(), WarningWindow { emitted_at: now, suppressed: 0 });
+        Some(0)
+    }
+}
+
 pub fn fallback(owner: &str, app: &str, reason: &str) {
     crate::otel::github_auth_fallback(owner, app, reason);
     #[cfg(test)]
@@ -44,7 +76,11 @@ pub fn fallback(owner: &str, app: &str, reason: &str) {
         *counters().lock()
             .entry((owner.into(), app.into(), reason.into())).or_default() += 1;
     }
-    tracing::warn!(owner, app, reason, "GitHub installation read using transition PAT fallback");
+    static WARNINGS: LazyLock<Mutex<FallbackWarnings>> = LazyLock::new(Mutex::default);
+    let suppressed_count = WARNINGS.lock().emission(owner, app, reason, Instant::now());
+    if let Some(suppressed_count) = suppressed_count {
+        tracing::warn!(owner, app, reason, suppressed_count, "GitHub installation read using transition PAT fallback");
+    }
 }
 
 fn component(value: &str) -> bool {
@@ -173,6 +209,25 @@ pub(crate) mod tests {
 
     fn count(owner: &str, app: &str, reason: &str) -> u64 {
         counters().lock().get(&(owner.into(), app.into(), reason.into())).copied().unwrap_or(0)
+    }
+
+    #[test]
+    fn fallback_warning_limiter_counts_suppressed_per_key_and_hour() {
+        let mut warnings = FallbackWarnings::default();
+        let start = Instant::now();
+        let within = start + FALLBACK_WARNING_INTERVAL - Duration::from_secs(1);
+        let boundary = start + FALLBACK_WARNING_INTERVAL;
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", start), Some(0));
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", start), None);
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", within), None);
+        // Each dimension has its own window and counter.
+        assert_eq!(warnings.emission("owner-b", "gh-ci", "missing", within), Some(0));
+        assert_eq!(warnings.emission("owner-a", "github-ledger", "missing", within), Some(0));
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "expired", within), Some(0));
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary), Some(2));
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary), None);
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary + FALLBACK_WARNING_INTERVAL), Some(1));
+        assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary + FALLBACK_WARNING_INTERVAL * 2), Some(0));
     }
 
     #[test]
