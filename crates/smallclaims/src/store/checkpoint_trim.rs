@@ -32,6 +32,15 @@ pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed"]
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
+/// The claims a member that trims locally deletes in one day unless `[trim] daily_claims` says
+/// otherwise: about 1.7 h of paced deletion at the 16.6 claims a second measured on a 53 GB
+/// member, whose first cut dropped 390,000 claims.
+pub const LOCAL_TRIM_DAILY_CLAIMS: u64 = 100_000;
+
+/// `meta`: the day a member that trims locally last deleted on, and how many claims it deleted
+/// that day, as `DAY CLAIMS`. Each chunk updates it in the transaction that deletes.
+pub const LOCAL_TRIM_DAY: &str = "local_trim_day";
+
 /// Stop starting new trim steps after this much work. A single step or COMMIT may take longer;
 /// this is not a hard bound on writer hold or foreground request latency.
 pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_millis(20);
@@ -437,6 +446,16 @@ impl Store {
         )?;
         if cut == 0 || trimmed.is_some_and(|trimmed| u128::try_from(trimmed).unwrap_or(0) >= cut) {
             return self.remove_checkpoint_staging(&context.scratch);
+        }
+        // An earlier cut the daily cap stopped finishes first, and a cut that could delete
+        // nothing today waits for tomorrow rather than record its tombstones now.
+        let trimming: bool = self.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM checkpoints WHERE state='trimming')",
+            [],
+            |row| row.get(0),
+        )?;
+        if trimming || self.local_trim_left_today()? == 0 {
+            return Ok(());
         }
         let checkpoint = checkpoint_name(cut);
         // A shared checkpoint this member was still recording before it chose local trim was
@@ -954,8 +973,21 @@ impl Store {
         let mut deleted_envelopes = 0;
         let mut deleted_claims = 0;
         let mut cursor = TrimCursor { local: self.local_walk(checkpoint)?, ..TrimCursor::default() };
+        // A local walk deletes at most the day's claims left; a shared checkpoint's trim is not
+        // capped.
+        let day = self.trim_day.load(Ordering::Relaxed);
+        let mut left = cursor.local.is_some().then(|| self.local_trim_left_today()).transpose()?;
         let delete = crate::profile::span("trim.delete");
         loop {
+            if left == Some(0) {
+                // The cut stays `trimming`, and the next day's first step goes on from here.
+                actions.push(CheckpointAction::TrimDeferred {
+                    checkpoint: checkpoint.to_owned(),
+                    envelopes: deleted_envelopes,
+                    claims: deleted_claims,
+                });
+                return Ok(());
+            }
             let mut connection = self.connection.write_background();
             let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
@@ -980,7 +1012,10 @@ impl Store {
             let mut steps = 0;
             // Only an empty lookup proves exhaustion. Even if transaction setup spent the
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
-            while steps < most && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET) {
+            while steps < most
+                && (steps == 0 || started.elapsed() < TRIM_CHUNK_BUDGET)
+                && left.is_none_or(|left| (claims.len() as u64) < left)
+            {
                 let Some((envelope, envelope_claims)) = next_trim_rows(&transaction, &mut cursor)? else {
                     break;
                 };
@@ -1025,6 +1060,10 @@ impl Store {
                 transaction
                     .prepare_cached(/* sqlite-large-value: allow-for-now lv-h90aea7898bf3 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
                     .execute(/* sqlite-large-value: allow-for-now lv-hde0878901e21 owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![local_walk_key(&walk.checkpoint), format!("{} {}", walk.envelope, walk.claim)])?;
+                let today = deleted_on(&transaction, day)? + claims.len() as u64;
+                transaction
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4d909c3fd602 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
+                    .execute(/* sqlite-large-value: allow-for-now lv-h5ece9b814a1a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![LOCAL_TRIM_DAY, format!("{day} {today}")])?;
             }
             transaction.commit()?;
             let held = held_since.elapsed();
@@ -1036,6 +1075,7 @@ impl Store {
             }
             deleted_envelopes += envelopes.len();
             deleted_claims += claims.len();
+            left = left.map(|left| left.saturating_sub(claims.len() as u64));
             chunks += 1;
             self.stop_for_trim_fault(TrimFault::AfterChunk(chunks))?;
             pause(self.trim_pause_duration(held));
@@ -1067,6 +1107,28 @@ impl Store {
         });
         Ok(())
     }
+}
+
+impl Store {
+    /// The claims a local trim may still delete today (`trim_locally_at_most`).
+    pub fn local_trim_left_today(&self) -> Result<u64> {
+        let deleted = deleted_on(&self.readers.get(), self.trim_day.load(Ordering::Relaxed))?;
+        Ok(self.local_trim_daily_claims().saturating_sub(deleted))
+    }
+}
+
+/// The claims a local trim deleted on `day`, as `LOCAL_TRIM_DAY` records them.
+fn deleted_on(connection: &Connection, day: u64) -> Result<u64> {
+    let saved: Option<String> = connection
+        .prepare_cached("SELECT value FROM meta WHERE key=?1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h70b39bb4733d owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ [LOCAL_TRIM_DAY], |row| row.get(0))
+        .optional()?;
+    Ok(saved
+        .as_deref()
+        .and_then(|saved| saved.split_once(' '))
+        .filter(|(saved_day, _)| saved_day.parse() == Ok(day))
+        .and_then(|(_, claims)| claims.parse().ok())
+        .unwrap_or(0))
 }
 
 /// How far the sweep of rows earlier trims left behind has gone: `after:CLAIM_ID`, or `done`.
