@@ -7839,6 +7839,16 @@ fn resolve_mission_run_inputs(
                         .optional()
                         .map_err(internal)?
                         .is_some();
+                    // A claim this member trimmed is never admitted again, so its pin cannot wait
+                    // for replication as an unarrived claim does.
+                    if !exists && smallclaims::store::retired::claim_refused(transaction, claim_id).map_err(internal)? {
+                        return Err(St3Error::new(
+                            "trimmed-resource-input-version",
+                            format!(
+                                "mission input `{name}`: {subject}@{claim_id} was trimmed on this member; pin a kept observation or the subject"
+                            ),
+                        ));
+                    }
                     if !exists {
                         return Err(St3Error::new(
                             "missing-resource-input-version",
