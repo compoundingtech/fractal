@@ -37,10 +37,12 @@ fn counters() -> &'static Mutex<Counts> {
 }
 
 const FALLBACK_WARNING_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const MAX_FALLBACK_WARNING_KEYS: usize = 1024;
 
 #[derive(Default)]
 struct FallbackWarnings {
     owners: HashMap<String, HashMap<String, HashMap<String, WarningWindow>>>,
+    keys: usize,
 }
 
 struct WarningWindow {
@@ -63,9 +65,25 @@ impl FallbackWarnings {
             window.emitted_at = now;
             return Some(std::mem::take(&mut window.suppressed));
         }
+        // Expired keys lose their pending suppressed count when a new key arrives.
+        // Keep active keys, but fail open to logging rather than grow past the cap.
+        let mut keys = 0;
+        self.owners.retain(|_, apps| {
+            apps.retain(|_, reasons| {
+                reasons.retain(|_, window| now.duration_since(window.emitted_at) < FALLBACK_WARNING_INTERVAL);
+                keys += reasons.len();
+                !reasons.is_empty()
+            });
+            !apps.is_empty()
+        });
+        self.keys = keys;
+        if self.keys == MAX_FALLBACK_WARNING_KEYS {
+            return Some(0);
+        }
         self.owners.entry(owner.into()).or_default()
             .entry(app.into()).or_default()
             .insert(reason.into(), WarningWindow { emitted_at: now, suppressed: 0 });
+        self.keys += 1;
         Some(0)
     }
 }
@@ -230,6 +248,33 @@ pub(crate) mod tests {
         assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary), None);
         assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary + FALLBACK_WARNING_INTERVAL), Some(1));
         assert_eq!(warnings.emission("owner-a", "gh-ci", "missing", boundary + FALLBACK_WARNING_INTERVAL * 2), Some(0));
+    }
+
+    #[test]
+    fn fallback_warning_limiter_caps_keys_and_prunes_expired_windows() {
+        let mut warnings = FallbackWarnings::default();
+        let start = Instant::now();
+        for index in 0..MAX_FALLBACK_WARNING_KEYS {
+            assert_eq!(warnings.emission(&format!("owner-{index}"), "gh-ci", "missing", start), Some(0));
+        }
+        assert_eq!(warnings.keys, MAX_FALLBACK_WARNING_KEYS);
+        // Over-cap keys always log, without being retained.
+        assert_eq!(warnings.emission("overflow", "gh-ci", "missing", start), Some(0));
+        assert_eq!(warnings.emission("overflow", "gh-ci", "missing", start), Some(0));
+        assert_eq!(warnings.keys, MAX_FALLBACK_WARNING_KEYS);
+        assert!(!warnings.owners.contains_key("overflow"));
+        assert_eq!(warnings.emission("owner-0", "gh-ci", "missing", start), None);
+        assert_eq!(warnings.emission("owner-1", "gh-ci", "missing", start), None);
+        let boundary = start + FALLBACK_WARNING_INTERVAL;
+        // Refresh one existing key, then insert: only the other keys are pruned.
+        assert_eq!(warnings.emission("owner-0", "gh-ci", "missing", boundary), Some(1));
+        assert_eq!(warnings.emission("overflow", "gh-ci", "missing", boundary), Some(0));
+        assert_eq!(warnings.keys, 2);
+        assert_eq!(warnings.owners.len(), 2);
+        assert_eq!(warnings.emission("owner-0", "gh-ci", "missing", boundary), None);
+        // A pruned key starts fresh, including its discarded suppression count.
+        assert_eq!(warnings.emission("owner-1", "gh-ci", "missing", boundary), Some(0));
+        assert_eq!(warnings.keys, 3);
     }
 
     #[test]
