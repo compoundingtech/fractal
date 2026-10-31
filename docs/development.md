@@ -374,9 +374,10 @@ macOS CI is currently disabled; its retained workflow is not a required check.
 See [CI operations](ci.md) for stage scope, routing, caches, and failure inspection.
 
 The `perf-cost` messaging-faults fixture applies its recipient on the receiving node,
-then waits for both provider readiness there and recipient visibility on the sending
-node before its cross-node warmup. Local provider readiness alone does not prove the
-declaration has replicated; native sends reject recipients unknown to the sender.
+then waits for both provider readiness there and a successful native recipient
+preflight on the sending node before its cross-node warmup. Local provider readiness
+and agent-card visibility do not prove the sender's materialized recipient state is
+ready; the fixture polls the same `/v1/messages/recipient` endpoint as native sends.
 The subsequent fault and delivery deadline remain unchanged.
 
 Changes to `docs/site/**` on `main` notify `compoundingtech/private` to deploy
