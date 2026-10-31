@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """The main check must fail closed unless the exact queue SHA passed every required check."""
+import ast
 import copy
 import importlib.machinery
 import importlib.util
@@ -109,7 +110,7 @@ assert "github.run_id" in upkeep.split('concurrency:', 1)[1].split('jobs:', 1)[0
 assert 'main is red; revert the merged change.' in upkeep
 assert "'failure'" in upkeep and "'cancelled'" in upkeep
 
-# Every fleet job is reused once with a namespaced graph and the same common opt-in guard.
+# Every queue job is reused once, except explicitly inapplicable lifecycle/advice jobs.
 def job_blocks(text):
     text = text.split('\njobs:\n', 1)[1]
     starts = list(re.finditer(r'^  ([\w-]+):\n', text, re.M))
@@ -118,8 +119,13 @@ def job_blocks(text):
 
 original, composed = job_blocks(fleet), job_blocks(upkeep)
 assert module.GATES == {name for name in original if name.startswith('evidence-gate-')}
-assert {name for name in composed if name.startswith('proof-')} == {'proof-' + name for name in original}
-for name in original:
+omitted = {
+    'namespace-capacity': 'Ephemeral queue-ref cancellation must not cancel landed proof.',
+    'evidence-presign-notice': 'Pre-signing advice applies only to an open PR.',
+}
+assert omitted.keys() <= original.keys()
+assert {name for name in composed if name.startswith('proof-')} == {'proof-' + name for name in original.keys() - omitted.keys()}
+for name in original.keys() - omitted.keys():
     body = composed['proof-' + name]
     condition = re.search(r'^    if: (.*)$', body, re.M)[1]
     assert "needs.main-checks.outputs.evidence-skipped == 'true'" in condition, name
@@ -135,6 +141,114 @@ assert 'toJSON(needs)' not in aggregate
 assert 'toJSON(needs.proof-linux-gate)' in aggregate
 assert '"linux-gate":{' in aggregate  # evidence commands retain original dependency names
 print('passed: every composed hosted lane is conditional and dependency-safe')
+
+# Abstract interpretation keeps actual event/ref exact while allowing runtime outcomes and cache/config
+# choices to vary. It detects an impossible event conjunct anywhere, without treating quoted text as code.
+def possible_on_push(condition, bindings=None):
+    text = condition.strip()
+    if text.startswith('"'):
+        text = ast.literal_eval(text)
+    text = text.removeprefix('${{').removesuffix('}}').strip()
+    pattern = r"'(?:''|[^'])*'|&&|\|\||==|!=|>=|<=|[!(),<>]|[A-Za-z_][\w.*-]*|\d+"
+    tokens = re.findall(pattern, text)
+    assert not re.sub(pattern, '', text).strip(), text
+    domain = {False, True, '', 0, 1, *(t[1:-1].replace("''", "'") for t in tokens if t.startswith("'"))}
+    known = {'github.event_name': {'push'}, 'github.ref': {'refs/heads/main'}, **(bindings or {})}
+    position = 0
+
+    def primary():
+        nonlocal position
+        token = tokens[position]
+        position += 1
+        if token == '!':
+            return {not value for value in primary()}
+        if token == '(':
+            result = logical_or()
+            assert tokens[position] == ')', text
+            position += 1
+            return result
+        if position < len(tokens) and tokens[position] == '(':
+            position += 1
+            while tokens[position] != ')':
+                logical_or()
+                if tokens[position] != ',':
+                    break
+                position += 1
+            assert tokens[position] == ')', text
+            position += 1
+            return {True} if token == 'always' else {False, True}
+        if token.startswith("'"):
+            return {token[1:-1].replace("''", "'")}
+        if token in ('true', 'false'):
+            return {token == 'true'}
+        return known.get(token, domain)
+
+    def comparison():
+        nonlocal position
+        result = primary()
+        if position < len(tokens) and tokens[position] in ('==', '!='):
+            operator = tokens[position]
+            position += 1
+            right = primary()
+            result = {(left == other) if operator == '==' else (left != other) for left in result for other in right}
+        return result
+
+    def logical_and():
+        nonlocal position
+        result = comparison()
+        while position < len(tokens) and tokens[position] == '&&':
+            position += 1
+            right = comparison()
+            result = {bool(left) and bool(other) for left in result for other in right}
+        return result
+
+    def logical_or():
+        nonlocal position
+        result = logical_and()
+        while position < len(tokens) and tokens[position] == '||':
+            position += 1
+            right = logical_and()
+            result = {bool(left) or bool(other) for left in result for other in right}
+        return result
+
+    result = logical_or()
+    assert position == len(tokens), (text, tokens[position:])
+    return any(result)
+
+assert not possible_on_push("!cancelled() && github.event_name == 'merge_group'")
+assert not possible_on_push("github.event_name == 'pull_request'")
+assert possible_on_push("github.event_name == 'merge_group' || github.event_name == 'push'")
+for name, body in composed.items():
+    if not name.startswith('proof-'):
+        continue
+    conditions = re.findall(r'^\s+(?:- )?if: (.+)$', body, re.M)
+    for condition in conditions:
+        assert possible_on_push(condition), (name, condition)
+    assert 'github.event.merge_group.head_ref' not in body, name
+assert possible_on_push(re.search(r'^    if: (.*)$', composed['proof-pick-runner'], re.M)[1],
+                        {'vars.CI1_RUNNERS': {'off'}, 'vars.CI_PR_NAMESPACE_PROFILE': {''}})
+for index, name in enumerate(('linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4'), 1):
+    assert f'CI_TEST_PARTITION: "hash:{index}/4"' in composed['proof-' + name], name
+assert 'EVENT: merge_group' in composed['proof-linux-gate']
+assert 'EVENT_NAME: ${{ github.event_name }}' in composed['proof-evidence-gate-linux-gate']
+assert 'CI_TEST_TOPOLOGY: merge-group' in composed['proof-evidence-note-rust-tests']
+assert 'IMPACT_BASE_SHA: ${{ github.event.before }}' in composed['proof-upgrade-impact']
+assert '--queue-ref' not in composed['proof-upgrade-impact']
+assert 'QUEUE_REF:' not in composed['proof-pick-runner']
+print('passed: queue-equivalent proof coverage, four partitions, and push-satisfiable job/step predicates')
+
+for gate in module.GATES:
+    assert 'EVENT_NAME: ${{ github.event_name }}' in composed['proof-' + gate], gate
+    assert 'HEAD_SHA: ${{ github.sha }}' in composed['proof-' + gate], gate
+linux = composed['proof-linux-gate']
+stage = linux.split('name: Require every Linux stage to pass', 1)[1].split('\n      - ', 1)[0]
+script = __import__('textwrap').dedent(stage.split('run: |\n', 1)[1])
+for extra, expected in [('success success', 0), ('skipped success', 1), ('success skipped', 1), ('success failure', 1)]:
+    env = dict(os.environ, EVENT='merge_group', RESULTS=' '.join(['success'] * 6),
+               MERGE_RESULTS=extra, GATE_SKIP='false', STAGE_SKIPS=' '.join(['false'] * 8))
+    done = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True)
+    assert done.returncode == expected, (extra, done.stdout, done.stderr)
+print('passed: actual Linux aggregate requires both extra proof partitions; evidence gates retain push identity')
 
 # Any accidental test execution defeats deduplication. Exercise every cache-fill stage with
 # command stand-ins which reject cargo test without --no-run, and cargo run/nextest execution.
