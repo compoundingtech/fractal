@@ -284,3 +284,79 @@ fn retained_member_removal_fences_a_validly_signed_later_rename() {
     assert_eq!(error.code, "untrusted-membership");
     assert_eq!(error.exit_code(), 4);
 }
+
+#[test]
+fn quarantined_unsigned_fork_does_not_pollute_valid_rename_evidence() {
+    let (store, member, _, _) = twice_renamed();
+    // A genuine unsigned sender reuses the admitted writer's name. Transport retains
+    // the fork, but the runtime must hold it outside the keyed member's history.
+    let unsigned = node("example", None, Some(&member));
+    crate::store::fleet_admission_tests_shared_seats::note(&unsigned, "unsigned unrelated receipt");
+    let exchange = unsigned.export_replication_exchange_answering(
+        FLEET, &store.replication_inventory().unwrap(), &[],
+    ).unwrap();
+    assert!(!exchange.envelopes.is_empty());
+    let quarantined = exchange.envelopes.iter().map(|envelope| envelope.hash.clone())
+        .collect::<BTreeSet<_>>();
+    store.receive_replication_exchange("example", FLEET, &exchange).unwrap();
+    let admission = store.validate_replication_backlog().unwrap();
+    assert!(admission.held > 0);
+    store.project_replication_backlog().unwrap();
+    let proof = store.export_rename_proof(IdentityKind::Agent, FINAL, None).unwrap();
+    assert!(proof.envelopes.iter().all(|envelope| !quarantined.contains(&envelope.hash)));
+    verify_rename_proof(&proof, member.public(), None).unwrap();
+}
+
+#[test]
+fn unrelated_admitted_diagnostic_writer_is_not_disclosed() {
+    let (store, member, _, _) = twice_renamed();
+    let unrelated_key = key();
+    admit(&store, "example-diagnostics", &unrelated_key, "invite", None);
+    let unrelated = node("example-diagnostics", Some(&unrelated_key), Some(&member));
+    sync(&store, &unrelated);
+    crate::store::fleet_admission_tests_shared_seats::note(&unrelated, "unrelated private diagnostic");
+    sync(&unrelated, &store);
+    assert!(store.replication_inventory().unwrap().envelopes.iter()
+        .any(|envelope| envelope.writer == "example-diagnostics"));
+    let proof = store.export_rename_proof(IdentityKind::Agent, FINAL, None).unwrap();
+    assert!(proof.envelopes.iter().all(|envelope| envelope.writer != "example-diagnostics"));
+    verify_rename_proof(&proof, member.public(), None).unwrap();
+}
+
+#[test]
+fn real_disk_export_keyset_pages_release_readers_and_pin_the_inventory_horizon() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("proof.sqlite3");
+    let member = key();
+    let store = Store::open(&path, "example").unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    store.pin_fleet_anchor(member.public()).unwrap();
+    store.set_member_key(Some(member.clone())).unwrap();
+    store.admit_fleet_anchor(FLEET, member.public(), "listening").unwrap();
+    store.ensure_principal_key(ACTOR).unwrap();
+    publish(&store, "version 2\nagent \"example-original/worker\" { command \"true\"; }\n", "paged-declaration");
+    rename(&store, IdentityKind::Agent, ORIGINAL, RENAMED, "paged-rename");
+    for index in 0..130 {
+        crate::store::fleet_admission_tests_shared_seats::note(&store, &format!("retained diagnostic {index}"));
+        store.seal_local_batches().unwrap();
+    }
+    let mut proof = store.export_rename_proof(IdentityKind::Agent, RENAMED, None).unwrap();
+    let expected = proof.envelopes.iter().map(|envelope| envelope.hash.clone()).collect::<Vec<_>>();
+    let checkpoint = Connection::open(&path).unwrap();
+    checkpoint.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let mut pages = Vec::new();
+    proof.envelopes = store.rename_proof_envelopes_with_page_observer(|count| {
+        assert!((1..=64).contains(&count));
+        pages.push(count);
+        // Real runtime writes and sealing during every page expose a lingering read
+        // transaction to TRUNCATE and ensure the scan does not chase arriving history.
+        crate::store::fleet_admission_tests_shared_seats::note(&store, "arrived after proof horizon");
+        store.seal_local_batches().unwrap();
+        let busy: i64 = checkpoint.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        assert_eq!(busy, 0, "an export page retained a SQLite reader snapshot");
+        Ok(())
+    }).unwrap();
+    assert!(pages.len() >= 9, "each of the three passes must traverse multiple bounded pages");
+    assert_eq!(proof.envelopes.iter().map(|envelope| envelope.hash.clone()).collect::<Vec<_>>(), expected);
+    verify_rename_proof(&proof, member.public(), None).unwrap();
+}

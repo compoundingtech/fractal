@@ -1,5 +1,5 @@
 //! Full authenticated naming-chain reduction and caller-pinned revision progress.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 use super::{BUNDLE_SCHEMA, VERDICT_SCHEMA, RenameProofBundle, RenameProofStep, RenameProofVerdict, ProofError, chain_error, malformed, verify_sealed_history};
 use super::authentication::{Authentication, authenticated_actor_alias};
@@ -11,6 +11,9 @@ pub fn verify_rename_proof(
     fleet_anchor: &str,
     after_revision: Option<&str>,
 ) -> Result<RenameProofVerdict, ProofError> {
+    if bundle.disclosure != "fleet-internal" {
+        return Err(malformed("rename evidence requires fleet-internal disclosure classification"));
+    }
     if bundle.schema != BUNDLE_SCHEMA || bundle.fleet_id.is_empty() || fleet_anchor.is_empty() {
         return Err(malformed("unsupported schema or empty fleet identity/anchor"));
     }
@@ -73,40 +76,15 @@ pub fn verify_rename_proof(
         }
         if fields["from"].as_str() != Some(canonical) || !to.starts_with(prefix) || !names.insert(to) { return Err(chain_error("rename spellings do not form a non-cyclic chain")); }
         let declaration = fields["declaration"].as_str().ok_or_else(|| chain_error("missing declaration token"))?;
-        let evidence = records.get(declaration).ok_or_else(|| chain_error("missing declaration"))?;
-        if evidence.claim.subject != *storage_id || evidence.claim.kind != declaration_kind {
-            return Err(chain_error("declaration does not belong to storage identity"));
-        }
-        authentication.require(declaration)?;
-        if bundle.identity_kind == "mission" && evidence.claim.origin != claim.origin { return Err(chain_error("rename writer does not own mission declaration")); }
-        if bundle.identity_kind == "agent" {
-            let mut owner_evidence = evidence;
-            let mut owner_visited = BTreeSet::new();
-            loop {
-                if !owner_visited.insert(&owner_evidence.claim.id) {
-                    return Err(chain_error("declaration predecessor cycle"));
-                }
-                if owner_evidence.claim.subject != *storage_id || owner_evidence.claim.kind != declaration_kind {
-                    return Err(chain_error("invalid agent ownership declaration"));
-                }
-                authentication.require(&owner_evidence.claim.id)?;
-                match owner_evidence.claim.body["kind"].as_str() {
-                    Some("agent") => {
-                        if owner_evidence.claim.body["member"]["host"].as_str() != Some(claim.origin.as_str()) {
-                            return Err(chain_error("rename writer does not own agent declaration"));
-                        }
-                        break;
-                    }
-                    Some("stop") if owner_evidence.claim.predecessors.len() == 1 => {
-                        owner_evidence = records.get(&owner_evidence.claim.predecessors[0])
-                            .ok_or_else(|| chain_error("missing agent ownership predecessor"))?;
-                    }
-                    _ => return Err(chain_error("agent declaration has no ownership evidence")),
-                }
-            }
-        }
+        require_declaration(&authentication, declaration, storage_id, declaration_kind, &claim.origin)?;
         canonical = to;
         final_declaration = Some(declaration);
+    }
+    let projection = naming_projection(&authentication, bundle);
+    if !projection.accepted
+        || projection.heads.get(storage_id).is_none_or(|head| head.blocked.is_some())
+    {
+        return Err(chain_error("authenticated naming facts fence this identity or revision"));
     }
     if bundle.storage_id != *storage_id || bundle.canonical_id != canonical || final_declaration != Some(bundle.declaration.as_str()) || bundle.chain != reversed {
         return Err(malformed("bundle metadata disagrees with authenticated naming chain"));
@@ -132,6 +110,7 @@ pub fn verify_rename_proof(
     }).collect();
     Ok(RenameProofVerdict {
         schema: VERDICT_SCHEMA.into(), ok: true, identity_kind: bundle.identity_kind.clone(),
+        disclosure: bundle.disclosure.clone(),
         storage_id: storage_id.clone(), canonical_id: canonical.into(), naming_revision: head.claim.id.clone(),
         declaration: bundle.declaration.clone(), chain, request_actor: actor.into(),
         kind: bundle.identity_kind.clone(), storage_identity: storage_id.clone(),
@@ -142,6 +121,95 @@ pub fn verify_rename_proof(
         signer_key: envelope.member_key.clone().expect("validated envelope signer"),
         fleet_id: bundle.fleet_id.clone(),
     })
+}
+
+fn require_declaration(
+    authentication: &Authentication<'_>, declaration: &str, identity: &str, kind: &str, origin: &str,
+) -> Result<(), ProofError> {
+    let mut evidence = authentication.records.get(declaration).ok_or_else(|| chain_error("missing declaration"))?;
+    let mut visited = BTreeSet::new();
+    loop {
+        let claim = &evidence.claim;
+        if !visited.insert(&claim.id) || claim.subject != identity || claim.kind != kind {
+            return Err(chain_error("invalid ownership declaration"));
+        }
+        authentication.require(&claim.id)?;
+        if kind == "mission.published" {
+            return if claim.origin == origin { Ok(()) } else { Err(chain_error("rename writer does not own mission declaration")) };
+        }
+        match claim.body["kind"].as_str() {
+            Some("agent") if claim.body["member"]["host"].as_str() == Some(origin) => return Ok(()),
+            Some("stop") if claim.predecessors.len() == 1 => {
+                evidence = authentication.records.get(&claim.predecessors[0])
+                    .ok_or_else(|| chain_error("missing agent ownership predecessor"))?;
+            }
+            _ => return Err(chain_error("agent declaration has no ownership evidence")),
+        }
+    }
+}
+
+/// Only principal-authenticated facts can reserve names or fence another identity.
+fn naming_projection(authentication: &Authentication<'_>, bundle: &RenameProofBundle) -> crate::naming::Projection<()> {
+    use crate::naming::{Fact, Head};
+    let mut heads = BTreeMap::new();
+    let mut names = BTreeMap::new();
+    let repaired_records = authentication.records.values().filter_map(|record| {
+        let claim = &record.claim;
+        (claim.kind == "record.repaired" && authentication.require(&claim.id).is_ok()
+            && claim.body["fields"]["replacement"].as_str().is_some_and(|id| authentication.records.contains_key(id)))
+            .then(|| claim.body["fields"]["record"].as_str()).flatten()
+    }).collect::<BTreeSet<_>>();
+    let repaired = authentication.records.values().filter_map(|record| {
+        let envelope = bundle.envelopes.iter().find(|envelope| envelope.writer == record.claim.origin && envelope.sequence == record.sequence)?;
+        let reference = crate::hash::replica_record_ref(&envelope.writer, envelope.sequence, &envelope.hash, record.position as u64);
+        repaired_records.contains(reference.as_str()).then_some(record.claim.id.as_str())
+    }).collect::<BTreeSet<_>>();
+    let mut operations = BTreeMap::<String, crate::operation_metadata::OperationMetadata>::new();
+    for record in authentication.records.values() {
+        let claim = &record.claim;
+        if !repaired.contains(claim.id.as_str()) && authentication.require(&claim.id).is_ok() {
+            if let Some((operation, digest)) = crate::store::operation_parts(&claim.body) {
+                operations.entry(operation.into()).or_default().include(digest.into(), claim.id.clone(), true);
+            }
+        }
+    }
+    let conflicts = operations.into_iter().filter_map(|(id, metadata)| {
+        metadata.row().filter(|(_, _, state)| state == "conflict").map(|_| id)
+    }).collect::<BTreeSet<_>>();
+    for record in authentication.records.values() {
+        let claim = &record.claim;
+        if (claim.kind == "mission.published" || (claim.kind == "intent.desired" && claim.subject.starts_with("agent/")))
+            && authentication.require(&claim.id).is_ok()
+        {
+            names.insert(claim.subject.clone(), (claim.subject.clone(), None));
+            heads.insert(claim.subject.clone(), Head { kind: (), canonical: claim.subject.clone(), revision: None, blocked: None });
+        }
+    }
+    let mut facts = Vec::new();
+    for record in authentication.records.values() {
+        let claim = &record.claim;
+        let declaration_kind = match claim.kind.as_str() {
+            "agent.renamed" => "intent.desired", "mission.renamed" => "mission.published", _ => continue,
+        };
+        if authentication.require(&claim.id).is_err() { continue; }
+        let fields = &claim.body["fields"];
+        let identity = &claim.subject;
+        heads.entry(identity.clone()).or_insert_with(|| Head { kind: (), canonical: identity.clone(), revision: None, blocked: Some("pending-replication") });
+        names.entry(identity.clone()).or_insert_with(|| (identity.clone(), None));
+        let declaration = fields["declaration"].as_str().expect("validated naming schema");
+        let unavailable = if fields["owner_host"].as_str() != Some(claim.origin.as_str())
+            || repaired.contains(declaration)
+            || crate::store::operation_parts(&claim.body).is_some_and(|(id, _)| conflicts.contains(id))
+            || require_declaration(authentication, declaration, identity, declaration_kind, &claim.origin).is_err()
+        { Some("conflict") } else { None };
+        facts.push(Fact {
+            id: claim.id.clone(), identity: identity.clone(),
+            from: fields["from"].as_str().expect("validated naming schema").into(),
+            to: fields["to"].as_str().expect("validated naming schema").into(),
+            previous: fields["previous_revision"].as_str().map(str::to_owned), repaired: repaired.contains(claim.id.as_str()), unavailable,
+        });
+    }
+    crate::naming::reduce(heads, names, facts, Some(&bundle.naming_revision))
 }
 
 #[cfg(test)]
