@@ -67,9 +67,11 @@ const START_MS: i64 = 4_102_489_800_000;
 const STEP_MS: i64 = 1_000;
 const PERSON: &str = "person/operator";
 
-/// The seeds CI runs. Every failing seed found by hand is added here.
+/// The seeds CI runs. Every failing seed found by hand is added here. The second row diverged in
+/// `resource_observations` until a rebuild kept items only compact states describe (#4426).
 const SEEDS: &[u64] = &[
     1, 2, 3, 5, 8, 13, 17, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597,
+    27, 74, 106, 121, 130, 133, 179, 209, 241, 246, 277, 281, 291, 293, 294,
 ];
 
 /// Both revisions draw the same kinds and fields. Native admission still uses each
@@ -1797,6 +1799,21 @@ seed_tests! {
     seed_610_converges: 610,
     seed_987_converges: 987,
     seed_1597_converges: 1597,
+    seed_27_converges: 27,
+    seed_74_converges: 74,
+    seed_106_converges: 106,
+    seed_121_converges: 121,
+    seed_130_converges: 130,
+    seed_133_converges: 133,
+    seed_179_converges: 179,
+    seed_209_converges: 209,
+    seed_241_converges: 241,
+    seed_246_converges: 246,
+    seed_277_converges: 277,
+    seed_281_converges: 281,
+    seed_291_converges: 291,
+    seed_293_converges: 293,
+    seed_294_converges: 294,
 }
 
 #[test]
