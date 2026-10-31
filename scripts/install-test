@@ -179,7 +179,7 @@ cat > "$work/platform-bin/mv" <<'SH'
 #!/usr/bin/env bash
 set -eu
 for argument in "$@"; do
-  if [[ ${INSTALL_RESTORE_FAIL:-} == yes && $argument == */previous/fractal ]]; then exit 1; fi
+  if [[ -n ${INSTALL_RESTORE_FAIL_NAME:-} && $argument == */previous/"$INSTALL_RESTORE_FAIL_NAME" ]]; then exit 1; fi
 done
 if [[ ${!#} == "$INSTALL_FAIL_DEST" && ! -e $INSTALL_FAIL_MARKER ]]; then
   : > "$INSTALL_FAIL_MARKER"
@@ -255,8 +255,10 @@ for fault in stat-error stat-empty restore; do
   ln "$destination/fractal" "$work/recovery-original-$fault"
   export INSTALL_FAIL_DEST="$destination/st3" INSTALL_FAIL_MARKER="$work/failure-$fault"
   if [[ $fault == restore ]]; then
-    export INSTALL_RESTORE_FAIL=yes
+    export INSTALL_RESTORE_FAIL_NAME=fractal
   else
+    # Fail the untouched alias restore regardless of native same-inode mv semantics.
+    export INSTALL_RESTORE_FAIL_NAME=st3
     printf '#!/bin/sh\n%s\n' "$([[ $fault == stat-error ]] && echo 'exit 1' || echo 'exit 0')" > "$work/platform-bin/stat"
     chmod +x "$work/platform-bin/stat"
   fi
@@ -272,7 +274,7 @@ for fault in stat-error stat-empty restore; do
   else
     [[ $destination/fractal -ef $work/recovery-original-$fault ]] || fail "$fault skipped actual restore"
   fi
-  unset INSTALL_RESTORE_FAIL
+  unset INSTALL_RESTORE_FAIL_NAME
   rm -f "$work/platform-bin/stat"
 done
 rm "$work/platform-bin/mv"
