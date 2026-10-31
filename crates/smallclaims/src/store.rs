@@ -39,6 +39,7 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
 use crate::operation_metadata::OperationMetadata;
