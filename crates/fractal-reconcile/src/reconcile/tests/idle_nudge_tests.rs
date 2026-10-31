@@ -1171,6 +1171,36 @@ fn an_idle_seat_holding_a_claim_with_a_note_only_wait_is_woken_then_faulted_then
     assert_eq!(idle.faults("step-quiet", &step).len(), 2);
 }
 
+/// A daemon that was down, or not yet upgraded, raises the quiet fault late. The holder still has
+/// thirty minutes from that fault before the step is stalled and its run's report-to is told.
+#[test]
+fn a_quiet_fault_raised_late_still_gives_the_holder_thirty_minutes() {
+    let idle = fixture();
+    reported(&idle);
+    let step = idle.hold("watched", "late-quiet");
+    idle.harness("idle");
+
+    // Five quiet hours pass with renewals and no evaluation.
+    idle.at(5 * HOUR);
+    idle.seat.reconciler.reconcile_once().unwrap();
+    let quiet = idle.faults("step-quiet", &step);
+    assert_eq!(quiet.len(), 1);
+    assert!(
+        quiet[0].body["fields"]["reason"].as_str().unwrap().contains("for 5h"),
+        "{}",
+        quiet[0].body["fields"]["reason"]
+    );
+    assert!(idle.faults("step-stalled", &step).is_empty(), "not stalled at once");
+    assert_eq!(idle.view(&step).stalled_at_unix_ms, None);
+
+    idle.idle_until(5 * HOUR + 29 * MINUTE);
+    assert!(idle.faults("step-stalled", &step).is_empty());
+    idle.idle_until(5 * HOUR + 31 * MINUTE);
+    let stalled = idle.faults("step-stalled", &step);
+    assert_eq!(stalled.len(), 1);
+    assert_eq!(stalled[0].body["fields"]["reviewer"], WATCHER);
+}
+
 #[test]
 fn a_seat_waiting_on_a_merge_it_declared_is_never_faulted() {
     let idle = fixture();
