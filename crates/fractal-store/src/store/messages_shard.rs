@@ -525,7 +525,7 @@ impl Runtime for MessagesRuntime {
 
     fn create_schema(&self, connection: &Connection) -> anyhow::Result<()> {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4fc020e207df owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ SCHEMA)?;
-        connection.execute_batch(stream_reads::LOCAL_SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha7b0b4f3013e owner=fractal_store::store::messages_shard TODO=trace-statement-and-value-representation */ stream_reads::LOCAL_SCHEMA)?;
         Ok(())
     }
 

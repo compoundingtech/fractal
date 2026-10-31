@@ -7,7 +7,7 @@ use super::*;
 /// outside the replicated log and every digest. One host-local order then sorts graph and stream
 /// entries together. A shard trigger cannot see the graph's index, so the daemon writes it as it
 /// admits items, and a reader that finds an item without one writes it then.
-pub(super) const LOCAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store::messages_shard::stream_reads TODO=chunk-or-reference-variable-columns */ "
+pub(super) const LOCAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h80316a30a7db owner=fractal_store::store::messages_shard::stream_reads TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_arrivals (
     subject TEXT PRIMARY KEY,
     store_index INTEGER NOT NULL,
@@ -32,7 +32,7 @@ pub fn record_arrivals(graph: &super::super::Store) -> anyhow::Result<usize> {
     let at = graph.index()?;
     let connection = shard.connection.write();
     Ok(connection.execute(
-        /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store::messages_shard::stream_reads TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_arrivals(subject, store_index, graph_index, arrived_at_unix_ms)
+        /* sqlite-large-value: allow-for-now lv-hd6f1369f787d owner=fractal_store::store::messages_shard::stream_reads TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_arrivals(subject, store_index, graph_index, arrived_at_unix_ms)
          SELECT subject, store_index, ?1, ?2 FROM stream_messages
          WHERE store_index > COALESCE((SELECT MAX(store_index) FROM stream_arrivals), 0)",
         rusqlite::params![at as i64, smallclaims::store::now_ms() as i64],
@@ -90,7 +90,7 @@ pub fn stream_events_page(
     let connection = shard.readers.get();
     let raw = connection
         .prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ "SELECT store_index, kind, subject, body FROM claims
+            "SELECT store_index, kind, subject, body FROM claims
              WHERE store_index > ?1 AND store_index <= ?3 AND kind='message.sent'
              ORDER BY store_index LIMIT ?2",
         )?
@@ -120,7 +120,7 @@ fn arrivals_current(graph: &super::super::Store, shard: &GraphStore) -> anyhow::
     let behind: bool = shard.readers.get().prepare_cached(
         "SELECT COALESCE((SELECT MAX(store_index) FROM stream_messages),0)
               > COALESCE((SELECT MAX(store_index) FROM stream_arrivals),0)",
-    )?.query_row([], |row| row.get(0))?;
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h1ef1fcd0470b owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?;
     if behind {
         record_arrivals(graph)?;
     }
@@ -144,7 +144,7 @@ pub fn conversation_position(graph: &super::super::Store) -> anyhow::Result<u64>
     };
     Ok(shard.readers.get().prepare_cached(
         "SELECT COALESCE(MAX(store_index),0) FROM stream_messages",
-    )?.query_row([], |row| row.get(0))?)
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-hcf0a762ac4ce owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
 }
 
 /// The stream items to or from any of `names` after `after`, newest first, each with the graph
@@ -168,7 +168,7 @@ pub fn conversation_items(
             .prepare_cached(
                 "SELECT store_index FROM stream_messages ORDER BY store_index DESC LIMIT 1 OFFSET 9999",
             )?
-            .query_row([], |row| row.get::<_, u64>(0))
+            .query_row(/* sqlite-large-value: allow-for-now lv-h8e71fd25b754 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ [], |row| row.get::<_, u64>(0))
             .optional()?
             .unwrap_or(0),
     };
@@ -176,8 +176,8 @@ pub fn conversation_items(
         StreamAfter::Position(position) => (position.max(floor), 0),
         StreamAfter::Arrival(arrival) => (floor, arrival),
     };
-    let mut statement = connection.prepare_cached(&format!(
-        /* sqlite-large-value: allow-for-now lv-h000000000000 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5999c6143f53 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ &format!(
+        "WITH selected AS (
             SELECT store_index, subject FROM stream_messages INDEXED BY stream_messages_recipient
             WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
             UNION
@@ -227,7 +227,7 @@ pub fn conversation_changed(
                 WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2 AND store_index<=?3)
              OR EXISTS(SELECT 1 FROM stream_messages INDEXED BY stream_messages_sender
                 WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2 AND store_index<=?3)",
-    )?.query_row(rusqlite::params![serde_json::to_string(names)?, after, through], |row| row.get(0))?)
+    )?.query_row(/* sqlite-large-value: allow-for-now lv-h9d7b465db685 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ rusqlite::params![serde_json::to_string(names)?, after, through], |row| row.get(0))?)
 }
 
 /// The first of a message's two timeline sequences, the message entry's; its content entry takes
