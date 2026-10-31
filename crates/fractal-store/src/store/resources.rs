@@ -10,6 +10,10 @@ pub(super) fn flush_preparation(transaction: &Transaction<'_>) -> Result<()> {
     preparation::flush_if_pending(transaction)
 }
 
+pub(super) fn flush_deferred_preparation(transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+    preparation::flush_deferred(transaction, budget)
+}
+
 #[cfg(test)]
 #[path = "resources_preparation_tests.rs"]
 mod preparation_tests;

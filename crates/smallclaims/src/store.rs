@@ -39,10 +39,9 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
-mod operation_metadata;
 pub mod prepared_envelope;
 mod replica_record;
-pub use operation_metadata::OperationMetadata;
+use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
 #[cfg(test)]
@@ -844,6 +843,12 @@ pub struct Store {
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
     trim_local: AtomicBool,
+    /// The most claims a local trim deletes in a day (`[trim] daily_claims`); see
+    /// `trim_locally_at_most`.
+    trim_daily_claims: AtomicU64,
+    /// The day, in days since the epoch, that a local trim's deletions count against: each
+    /// checkpoint step sets it from its own clock.
+    pub(crate) trim_day: AtomicU64,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1259,6 +1264,8 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
+            trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
+            trim_day: AtomicU64::new(0),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -9096,6 +9103,17 @@ impl Store {
 
     pub fn trims_locally(&self) -> bool {
         self.trim_local.load(Ordering::Relaxed)
+    }
+
+    /// The most claims a member that trims locally deletes in one day, `[trim] daily_claims`. A
+    /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
+    /// next cut begins, so a large backlog drains over several days rather than in one long trim.
+    pub fn trim_locally_at_most(&self, claims: u64) {
+        self.trim_daily_claims.store(claims, Ordering::Relaxed);
+    }
+
+    pub fn local_trim_daily_claims(&self) -> u64 {
+        self.trim_daily_claims.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.

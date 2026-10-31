@@ -15,6 +15,8 @@ pub mod error;
 pub mod fleet;
 pub mod hash;
 pub mod ivm;
+pub mod naming;
+pub mod operation_metadata;
 pub mod performance;
 pub mod prepared_cut;
 pub mod fifo;
