@@ -3412,6 +3412,12 @@ struct AgentRetireArgs {
     /// Existing eligible agent identity, bare name or agent/NAME.
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     successor: Option<String>,
+    /// Desired content revision: `revision` in agents show (not the declaration claim ID).
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_revision: Option<String>,
+    /// Selected runtime's `incarnation_id` in agents show.
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expect_incarnation: Option<String>,
     #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
     idempotency_key: String,
 }

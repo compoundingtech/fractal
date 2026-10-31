@@ -4368,6 +4368,8 @@ pub struct AgentRetireParameters {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

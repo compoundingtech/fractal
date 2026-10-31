@@ -334,6 +334,7 @@ export type AgentResumeParameters = {
 
 export type AgentRetireParameters = {
   agent: Id;
+  expect_revision?: string;
   reason: string;
   successor?: Id;
 };

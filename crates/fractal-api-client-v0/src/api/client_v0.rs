@@ -8589,19 +8589,18 @@ async fn dispatch_action(
                 .runtime_desired_revision
                 .as_deref()
                 .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
-            state
-                .store
-                .retire_agent_with_successor(
-                    &agent,
-                    authority_actor,
-                    &parameters.reason,
-                    token,
-                    request.fence.runtime_incarnation.as_deref(),
-                    &request.idempotency_key,
-                    &state.configured_peers,
-                    parameters.successor.as_deref(),
-                )
-                .map_err(ApiError::bad)?;
+            state.store.retire_agent_with_successor(
+                &agent, authority_actor, &parameters.reason, token,
+                request.fence.runtime_incarnation.as_deref(),
+                &request.idempotency_key, &state.configured_peers,
+                parameters.successor.as_deref(), parameters.expect_revision.as_deref(),
+            ).map_err(|error| {
+                if error.code == "idempotency-mismatch" {
+                    action_idempotency_conflict()
+                } else {
+                    ApiError::bad(error)
+                }
+            })?;
             signal_changed(state);
             Ok(vec![agent])
         }

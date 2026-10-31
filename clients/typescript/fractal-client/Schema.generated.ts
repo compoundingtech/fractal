@@ -279,6 +279,7 @@ export type AgentResumeParametersEncoded = typeof AgentResumeParameters.Encoded
 
 export const AgentRetireParameters = /*#__PURE__*/ (() => Schema.Struct({
   "agent": Id,
+  "expect_revision": optionalKey(Schema.String.check(Schema.isMinLength(1))),
   "reason": Schema.String.check(Schema.isMinLength(1)),
   "successor": optionalKey(Id)
 }).annotate({ identifier: "AgentRetireParameters" }))()
