@@ -1192,6 +1192,8 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         }
         ErrorCode::ContentNotText => "this content is not plain text, so it was not returned".into(),
         ErrorCode::ValidationFailed
+        | ErrorCode::InvalidAnswer
+        | ErrorCode::NotAnswerable
         | ErrorCode::AgentRosterCutNotReady
         | ErrorCode::ProjectionDetailTooLarge
         | ErrorCode::AgentsPublicationRowTooLarge
@@ -2057,6 +2059,36 @@ impl Client {
         .await
     }
 
+    pub async fn harness_questions(
+        &self,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Envelope<Page>, ClientError> {
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", percent_encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        let suffix = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", query.join("&"))
+        };
+        self.get(&format!("/v1/client/harness-questions{suffix}"))
+            .await
+    }
+    pub async fn harness_question(
+        &self,
+        id: &str,
+    ) -> Result<Envelope<HarnessQuestion>, ClientError> {
+        self.get(&format!(
+            "/v1/client/harness-questions/{}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn notes_list(&self) -> Result<Envelope<DirectiveNotes>, ClientError> {
         self.get("/v1/client/notes").await
     }
@@ -2457,6 +2489,26 @@ impl Client {
             fields.join("&")
         ))
         .await
+    }
+    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path
+            .split(['/', '?'])
+            .any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!(
+                "not a GitHub plugin read: {path}"
+            )));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body
+            .get_mut("value")
+            .map(serde_json::Value::take)
+            .unwrap_or(body))
     }
     pub async fn runtimes_list(
         &self,
@@ -2876,6 +2928,17 @@ impl Client {
         parameters: CustomReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::custom_reply(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn harness_answer(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::harness_answer(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -5302,6 +5365,8 @@ mod tests {
         assert!(!gone.is_transient());
         assert!(!api(ErrorCode::Forbidden, "no").is_transient());
         for code in [
+            ErrorCode::InvalidAnswer,
+            ErrorCode::NotAnswerable,
             ErrorCode::ProjectionDetailTooLarge,
             ErrorCode::ProjectionDetailInvalidSource,
         ] {

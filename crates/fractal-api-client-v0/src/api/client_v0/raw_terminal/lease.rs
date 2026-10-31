@@ -15,19 +15,24 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
         let root = tempfile::tempdir().unwrap();
-        let state = AppState { owning_person: None,
-        store: Arc::new(Store::open_memory("lease-owner").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "lease-owner".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: root.path().join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: Arc::new(Store::open_memory("lease-owner").unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0).0,
+            node: "lease-owner".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: root.path().join("unused-pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         claim(
             &state,
             "agent/shell",
