@@ -371,7 +371,7 @@ keep = "newest,newest-carrier-of-each-field"
 kind = "resource.observed"
 when = ["actor=null", "observer=set"]
 slot = []
-keep = "newest"
+keep = "newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts"
 
 [[rules]]
 kind = "render.applied"

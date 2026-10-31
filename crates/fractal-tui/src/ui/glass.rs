@@ -291,6 +291,7 @@ pub(crate) struct Glasses {
     placeholder: Option<String>,
     history: Vec<glass_store::StoredPlace>,
     history_cursor: usize,
+    restoring: bool,
     /// Where each split's tab strip starts, for the glass last drawn: this window only, never
     /// stored. Drawing keeps it, so it is shared state behind a `RefCell`.
     strips: RefCell<TabStrips>,
@@ -821,6 +822,7 @@ impl Glasses {
             placeholder,
             history,
             history_cursor,
+            restoring: false,
             strips: RefCell::default(),
         }
     }
@@ -2695,7 +2697,7 @@ impl Ui {
         };
         // `+` keeps its place at the end while the tab in front and both markers still have room.
         let strip_room = area.width.saturating_sub(x - area.x);
-        let mut plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
+        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
             ADD
         } else {
             0
@@ -2788,7 +2790,6 @@ impl Ui {
                 first = group.current;
             }
             last = first;
-            plus = 0;
             tail = 0;
             labels[first].0 = tabs[first]
                 .1
@@ -2842,7 +2843,7 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
-        if plus > 0 && x + 3 <= area.x + area.width {
+        if !bare && x + 3 <= area.x + area.width {
             buf.set_stringn(x, area.y, " + ", 3, theme::dim().bg(strip));
             self.hit(
                 Rect {
@@ -3324,7 +3325,7 @@ impl Ui {
         match key.code {
             KeyCode::Char('q') if control => self.quit = true,
             // The agent's actions: restart, retire, suspend and the rest (Nathan, 2026-10-04).
-            KeyCode::Char('a') if control && conversation.is_some() => {
+            KeyCode::Char(screens::ACTIONS_CHORD) if control && conversation.is_some() => {
                 if let Some(agent) = &conversation {
                     self.popover = Some(format!("actions:{agent}"));
                 }
@@ -4427,6 +4428,7 @@ impl Ui {
         }
         self.glass_changed(&id);
         self.show_focused();
+        self.prune_place_history();
         self.record_place_change(None);
     }
 
@@ -4437,7 +4439,7 @@ impl Ui {
         ("t", "a new tab"),
         ("v", "split right"),
         ("x", "split below"),
-        ("[ ]", "previous, next tab"),
+        ("[ ]", "back, forward in place history"),
         ("o", "zoom the split, and back"),
         ("s", "show or hide the sidebar"),
         ("g", "another space, or a new one"),
@@ -4483,19 +4485,11 @@ impl Ui {
                     let glasses = &mut self.glasses;
                     glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
                 }
-                '[' | ']' => self.step_tab(letter == ']'),
+                '[' | ']' => self.navigate_history(letter == ']'),
                 _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
         }
-    }
-
-    /// The next or previous tab in the focused split.
-    fn step_tab(&mut self, forward: bool) {
-        let glass = self.glasses.glass();
-        let tabs = glass.count(glass.focus).max(1);
-        let current = glass.layout.groups()[glass.focus].current;
-        self.show_tab(if forward { (current + 1) % tabs } else { (current + tabs - 1) % tabs });
     }
 
     /// The leader's list, over the bottom of the screen: what to press next.
@@ -4572,7 +4566,7 @@ impl Ui {
     }
 
     /// Show `pane` in the focused tab in place of what it shows: an agent's conversation and
-    /// its terminal are one tab, switched by Ctrl+] and Ctrl+\.
+    /// its terminal are one tab, switched by Enter and Ctrl+\.
     pub(crate) fn swap_focused_pane(&mut self, pane: Pane) {
         let focus = self.glasses.glass().focus;
         self.swap_shown_pane(focus, pane);
@@ -6282,6 +6276,24 @@ mod tests {
     }
 
     #[test]
+    fn tab_strip_add_button_uses_spare_space_after_two_short_tabs() {
+        let mut ui = tab_badge_world();
+        ui.world.attention = Load::Ready(Vec::new());
+        ui.refresh_tab_statuses();
+        let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+        group.tabs.truncate(2);
+        group.tabs[0].title = Some("A".into());
+        group.tabs[1].title = Some("B".into());
+        let row = tab_strip_row(&ui, 14);
+        assert_eq!(row, "  ●A   ○B   +");
+        assert_eq!(strip_markers(&ui), (None, None));
+        assert!(ui.frame.borrow().hits.iter().any(|(rect, hit)| {
+            matches!(hit, Hit::GlassAdd(0)) && rect.width == 3 && rect.right() <= 14
+        }));
+        println!("SPARE 14: |{row}|");
+    }
+
+    #[test]
     fn every_narrow_strip_window_keeps_its_visible_activity() {
         for count in 1..=60 {
             let mut ui = tab_badge_world();
@@ -6871,7 +6883,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_bracket_turns_an_agents_tab_into_its_terminal_and_ctrl_backslash_turns_it_back() {
+    fn attach_turns_an_agents_tab_into_its_terminal_and_ctrl_backslash_turns_it_back() {
         let mut ui = glass();
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".into())),
@@ -6885,8 +6897,8 @@ mod tests {
         ui.move_focus(KeyCode::Left);
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.terminal.is_none(), "Enter alone never attaches");
-        // Crossterm reports 0x1d as Ctrl+5. The same tab shows the terminal: no second tab.
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        // The Attach button opens the terminal in this tab, never a second tab.
+        ui.click(Hit::Attach);
         let terminal = "terminal:agent/example/atlas/builder";
         assert_eq!(tabs(&ui).2[0], vec![terminal.to_owned()]);
         assert_eq!(
@@ -6923,7 +6935,7 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::CloseTerminal))
         );
         // Middle-closing an attached terminal's tab uses the same detach action.
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.effects.clear();
         screen(&ui);
         let tab = ui.frame.borrow().hits.iter()
@@ -6950,6 +6962,96 @@ mod tests {
         assert!(ui.terminal_focused());
     }
 
+    /// The conversation draws no Attach control, so its guidance names keys. Follow the keys the
+    /// rendered hint says, as the outer terminal delivers them, and the terminal must attach.
+    #[test]
+    fn the_conversations_terminal_hint_names_keys_that_attach_it() {
+        use crossterm::event::{Event, KeyEvent, MouseEvent};
+        let wide = |ui: &Ui| {
+            let mut terminal = Terminal::new(TestBackend::new(240, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let key = |ui: &mut Ui, code: KeyCode, modifiers: KeyModifiers| {
+            ui.input_event(Event::Key(KeyEvent::new(code, modifiers)));
+        };
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", agent)]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        // Enter in a conversation keeps its meaning: it never attaches.
+        key(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            ui.terminal.is_none() && !ui.editing,
+            "Enter alone never attaches"
+        );
+        // Expand the band with a click on its drawn toggle.
+        let shown = wide(&ui);
+        let hits = ui.frame.borrow().hits.clone();
+        assert!(
+            !hits.iter().any(|(_, hit)| matches!(hit, Hit::Attach)),
+            "the conversation draws no Attach control: {shown}"
+        );
+        let toggle = hits
+            .iter()
+            .find(|(_, hit)| matches!(hit, Hit::Alert(_, AlertTap::Toggle)))
+            .map(|(rect, _)| *rect)
+            .expect("the band draws its toggle");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            ui.input_event(Event::Mouse(MouseEvent {
+                kind,
+                column: toggle.x,
+                row: toggle.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        let shown = wide(&ui);
+        let route = shown
+            .lines()
+            .find_map(|line| {
+                line.split_once("answer it in the terminal (")
+                    .map(|(_, rest)| rest.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the band says how to reach the terminal: {shown}"));
+        let route = route.split(')').next().unwrap();
+        assert_eq!(route, screens::terminal_route(), "{shown}");
+        // Read the keys back from what is drawn, not from the code that drew them.
+        let (chord, rest) = route
+            .strip_prefix("Ctrl+")
+            .and_then(|route| route.split_once(" then "))
+            .unwrap_or_else(|| panic!("a chord then a key: {route}"));
+        let chord = chord.to_ascii_lowercase().chars().next().unwrap();
+        let action = rest.chars().next().unwrap();
+        key(&mut ui, KeyCode::Char(chord), KeyModifiers::CONTROL);
+        let menu = wide(&ui);
+        assert!(
+            menu.lines()
+                .any(|line| line.contains(&format!(" {action}  Terminal"))),
+            "the actions menu draws the hinted Terminal row: {menu}"
+        );
+        assert!(ui.terminal.is_none(), "opening the menu attaches nothing");
+        key(&mut ui, KeyCode::Char(action), KeyModifiers::NONE);
+        // The conversation's tab turns into its attached terminal, focused and drawn.
+        assert_eq!(tabs(&ui).2[0], vec![format!("terminal:{agent}")]);
+        assert_eq!(
+            ui.terminal.as_ref().map(|view| view.agent.as_str()),
+            Some(agent)
+        );
+        assert!(ui.terminal_focused());
+        assert!(screen(&ui).contains("demo terminal"));
+    }
+
     #[test]
     fn the_leader_lists_what_to_press_and_the_terminal_never_sees_those_keys() {
         let mut ui = glass();
@@ -6957,7 +7059,7 @@ mod tests {
             Pane::Agent(Some("agent/example/atlas/builder".into())),
             Open::Tab,
         );
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        ui.click(Hit::Attach);
         assert!(ui.terminal_focused());
         ui.effects.clear();
         // Ctrl+\ opens the list; nothing is sent to the program and nothing is left.
@@ -7001,7 +7103,7 @@ mod tests {
             Pane::Agent(Some("agent/example/atlas/builder".into())),
             Open::Tab,
         );
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        ui.click(Hit::Attach);
         assert!(ui.terminal_focused());
         ui.effects.clear();
         ctrl(&mut ui, '\\');
@@ -7041,8 +7143,8 @@ mod tests {
         press(&mut ui, KeyCode::Char('c'), KeyModifiers::NONE);
         ui.terminal = None;
         assert_eq!(tabs(&ui).2, vec![vec![format!("terminal:{shell}")]]);
-        // Ctrl+] attaches this shell again, not whichever agent the list has selected.
-        ctrl(&mut ui, ']');
+        // Enter attaches this shell again, not whichever agent the list has selected.
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
             ui.terminal.as_ref().map(|view| view.agent.as_str()),
             Some(shell)
@@ -7067,9 +7169,9 @@ mod tests {
             panic!("the demo has two agents with terminals");
         };
         ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         assert_eq!(ui.terminal.as_ref().map(|view| view.agent.as_str()), Some(second.as_str()));
         assert_eq!(ui.parked.len(), 1, "the first is still attached");
         let shown = screen(&ui);
@@ -7129,9 +7231,9 @@ mod tests {
             panic!("two demo terminals")
         };
         ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         let mut peers = Vec::new();
         for agent in &ids {
             let (client, mut peer) = UnixStream::pair().unwrap();
@@ -8706,7 +8808,7 @@ mod tests {
             Pane::Terminal("agent/example/atlas/builder".into()),
             Open::Right,
         );
-        // Opening a terminal tab never attaches it; Ctrl+] does.
+        // Opening a terminal tab never attaches it; Enter does.
         assert!(ui.terminal.is_none());
         ui.attach_terminal("agent/example/atlas/builder");
         ui.terminal = Some(crate::ui::TerminalView {
@@ -9445,7 +9547,7 @@ mod tests {
         ui.open_in_glass(Pane::Terminal("terminal/example-shell".into()), Open::Tab);
         assert!(ui.terminal.is_none());
         let shown = screen(&ui);
-        assert!(shown.contains("Not attached. Ctrl+] attaches"), "{shown}");
+        assert!(shown.contains("Not attached. Enter attaches"), "{shown}");
         assert!(
             !shown.contains("Message "),
             "no agent's message box: {shown}"

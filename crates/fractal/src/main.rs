@@ -8224,7 +8224,7 @@ async fn fabric_route(
         .with_context(|| format!("this machine is in no fleet to reach `{owner}` through"))?;
     let fabric =
         fabric.with_context(|| format!("this machine has no `fabric` to reach `{owner}` with"))?;
-    let view: fractal_daemon::fleet::FleetView = client.get("/v1/internal/fleet/membership").await?;
+    let view: fractal_daemon::fleet::FleetView = crate::fleet_cli::fleet_read(client, "membership").await?;
     let peer = fractal_daemon::terminal_fabric::owner_peer(&fabric, &view.members, owner)
         .await
         .with_context(|| {

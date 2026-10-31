@@ -3462,6 +3462,78 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
     assert!(state.store.active_mission_runs().unwrap().is_empty());
 }
 
+/// Every internal route the daemon registers, from its router's source, so a new one is covered
+/// without editing a list.
+fn internal_routes() -> Vec<String> {
+    let source = /* sqlite-large-value: allow-for-now lv-hcb8b52f10887 owner=fractal_api_core::api::tests TODO=trace-statement-and-value-representation */ include_str!("../api.rs");
+    let mut routes = std::collections::BTreeSet::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("\"/v1/internal/") {
+        let literal = &rest[start + 1..];
+        let end = literal.find('"').unwrap();
+        routes.insert(literal[..end].to_owned());
+        rest = &literal[end..];
+    }
+    routes.insert(crate::peer::CLIENT_READ_FORWARD_PATH.to_owned());
+    routes.insert(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH.to_owned());
+    // Path parameters, should a route gain one, are given a concrete segment.
+    routes.into_iter().map(|route| route.replace("{id}", "example")).collect()
+}
+
+/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
+/// any method, while this node's replication worker and its operator's CLI, which run in no
+/// harness, pass.
+#[tokio::test]
+async fn internal_routes_refuse_seat_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let routes = internal_routes();
+    assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
+    for route in &routes {
+        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+            let request = || {
+                Request::builder()
+                    .method(method.clone())
+                    .uri(route.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            };
+            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
+            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            assert!(
+                guard_bound_request(request(), None, &state.store).await.is_ok(),
+                "{method} {route} serves a caller in no harness"
+            );
+        }
+    }
+}
+
+/// Through the router: a seat is refused on an internal route before its handler runs, the
+/// worker is served, and a seat reads the fleet's status through its public route.
+#[tokio::test]
+async fn a_seat_reads_fleet_views_through_public_routes_only() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let call = |method: &str, route: &str, bound: bool| {
+        let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
+        if bound {
+            request = request.extension(BoundAgent("agent/own".into()));
+        }
+        app.clone().oneshot(request.body(Body::from(if method == "GET" { "" } else { "{}" })).unwrap())
+    };
+    let refused = call("POST", "/v1/internal/replication/receive", true).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+    assert_eq!(call("GET", "/v1/internal/fleet/status", true).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call("GET", "/v1/internal/fleet/status", false).await.unwrap().status(), StatusCode::OK);
+    for route in ["/v1/fleet/status", "/v1/fleet/membership", "/v1/fleet/admission-residue", "/v1/fleet/invites"] {
+        assert_eq!(call("GET", route, true).await.unwrap().status(), StatusCode::OK, "{route}");
+    }
+}
+
 #[tokio::test]
 async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     use crate::store::message_subscriptions::{PERFORMANCE_DECLARATIONS, PERFORMANCE_REGISTRATION};
@@ -13404,3 +13476,4 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         }
     }
 }
+
