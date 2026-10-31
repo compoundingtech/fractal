@@ -94,14 +94,37 @@ refuse_nix_path() (
 ownership_names=(fractal st3 st stui)
 if $source_preflight; then ownership_names+=(st3-migrate); else ownership_names+=(pty); fi
 for name in "${ownership_names[@]}"; do refuse_nix_path "$bin_dir/$name"; done
+macos_home=
+macos_app=
+if [[ $(uname -s) == Darwin ]]; then
+  macos_home="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}"
+  mkdir -p "$macos_home"
+  macos_home=$(cd "$macos_home" && pwd)
+  macos_app=$(python3 - "$macos_home" "$source_preflight" <<'PY'
+import os
+from pathlib import Path
+import sys
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+app = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH'))
+default = Path(sys.argv[1]) / 'Applications/SmallTalk.app'
+instance = os.environ.get('FRACTAL_INSTANCE')
+if sys.argv[2] == 'true' and instance:
+    # Source installs let the helper choose its instance default; archives
+    # explicitly pass their shared-app default as --app below.
+    default = Path(sys.argv[1]) / '.st-instance' / instance / 'app/SmallTalk.app'
+print(Path(app).expanduser().absolute() if app else default)
+PY
+)
+fi
 # A physical install is owned only with both reverse aliases. Historical installs
 # used the exact fractal -> st3 link; arbitrary executables are never adopted.
 refuse_foreign_fractal() {
-  local canonical="$bin_dir/fractal" target name directory candidate
+  local canonical="$bin_dir/fractal" target name directory candidate destination_directory="$bin_dir"
   if [[ -e $canonical || -L $canonical ]]; then
     if [[ -L $canonical ]]; then
       target=$(readlink "$canonical")
-      [[ $target == st3 || $target == "$bin_dir/st3" ]] || {
+      [[ $target == st3 || $target == "$bin_dir/st3" ||
+        ( -n $macos_app && $target == "$macos_app/Contents/MacOS/fractal" ) ]] || {
         echo "install: refusing to replace foreign fractal command: $canonical" >&2; return 1;
       }
     elif [[ -f $canonical && -x $canonical ]]; then
@@ -119,17 +142,24 @@ refuse_foreign_fractal() {
   # destination still requires positive ownership above.
   [[ -z $instance ]] || return 0
   local -a directories
+  # Match the helper's resolved-parent exclusion without resolving link targets.
+  if [[ -n $macos_app ]]; then destination_directory=$(cd "$bin_dir" && pwd -P); fi
   IFS=: read -ra directories <<< "${PATH:-}"
   for directory in "${directories[@]}"; do
     directory=${directory:-.}
     [[ -d $directory ]] || continue
-    directory=$(cd "$directory" && pwd)
-    [[ $directory != "$bin_dir" ]] || continue
+    if [[ -n $macos_app ]]; then
+      directory=$(cd "$directory" && pwd -P)
+    else
+      directory=$(cd "$directory" && pwd)
+    fi
+    [[ $directory != "$destination_directory" ]] || continue
     candidate="$directory/fractal"
     if [[ -e $candidate || -L $candidate ]]; then
       if [[ -L $candidate ]]; then
         target=$(readlink "$candidate")
-        [[ $target == "$canonical" || $target == "$bin_dir/st3" ]] && continue
+        [[ $target == "$canonical" || $target == "$bin_dir/st3" ||
+          ( -n $macos_app && $target == "$macos_app/Contents/MacOS/fractal" ) ]] && continue
       fi
       echo "install: refusing to install: PATH contains a foreign fractal command: $candidate" >&2
       return 1
@@ -138,8 +168,8 @@ refuse_foreign_fractal() {
 }
 mkdir -p "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
-# The macOS helper recognizes its own signed app links and performs this preflight.
-if [[ $(uname -s) != Darwin ]]; then refuse_foreign_fractal; fi
+# Refuse foreign commands before either version or service-status probes.
+refuse_foreign_fractal
 if $source_preflight; then exit 0; fi
 installed_version() {
   local version
@@ -188,8 +218,6 @@ macos=false
 macos_job=
 macos_locked=false
 macos_lock=
-macos_home=
-macos_app=
 macos_helper="$(cd "$(dirname "$0")" && pwd)/install-macos.py"
 previous_entry_is_unchanged() {
   local previous current
@@ -285,18 +313,6 @@ ln -s fractal "$stage/st3"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 if [[ $(uname -s) == Darwin ]]; then
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-  macos_home="${FRACTAL_MACOS_INSTALL_HOME-${ST_MACOS_INSTALL_HOME:-$HOME}}"
-  mkdir -p "$macos_home"
-  macos_home=$(cd "$macos_home" && pwd)
-  macos_app=$(python3 - "$macos_home" <<'PY'
-import os
-from pathlib import Path
-import sys
-# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-app = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH'))
-print(Path(app).expanduser().absolute() if app else Path(sys.argv[1]) / 'Applications/SmallTalk.app')
-PY
-)
   macos_lock="$(dirname "$macos_app")/.${macos_app##*/}.archive-install.lock"
   mkdir -p "$(dirname "$macos_app")"
   # Different bin directories can still install the same app. This is separate

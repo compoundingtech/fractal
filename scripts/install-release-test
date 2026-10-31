@@ -244,6 +244,42 @@ if os.environ.get('INSTALL_HELPER_FAIL'):
     raise SystemExit(1)
 print('app receipt')
 PY
+# Direct Darwin archives must refuse foreign commands before either probe.
+# Each executable writes a marker for ANY invocation, including --version.
+for kind in file link one-alias; do
+  bin="$work/mac-collision-$kind"
+  mkdir -p "$bin"
+  export INSTALL_PROBE_MARKER="$work/mac-probed-$kind"
+  probe="$work/mac-foreign-$kind"
+  printf '#!/bin/sh\n: > "$INSTALL_PROBE_MARKER"\necho foreign\n' > "$probe"
+  chmod +x "$probe"
+  cp -p "$probe" "$probe.saved"
+  if [[ $kind == link ]]; then
+    ln -s "$probe" "$bin/fractal"
+  else
+    cp -p "$probe" "$bin/fractal"
+    ln "$bin/fractal" "$work/mac-original-$kind"
+    if [[ $kind == one-alias ]]; then ln -s fractal "$bin/st"; fi
+  fi
+  original_identity=$(stat -f '%d:%i' "$bin/fractal")
+  if install_fixture --bin-dir "$bin" --quiet > "$work/mac-collision.out" 2> "$work/mac-collision.err"; then exit 1; fi
+  grep -q 'refusing to replace foreign fractal command' "$work/mac-collision.err"
+  test ! -s "$work/mac-collision.out"
+  test ! -e "$INSTALL_PROBE_MARKER"
+  test ! -e "$bin/pty"
+  test ! -e "$bin/st3"
+  test "$(stat -f '%d:%i' "$bin/fractal")" = "$original_identity"
+  cmp "$probe" "$probe.saved"
+  if [[ $kind == link ]]; then
+    test "$(readlink "$bin/fractal")" = "$probe"
+  else
+    test "$bin/fractal" -ef "$work/mac-original-$kind"
+    cmp "$bin/fractal" "$probe"
+  fi
+done
+unset INSTALL_PROBE_MARKER
+# The physical command with BOTH reverse aliases below is owned (also the
+# Home Manager layout on Darwin); the real helper's later refusal is unchanged.
 FRACTAL_INSTANCE= ST_INSTANCE=masked-old install_fixture --bin-dir "$work/installed" --quiet > "$work/quiet.out" 2> "$work/quiet.err"
 test ! -s "$work/quiet.out"
 test ! -s "$work/quiet.err"
@@ -252,6 +288,36 @@ grep -q 'app receipt' "$work/notices.out"
 if INSTALL_HELPER_FAIL=1 install_fixture --bin-dir "$work/installed" --quiet > "$work/failure.out" 2> "$work/failure.err"; then exit 1; fi
 test ! -s "$work/failure.out"
 grep -q 'helper failure' "$work/failure.err"
+# Owned signed-app and retained legacy command links still reach the helper
+# and report the old CLI version. A custom tilde app path is expanded exactly
+# as by the helper; canonical link target spelling remains literal.
+for form in app custom legacy absolute-legacy; do
+  bin="$work/mac-owned-$form"
+  app="${FRACTAL_MACOS_INSTALL_HOME}/Applications/SmallTalk.app"
+  configured_app=$app
+  if [[ $form == custom ]]; then
+    app="$HOME/Custom Applications/Fractal.app"
+    configured_app='~/Custom Applications/Fractal.app'
+  fi
+  mkdir -p "$bin" "$app/Contents/MacOS"
+  printf '#!/bin/sh\necho old-owned\n' > "$app/Contents/MacOS/fractal"
+  chmod +x "$app/Contents/MacOS/fractal"
+  case $form in
+    app | custom)
+      ln -s "$app/Contents/MacOS/fractal" "$bin/fractal"
+      ln -s fractal "$bin/st3" ;;
+    legacy | absolute-legacy)
+      ln -s "$app/Contents/MacOS/fractal" "$bin/st3"
+      target=st3
+      if [[ $form == absolute-legacy ]]; then target="$bin/st3"; fi
+      ln -s "$target" "$bin/fractal" ;;
+  esac
+  ln -s fractal "$bin/st"
+  FRACTAL_MACOS_APP_PATH="$configured_app" install_fixture --bin-dir "$bin" > "$work/mac-owned.out"
+  grep -q 'Upgrading Fractal old-owned → new-fractal' "$work/mac-owned.out"
+  grep -q 'app receipt' "$work/mac-owned.out"
+  test "$("$bin/fractal" --version)" = old-owned
+done
 printf '#!/bin/sh\necho Linux\n' > "$work/platform-bin/uname"
 # Fail one rename after fractal was replaced, then allow real rollback renames.
 real_mv=$(command -v mv)

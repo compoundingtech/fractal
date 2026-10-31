@@ -152,6 +152,122 @@ class Installer(unittest.TestCase):
                 self.assertFalse(m.foreign_fractal_on_path(destination, self.home))
                 candidate.unlink()
 
+    def test_release_darwin_ownership_table_matches_helper(self):
+        repo = Path(__file__).resolve().parent.parent
+        fakebin = self.home / 'platform-bin'
+        fakebin.mkdir()
+        uname = fakebin / 'uname'
+        uname.write_text('#!/bin/sh\necho Darwin\n')
+        uname.chmod(0o755)
+        # Expose only tools, never an inherited host fractal command.
+        for name in ('bash', 'python3', 'dirname', 'basename', 'readlink', 'mkdir'):
+            (fakebin / name).symlink_to(shutil.which(name, path=self.original_path))
+        bin_dir = self.home / 'commands'
+        bin_dir.mkdir()
+        canonical = bin_dir / 'fractal'
+        other = self.home / 'other-bin'
+        other.mkdir()
+        parent_alias = self.home / 'commands-alias'
+        parent_alias.symlink_to(bin_dir, target_is_directory=True)
+        for mode in ('default', 'custom', 'instance'):
+            # --source-preflight follows the source helper's instance default,
+            # unlike the archive wrapper's later explicit shared --app.
+            app = (self.home / 'custom/Fractal.app' if mode == 'custom'
+                   else self.home / '.st-instance/table/app/SmallTalk.app' if mode == 'instance'
+                   else self.home / 'Applications/SmallTalk.app')
+            environment = dict(os.environ, HOME=str(self.home),
+                               FRACTAL_MACOS_INSTALL_HOME=str(self.home),
+                               FRACTAL_MACOS_APP_PATH=str(app),
+                               FRACTAL_INSTANCE='table' if mode == 'instance' else '',
+                               ST_INSTANCE='')
+            if mode != 'custom':
+                environment.pop('FRACTAL_MACOS_APP_PATH')
+                environment.pop('ST_MACOS_APP_PATH', None)
+            instance = environment['FRACTAL_INSTANCE'] or None
+            app_binary = str(app / 'Contents/MacOS/fractal')
+            # (form, raw target, shell ownership, helper ownership)
+            rows = [
+                ('absent', None, True, True),
+                ('link', 'st3', True, True),
+                ('link', str(bin_dir / 'st3'), True, True),
+                ('link', app_binary, True, True),
+                ('link', str(app / 'Contents/MacOS/st3'), False, False),
+                ('link', str(app / 'Contents/MacOS/../MacOS/fractal'), False, False),
+                ('link', '/missing/foreign-st3', False, False),
+                ('file', None, False, False),
+                ('one-alias', None, False, False),
+                # HM's physical+two-alias marker is owned by the early guard;
+                # helper physical->app conversion refusal is inherited.
+                ('physical', None, True, False),
+                ('directory', None, False, False),
+            ]
+            for form, target, shell_owned, helper_owned in rows:
+                with self.subTest(mode=mode, form=form, target=target):
+                    if form == 'link':
+                        canonical.symlink_to(target)
+                    elif form == 'directory':
+                        canonical.mkdir()
+                    elif form != 'absent':
+                        canonical.write_text('#!/bin/sh\nexit 99\n')
+                        canonical.chmod(0o755)
+                        if form in ('physical', 'one-alias'):
+                            (bin_dir / 'st').symlink_to('fractal')
+                        if form == 'physical':
+                            (bin_dir / 'st3').symlink_to(str(canonical))
+                    env = dict(environment, PATH=str(fakebin))
+                    result = subprocess.run(
+                        [str(repo / 'scripts/install-release'), '--source-preflight',
+                         '--bin-dir', str(bin_dir)], env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, shell_owned, result.stderr)
+                    with patch.multiple(m, APP=str(app), BIN_DIR=str(bin_dir), INSTANCE=instance):
+                        actual = not (canonical.exists() or canonical.is_symlink()) or m.owns_fractal(canonical, self.home)
+                        self.assertEqual(actual, helper_owned)
+                    if canonical.is_dir() and not canonical.is_symlink():
+                        canonical.rmdir()
+                    else:
+                        canonical.unlink(missing_ok=True)
+                    for name in ('st', 'st3'):
+                        (bin_dir / name).unlink(missing_ok=True)
+            # PATH targets share the helper's literal comparisons. Instances
+            # bypass this scan, but never bypass the destination table above.
+            canonical.symlink_to('st3')
+            candidate = other / 'fractal'
+            path_rows = [
+                (str(canonical), True), (str(bin_dir / 'st3'), True),
+                (app_binary, True), ('st3', False),
+                (str(app / 'Contents/MacOS/st3'), False),
+                ('/missing/foreign', False), (None, False),
+            ]
+            for target, owned in path_rows:
+                with self.subTest(mode=mode, path_target=target):
+                    if target is None:
+                        candidate.write_text('#!/bin/sh\nexit 99\n')
+                        candidate.chmod(0o755)
+                    else:
+                        candidate.symlink_to(target)
+                    path = os.pathsep.join([str(other), str(fakebin)])
+                    env = dict(environment, PATH=path)
+                    result = subprocess.run(
+                        [str(repo / 'scripts/install-release'), '--source-preflight',
+                         '--bin-dir', str(bin_dir)], env=env, capture_output=True, text=True)
+                    expected = owned or instance is not None
+                    self.assertEqual(result.returncode == 0, expected, result.stderr)
+                    with patch.multiple(m, APP=str(app), BIN_DIR=str(bin_dir), INSTANCE=instance), \
+                            patch.dict(os.environ, PATH=path):
+                        self.assertEqual(not m.foreign_fractal_on_path(canonical, self.home), expected)
+                    candidate.unlink()
+            # A PATH spelling of the destination's physical directory is not
+            # an unrelated command, including a literal-st3 canonical link.
+            path = os.pathsep.join([str(parent_alias), str(fakebin)])
+            result = subprocess.run(
+                [str(repo / 'scripts/install-release'), '--source-preflight', '--bin-dir', str(bin_dir)],
+                env=dict(environment, PATH=path), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with patch.multiple(m, APP=str(app), BIN_DIR=str(bin_dir), INSTANCE=instance), \
+                    patch.dict(os.environ, PATH=path):
+                self.assertFalse(m.foreign_fractal_on_path(canonical, self.home))
+            canonical.unlink()
+
     def command(self, args):
         args = list(map(str, args))
         self.calls.append(args)
@@ -827,20 +943,31 @@ class Installer(unittest.TestCase):
         (fakebin / 'uname').write_text('#!/bin/sh\necho Darwin\n')
         helper = fakebin / 'python3'
         helper.write_text('#!' + sys.executable + '\n' +
-            'import os,pathlib,sys\n' +
+            'import os,pathlib,shutil,sys\n' +
             'if sys.argv[1] == "-": os.execv(sys.executable, [sys.executable] + sys.argv[1:])\n' +
             'source=pathlib.Path(sys.argv[sys.argv.index("--from")+1])\n' +
             'destination=pathlib.Path(sys.argv[sys.argv.index("--bin-dir")+1])\n' +
+            'instance=os.environ.get("FRACTAL_INSTANCE")\n' +
+            'if instance:\n' +
+            '    app=pathlib.Path(os.environ["ST_MACOS_INSTALL_HOME"])/".st-instance"/instance/"app/SmallTalk.app/Contents/MacOS"\n' +
+            '    app.mkdir(parents=True,exist_ok=True)\n' +
+            '    shutil.copy2(source/"fractal",app/"fractal")\n' +
+            '    source=app\n' +
             'for name in ["fractal"]:\n' +
+            '    (destination/name).unlink(missing_ok=True)\n' +
             '    (destination/name).symlink_to(source/name)\n' +
             'for name in ["st", "st3"]:\n' +
+            '    (destination/name).unlink(missing_ok=True)\n' +
             '    (destination/name).symlink_to("fractal")\n')
         for path in fakebin.iterdir():
             path.chmod(0o755)
+        for name in ('bash', 'dirname', 'basename', 'readlink', 'mkdir', 'mktemp',
+                     'ln', 'cp', 'chmod', 'mv', 'rm', 'rmdir', 'stat', 'tr'):
+            (fakebin / name).symlink_to(shutil.which(name, path=self.original_path))
         for name in ['fractal', 'st3-migrate', 'pty']:
             path = self.source / name
             path.write_text('#!/bin/sh\nexit 0\n'); path.chmod(0o755)
-        env = dict(os.environ, PATH=str(fakebin) + os.pathsep + self.original_path,
+        env = dict(os.environ, PATH=str(fakebin),
                    ST_MACOS_INSTALL_HOME=str(self.home))
         first = self.home / 'source-bin'
         subprocess.run([str(repo / 'scripts/install'), '--from', str(self.source), '--bin-dir', str(first)],
@@ -862,6 +989,15 @@ class Installer(unittest.TestCase):
             self.assertFalse((destination / 'stui').is_symlink())
             self.assertEqual(os.readlink(destination / 'st'), 'fractal')
             self.assertFalse((destination / 'st3-migrate').is_symlink())
+        # A second source install must accept its own instance app link, not
+        # mistake it for the archive wrapper's shared-app --app override.
+        instance_bin = self.home / 'source-instance-bin'
+        command = [str(repo / 'scripts/install'), '--instance', 'upgrade',
+                   '--from', str(self.source), '--bin-dir', str(instance_bin)]
+        for _ in range(2):
+            subprocess.run(command, env=env, check=True, stdout=subprocess.PIPE)
+        self.assertEqual(os.readlink(instance_bin / 'fractal'),
+                         str(self.home / '.st-instance/upgrade/app/SmallTalk.app/Contents/MacOS/fractal'))
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native macOS signing and atomic directory exchange')
     def test_native_ad_hoc_install_upgrade_and_rollback(self):
