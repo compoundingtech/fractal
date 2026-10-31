@@ -314,6 +314,25 @@ pub fn steps(
                 None,
             ));
         }
+        // A step in hand says what its holder declared it waits on, or that it has stalled.
+        if step.state == StepState::Working
+            && let Some(metadata) = mission.step_metadata.get(&step.id)
+        {
+            if let Some(waiting_on) = metadata.waiting_on.as_deref() {
+                steps.line(Line::from(vec![
+                    span("      ", palette.dim()),
+                    span(format!("waiting on {waiting_on}"), palette.soft()),
+                ]));
+            } else if let Some(stalled) = metadata.stalled.as_deref() {
+                steps.line(Line::from(vec![
+                    span("      ", palette.dim()),
+                    span(
+                        format!("stalled {stalled} ago: no progress and no declared wait"),
+                        fg(palette.working),
+                    ),
+                ]));
+            }
+        }
         // A step whose holder sat idle with nothing set to wake it says when st nudged it.
         if step.state == StepState::Working
             && let Some(nudged) = mission

@@ -55,9 +55,19 @@ const activityOf = (agent: DecodedAgent): Agent['activity'] => {
   return 'idle'
 }
 
+/** A held step's declared wait, or that it stalled: st names only one of the two. */
+const holdOf = (work: NonNullable<DecodedAgent['current_work']>[number]): string | undefined =>
+  Option.match(work.waiting_on ?? Option.none(), {
+    onSome: (target) => `waiting on ${target}`,
+    onNone: () =>
+      Option.isSome(work.stalled_at ?? Option.none()) ? 'stalled: no progress and no declared wait' : undefined,
+  })
+
 const statusOf = (agent: DecodedAgent): string => {
   const work = agent.current_work?.[0]
-  const title = work === undefined ? undefined : Option.getOrUndefined(work.title)
+  const named = work === undefined ? undefined : Option.getOrUndefined(work.title)
+  const hold = work === undefined ? undefined : holdOf(work)
+  const title = named === undefined ? hold : hold === undefined ? named : `${named} · ${hold}`
   return (
     Option.getOrUndefined(agent.fault) ??
     (agent.state === 'down'

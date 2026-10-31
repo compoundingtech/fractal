@@ -4,7 +4,7 @@ use super::*;
 
 pub const QUERY: &str =
     "SELECT s.subject, s.run_id, r.mission_id, s.step_path, s.title, s.goals, s.status,
-                    s.updated_at_unix_ms
+                    s.updated_at_unix_ms, s.attempt
              FROM step_runs s
              JOIN mission_runs r ON r.id=s.run_id
              WHERE s.subject IN (SELECT value FROM json_each(?1))";
@@ -17,6 +17,7 @@ pub fn read(
     if subjects.is_empty() {
         return Ok(BTreeMap::new());
     }
+    let now = now_ms();
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4e3c47b4ff2b owner=fractal_store::store::step_labels TODO=trace-statement-and-value-representation */ QUERY)?;
     statement
         .query_map([serde_json::to_string(subjects)?], |row| {
@@ -29,11 +30,23 @@ pub fn read(
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, String>(7)?,
+                row.get::<_, u32>(8)?,
             ))
         })?
         .map(|row| {
-            let (subject, run, mission, path, title, goals, status, updated_at) = row?;
+            let (subject, run, mission, path, title, goals, status, updated_at, attempt) = row?;
             let goals: Vec<String> = serde_json::from_str(&goals)?;
+            // A held step names its open declared wait, or when it stalled: two lookups of the
+            // step's newest claims, only for steps in hand.
+            let held = matches!(status.as_str(), "claimed" | "working");
+            let waiting = held
+                .then(|| declared_waits::declared_wait_at(connection, &subject, attempt, now))
+                .transpose()?
+                .flatten();
+            let stalled_at = (held && waiting.is_none())
+                .then(|| quiet_claims::stalled_at(connection, &subject, attempt, now))
+                .transpose()?
+                .flatten();
             Ok((
                 subject,
                 StepLabel {
@@ -44,6 +57,8 @@ pub fn read(
                     goal: goals.into_iter().next(),
                     status,
                     updated_at_unix_ms: updated_at.parse()?,
+                    waiting_on: waiting.as_ref().map(declared_waits::describe_wait),
+                    stalled_at_unix_ms: stalled_at,
                 },
             ))
         })

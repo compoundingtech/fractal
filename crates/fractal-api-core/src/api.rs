@@ -3078,6 +3078,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             "id":id, "mission_id":step.mission, "mission_run_id":step.run,
             "path":step.path, "title":step.title, "goal":step.goal,
             "state":client_work_state(&step.status), "since":client_timestamp(step.updated_at_unix_ms),
+            "waiting_on":step.waiting_on, "stalled_at":step.stalled_at_unix_ms.map(client_timestamp),
         }))
         };
         let mut refs = subjects.into_iter().map(|id| {

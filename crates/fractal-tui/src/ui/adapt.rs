@@ -745,6 +745,31 @@ fn agent_state(agent: &fractal_client::Agent) -> AgentState {
     }
 }
 
+/// What an agent's held step last reported, led by what it waits on or that it stalled: st
+/// names one of the two only while the step is held. A holder with no session says so instead.
+fn held_progress(missions: &[Mission], work: &fractal_client::WorkLabel, now: &str) -> Option<String> {
+    let reported = step_progress(missions, &work.id);
+    if let Some(since) = work.holder_down_since.as_deref() {
+        return Some(match reported {
+            Some(line) => format!("Held by a seat with no session since {since}. Last reported: {line}"),
+            None => format!("Held by a seat with no session since {since}"),
+        });
+    }
+    let hold = work
+        .waiting_on
+        .as_deref()
+        .map(|on| format!("waiting on {on}"))
+        .or_else(|| {
+            work.stalled_at
+                .as_deref()
+                .map(|at| format!("stalled {} ago: no progress and no declared wait", age(at, now)))
+        });
+    match (hold, reported) {
+        (Some(hold), Some(progress)) => Some(format!("{hold} · {progress}")),
+        (hold, progress) => hold.or(progress),
+    }
+}
+
 #[cfg(test)]
 fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
     agents_at(model, missions, &chrono::Utc::now().to_rfc3339())
@@ -783,17 +808,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
                     mail_custody: agent.mail_custody.as_ref().map(|custody| format!("retired; mail held for {}", custody.successor)),
-                    progress: work
-                        .and_then(|work| {
-                            let reported = step_progress(missions, &work.id);
-                            match work.holder_down_since.as_deref() {
-                                Some(since) => Some(match reported {
-                                    Some(line) => format!("Held by a seat with no session since {since}. Last reported: {line}"),
-                                    None => format!("Held by a seat with no session since {since}"),
-                                }),
-                                None => reported,
-                            }
-                        }),
+                    progress: work.and_then(|work| held_progress(missions, work, now)),
                     goal: work.and_then(|work| work.goal.as_deref().map(clean_message_text)),
                     claimed: work.map(|work| format!("{} ago", age(&work.since, now))),
                     next: agent
@@ -2169,6 +2184,8 @@ mod tests {
                 blocked_reason: None,
                 last_progress: Some("  Tests pass on\nmain; opening the PR \n".into()),
                 nudged: None,
+                waiting_on: None,
+                stalled: None,
             },
         );
         mission.step_metadata.insert(
@@ -2850,7 +2867,7 @@ mod tests {
                 ]),
             ],
         })]);
-        model.agents = window(vec![serde_json::json!({
+        let mut keeper = serde_json::json!({
             "id": "agent/example/harbor/keeper", "kind": "agent", "revision": "r2",
             "updated_at": "2026-09-29T09:59:00Z", "name": "fleet/harbor/keeper",
             "state": "running", "reachability": "local", "harness_state": "working",
@@ -2863,7 +2880,8 @@ mod tests {
             "next_work": label("step-run/audit-1/report", "report", "ready"),
             "upcoming_work": [label("step-run/audit-1/report", "report", "ready")],
             "under": [],
-        })]);
+        });
+        model.agents = window(vec![keeper.clone()]);
         assert!(model.work.items.is_empty() && model.runtimes.items.is_empty());
         let world = world(&model, "person/avery", &Extras::default());
 
@@ -2886,6 +2904,20 @@ mod tests {
         );
         assert_eq!(agent.details.queue, ["fleet/harbor · Audit › report"]);
         assert_eq!(world.host, "harbor");
+
+        // The held step's declared wait leads its holder's status line.
+        let mut held = label("step-run/audit-1/scan", "scan", "claimed");
+        held["waiting_on"] = serde_json::json!("pull request acme/harbor#7");
+        keeper["current_work"] = serde_json::json!([held]);
+        model.agents = window(vec![keeper]);
+        let world = super::world(&model, "person/avery", &Extras::default());
+        let Load::Ready(agents) = &world.agents else {
+            panic!("agents load from the agents window alone")
+        };
+        assert_eq!(
+            agents[0].details.progress.as_deref(),
+            Some("waiting on pull request acme/harbor#7")
+        );
     }
 
     #[test]

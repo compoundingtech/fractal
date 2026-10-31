@@ -3693,6 +3693,62 @@ mod tree_tests {
     }
 
     #[test]
+    fn a_working_step_says_what_it_waits_on_or_that_it_stalled() {
+        let mut world = crate::ui::demo::world();
+        let Load::Ready(missions) = &mut world.missions else {
+            panic!("the demo world has missions");
+        };
+        let mission = missions
+            .iter_mut()
+            .find(|mission| mission.steps.iter().any(|step| step.state == StepState::Working))
+            .unwrap();
+        let step = mission
+            .steps
+            .iter()
+            .find(|step| step.state == StepState::Working)
+            .unwrap()
+            .id
+            .clone();
+        let id = mission.id.clone();
+        let shown = |world: &World| {
+            mission_detail(world, Some(&id), 120, "", None, &Default::default())
+                .lines
+                .iter()
+                .map(text::plain)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let set = |world: &mut World, waiting_on: Option<&str>, stalled: Option<&str>| {
+            let Load::Ready(missions) = &mut world.missions else {
+                unreachable!()
+            };
+            let metadata = missions
+                .iter_mut()
+                .find(|mission| mission.id == id)
+                .unwrap()
+                .step_metadata
+                .entry(step.clone())
+                .or_default();
+            metadata.waiting_on = waiting_on.map(Into::into);
+            metadata.stalled = stalled.map(Into::into);
+        };
+        assert!(!shown(&world).contains("waiting on"));
+        set(&mut world, Some("pull request acme/garden#12 · 2h"), None);
+        assert!(
+            shown(&world).contains("waiting on pull request acme/garden#12 · 2h"),
+            "{}",
+            shown(&world)
+        );
+        set(&mut world, None, Some("40m"));
+        let detail = shown(&world);
+        assert!(
+            detail.contains("stalled 40m ago: no progress and no declared wait"),
+            "{detail}"
+        );
+        assert!(!detail.contains("waiting on"));
+    }
+
+    #[test]
     fn a_request_holding_a_json_report_shows_what_happened_and_folds_the_rest() {
         let text = r#"The deploy finished: {"status":"failed","error":"unit st3.service did not start","commit":"8821eced","host":"willow","attempt":2,"log":"/var/log/x","duration_ms":1234,"members":["maple","cedar"],"plan":{"a":1},"notes":"long\nnotes"}"#;
         let shown = report(text, 60)

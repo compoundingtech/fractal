@@ -1307,7 +1307,11 @@ clock runs again. A pull request's watch already told the seat that it merged or
 a step or a time sends a message of its own, once.
 
 The step shows `waiting on` its target while the wait is open: `st work show` prints
-`Waiting on:`. A step with an open declared wait is not [idle-holding](#idle-holders).
+`Waiting on:`; stui's mission view and the phone's mission screen print `waiting on` under the
+step; and the agent rows in stui, the phone and the web name it beside the step the agent holds.
+The client contract carries it as `waiting_on` (and `waiting_since`) on mission steps and on the
+agents' `current_work` labels. A step with an open declared wait is not
+[idle-holding](#idle-holders).
 
 A declared wait stops the execution clock like any wait: for what is left of the attempt's 12h
 wait budget, or until a time target, unless `--for` says less. When the budget is spent the wait
@@ -1402,7 +1406,10 @@ faults are: record progress, declare the wait, ask, or release. Fifteen minutes 
 to wake it has already brought one [idle nudge](#idle-holders).
 
 Thirty minutes after the fault, with no answer, the step is stalled. `st work show` prints
-`Stalled:`, the work resource carries `stalled_at_unix_ms`, and the step counts toward the
+`Stalled:`, the work resource carries `stalled_at_unix_ms`, mission steps and the agents'
+`current_work` labels carry `stalled_at`, stui's mission view and the phone's mission screen print
+`stalled … ago` under the step, the agent rows in stui, the phone and the web say `stalled` beside
+the step the agent holds, and the step counts toward the
 `stalled-runs` target that `st doctor` checks (`slo/targets.toml`). A second fault goes to the
 run's report-to, else to its requester when that is an agent, else to the operator.
 

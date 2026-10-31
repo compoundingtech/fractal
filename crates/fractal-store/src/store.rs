@@ -2126,6 +2126,10 @@ pub struct StepLabel {
     pub goal: Option<String>,
     pub status: String,
     pub updated_at_unix_ms: u128,
+    /// What a held step's holder declared it waits on, while that wait is open.
+    pub waiting_on: Option<String>,
+    /// When a held step became stalled, while it is.
+    pub stalled_at_unix_ms: Option<u128>,
 }
 
 /// A kept agent status: the snapshot it answers, the agent projection index it was reduced at,

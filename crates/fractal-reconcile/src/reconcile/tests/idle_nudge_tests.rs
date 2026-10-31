@@ -1228,3 +1228,47 @@ fn a_seat_waiting_on_a_merge_it_declared_is_never_faulted() {
     idle.idle_until(13 * HOUR + MINUTE);
     assert_eq!(idle.faults("step-quiet", &step).len(), 1);
 }
+
+#[test]
+fn a_held_steps_label_and_mission_card_name_its_wait_then_its_stall() {
+    let idle = fixture();
+    reported(&idle);
+    let step = idle.hold("watched", "labels");
+    let run = idle.view(&step).run;
+    let label = |idle: &Idle| {
+        idle.seat
+            .store
+            .step_labels(std::slice::from_ref(&step))
+            .unwrap()
+            .remove(&step)
+            .unwrap()
+    };
+    let card = |idle: &Idle| {
+        idle.seat
+            .store
+            .mission_step_preview(&run)
+            .unwrap()
+            .2
+            .into_iter()
+            .find(|candidate| candidate.subject == step)
+            .unwrap()
+    };
+    assert_eq!(label(&idle).waiting_on, None);
+
+    idle.wait_on(&step, "1h");
+    let waiting = label(&idle).waiting_on.unwrap();
+    assert!(waiting.starts_with("time "), "{waiting}");
+    assert_eq!(card(&idle).waiting_on.unwrap().kind, "time");
+
+    // The wait ends at its time; four quiet hours later the step is stalled.
+    idle.harness("idle");
+    idle.idle_until(HOUR + MINUTE);
+    assert_eq!(label(&idle).waiting_on, None);
+    idle.idle_until(4 * HOUR + 32 * MINUTE);
+    assert!(label(&idle).stalled_at_unix_ms.is_some());
+    assert!(card(&idle).stalled_at_unix_ms.is_some());
+
+    idle.progress(&step, "Back at it");
+    assert_eq!(label(&idle).stalled_at_unix_ms, None);
+    assert_eq!(card(&idle).stalled_at_unix_ms, None);
+}

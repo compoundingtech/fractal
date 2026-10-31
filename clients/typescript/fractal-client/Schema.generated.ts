@@ -1045,8 +1045,12 @@ export const WorkLabel = /*#__PURE__*/ (() => Schema.Struct({
   "mission_run_id": MissionRunId,
   "path": Schema.String,
   "since": Timestamp,
+  /** When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves. */
+  "stalled_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves." }),
   "state": WorkState,
-  "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+  "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`. */
+  "waiting_on": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`." })
 }).annotate({ identifier: "WorkLabel" }))()
 export type WorkLabel = typeof WorkLabel.Type
 export type WorkLabelEncoded = typeof WorkLabel.Encoded
@@ -3086,8 +3090,14 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   /** Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress. */
   "progress_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "Current attempt latest nonempty work.progress summary time; not lease renewal or seat activity. Lightweight mission list cards are unhydrated and return null, not proof of no progress." }),
   "since": Timestamp,
+  /** When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves. */
+  "stalled_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves." }),
   "state": WorkState,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`. */
+  "waiting_on": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`." }),
+  /** When the open declared wait began. */
+  "waiting_since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When the open declared wait began." }),
   "wake": Schema.OptionFromOptionalNullOr(MissionWake, NULL_NONE),
   /** The deferral's blocked reason, or the observed wake failure when no deferral reason exists. */
   "wake_reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The deferral's blocked reason, or the observed wake failure when no deferral reason exists." })

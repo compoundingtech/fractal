@@ -3364,6 +3364,9 @@ fn mission_resources_filtered(
                                     "wake": wake,
                                     "claim_expires_at": step.claim_expires_at_unix_ms.map(client_timestamp),
                                     "nudged_at": step.nudged_at_unix_ms.map(client_timestamp),
+                                    "waiting_on": step.waiting_on.as_ref().map(crate::store::describe_wait),
+                                    "waiting_since": step.waiting_on.as_ref().map(|wait| client_timestamp(wait.since_unix_ms)),
+                                    "stalled_at": step.stalled_at_unix_ms.map(client_timestamp),
                                 })
                             })
                             .collect::<Vec<_>>()

@@ -1564,6 +1564,15 @@ pub struct MissionStep {
     /// When st last nudged this held step's holder for idling with nothing set to wake it.
     #[serde(default)]
     pub nudged_at: Option<String>,
+    /// What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
+    /// When the open declared wait began.
+    #[serde(default)]
+    pub waiting_since: Option<String>,
+    /// When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves.
+    #[serde(default)]
+    pub stalled_at: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionWake {
@@ -1631,6 +1640,12 @@ pub struct WorkLabel {
     pub since: String,
     #[serde(default)]
     pub holder_down_since: Option<String>,
+    /// What the holder declared this held step waits on with `work wait --on`, while that wait is open, such as `pull request OWNER/REPO#N`.
+    #[serde(default)]
+    pub waiting_on: Option<String>,
+    /// When this held step became stalled: no progress past its run's stalled-after and 30 minutes after its holder's fault, and no open declared wait. Absent once its holder moves.
+    #[serde(default)]
+    pub stalled_at: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Work {

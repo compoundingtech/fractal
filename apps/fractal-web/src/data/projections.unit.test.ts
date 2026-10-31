@@ -477,3 +477,39 @@ test('retains current and bounded upcoming work and invalidates every sidebar wo
   expect(project.fleetFromAgents([decode({ ...wire, upcoming_work: [] })]).agents[0]?.upcomingWork).toEqual([])
   expect(project.fleetFromAgents([decode({ ...wire, current_work: [] })]).agents[0]?.mission).toBeUndefined()
 })
+
+test.each([
+  [{}, 'Plant the beds'],
+  [{ waiting_on: 'pull request acme/garden#12' }, 'Plant the beds · waiting on pull request acme/garden#12'],
+  [{ stalled_at: '2026-10-04T11:00:00.000Z' }, 'Plant the beds · stalled: no progress and no declared wait'],
+])('an agent holding a step says what it waits on or that it stalled (%o)', (hold, status) => {
+  const held = openAgent(decodeUnknownSync(
+    Agent,
+    'strict',
+  )({
+    kind: 'agent',
+    id: 'agent/gardener',
+    name: 'Gardener',
+    host_id: 'host/example',
+    runtime_ids: [],
+    reachability: 'reachable',
+    state: 'running',
+    harness_state: 'idle',
+    blocked_on: null,
+    fault: null,
+    revision: '1',
+    updated_at: '2026-10-04T12:00:00.000Z',
+    current_work_ids: ['step-run/beds/plant'],
+    current_work: [{
+      id: 'step-run/beds/plant',
+      mission_id: 'mission/garden',
+      mission_run_id: 'mission-run/beds',
+      path: 'plant',
+      title: 'Plant the beds',
+      state: 'claimed',
+      since: '2026-10-04T08:00:00.000Z',
+      ...hold,
+    }],
+  } satisfies AgentEncoded))
+  expect(fleetFromAgents([held]).agents[0]?.status).toBe(status)
+})
