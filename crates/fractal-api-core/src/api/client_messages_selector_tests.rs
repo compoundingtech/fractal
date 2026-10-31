@@ -586,6 +586,18 @@ fn benchmark_client_messages_selector_migration_copy() {
 
 #[test]
 fn client_messages_selector_non_lifecycle_status_does_not_churn_headers() {
+    assert_non_lifecycle_status_does_not_churn_headers(false);
+}
+
+#[test]
+fn client_messages_selector_status_parity_waits_for_a_fold_its_commit_left_pending() {
+    // A commit folds at most BACKFILL_SUBJECTS pending subjects, in subject order. Sending that many
+    // messages whose subjects sort first in the same transaction leaves this one pending, as an
+    // over-budget fold on a loaded host does; a page read then would show the header before it.
+    assert_non_lifecycle_status_does_not_churn_headers(true);
+}
+
+fn assert_non_lifecycle_status_does_not_churn_headers(crowd_the_fold: bool) {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("claims.sqlite"), "selector-field-regression").unwrap();
     for (kind, fields) in [
@@ -596,13 +608,31 @@ fn client_messages_selector_non_lifecycle_status_does_not_churn_headers() {
             ("status".into(), json!("accepted")),
         ])),
     ] {
-        store.append_claim(&ClaimInput {
-            subject: subject(0), kind: kind.into(), actor: Some(ACTOR.into()), fields,
-            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
-        }).unwrap();
+        if crowd_the_fold && kind == "publication.operation" {
+            let mut writer = store.connection.write();
+            let tx = writer.transaction().unwrap();
+            for index in 0..crate::store::client_messages::BACKFILL_SUBJECTS {
+                append_claim_record_tx(&tx, "selector-field-regression", &format!("message/crowd-{index:05}"),
+                    "message.sent", Some(ACTOR), &json!({"fields": sent_fields(index + 1)}), &[], None).unwrap();
+            }
+            append_claim_record_tx(&tx, "selector-field-regression", &subject(0), kind, Some(ACTOR),
+                &json!({"fields": fields}), &[], None).unwrap();
+            tx.commit().unwrap();
+            drop(writer);
+            assert!(store.client_message_selectors_pending().unwrap(),
+                "the crowded commit must leave this subject's fold pending");
+        } else {
+            store.append_claim(&ClaimInput {
+                subject: subject(0), kind: kind.into(), actor: Some(ACTOR.into()), fields,
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        // A commit folds selectors for at most 10 ms of wall time; a page read while this subject
+        // is still pending is cut below the store's index and shows its header before this claim.
+        while store.maintain_client_message_selectors().unwrap() {}
         let versions: u64 = store.readers.get().query_row(
-            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0",
-            [], |row|row.get(0)).unwrap();
+            "SELECT COUNT(*) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND subject=?1",
+            [subject(0)], |row|row.get(0)).unwrap();
         assert_eq!(versions,1,"non-selection metadata must not version selector headers");
         for case in CASES {
             let actual = page(&store, case, store.index().unwrap(), None).items;

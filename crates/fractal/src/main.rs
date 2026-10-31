@@ -579,6 +579,11 @@ struct ReplicationWorkerArgs {
 
 #[derive(Subcommand)]
 enum FleetCommand {
+    /// Show the fleet's public trust anchor for independent proof verification.
+    Anchor {
+        #[command(subcommand)]
+        command: FleetAnchorCommand,
+    },
     /// Found a new fleet with this machine as its first member (the anchor).
     Create(FleetCreateArgs),
     /// Create a single-use code that lets one new machine join.
@@ -614,6 +619,12 @@ enum FleetCommand {
         #[arg(long, default_value = "30m")]
         timeout: String,
     },
+}
+
+#[derive(Subcommand)]
+enum FleetAnchorCommand {
+    /// Print the public fleet trust anchor to distribute to offline verifiers.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -1288,6 +1299,10 @@ enum MissionViewCommand {
     ReportTo(MissionReportToArgs),
     /// Set a finished run's outcome to completed, failed, or cancelled, with a reason.
     Outcome(MissionOutcomeArgs),
+    /// Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it.
+    ///
+    /// A person or the fleet's fault agent may. A later failure of the same source is a new fault.
+    DismissFault(MissionDismissFaultArgs),
     /// Retire a mission so it leaves the lists and cannot start; publishing it again brings it back.
     Retire(MissionRetireArgs),
     /// Show one agent's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
@@ -1508,6 +1523,22 @@ struct MissionOutcomeArgs {
     #[arg(long)]
     reason: String,
     /// A person, or an agent that requested the run or may revise its mission.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+}
+
+#[derive(Args)]
+struct MissionDismissFaultArgs {
+    /// The fault's run (`mission-run/...`) or its exact source subject, as its fault message names it.
+    source: String,
+    /// The fault's episode, needed only when its source has more than one current fault.
+    #[arg(long)]
+    episode: Option<String>,
+    /// Why the fault can be put aside, for example that the run ended and a later run replaced it.
+    #[arg(long)]
+    reason: String,
+    /// A person, or the fleet's fault agent.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
@@ -2825,15 +2856,20 @@ enum AgentsCommand {
 }
 
 #[derive(Args)]
+#[command(subcommand_negates_reqs = true, args_conflicts_with_subcommands = true)]
 struct IdentityRenameArgs {
+    #[command(subcommand)]
+    command: Option<IdentityRenameCommand>,
     /// Complete current or historical ID.
-    from: String,
+    #[arg(required = true)]
+    from: Option<String>,
     /// New full ID; historical names cannot be reused.
-    to: String,
-    #[arg(long = "as", value_parser = parse_publication_actor)]
-    actor: String,
-    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
-    reason: String,
+    #[arg(required = true)]
+    to: Option<String>,
+    #[arg(long = "as", required = true, value_parser = parse_publication_actor)]
+    actor: Option<String>,
+    #[arg(long, required = true, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    reason: Option<String>,
     #[arg(long = "if-naming-revision")]
     expected_naming_revision: Option<String>,
     #[arg(long = "if-declaration")]
@@ -2842,17 +2878,133 @@ struct IdentityRenameArgs {
     idempotency_key: Option<String>,
 }
 
+#[derive(Subcommand)]
+enum IdentityRenameCommand {
+    /// Export or independently verify a signed rename proof.
+    Proof {
+        #[command(subcommand)]
+        command: RenameProofCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RenameProofCommand {
+    /// Export fleet-internal evidence; contains complete co-batched claims and blobs.
+    /// Do not publish the bundle or attach it to public issues.
+    Export {
+        name: String,
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Consent to disclosing complete co-batched claims and blobs to fleet tooling.
+        #[arg(long)]
+        include_co_batched_claims: bool,
+    },
+    /// Verify a portable proof offline, trusting only the supplied fleet anchor.
+    Verify {
+        file: PathBuf,
+        #[arg(long)]
+        fleet_anchor: String,
+        /// Require this claim-ID token to precede the proven head strictly.
+        #[arg(long)]
+        after_revision: Option<String>,
+    },
+}
+
+fn rename_proof_verdict(
+    file: &Path,
+    fleet_anchor: &str,
+    after_revision: Option<&str>,
+) -> (Value, u8) {
+    let failure = |code: &str, message: String, exit_code| {
+        (json!({
+            "schema": "fractal.rename-proof-verdict.v1",
+            "ok": false,
+            "error": { "code": code, "message": message },
+        }), exit_code)
+    };
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(error) => return failure("malformed-bundle", error.to_string(), 6),
+    };
+    let bundle = match serde_json::from_slice::<smallclaims::proof::RenameProofBundle>(&bytes) {
+        Ok(bundle) => bundle,
+        Err(error) => return failure("malformed-bundle", error.to_string(), 6),
+    };
+    match smallclaims::proof::verify_rename_proof(&bundle, fleet_anchor, after_revision) {
+        Ok(verdict) => match serde_json::to_value(verdict) {
+            Ok(value) => (value, 0),
+            Err(error) => failure("malformed-bundle", error.to_string(), 6),
+        },
+        Err(error) => failure(
+            &error.code,
+            error.message.clone(),
+            u8::try_from(error.exit_code()).unwrap_or(6),
+        ),
+    }
+}
+
+fn offline_rename_proof(command: &Command) -> Option<ExitCode> {
+    let args = match command {
+        Command::Agents { command: AgentsCommand::RenameId(args) }
+        | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+        _ => return None,
+    };
+    let Some(IdentityRenameCommand::Proof {
+        command: RenameProofCommand::Verify { file, fleet_anchor, after_revision },
+    }) = &args.command else {
+        return None;
+    };
+    let (verdict, code) = rename_proof_verdict(file, fleet_anchor, after_revision.as_deref());
+    println!("{verdict}");
+    Some(ExitCode::from(code))
+}
+
+fn offline_rename_proof_arguments(arguments: &[std::ffi::OsString]) -> Option<ExitCode> {
+    // Only parse this extra time for the rename surface. Actual dispatch is based
+    // on clap's typed command, never on a filename or a free-form argument.
+    if !arguments.iter().any(|argument| argument == "rename-id") {
+        return None;
+    }
+    let matches = cli_command().try_get_matches_from_mut(arguments).ok()?;
+    let cli = Cli::from_arg_matches(&matches).ok()?;
+    offline_rename_proof(&cli.command)
+}
+
 async fn run_identity_rename(
     endpoint: &Endpoint,
     args: IdentityRenameArgs,
     agent: bool,
     json_output: bool,
 ) -> Result<()> {
+    if let Some(IdentityRenameCommand::Proof { command }) = args.command {
+        let RenameProofCommand::Export { name, revision, out, include_co_batched_claims } = command else {
+            anyhow::bail!("proof verification must be dispatched offline");
+        };
+        anyhow::ensure!(include_co_batched_claims,
+            "rename proof export requires --include-co-batched-claims: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues");
+        let client = generated_client(endpoint, None)?;
+        let request = fractal_client::RenameProofExportRequest { name, revision, include_co_batched_claims };
+        let bundle = if agent {
+            client.agent_rename_proof_export(&request).await?
+        } else {
+            client.mission_rename_proof_export(&request).await?
+        };
+        let bytes = serde_json::to_vec_pretty(&bundle)?;
+        if let Some(path) = out {
+            std::fs::write(&path, &bytes)
+                .with_context(|| format!("writing rename proof {}", path.display()))?;
+        } else {
+            println!("{}", std::str::from_utf8(&bytes)?);
+        }
+        return Ok(());
+    }
     let request = fractal_client::RenameRequest {
-        from: args.from,
-        to: args.to,
-        actor: args.actor,
-        reason: args.reason,
+        from: args.from.context("rename requires a source ID")?,
+        to: args.to.context("rename requires a destination ID")?,
+        actor: args.actor.context("rename requires --as")?,
+        reason: args.reason.context("rename requires --reason")?,
         expected_naming_revision: args.expected_naming_revision,
         expected_declaration: args.expected_declaration,
         idempotency_key: args.idempotency_key.unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
@@ -4258,6 +4410,14 @@ enum MessageCommand {
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
     /// People have no inbox: a send or reply to a person fails. To reach a person, print in
     /// the chat.
+    ///
+    /// Use single quotes for literal shell text, or a quoted heredoc for multiline bodies:
+    ///
+    ///   fractal conversations send agent/example --from agent/sender --body 'Run `cargo test`'
+    ///   fractal conversations send agent/example --from agent/sender --body - <<'EOF'
+    ///   Run `cargo test` and report $STATUS.
+    ///   EOF
+    #[command(verbatim_doc_comment)]
     Send(MessageSendArgs),
     /// List the current mailbox for one explicit identity.
     Ls(MessageListArgs),
@@ -4342,8 +4502,12 @@ enum MessageCommand {
 struct MessageSendArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     to: String,
-    #[arg(short = 'm', long)]
-    body: String,
+    /// Message text, or - to read UTF-8 from stdin without trimming.
+    #[arg(short = 'm', long, required_unless_present = "body_file", conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read the exact UTF-8 message text from a file.
+    #[arg(long, value_name = "PATH")]
+    body_file: Option<PathBuf>,
     #[arg(long)]
     subject: Option<String>,
     #[arg(long)]
@@ -4881,6 +5045,10 @@ fn cli_main() -> ExitCode {
             return ExitCode::from(2);
         }
         None => {}
+    }
+    // Verification is independent even of instance selection and config loading.
+    if let Some(code) = offline_rename_proof_arguments(&arguments) {
+        return code;
     }
     // An instance changes where every path resolves, so it comes before anything reads one.
     let instance_name = fractal_daemon::instance::requested(&arguments);
@@ -5935,9 +6103,10 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::Publish(args) => Some(args.actor.as_str()),
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
             MissionViewCommand::Start(args) => Some(args.actor.as_str()),
-            MissionViewCommand::RenameId(args) => Some(args.actor.as_str()),
+            MissionViewCommand::RenameId(args) => args.actor.as_deref(),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
+            MissionViewCommand::DismissFault(args) => Some(args.actor.as_str()),
             MissionViewCommand::ReportTo(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retire(args) => Some(args.actor.as_str()),
             MissionViewCommand::Release(args) | MissionViewCommand::CancelRequest(args) => {
@@ -5976,7 +6145,7 @@ fn guard_mutating_cli_actor(
             AgentsCommand::Rename(args) => Some(args.actor.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("a harness rename needs explicit --as {own}")
             })?),
-            AgentsCommand::RenameId(args) => Some(args.actor.as_str()),
+            AgentsCommand::RenameId(args) => args.actor.as_deref(),
             AgentsCommand::Queue(args) => match &args.command {
                 Some(AgentQueueCommand::Move(args)) => Some(args.actor.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("a harness queue move needs explicit --as {own}; it cannot use the configured person")
@@ -14682,6 +14851,7 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
+    let body = args.body.take().context("message body is required")?;
     if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
@@ -14695,7 +14865,7 @@ async fn send_message(
         &id,
         &from,
         &to,
-        &args.body,
+        &body,
         args.subject.as_deref(),
         args.in_reply_to.as_deref(),
         &args.tags,
@@ -14708,7 +14878,7 @@ async fn send_message(
         idempotency_key: String::new(),
         from,
         to,
-        content: args.body,
+        content: body,
         title: args.subject,
         in_reply_to: args.in_reply_to,
         tags: args.tags,

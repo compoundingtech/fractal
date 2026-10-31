@@ -1274,6 +1274,9 @@ pub struct Reconciler<R = NativeRuntime> {
     observer_deadlines: Arc<Mutex<HashMap<String, u128>>>,
     /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
+    /// The fields the latest arm of each observer/revision requests, so an arm that requests
+    /// more polls at once rather than keeping a deadline set by a poll that read less.
+    observer_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
@@ -1498,6 +1501,7 @@ impl Reconciler<NativeRuntime> {
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
+            observer_fields: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: github_plugin_store::GithubPluginStore::shared(state_dir)?,
@@ -1677,6 +1681,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             step_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
+            observer_fields: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
             unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
             github_plugin: Arc::new(github_plugin_store::GithubPluginStore::memory()),
@@ -16700,6 +16705,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         let prefix = format!("{observer}:");
         self.observer_cursors.lock().unwrap_or_else(PoisonError::into_inner)
             .retain(|key, _| !key.starts_with(&prefix));
+        self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
+            .retain(|key, _| !key.starts_with(&prefix));
         if let Err(error) = self.github_plugin.forget(observer) {
             tracing::warn!(observer, "the GitHub plugin database kept a cursor it no longer needs: {error:#}");
         }
@@ -16820,6 +16827,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                     })
                     .unwrap_or_else(now_ms)
             });
+        // The deadline was set by a poll that read the fields its arm requested. Fields this arm
+        // adds were never read, as when a watch's subscription reaches the standing observer
+        // after its first poll (#4470), so poll now instead of waiting out that cadence.
+        let previous_fields = self.observer_fields.lock().unwrap_or_else(PoisonError::into_inner)
+            .insert(deadline_key.clone(), spec.fields.clone());
+        if previous_fields.is_some_and(|previous| spec.fields.iter().any(|field| !previous.contains(field))) {
+            next_check = next_check.min(now_ms());
+        }
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
         // a newer watcher observation if it was already in flight.
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
@@ -20260,6 +20275,7 @@ pub mod tests {
 
     mod channel_recovery;
     mod differential;
+    mod fault_dismiss_tests;
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
@@ -40700,6 +40716,66 @@ agent "example.reviewer" { workspace "/tmp"; command "true" }"#,
         // Watching again starts the observer again.
         fixture.store.declare_watch(&twelve, planner, None).unwrap();
         assert!(fixture.running(&fixture.observer) && fixture.running(&planner_watch));
+    }
+
+    /// `st gh watch` declares the standing observer, which reads issues, before the watch that
+    /// adds pull requests and comments. A poll between the two reads issues alone, so the arm the
+    /// watch brings polls at once instead of waiting out the cadence that poll set (#4470).
+    #[tokio::test]
+    async fn an_observer_whose_fields_widen_after_a_poll_polls_again_at_once() {
+        struct FieldsProvider {
+            requests: Arc<Mutex<Vec<BTreeSet<String>>>>,
+        }
+        impl ResourceProvider for FieldsProvider {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                self.requests.lock().unwrap().push(request.fields);
+                Box::pin(async {
+                    Ok(crate::resource::ProviderObservation {
+                        facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                        cursor: Some("read".into()),
+                        next_check_unix_ms: now_ms() + 300_000,
+                    })
+                })
+            }
+        }
+        let fixture = WatchFixture::new();
+        let thread = crate::github_watch::ThreadRef::parse("acme/garden#12").unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let reconciler = Reconciler::new(
+            fixture.store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(FieldsProvider { requests: requests.clone() }));
+        let poll = |count: usize| {
+            reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+            let requests = requests.clone();
+            let deadlines = reconciler.observer_deadlines.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while requests.lock().unwrap().len() < count || deadlines.lock().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                }).await.unwrap_or_else(|_| panic!("poll {count} did not run at once: {:?}", requests.lock().unwrap()));
+            }
+        };
+
+        // The observer alone polls, reads issues, and sets its standing cadence.
+        fixture.store.ensure_watch_observer(&thread).unwrap();
+        poll(1).await;
+        assert_eq!(requests.lock().unwrap()[0], BTreeSet::from(["issues".to_owned()]));
+        let deadline = *reconciler.observer_deadlines.lock().unwrap().values().next().unwrap();
+        assert!(deadline >= now_ms() + 170_000, "the standing cadence is three minutes");
+
+        // The watch widens what it reads: the next poll comes now, not at that deadline.
+        fixture.watch("acme/garden#12", "agent/example.planner");
+        poll(2).await;
+        assert!(requests.lock().unwrap()[1].contains("pull_requests"), "{:?}", requests.lock().unwrap());
+
+        // The same fields again keep the cadence.
+        fixture.store.declare_watch(&thread, "agent/example.reviewer", None).unwrap();
+        reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(requests.lock().unwrap().len(), 2, "{:?}", requests.lock().unwrap());
     }
 
     /// A watch on a repository that an intake already observes uses the intake's resource, so

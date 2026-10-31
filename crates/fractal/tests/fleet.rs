@@ -665,6 +665,103 @@ async fn joined_with(
     node
 }
 
+#[test]
+fn offline_rename_proof_uses_supported_environment_aliases() {
+    let root = tempfile::tempdir().unwrap();
+    let node = Node::new(root.path(), "offline-proof");
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for kind in ["agents", "missions"] {
+        for (preferred, legacy) in [(None, None), (Some("0"), None), (None, Some("0")), (Some("0"), Some("invalid"))] {
+            let mut command = node.command(&[
+                "--endpoint", "not-a-valid-endpoint", kind, "rename-id", "proof", "verify",
+                "missing.json", "--fleet-anchor", "caller-anchor",
+            ]);
+            command.env_remove("FRACTAL_DAEMON_WAIT").env_remove("ST3_DAEMON_WAIT");
+            if let Some(value) = preferred { command.env("FRACTAL_DAEMON_WAIT", value); }
+            if let Some(value) = legacy { command.env("ST3_DAEMON_WAIT", value); }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(6), "{}", String::from_utf8_lossy(&output.stderr));
+            let verdict: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(verdict["ok"], false);
+            assert_eq!(verdict["error"]["code"], "malformed-bundle");
+        }
+    }
+}
+
+#[tokio::test]
+async fn rename_proofs_export_over_cli_and_verify_without_daemon_or_config() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = anchor(root.path(), "proof-source").await;
+    let anchor_value = node.st_json(&["fleet", "anchor", "show"]);
+    let fleet_anchor = anchor_value["fleet_anchor"].as_str().unwrap();
+    assert_eq!(node.st_ok(&["fleet", "anchor", "show"]).trim(), fleet_anchor);
+    let declaration = node.root.join("identities.kdl");
+    fs::write(&declaration, r#"version 2
+agent "proof-original/worker" { command "true"; workspace "/tmp"; restart "never"; }
+mission "proof-original" state="ready" {
+  goal "Prove portable identity history."
+  step "work" { agentless }
+}
+"#).unwrap();
+    node.st_ok(&["apply", declaration.to_str().unwrap(), "--as", PERSON]);
+    let mut proofs = Vec::new();
+    for (kind, prefix, suffix) in [("agents", "agent", "/worker"), ("missions", "mission", "")] {
+        let original = format!("{prefix}/proof-original{suffix}");
+        let renamed = format!("{prefix}/proof-renamed{suffix}");
+        let receipt = node.st_json(&[
+            kind, "rename-id", &original, &renamed,
+            "--as", PERSON, "--reason", "Clarify responsibility",
+        ]);
+        let revision = receipt["naming_revision"].as_str().unwrap().to_owned();
+        let denied = node.st(&[kind, "rename-id", "proof", "export", &original]);
+        assert!(!denied.status.success());
+        assert!(String::from_utf8_lossy(&denied.stderr).contains("co-batched claims and blobs"));
+        let proof = root.path().join(format!("{kind}-proof.json"));
+        node.st_ok(&[
+            kind, "rename-id", "proof", "export", &original,
+            "--revision", &revision, "--out", proof.to_str().unwrap(),
+            "--include-co-batched-claims",
+        ]);
+        let from_file: Value = serde_json::from_slice(&fs::read(&proof).unwrap()).unwrap();
+        let from_stdout = node.st_json(&[
+            kind, "rename-id", "proof", "export", &renamed,
+            "--include-co-batched-claims",
+        ]);
+        for field in ["schema", "identity_kind", "storage_id", "canonical_id", "naming_revision", "declaration", "chain"] {
+            assert_eq!(from_file[field], from_stdout[field], "{field}");
+        }
+        assert_eq!(from_file["schema"], "fractal.rename-proof.v1");
+        assert_eq!(from_file["disclosure"], "fleet-internal");
+        proofs.push((kind, proof, renamed, revision));
+    }
+    node.stop();
+    // Deliberately invalid local configuration must be irrelevant to verification.
+    fs::write(node.root.join("config/st3/config.toml"), "not valid toml = [").unwrap();
+    for (kind, proof, renamed, revision) in proofs {
+        let offline = [
+            "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify", proof.to_str().unwrap(),
+            "--fleet-anchor", fleet_anchor,
+        ];
+        let verdict = node.st_json(&offline);
+        assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+        assert_eq!(verdict["ok"], true);
+        assert_eq!(verdict["disclosure"], "fleet-internal");
+        assert_eq!(verdict["to"], renamed);
+        let mut stale = offline.to_vec();
+        stale.extend(["--after-revision", &revision]);
+        let rejected = node.st(&stale);
+        assert_eq!(rejected.status.code(), Some(5));
+        let verdict: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+        assert_eq!(verdict["ok"], false);
+        assert_eq!(verdict["error"]["code"], "stale-revision");
+    }
+}
+
 /// Re-publication and parent revisions must preserve the weekly occurrence, even after its
 /// child finishes. Put the next real weekly tick close enough to exercise it in this daemon.
 #[tokio::test(flavor = "multi_thread")]
@@ -5945,6 +6042,40 @@ fn gh_prs(node: &Node, actor: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// Wait until `node` answers `st gh prs fixture/app` from its own mirror, which it fills from
+/// GitHub right after a look it recorded; until then it answers from its graph. A wait that runs
+/// out says which step it stopped at (#4470): the last answer's source and reason, what the
+/// poller's claims say its observer did, and the tail of its logs.
+async fn wait_for_mirror(node: &Node, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        let answer = gh_prs(node, PERSON);
+        assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+        if answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 {
+            return;
+        }
+        if Instant::now() >= deadline {
+            // Read without unwrapping, so a stopped daemon cannot hide this message.
+            let trace = node.st(&["--json", "trace", "show", "observer/github/fixture/app"]);
+            let claims = String::from_utf8_lossy(&trace.stdout).lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            let observer = |kind: &str| claims.iter()
+                .filter(|claim| claim["kind"] == kind)
+                .map(|claim| claim["body"].clone())
+                .collect::<Vec<_>>();
+            panic!(
+                "timed out waiting until {what}: the last answer came from {}; the poller recorded {} looks; its observer's last state is {}\n{}",
+                answer["source"],
+                observer("observer.observed").len(),
+                observer("observer.state").last().unwrap_or(&Value::Null),
+                node.logs(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
 /// repository.
 fn watch_fixture_app(node: &Node) {
@@ -5976,10 +6107,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
     let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
     watch_fixture_app(&poller);
-    wait_until("the poller mirrors pull request 12", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
-    }).await;
+    wait_for_mirror(&poller, "the poller mirrors pull request 12").await;
 
     let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
@@ -6002,13 +6130,7 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     }
     poller.start().await;
     poller.wait_listening().await;
-    wait_until("the poller refills its lost mirror from GitHub", 90, || {
-        let answer = gh_prs(&poller, PERSON);
-        async move {
-            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
-            answer["source"]["kind"] == "mirror"
-        }
-    }).await;
+    wait_for_mirror(&poller, "the poller refills its lost mirror from GitHub").await;
     let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
     assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
     assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));

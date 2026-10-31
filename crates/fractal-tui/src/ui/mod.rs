@@ -164,8 +164,6 @@ struct FrameInfo {
     /// Glasses: where Home was drawn over the glass, while it is open.
     home: Option<Rect>,
     read_messages: HashSet<String>,
-    /// The focused agent's pane was too narrow for details beside its conversation.
-    agent_narrow: bool,
     /// The first palette row drawn.
     palette_top: usize,
     /// Glasses: where the right-click menu was drawn, while it is open.
@@ -469,9 +467,8 @@ pub struct Ui {
     pub(crate) voice: Option<voice::VoiceState>,
     /// Inputs whose text came from voice; their next message is tagged `dictated`.
     dictated: HashSet<String>,
-    /// The agent details pane beside the conversation.
-    /// Agents whose details pane is hidden beside their conversation; each agent its own.
-    details_hidden: HashSet<String>,
+    /// This device's global agent-details visibility, shared by both agent views.
+    agent_details: bool,
     /// The focused mission shows its whole declaration in place of its card.
     kdl: bool,
     /// The focus the message box was opened under: once another pane has the focus, typing
@@ -529,9 +526,6 @@ pub struct Ui {
     /// The footer names this build (version, revision, age); off in tests, whose screens must
     /// not change with every commit.
     pub(crate) build: bool,
-    /// A pane too narrow for details beside the conversation shows them instead of it.
-    /// Agents whose narrow pane shows their details in place of the conversation.
-    details_here: HashSet<String>,
     /// Finding text in a conversation.
     find: Option<Find>,
     /// Images attached to each draft, by its key, until it is sent.
@@ -825,7 +819,7 @@ impl Ui {
             answering: None,
             changes_answer: None,
             dictated: HashSet::new(),
-            details_hidden: HashSet::new(),
+            agent_details: true,
             kdl: false,
             focus_seen: (0, None),
             tree: false,
@@ -852,7 +846,6 @@ impl Ui {
             // A space kept in memory only; the live loop and the demo open the device's own.
             glasses: glass::Glasses::open(None, None),
             build: false,
-            details_here: HashSet::new(),
             find: None,
             attachments: HashMap::new(),
             message_limit: None,
@@ -1023,6 +1016,7 @@ impl Ui {
             self.simple = simplified(&loaded);
             self.conversation_first = prefs::conversation_first(&loaded);
             self.terminal_fallback = loaded.terminal_fallback != Some(false);
+            self.agent_details = loaded.agent_details != Some(false);
         }
     }
 
@@ -1110,6 +1104,7 @@ impl Ui {
                     terminal_first: self.conversation_first.map(|first| !first),
                     conversation_first: self.conversation_first,
                     terminal_fallback: Some(self.terminal_fallback),
+                    agent_details: Some(self.agent_details),
                 },
             );
         }
@@ -1247,20 +1242,10 @@ impl Ui {
         self.glasses.inventories_wanted(self.tab(), self.usage_hours)
     }
 
-    /// Details beside the conversation, or in its place when the pane is too narrow for both;
-    /// for the agent shown, not every agent (Nathan, 2026-10-03).
+    /// One device-local visibility choice for every agent and both views.
     fn toggle_details(&mut self) {
-        let Some(agent) = self.selected_id() else {
-            return;
-        };
-        let set = if self.frame.borrow().agent_narrow {
-            &mut self.details_here
-        } else {
-            &mut self.details_hidden
-        };
-        if !set.remove(&agent) {
-            set.insert(agent);
-        }
+        self.agent_details = !self.agent_details;
+        self.save_prefs();
     }
 
     pub(crate) fn conversation_updated(&mut self, target: &str) {
@@ -2599,43 +2584,7 @@ impl Ui {
             return;
         };
         let narrow = area.width < 90;
-        if self.composing(&agent.id) {
-            self.frame.borrow_mut().agent_narrow = narrow;
-        }
-        // Too narrow for details beside the conversation: `i` shows them in its place.
-        if narrow
-            && self.details_here.contains(&agent.id)
-            && !agent.unmanaged
-            && self.composing(&agent.id)
-        {
-            buf.set_stringn(
-                area.x,
-                area.y,
-                " i back to the conversation ",
-                area.width as usize,
-                theme::fg(theme::OVERLAY1),
-            );
-            self.hit(Rect { height: 1, ..area }, Hit::Key('i'));
-            let doc = screens::agent_details(
-                &self.world,
-                agent,
-                (area.width as usize).saturating_sub(3),
-                self.spinner(),
-            );
-            self.pane(
-                buf,
-                &format!("details:{}", agent.id),
-                Rect {
-                    y: area.y + 1,
-                    height: area.height.saturating_sub(1),
-                    ..area
-                },
-                doc,
-                false,
-            );
-            return;
-        }
-        let details = !self.details_hidden.contains(&agent.id);
+        let details = self.agent_details;
         let area = if details && !agent.unmanaged && area.width >= 90 {
             let side = (area.width / 3).clamp(30, 44);
             let pane = Rect {
@@ -2695,7 +2644,7 @@ impl Ui {
             let key = "ctrl+d";
             let label = if narrow {
                 format!(" {key} details ")
-            } else if !self.details_hidden.contains(&agent.id) {
+            } else if self.agent_details {
                 format!(" {key} hide details ▸ ")
             } else {
                 format!(" ◂ {key} details ")

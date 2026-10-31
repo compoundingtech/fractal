@@ -3,21 +3,25 @@
 ## GitHub Actions on Namespace
 
 Workspace CI runs on pull requests, merge groups and manual dispatch. The merge queue tests the
-exact commit that lands on `main`; its successful checks stay attached to that SHA, so a main push
-does not repeat the workspace gate. `Main upkeep` verifies those five checks, runs `perf-cost`
-(which pull requests and the queue do not run; the daily long lanes run it too), and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
+exact commit that lands on `main`; its successful checks stay attached to that SHA.
+`Main upkeep` verifies the four required queue checks. If the queue took an evidence skip,
+or its metadata cannot prove hosted execution, upkeep runs the merge-group proof jobs for
+that exact landed source. Otherwise it retains the hosted queue proof without repeating it.
+Upkeep also runs `perf-cost` (which pull requests and the queue do not run; the daily long
+lanes run it too) and fills missing main-scope caches. PR Rust stages use idle shared-pool runners on ci1/ci2 with Namespace overflow; required merge stages use the chosen pool’s priority label;
 Genie and TypeScript cache warmers use GitHub-hosted runners. macOS CI is currently
 disabled. PR updates cancel obsolete runs for that PR in Workspace CI and the
-public-content guard. Main upkeep and public checks keep only the latest main push;
-older pushes must not keep consuming runners after their source is superseded. Manual dispatch
+public-content guard. Public checks keep only the latest main push. Main upkeep retains
+each landed source for any required post-merge proof. Manual dispatch
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
-The five required queue checks and complete test partitions are retained.
+The four required queue checks and complete test partitions are retained.
 
-When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
-level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
-only for a pull request with an explicit evidence decision and successful change detection;
-failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
-and the queue retains complete shard receipts.
+When a trusted note covers a pull request or merge group's web check,
+`fractal-web-execution` skips at job level and allocates no runner. The always-emitted
+`fractal-web` collector accepts the skip only with an explicit evidence decision and
+successful change detection; failure and cancellation still fail. Main and manual runs
+require execution when web inputs changed. Evidence-skipped queue work is followed by
+the exact-source hosted proof described above.
 
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
@@ -34,7 +38,7 @@ TypeScript client check and the web lane. Draft PRs allocate no CI runners: ever
 release validation, Nix validation and optional macOS CI has a draft guard. This includes metadata
 jobs and `always()` collectors. `ready_for_review` starts checks; `converted_to_draft` enters the
 existing PR concurrency group and cancels obsolete ready-head work while skipping every new job.
-Keep a PR draft while iterating and testing locally, then mark its final head ready for Intake.
+Keep a PR draft while iterating and testing locally, then mark its final head ready for exact-head review.
 A later push to a ready PR still validates the replacement head and cancels its superseded run;
 this policy reduces iteration demand, rather than enforcing a lifetime one-run limit.
 A stacked PR can retain workflow files from an older base that lacks these job guards.
@@ -47,8 +51,8 @@ and scheduling can start a legacy job before the observer runs. The one-day obse
 records actual build/test job starts as well as accepted requests and final cancellations.
 GitHub does not emit the requested activity for reruns; do not rerun drafts.
 
-GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run is the
-final safety gate and runs every required stage regardless of PR draft payload. Do not arm
+GitHub treats draft-phase skipped required contexts as satisfied. The merge-group run retains
+all required checks and applies the exact-source evidence policy regardless of PR draft payload. Do not arm
 auto-merge before the fresh ready-head checks register. Re-running an old draft run retains its
 old draft event and stays skipped; use the ready transition or a new push for fresh checks.
  `Workspace CI` also runs on the `merge_group` event, so GitHub's merge queue receives
@@ -72,17 +76,26 @@ tested source rather than a later `origin/main` fetch;
 unrelated unreleased main changes do not block a new PR's check. It does not download dependencies
 or compile. Manual dispatch runs the safety tests without inventing a PR delta.
 
-The Linux gate runs four test partitions for merge groups and two for other events, plus Clippy and fleet compatibility on separate runners. The extra merge partitions use the common merge role on either host, including ci2-merge-1, or the same Namespace overflow choice. Each uses the one exact-source producer archive. Before shard 1 executes, actual nextest lists must prove the selected inventory is a disjoint, complete union of all four (or both) shards. The unchanged linux-gate requires genuine success from every applicable shard; skipped merge shards fail it. No test filter, retry cap, timeout or required context is changed.
-`linux-gate` is the aggregate Linux check: it needs `upgrade-impact`, all applicable stage jobs and the named mail redelivery
-check, and passes only when every one succeeded (a skipped or cancelled stage fails it). The stage jobs use the shape label
-`nscloud-ubuntu-24.04-amd64-8x16-with-features`; `isolation-vm` uses
-`namespace-profile-linux-x86-64` when it overflows. `genie-freshness` and `typescript-client`
-use GitHub-hosted `ubuntu-latest`, keeping lightweight checks off reserved build capacity. The `linux-gate` aggregate uses GitHub-hosted
-`ubuntu-latest`, so it cannot queue behind build or benchmark jobs. The stages ran on `nscloud-ubuntu-24.04-amd64-16x32`
-until 2026-10-03, when that label stopped getting runners; on the profile they queued behind its
-limit of about five runners at once.
+The Linux gate runs four test partitions for merge groups and two for other events,
+plus Clippy and fleet compatibility on separate runners. Extra merge partitions use
+the common merge role or the selected Namespace overflow. Each consumes its
+workflow's exact-source producer archive. Before shard 1 executes, actual nextest
+lists must prove that the selected inventories form a disjoint, complete union.
 
-By default, required merge-group producers, the first two test shards, supporting Rust jobs, canaries and VM jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common `ci1-merge` role. An overflowed group uses the existing Namespace 8x16 shape for build/test stages and the existing KVM profile for isolation-vm. Both label forms retain priority 1 and the same run affinity; every consumer still uses its own exact-source producer archive.
+`linux-gate` aggregates `upgrade-impact`, applicable build/test and Rust stages,
+and `ci-script-tests`. Each must succeed, except for a stage its matching evidence
+gate explicitly permits to skip; failure, cancellation or an unexplained skip fails
+the aggregate. Mail redelivery and isolation VM coverage run in the daily lanes.
+Namespace build/test stages use `nscloud-ubuntu-24.04-amd64-8x16-with-features`;
+the daily `isolation-vm` uses `namespace-profile-linux-x86-64`.
+`genie-freshness`, `typescript-client` and the `linux-gate` aggregate use GitHub-hosted
+`ubuntu-latest`, keeping lightweight checks off reserved build capacity.
+
+By default, required merge-group producers, the first two test shards and supporting
+Rust jobs use `ci1-priority` on either host. Merge shards 3 and 4 use the common
+`ci1-merge` role. An overflowed group uses the Namespace 8x16 shape for build/test
+stages. Both label forms retain priority 1 and the same run affinity; every consumer
+still uses its own exact-source producer archive.
 A GitHub-hosted picker reads the common group3 role census; unavailable metadata retains the
 existing priority role. GitHub chooses the physical host. The PR opt-in variable never disables merge picking.
 Merge overflow is enabled by default. `CI_MERGE_OVERFLOW=off` restores the owned-only admission policy. A positive complete runner census below the admission minimum selects Namespace; missing or malformed runner metadata retains the owned role.
@@ -107,62 +120,12 @@ preempting active jobs or reserving capacity. PR picking, Namespace shapes/affin
 and required checks are retained. Already queued runs retain
 the labels from their workflow revision.
 
-Performance (`perf.yml`) runs only by manual dispatch, on any ref; the [daily long
-lanes](#daily-long-lanes) run its load jobs on `main` once a day. It never starts for merge groups,
-and it starts for no pull request: PR triggers were removed to reduce queue demand. Its admission
-job still decides for a pull request as before, should PR triggers return: ready PR runs would start
-for changes beneath `crates/`, vendor or Nix inputs, build manifests, the load workload and its
-workflow, or an explicit `ci-perf` label. The metadata-only admission job
-checks the PR head before and after its bounded changed-file inventory, including rename
-sources. Only an explicit successful `run=false` skips the optional workload; malformed
-metadata, head drift or failed admission retain coverage. Unrelated label events cannot
-cancel a running load test. The existing load test and its budgets are unchanged.
+Performance (`perf.yml`) runs only by manual dispatch, on any ref. The
+[daily long lanes](#daily-long-lanes) run its load jobs on `main` once a day.
+It does not start for pull requests or merge groups.
+
 Its Namespace priority is always 3. A busy queue can delay optional
 loads and main baseline reports until required work drains; priority does not reserve a slot.
-
-The standing-rule before window is 2026-10-12 12:15–18:15 UTC. A finite 445-request
-census independently retained 198 Workspace creation records (167 PR, 30 merge-group,
-one manual), 200 Performance records (187 PR, 13 main) and 180 public-check records
-(167 PR, 13 main). These differ from the earlier attributed coordination count; use
-the exact filtered populations for the comparison. Some runs were still nonterminal.
-Actual runner-start waits use dependencies from each run's retrieved workflow revision:
-
-| Event / assigned pool | Qualified jobs | Median wait | p90 wait |
-| --- | ---: | ---: | ---: |
-| PR / Namespace | 802 | 319.5s | 1507s |
-| Merge group / Namespace | 181 | 301s | 1033s |
-| PR / owned | 104 | 2s | 32s |
-
-Twenty-six graph/name-unqualified samples were excluded. Unassigned jobs remain censored,
-not zero wait. Pools contain different stages/source/cache populations; this table does
-not establish a causal effect of routing or an added worker. Required-green completion
-was median/p90 2958.5s/4910s for 48 PR runs and 2517s/3706s for 14 merge runs.
-
-The 22 PRs merged during this window had 73 distinct observed Workspace head generations
-across their respective PR lifetimes. Excluding each opening head leaves 51 observed
-head updates: a **lower bound** of 2.32 pushes per merged PR (median one). This is not a
-commit count or complete push-event census: same-head/repeated-head, pre-workflow and
-unrecorded pushes are absent. New draft skip records, observed head generations and
-executed ready-head CI must be separate in the post-rule cohort. The standing policy
-landed as `f30de78266db020d7dfea468707b4d9196786ba5` at 2026-10-12 23:44:21 UTC
-(GitHub's merge-event timestamp). Before/after results remain pending the finite
-post-land measurement window; no speedup is claimed. Jobs created before landing retain
-their workflow revision and belong to the earlier-policy cohort.
-Raw report: `doc/fleet/smalltalk/ci-speed/2026-10-12/standing-demand-before@714509aea896388b2d74a203a0300434bad70acf40ad7b9aa45d52750b6c3891`.
-
-The complete 2026-10-11 UTC day contained 201 PR and 50 merge-group Workspace runs.
-Among runs with all five required checks green (80 PR, 44 merge), required-check completion
-from workflow creation had median/p90 28m57s/35m53s for PRs and 26m25s/33m44s for merge groups.
-Successful workflow duration (40 PR, 44 merge) was 29m41s/40m48s and 26m36s/33m52s.
-These populations differ because optional failures do not change the required-check cohort.
-Median assigned-job waits were about ten seconds; compilation and test execution dominated.
-The mixed revisions and suites do not establish an improvement or meet the 20-minute SLO.
-
-The 2026-10-09 investigation retained a PR build waiting 55.1 minutes at priority 2 before
-15.7 minutes of execution; two sampled merge builds at priority 1 waited 0.3 and 1.7 minutes.
-One 116.6-minute PR had 41.0 minutes of producer wait and 28.8 minutes of shard wait.
-This motivates queue ordering; it does not establish a cache or compiler defect, nor promise
-that the 20-minute run SLO is met under overload.
 
 Profile labels carry affinity inline, for example
 `namespace-profile-linux-x86-64;job.priority=1;github.run-id=${{ github.run_id }}`.
@@ -171,10 +134,10 @@ Shape labels retain `-with-features` and a separate
 separate `namespace-features:` label with profiles; see the
 [Runner Controls syntax](https://namespace.so/docs/solutions/github-actions/runner-controls).
 
-The documented Linux limit is 320 vCPUs / 640 GiB; this change does not increase it.
-Queue time is measured separately from execution time. Already queued jobs retain the labels
-from their immutable workflow revision and finish naturally; this change does not rerun them.
-Optional jobs remain subject to capacity after required checks. See Namespace's
+Queue time is measured separately from execution time. Queued jobs retain the labels
+from their immutable workflow revision. Use a current [capacity reading](#measured-concurrency)
+to inspect available resources. Optional jobs remain subject to capacity after required checks.
+See Namespace's
 [job ordering and priority controls](https://namespace.so/docs/solutions/github-actions/runner-controls/job-ordering).
 
 CI's default Nix shell explicitly appends `$CARGO_HOME/bin` to `PATH` after
@@ -185,36 +148,44 @@ the shell's order for Clippy and nextest, without changing Cargo's cache home or
 configuring an unpinned rustup default. The Linux guard tests this lookup with
 real Cargo and benign stand-in commands; it compiles no Rust.
 
-`scripts/ci-linux STAGE` runs one stage:
+`scripts/ci-linux STAGE` accepts `tests`, `clippy`, `fleet-compat`,
+`mail-redelivery-canaries` or `conversation-model`. These are script arguments;
+the workflow jobs have names such as `linux-tests` and `linux-clippy`.
 
-- `linux-tests` and `linux-tests-shard-2`: prepare the provider component fixtures, build the
-  selected test executables with dev/test debug info and incremental compilation disabled,
-  and install matching hooks directly from the built st2 executable. They run complementary
-  nextest hash partitions with eight test threads each. The profile's default filter still
-  selects the gate scope (see [gate scope](#gate-scope));
-- `linux-clippy`: `cargo clippy --workspace --all-targets --locked`, the standalone conversation
-  model check, the [warning ratchet](#clippy-warning-ratchet), then
-  `cargo run --locked -p fractal-client-codegen -- --check`;
-- `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
-  previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
-  metadata before running it; it does not rebuild the baseline or its PTY dependency.
-  It also runs the production mailbox bind handler against a pinned PTY 0.13.0
-  (`063ff7f`) metadata fixture without `daemonBootId`, with a live matching process
-  start token. The previous-release fleet test uses a stub PTY and covers replication,
-  not native channel admission; the metadata fixture independently covers the deployed
-  writer contract even when the devShell PTY advances.
+- `tests`: runs the selected nextest hash partition. The workflow installs matching
+  hooks with `scripts/ci-install-built-hooks`, using the built `ci-hooks-install`
+  executable or the verified archive's `CI_TEST_HOOKS_BINARY`. See
+  [gate scope](#gate-scope) for the selected suite.
+- `clippy`: checks all workspace targets and the standalone conversation model,
+  applies the [warning ratchet](#clippy-warning-ratchet), and runs
+  `cargo run --locked -p fractal-client-codegen -- --check`.
+- `fleet-compat`: tests against the previous-release native archive pinned in
+  `.github/fleet-compat-baseline.json`, after verifying its SHA-256 and embedded
+  source/target metadata. It does not rebuild the baseline or its PTY dependency.
+- `mail-redelivery-canaries`: runs the explicit zero-retry regression selection
+  used by the [daily mail canaries](#daily-mail-redelivery-canaries).
+- `conversation-model`: tests `fractal-conversation-ui` without default features
+  and verifies that its normal dependencies do not include `ratatui`.
 
-The primary test job proves that the two actual nextest inventories are disjoint and their union
-equals the full selected suite. The explicit zero-retry mail canaries run in a parallel job. The primary also
-runs the standalone conversation model feature check. The second shard runs the remaining
-workspace and st2 tests on independent Namespace CPUs. `linux-gate` requires both shards;
-failure, cancellation or skipping either shard fails the gate. Each shard retains passing test
-durations in its logs, and the primary saves `ci-logs/test-partitions.json` with the tested SHA
-and all three inventories.
+The `fleet-compat` stage also runs
+`deployed_pty_0_13_0_record_without_boot_id_binds_mailbox` through the production
+mailbox bind handler with a pinned PTY 0.13.0 (`063ff7f`) metadata fixture without
+`daemonBootId` and a matching live process start token. The same test belongs to the
+normal Rust suite. The previous-release fleet test uses a stub PTY and covers
+replication; the metadata fixture covers native channel admission even when the
+devShell PTY advances.
 
-The Linux `linux-test-build` job compiles the workspace into one nextest archive
-and preserves the existing executed test selection. Both shards, the zero-retry mail job and isolation VM require that
-successful producer and download its exact artifact ID. They check the manifest SHA, source/tree,
+The workflow verifies that its configured partition inventories are disjoint and
+cover the complete selected suite. The generated `fleet.yml` declares the
+partitions and which shards apply to PRs and merge groups. `linux-gate` requires
+every applicable shard or its explicitly accepted exact-source evidence skip;
+a failed, cancelled or unexpectedly skipped shard fails its aggregate. Logs retain
+passing test durations and the partition inventories.
+
+Each workflow's `linux-test-build` job compiles its selected workspace targets
+into a nextest archive. Its consuming test shards, and the daily mail and isolation
+VM jobs where declared, require that successful producer and download its exact
+artifact ID. They check the manifest SHA, source/tree,
 run, the successful producer attempt, architecture, nextest/rustc versions, target-selection recipe and archive/gateway file digests before extracting.
 A failed-jobs-only rerun can inherit the earlier successful producer output; its attempt and
 manifest remain explicitly pinned, with the same run/source/tree/tool identities required. Cargo
@@ -228,9 +199,10 @@ Manifest/fixture paths
 map each compiled package beneath the recorded producer root to the consumer checkout, including
 library fixtures launched by another package. Outside archives the original compiled path remains
 the fallback. Archive mode rejects missing or mismatched roots/binaries. Tests, assertions,
-partitions, retries, eight test threads, real VM checks and required contexts are unchanged.
-Local and macOS runs use the same metadata-derived binary selection and CI profile;
-`CI_TEST_PARTITION` selects the shard.
+partitions and retries follow the selected lane's configuration. `scripts/ci-linux tests`
+uses `CI_TEST_THREADS`, then `CI_LOCAL_TEST_THREADS`, then the available CPU count
+for test concurrency. Local and macOS runs use the same metadata-derived binary
+selection and CI profile; `CI_TEST_PARTITION` selects the shard.
 
 New test files and paths are checked automatically by `genie-freshness` on each PR and
 merge group. A guard failure names each file and line and points its author to `test_env!`
@@ -246,12 +218,14 @@ file. Keep the original fixture, executable, arguments and assertions. Run
 `python3 scripts/check-ci-test-paths` and the affected test before pushing. Apply the same
 fix if a merge group finds a raw path introduced by another PR; do not bypass the guard.
 
-Main upkeep probes the exact Cargo and Nix cache keys for each stage before provisioning Nix
-or restoring build archives. When both entries exist it stops after the probes. A miss is flagged
-as P0 and fills the missing entries with builds only: selected test executables, Clippy artifacts,
-the integration binary, the Genie shell, or the isolation archive and VM driver. The published
-fleet baseline is downloaded rather than compiled. Workspace tests and the isolation VM are not
-repeated on main. The TypeScript dependency cache is also kept on main without repeating its tests.
+Main upkeep's cache jobs probe the exact Cargo and Nix keys before provisioning Nix
+or restoring build archives. When both entries exist, the cache job stops after the probes.
+A miss is flagged as P0 and fills the missing entries with builds only: selected test
+executables, Clippy artifacts, the integration binary, the Genie shell, or the isolation
+archive and VM driver. The published fleet baseline is downloaded rather than compiled.
+These cache jobs do not repeat workspace tests or the isolation VM; the separately selected
+post-merge proof jobs provide hosted execution when queue evidence requires it. The
+TypeScript dependency cache is also kept on main without repeating its tests.
 Merge-group and PR caches have their own ref scope; they cannot replace these main-scope saves,
 which all PRs and Namespace overflow runs can restore. Manual Workspace CI dispatch on main
 remains available for a full run. Release and deployment workflows keep their own push triggers.
@@ -282,10 +256,7 @@ not billed cost or a claim of lower wall time. Cold seeds and evicted entries st
 downloads. A valid warm archive supplies the entire shell without the public NAR fetch that failed
 in run 38922273766/job 117046015044.
 
-The [original trial measurements](https://github.com/compoundingtech/fractal/pull/849#issuecomment-5936374396)
-recorded a warm run of 6m59s with this design, versus 8m49s to 9m30s with only the Cargo cache.
-That trial excluded the messaging matrix; current CI includes it. Caching the entire Nix store
-instead took 90–105 seconds to restore 4.4 GB, which cost more than it saved. The selected
+Caching the whole Nix store cost more to restore than it saved. The selected
 outputs keep the cache focused on repeated downloads and expensive immutable builds.
 Namespace cache volumes are not used: they are per node and replicate in the background, so a
 job landing on another node can start empty.
@@ -550,8 +521,9 @@ killed with SIGKILL leaves its directory in RAM until reboot; sweep with
 `find /dev/shm -maxdepth 1 -name 'st-nextest.*' -mmin +1440 -exec rm -rf {} +`. Set
 `ST_NEXTEST_TMPDIR=disk` to keep the disk. CI never takes this branch, so the hosted runs keep real
 disks and every test that syncs to one; a local tmpfs pass does not exercise fsync or disk behavior
-and is not evidence for those tests, and nothing a local run produces stands in for the hosted
-required checks.
+and is not evidence for those on-disk properties. Local signed notes may satisfy queue
+checks under the configured evidence policy; evidence-skipped queue execution still requires
+exact-source hosted proof on protected main.
 
 The old trusted fleet runner and st merge train are retired; there is no operations installation
 handoff. Namespace workflows use this script from the checkout and land through GitHub's merge
@@ -760,8 +732,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   `scripts/ci-fractal-web-kit-graph` fails the lane when any bundled repository file is
   outside the kit patterns, so a new import cannot make a change skip the plays that
   render it.
-  This selection is the same for PRs, merge groups and pushes. Main pushes currently
-  run Main upkeep's dependency-cache warmer, not a duplicate Workspace CI execution.
+  This selection is the same for PRs, merge groups and pushes. Main upkeep runs the
+  dependency-cache warmer and, when queue evidence requires it, exact-source hosted proof.
 - The web shell closure. A fresh GitHub-hosted runner needs about 120 s to fetch and evaluate
   the flake inputs, build the Buck root, capability projection and Genie import (none is in a
   public cache) and substitute ~1.5 GB for `nix develop .#web`. `scripts/ci-web-shell fill`
@@ -803,9 +775,10 @@ their sandbox flags and declared-input boundary remain unchanged.
   A new web identity uses the cold-shell fallback until main upkeep has populated its entry.
 - `fractal-web` is always emitted (`if: always()`), with a one-minute timeout. Its
   embedded `scripts/ci-fractal-web-gate` passes only when detection succeeded and
-  either no relevant paths changed and execution was skipped, or execution succeeded.
-  Failure, timeout, cancellation and unexpected skips fail the gate. It is not a required
-  check; the ruleset adds it only after successful PR and merge-group emissions.
+  either no relevant paths changed and execution was skipped, execution succeeded, or
+  a trusted evidence decision explicitly covers the skipped execution on a pull request
+  or merge group. Failure, timeout, cancellation and unexpected skips fail the gate.
+  It is one of the four required checks in the generated ruleset.
 
 `scripts/ci-fractal-web-test`, run by `genie-freshness`, covers detection, fail-closed
 paths, the gate truth table and generated job shape.
@@ -1049,13 +1022,12 @@ semantics. Cancelled partial proofs remain incomplete rather than passes.
 
 Genie, TypeScript and the aggregate remain on GitHub-hosted Ubuntu.
 The declared ci1 pool is five general workers (including one reserved priority worker) and one
-merge worker, with dynamic label lending. The current source run used `ci1-5` with
-`ci1-priority`; that proves a matching worker, not the current labels of all six workers.
+merge worker, with dynamic label lending.
 Priority PRs share the lane; this sharing is accepted, with release/merge-first ordering owned
 by the private controller. GitHub itself does not prioritize self-hosted jobs. The existing
 hosted queue observer warns once when an owned job has no assigned runner for five continuous
 minutes after its actual workflow dependencies complete. It preserves current work; it does
-not repair offline runners or guarantee starts. Watch the first merge after this lands.
+not repair offline runners or guarantee starts.
 
 For ready PRs, `CI1_RUNNERS=on` enables a GitHub-hosted metadata picker over the shared
 runner group3 (existing name `ci1`). Both physical hosts share `ci1`, `ci1-merge` and
@@ -1093,6 +1065,23 @@ a fresh Cargo home and no compiler wrappers, stays offline, and prints Cargo std
 Cargo builds use the host's four-job limit. Workspace test shards explicitly use eight test
 threads, with the host's 14 GiB per-job memory limit. The repository variable `CI1_MIN_IDLE`
 can override admission; keep it at four when preserving CPU capacity for reserved lanes.
+
+### Debug information
+
+The workspace `dev` and `test` profiles keep `debug = 1` for workspace crates and
+`debug = 0` for dependencies, with `split-debuginfo = "unpacked"`. On Linux this
+keeps workspace DWARF in `.dwo` sidecars instead of duplicating it in every linked
+test executable. Keep those sidecars with the build tree for file:line backtraces.
+The existing `fractal-daemon` test-profile override still disables its debug info.
+
+The nextest `ci` profile changes test selection and execution, not Cargo's compiler
+profile. Hosted CI and `scripts/ci-local` explicitly set
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`; the hosted build also
+disables incremental compilation. Those overrides still take precedence, so
+ordinary local workspace builds and hosted CI have different debug-info budgets.
+Do not strip debug information from the default local profiles: panic messages
+retain their own source location after stripping, but caller backtrace frames lose
+file:line. Release profiles are unchanged.
 
 ### Debug assertions
 
@@ -1342,12 +1331,8 @@ stopping it after the workload has finished writing compiler outputs.
 Main report artifacts remain for thirty days. `scripts/ci-perf-cache-test` checks provenance,
 workload compatibility, report selection and required PR baselines.
 
-These snapshots avoid the repository's shared dependency-cache eviction: on 2026-10-04 the
-10 GB pool had already evicted main's just-saved Performance build and stores. A cold PR took
-25m21s, including 837s generating stores; a cache-hit PR still took about eleven minutes, including
-5m16s compiling the whole integration target and almost three minutes setting up unrelated tools.
-The first new-recipe PR passed in 17m51s (4m22s compiling, 584s generating), comparing two real
-main reports. Every missing snapshot is flagged P0. A new store recipe generates its source stores on RAM-backed
+These snapshots avoid the repository's shared dependency-cache eviction.
+Every missing snapshot is flagged P0. A new store recipe generates its source stores on RAM-backed
 scratch space; the harness copies them to ordinary runner disk before measuring. `perf-cost`
 continues using the Actions cache with the same generator/schema keys.
 
@@ -1478,10 +1463,6 @@ active work. Native Nix verification probes real output paths before building an
 proves its repeat with downloads and builds disabled. Performance retains its separate
 durable snapshots and successful-main-only baselines.
 
-The macOS workflow was manually disabled when this audit ran. Its cache configuration is
-maintained without changing that repository setting. Portable publishing permissions and
-accepted-source verification remain in place.
-
 ## Daily mail redelivery canaries
 
 Once a day (`daily-mail-redelivery-canaries` in `daily-long.yml`), `scripts/ci-mail-redelivery-canaries` requires twenty-two named,
@@ -1501,7 +1482,6 @@ The script fails if any required test is missing, ignored, or filtered out. It r
 and in the merge queue as a required check, a member of `linux-gate`, until 2026-10-23; since then it
 runs only in the daily run, and the canary tests are in `.config/daily-only.filterset`, so the
 per-PR test shards leave them out too. A red daily run comments on the run's one open issue.
-Apply the fifth live ruleset check after this workflow has passed on main.
 
 ## Generated files and existing workflows
 
@@ -1520,19 +1500,18 @@ nix flake check --no-build
 
 `genie-freshness` runs the second command on Linux. Nix CI setup uses the public
 `overeng-effect-utils` Cachix descriptor as a read-only substituter, with no publishing token.
-The preview input also supplies `otelite`, so updating this pin changes the collector used by
-release-integration and the default shell. Re-pin to effect-utils main once the Rust helper and
-repo-settings changes have merged.
+The same input supplies `otelite`, so updating its pin changes the collector used by
+release-integration and the default shell.
 
-| Workflow | Change and reason |
+| Workflow | What it runs |
 | --- | --- |
-| `fleet.yml` | The old fork-only fleet compatibility job is absorbed into `linux-gate`, which now covers every PR and main. This preserves fork coverage and adds same-repository coverage on Namespace. |
-| `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
-| `release-fractal.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
-| `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
-| `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
-| `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
-| `public-repo.yml` | Preserve the guard and its tests on all PRs and main pushes; move Linux to Namespace. |
+| `fleet.yml` | Workspace CI on pull requests, merge groups and manual dispatch; required checks use the selected source and evidence policy. |
+| `nix.yml` | Defines the persistent-store Nix release check. Its job is disabled in the generated workflow; schedule or manual dispatch does not qualify a native check. |
+| `release-fractal.yml` | Release archives on main pushes, tags, dispatch and relevant PRs. Linux builds use the selected owned priority pool outside PR validation; macOS and installer/assembly/publish jobs use their declared hosted runners. This workflow is separate from required merge checks. |
+| `debug-assertions-daily.yml` | Scheduled and manually dispatched test coverage with dev/test debug assertions enabled; reports failures through its daily issue. |
+| `daily-long.yml` | Scheduled and manually dispatched systemd-scope, mail, compatibility, full-scale and performance coverage on main; reports failures through its daily issue. |
+| `release-daily.yml` | Publishes the newest successful main release archives when the source changes; see [binary releases](st3/binary-releases.md#daily-releases). |
+| `public-repo.yml` | Public-content checks on PRs, merge groups, main pushes and dispatch, on GitHub-hosted Ubuntu. |
 
 The content guard still rejects real machine/home identities and private fleet configuration
 references. Release workflows remain separate from the required gate; neither package
@@ -1540,10 +1519,11 @@ verification nor the Nix package/check graph is made redundant by workspace next
 
 ## Merge queue
 
-`main` lands through GitHub's merge queue. Add a ready pull request to it with
+`main` lands through GitHub's merge queue. Complete the exact-head checks and
+[review](review.md), then add the ready pull request using its full reviewed commit SHA:
 
 ```sh
-gh pr merge NUMBER --auto
+gh pr merge NUMBER --auto --match-head-commit REVIEWED_HEAD
 ```
 
 The queue tests the pull request on top of the current `main` and the entries ahead of it with
@@ -1557,10 +1537,12 @@ queue it again. The merge train (`st lanes join smalltalk`) is retired.
 The ruleset (`.github/repo-settings.json`, generated from `repo-settings.json.genie.ts`, applied
 by an administrator and never by CI) requires the four checks from GitHub Actions with an empty
 bypass list, keeps the pull-request, deletion and force-push protections, and configures the queue:
-merge method MERGE, a proposed three entries build at once (see [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes)),
-up to five merge together, and a check that
-never reports fails its entry after 60 minutes. Repository settings enable native auto-merge and
-branch deletion after merge. Check the live settings against the file with `gh-check-settings`:
+merge method `MERGE`, grouping strategy `HEADGREEN`, three entries building at once,
+one through six entries per merge, a one-minute batch wait, and a 120-minute check-response
+timeout. These are the generated configuration, not a live-settings observation.
+See [capacity tuning](#merge-overflow-and-daily-namespace-minutes).
+Repository settings enable native auto-merge and branch deletion after merge.
+Check the live settings against the file with `gh-check-settings`:
 
 ```sh
 nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
@@ -1571,54 +1553,7 @@ an empty bypass list, creation open (CI and agents create records) and deletion 
 dead trees with its host's own login; see
 [gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace).
 
-`st/ci` is no longer required. Its producer on the fleet's machines is retired after the first
-pull request has merged through the queue.
-
-To roll back, restore the previous ruleset (the JSON is in the body of pull request #916) with
-`gh api --method PUT repos/compoundingtech/fractal/rulesets/20563764 --input old-main-ruleset.json`,
-then start the train again with `st missions start` on its mission.
-
 ## Measured concurrency
-
-The [manual capacity run](https://github.com/compoundingtech/fractal/actions/runs/36931429222)
-on 2026-10-01 recorded the workspace limits with `nsc workspace concurrency --output json`:
-
-| Platform | Concurrent vCPUs | Concurrent memory |
-| --- | ---: | ---: |
-| Linux (amd64 and arm64 share a pool) | 320 | 640 GiB |
-| macOS arm64 | 96 | 224 GiB |
-
-Namespace limits CPU and memory per platform; a workflow run is not a fixed unit of capacity.
-With the current 8x16 stage runners, a merge-queue Workspace CI group initially starts four
-8-vCPU/16-GiB stage jobs and two 8-vCPU/16-GiB profile jobs: 48 vCPUs and 96 GiB at peak.
-The TypeScript client job follows generator freshness and reuses its runner slot.
-PR runs no longer start `perf-cost` (at this measurement it took their initial peak to 56 vCPUs
-and 112 GiB). Main upkeep and the daily long lanes run that check separately; Main upkeep's cache-fill jobs normally finish after their lookup-only probes.
-Five complete merge-queue groups need 240 vCPUs and 480 GiB, within the Linux pool limit;
-`max_entries_to_build` was 5 at this historical measurement; current capacity policy appears in [Merge overflow and daily Namespace minutes](#merge-overflow-and-daily-namespace-minutes).
-PRs, main pushes and other workloads share that capacity; Namespace queues jobs until resources
-are available. The `linux-gate` aggregate starts after the four stage jobs finish, so it does
-not add to the initial peak. macOS uses its own pool.
-
-At 21:51:47 UTC, GitHub's job step timestamps showed seven PR, merge-group and main workflow
-runs executing 19 Namespace jobs together. Including the manual capacity run, the overlap was
-eight runs and 24 jobs. These are observed overlaps of runs at different stages, rather than
-eight fully parallel Workspace CI groups. The runs were:
-
-- main: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930646852)
-  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36930646948) for one commit,
-  with [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931186016)
-  and [macOS CI](https://github.com/compoundingtech/fractal/actions/runs/36931186029) for the next;
-- merge group: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36930644645);
-- PRs: [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931199367)
-  and [Workspace CI](https://github.com/compoundingtech/fractal/actions/runs/36931346163).
-
-The initial jobs in 13 observed CI runs created from 21:30 UTC had a median startup delay of
-18 seconds, a 95th percentile of 187 seconds (nearest rank) and a maximum of 305 seconds (57 jobs). Startup
-delay is measured from workflow creation to the first job step; jobs waiting on dependencies,
-skipped jobs and jobs without a Namespace runner are excluded. Each active job's interval runs
-from its first step to job completion, with unfinished jobs counted through the observation.
-The observation is repository-scoped; the workspace can also have jobs from other repositories.
 
 To refresh the capacity measurement, dispatch `namespace-capacity.yml` on `main`:
 `gh workflow run namespace-capacity.yml --ref main`. The same workflow runs hourly at minute 17 UTC.
@@ -1635,12 +1570,11 @@ for the distinction between build concurrency and merge batch size.
 
 ## Superseded merge groups
 
-Push concurrency in Main upkeep and the public guard is scoped to protected main.
-In the public guard a new main push cancels obsolete automatic work. Main upkeep never cancels a
-started run: main pushes share one group, GitHub keeps only the newest pending run, so a burst of
-merges coalesces into one more upkeep that probes and fills the current main's exact cache
-entries, and a started cache fill finishes instead of being killed half way. PR groups use the PR number, rather than its head SHA, so a new head
-replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
+The public guard scopes push concurrency to protected main; a new main push cancels
+its obsolete automatic work. Main upkeep instead uses a distinct run-ID concurrency group
+and never cancels a started run or coalesces pending main pushes: every landed tree that
+skipped queue execution needs its own hosted proof. PR groups use the PR number, rather
+than the head SHA, so a new head replaces the old one. Manual pinned validations are never grouped with PR or push runs. Old
 immutable workflow revisions can remain queued: before cancelling a backlog entry, compare its
 event, source and PR state with current main or the PR's latest head, retain its original timing
 and cancellation, and leave manual controls and merge groups to their owners.
@@ -1649,7 +1583,7 @@ The `namespace-capacity` job also watches `merge_group` events on a GitHub-hoste
 independent of ci1 and Namespace availability. It polls the group's ref and required check statuses
 every 15 seconds. A missing ref or a changed SHA on two consecutive successful lookups force-cancels
 its own workflow, including queued Linux jobs and always-run summaries. Lookup failures retain work.
-Once all five required checks finish, the watcher exits normally; a ref removed by a successful
+Once all four required checks finish, the watcher exits normally; a ref removed by a successful
 merge therefore retains the completed workflow result used by main upkeep. It executes embedded
 workflow code without checking out queued PR code. Capacity reports run separately in
 `namespace-capacity.yml` on Namespace.
@@ -1670,34 +1604,24 @@ A queued Namespace job is never a pass. Do not fall back to another runner by ha
 
 ## Inspect a failure
 
-Use the PR Checks tab or `gh run view RUN_ID --log-failed`. The Linux job uploads `linux-ci-logs`
-even on failure. Inspect each stage's log and timing, the selected suite and checked merge SHA.
+Use the PR Checks tab or `gh run view RUN_ID --log-failed`. Each stage job uploads
+`<job>-logs`, such as `linux-tests-logs` or `linux-clippy-logs`, even on failure.
+Inspect the stage's log and timing, selected suite and checked merge SHA.
 A passing retry is a flaky outcome in the nextest log. A queued Namespace job with no runner
 is infrastructure readiness, not a successful check; the merge queue keeps the entry waiting.
 
-During an outage, `CI_OUTAGE_FAST_QUEUE=on` skips optional Nix-cache saves and same-source build-snapshot publication on merge-group runs. Required checks, cache restores, the producer test archive, logs, cache coverage and PR/main cache publication continue. Set the variable back to `off` when Speed ends the outage; an unset variable also preserves normal publication. The earlier six-build incident guidance and automatic restore-to-two instruction are superseded by CI-speed-owned capacity tuning. The current source proposes three with Namespace overflow; the initial live trial returned to two after a measured PR wait exceeded five minutes. Preserve all other live ruleset fields when changing admission.
+During an outage, `CI_OUTAGE_FAST_QUEUE=on` skips optional Nix-cache saves and same-source build-snapshot publication on merge-group runs. Required checks, cache restores, the producer test archive, logs, cache coverage and PR/main cache publication continue. Set the variable back to `off` when Speed ends the outage; an unset variable also preserves normal publication. Preserve unrelated live ruleset fields during an approved capacity change.
 
 ## Merge overflow and daily Namespace minutes
 
-CI-speed owns live CI variables and queue capacity. Start with `max_entries_to_build=3`,
-merge sizes 1–5 and a five-minute batch wait; live HEADGREEN remains the incident's
-existing strategy. The generated ruleset's normal ALLGREEN strategy is unchanged.
-Change only the build-count field when tuning the live ruleset. This is capacity
-configuration, not proof of CI p90 <20 minutes, runner wait <5 minutes or queue-to-merge
-p90 <45 minutes.
-
-The 2026-10-12 standing rule supersedes whole/partial Namespace merge overflow:
-required merge stages wait on the selected owned priority pool regardless of the old override variables.
+CI-speed owns live CI variables and queue capacity. Read the generated parameters
+[above](#merge-queue) and verify the applied settings before an approved change.
+Preserve unrelated fields. Queue parameters alone do not establish CI completion,
+runner wait or queue-to-merge latency.
+The picker selects the owned priority pool or Namespace overflow before jobs
+start, using the configured overflow policy and qualified runner census.
 No job migrates after it starts. If a selected local job waits, qualify the named live runner
 and registration; preserve running work and do not reopen an isolated worker or blind-retry.
-
-Namespace account capacity is fixed. At 18:47 UTC Operations measured hetz2 load 54/65/71,
-five queued builder builds and three heavy slots; ci1 had load 15, 86 GiB available and
-five workers active. These are instantaneous baselines, not an added-pool benefit measurement.
-A bounded additional-runner comparison on ci1 remains required before a persistent pool
-increase; hetz2 builder contention makes it the poorer candidate. Record eligible-to-start
-waits and builder impact separately. Before/after push demand must use observed PR head-update
-receipts, not commit counts or skipped-workflow totals presented as pushes.
 
 `Namespace usage` runs at 03:05 UTC on GitHub-hosted capacity and reports the previous
 UTC day's observed Namespace job execution minutes, split by event (merge_group,
@@ -1734,19 +1658,6 @@ minutes: provisioning before the first job step and deleted GitHub history are
 outside this method. Use Namespace's billing view for an invoice; the report
 preserves raw job IDs/timestamps for reconciliation.
 
-Intake's read-only day counts for October 2–8 were 949, 1,222, 1,227, 1,437,
-1,126, 1,761 and 1,699 runs. The last day alone requires at least 1,699 jobs
-requests plus run-list pages; this invalidated the earlier 800-request/job-token
-design. The bounded 4,000-call design and earlier schedule allow this scale, but
-actual call count, credential capability and natural completion remain execution
-evidence, not a guaranteed bound on future repository volume.
-The initial historical collector ended naturally after 37m05s, scanning 14,135
-retained run records and 1,761 relevant runs. That requires at least 1,903 API
-calls (142 run-list pages plus at least one jobs page per relevant run); its exact
-request count was not instrumented. Its older identity gap makes its 38,979.28
-observed job minutes a lower bound, not current collector qualification. The new
-collector records exact request/rate evidence for its own natural outcome.
-
 The reporter makes only read-only GET requests to Actions run/job endpoints. The
 existing secret must permit those reads in addition to the picker's organization
 runner-list access; workflow job-token permissions do not restrict a PAT's actual
@@ -1757,22 +1668,14 @@ and [REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-l
 Each response must have fresh valid limit and remaining headers; earlier values
 never substitute for missing current quota evidence.
 
-One pinned corrected local-auth report ended naturally with exit 1 after 207.77s:
-234 attempted API calls, observed limit 5,000, minimum remaining 499, and the
-explicit reserve-reached error. It retained 4,836.67 observed minutes as partial
-window evidence. This confirms the quota-reserve behavior with local authentication,
-not the scheduled credential, full window, or a successful daily total. No automatic
-retry follows quota exhaustion.
-
-Test archive transfer verifies the complete ZIP before exposing consumer inputs. The four
-archive consumers download only the successful producer artifact ID, verify its API size
+Test archive transfer verifies the complete ZIP before exposing consumer inputs.
+Archive consumers download only the successful producer artifact ID, verify its API size
 and SHA256, verify the producer-output manifest hash and all four ZIP members, then
 publish a fresh private directory atomically. A failed or incomplete transfer gets at most
 one repeat download of that same ID (each ZIP request has a 10-minute limit); interrupted
 requests retain their signal status. No compiler or test is retried. Source, run, successful
 producer attempt, toolchain and individual file hashes are still checked before extraction.
-The job logs the ZIP size/digest and transfer attempt. This protects the transfer boundary;
-it does not establish the cause of earlier digest mismatches or a measured speedup.
+The job logs the ZIP size/digest and transfer attempt.
 
 ## Tests the sandboxed Fractal check does not run
 
