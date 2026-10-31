@@ -336,6 +336,14 @@ fn prefix_successor(prefix: &str) -> Option<String> {
     None
 }
 
+/// The same canonical newest-claim cursor reader used by the public store and answers check.
+pub(super) fn claimed_observer_cursor_at(connection: &Connection, observer: &str) -> Result<Option<String>> {
+    // Keys are bounded; claim body/cursor JSON remains unproven, as in the production newest-claim reader.
+    let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h00e80ee09700 owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &smallclaims::store::latest_claim_of_kind_query())?
+        .query_row(/* sqlite-large-value: allow-for-now lv-hf4694658e03c owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ params![observer, "observer.observed"], smallclaims::store::claim_from_row).optional()?;
+    Ok(claim.and_then(|claim| claim.body.pointer("/fields/cursor").and_then(Value::as_str).map(str::to_owned)))
+}
+
 impl Store {
     /// The observer that last recorded into `resource`, when that is not `observer`.
     pub fn resource_recorder(&self, resource: &str, observer: &str) -> Result<Option<String>> {
@@ -461,15 +469,7 @@ impl Store {
     /// plugin database wrote the whole cursor there; for a repository observer this build writes
     /// only how far it has read, which every member keeps.
     pub fn claimed_observer_cursor(&self, observer: &str) -> Result<Option<String>> {
-        Ok(self
-            .latest_claim(observer, Some("observer.observed"))?
-            .and_then(|claim| {
-                claim
-                    .body
-                    .pointer("/fields/cursor")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            }))
+        claimed_observer_cursor_at(&self.readers.get(), observer)
     }
 
     /// Constant-work version, independent of claims that do not change resource rows.
