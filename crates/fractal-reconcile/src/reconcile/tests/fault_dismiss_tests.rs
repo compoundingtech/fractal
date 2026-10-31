@@ -1,6 +1,7 @@
 //! A fault whose run has ended can never close at its source, so a person or the fleet's fault
 //! agent dismisses it with a reason. No other agent may, a fault on an open run closes only at
-//! its source, and a later failure of the same source is a new fault.
+//! its source, and a later failure of the same source is a new fault. Only one live agent holds
+//! `handles-faults`, and a dismissal counts only from a person or the holder of its time.
 use super::*;
 use crate::model::{FaultDismissRequest, St3Error};
 
@@ -153,4 +154,106 @@ fn a_later_failed_run_of_the_same_mission_is_a_new_fault() {
         })
         .unwrap_err();
     assert_eq!(wrong_episode.code, "missing-fault");
+}
+
+fn try_apply(store: &Store, source: &str, idempotency_key: &str) -> Result<(), St3Error> {
+    let intent = parse_intent(source, "node").unwrap();
+    let mission = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &mission.subject_tokens, idempotency_key).map(|_| ())
+}
+
+fn seat(name: &str, handles_faults: bool) -> String {
+    let flag = if handles_faults { "; handles-faults" } else { "" };
+    format!("agent {name:?} {{ workspace \"/tmp\"; command \"true\"{flag} }}\n")
+}
+
+#[test]
+fn only_one_live_agent_handles_faults_and_the_flag_moves_by_stopping_its_holder() {
+    let store = store();
+    let second = try_apply(&store, &format!("version 2\n{}", seat("other", true)), "second").unwrap_err();
+    assert_eq!(second.code, "fault-agent-taken");
+    assert!(second.message.contains("agent/node.ops"), "{}", second.message);
+    let pair = format!("version 2\n{}{}", seat("first", true), seat("second", true));
+    assert_eq!(try_apply(&store, &pair, "pair").unwrap_err().code, "fault-agent-taken");
+    assert_eq!(store.fleet_fault_agent().unwrap().as_deref(), Some("agent/node.ops"));
+
+    // Declaring the holder again, or anything that declares no holder, is never refused.
+    try_apply(&store, &format!("version 2\n{}{}", seat("ops", true), seat("third", false)), "again").unwrap();
+    // The flag moves in a publication that drops it from its holder, or stops the holder.
+    try_apply(&store, &format!("version 2\n{}{}", seat("ops", false), seat("other", true)), "move").unwrap();
+    assert_eq!(store.fleet_fault_agent().unwrap().as_deref(), Some("agent/node.other"));
+    try_apply(&store, &format!("version 2\nstop \"agent/node.other\"\n{}", seat("ops", true)), "back").unwrap();
+    assert_eq!(store.fleet_fault_agent().unwrap().as_deref(), Some("agent/node.ops"));
+}
+
+#[test]
+fn two_members_that_each_accepted_a_fault_agent_have_none_until_one_steps_down() {
+    let alder = Arc::new(Store::open_memory("alder").unwrap());
+    apply_source(&alder, SOURCE, "fault-dismiss");
+    let birch = Store::open_memory("birch").unwrap();
+    apply_source(&birch, &format!("version 2\n{}", seat("standby", true)), "standby");
+    assert_eq!(birch.fleet_fault_agent().unwrap().as_deref(), Some("agent/node.standby"));
+    crate::store::tests_shared::receive_and_project(
+        &alder,
+        "birch",
+        &crate::store::tests_shared::exchange_from(&birch, &crate::model::ReplicationInventory::default()),
+    );
+    assert_eq!(alder.fleet_fault_agent().unwrap(), None, "neither holds a disputed flag");
+    let (run, _) = failed_loop(&alder, "disputed");
+    alder.set_mission_run_state(&run.id, "failed", "terminal", Some("the loop failed")).unwrap();
+    assert_eq!(dismiss(&alder, &run.subject, "agent/node.ops").unwrap_err().code, "fault-dismiss-forbidden");
+
+    try_apply(&alder, "version 2\nstop \"agent/node.standby\"\n", "step-down").unwrap();
+    assert_eq!(alder.fleet_fault_agent().unwrap().as_deref(), Some("agent/node.ops"));
+    dismiss(&alder, &run.subject, "agent/node.ops").unwrap();
+    assert!(faults_of(&alder, &run).is_empty());
+}
+
+#[test]
+fn a_dismissal_counts_only_from_a_person_or_the_fault_agent_of_its_time() {
+    let store = store();
+    let ended = |id: &str| {
+        let (run, _) = failed_loop(&store, id);
+        store.set_mission_run_state(&run.id, "failed", "terminal", Some("the loop failed")).unwrap();
+        let fault = faults_of(&store, &run).remove(0);
+        (run, fault)
+    };
+    // A dismissal claim as another member might accept it, bypassing this member's checks.
+    let record = |fault: &AttentionItemView, actor: &str| {
+        std::thread::sleep(Duration::from_millis(2));
+        store
+            .append_claim(&ClaimInput {
+                subject: fault.subject.clone(),
+                kind: "fault.dismissed".into(),
+                actor: Some(actor.into()),
+                fields: BTreeMap::from([
+                    ("episode".into(), Value::String(fault.episode.clone())),
+                    ("reason".into(), Value::String("recorded elsewhere".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    let (by_holder, holder_fault) = ended("by-holder");
+    let (by_other, other_fault) = ended("by-other");
+    let (by_person, person_fault) = ended("by-person");
+    record(&holder_fault, "agent/node.ops");
+    record(&other_fault, "agent/node.other");
+    record(&person_fault, "person/operator");
+    assert!(faults_of(&store, &by_holder).is_empty(), "the fault agent's dismissal counts");
+    assert_eq!(faults_of(&store, &by_other).len(), 1, "another agent's dismissal hides nothing");
+    assert!(faults_of(&store, &by_person).is_empty(), "a person's dismissal counts");
+
+    // The flag moves to `other`: its earlier dismissal still hides nothing, and the former
+    // holder's dismissal, made while it held the flag, still counts.
+    try_apply(&store, &format!("version 2\n{}{}", seat("ops", false), seat("other", true)), "move").unwrap();
+    assert_eq!(faults_of(&store, &by_other).len(), 1, "a later grant does not reach back");
+    assert!(faults_of(&store, &by_holder).is_empty(), "a dismissal keeps the authority of its time");
+    record(&other_fault, "agent/node.other");
+    assert!(faults_of(&store, &by_other).is_empty(), "the new holder's dismissal counts");
 }
