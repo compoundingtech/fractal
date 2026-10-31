@@ -6842,6 +6842,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local)?;
+    if let Some(claims) = config.trim.daily_claims {
+        store.trim_locally_at_most(claims);
+    }
     *store
         .extension::<fractal_store::store::answers_check::TrimSettings>()
         .notify
