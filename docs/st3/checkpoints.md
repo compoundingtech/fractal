@@ -175,7 +175,8 @@ These claims are never dropped, whatever a rule says:
 - a claim whose record is not valid: invalid, unknown or repaired, or the replacement of a repair;
 - a claim a projection row references by ID: desired state, mission definitions and revisions,
   document bindings;
-- a claim another claim in the sealed set cites as evidence, or that a mission run pins as an input;
+- a claim another claim in the sealed set cites as evidence, that a mission run pins as an input,
+  or that a mission request names as its discovery;
 - a claim held in two envelopes, and a claim sharing an operation with a kept claim, so an
   operation is wholly kept or wholly dropped;
 - each writer's newest envelope in the sealed set, because sequence numbers and heads read it;
