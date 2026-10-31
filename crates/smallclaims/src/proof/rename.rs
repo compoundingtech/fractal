@@ -92,10 +92,9 @@ pub fn verify_rename_proof(
     if bundle.storage_id != *storage_id || bundle.canonical_id != canonical || final_declaration != Some(bundle.declaration.as_str()) || bundle.chain != reversed {
         return Err(malformed("bundle metadata disagrees with authenticated naming chain"));
     }
-    if let Some(after) = after_revision {
-        if !reversed.iter().take(reversed.len().saturating_sub(1)).any(|id| id == after) {
-            return Err(ProofError::new("stale-revision", "required revision is absent or is not strictly before the head"));
-        }
+    if let Some(after) = after_revision
+        && !reversed.iter().take(reversed.len().saturating_sub(1)).any(|id| id == after) {
+        return Err(ProofError::new("stale-revision", "required revision is absent or is not strictly before the head"));
     }
     let fields = &head.claim.body["fields"];
     let actor = fields["request"]["actor"].as_str()
@@ -177,10 +176,8 @@ fn naming_projection(authentication: &Authentication<'_>, bundle: &RenameProofBu
         let claim = &record.claim;
         if !repaired.contains(claim.id.as_str()) && authentication.require(&claim.id).is_ok()
             && admitted_naming(claim)
-        {
-            if let Some((operation, digest)) = crate::store::operation_parts(&claim.body) {
-                operations.entry(operation.into()).or_default().include(digest.into(), claim.id.clone(), true);
-            }
+            && let Some((operation, digest)) = crate::store::operation_parts(&claim.body) {
+            operations.entry(operation.into()).or_default().include(digest.into(), claim.id.clone(), true);
         }
     }
     let conflicts = operations.into_iter().filter_map(|(id, metadata)| {

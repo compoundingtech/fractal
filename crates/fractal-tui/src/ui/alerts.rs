@@ -39,6 +39,15 @@ pub(super) enum Place {
     Terminal,
 }
 
+/// The terminal an answer the form cannot give goes to, as said from `place`: the one under the
+/// band, or the keys that reach it from the conversation (no Attach control is drawn there).
+fn the_terminal(place: Place) -> String {
+    match place {
+        Place::Terminal => "this terminal".to_owned(),
+        Place::Band | Place::Inbox => format!("the terminal ({})", screens::terminal_route()),
+    }
+}
+
 /// One numbered row of a prompt's form, in the order it is drawn and numbered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum FormRow {
@@ -231,13 +240,14 @@ pub(super) fn prompt_form(
     place: Place,
 ) -> (bool, usize) {
     let Some(model) = prompt_model(world, item) else {
-        doc.wrap(
-            &text::inline(
-                "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
-                theme::dim(),
+        let words = match place {
+            Place::Terminal => "Answer it in this terminal. This clears when the prompt is gone, however it was answered.".to_owned(),
+            Place::Band | Place::Inbox => format!(
+                "Answer it in the seat's terminal ({}). This clears when the prompt is gone, however it was answered.",
+                screens::terminal_route()
             ),
-            width,
-        );
+        };
+        doc.wrap(&text::inline(&words, theme::dim()), width);
         return (false, 0);
     };
     let id = &item.id;
@@ -284,9 +294,18 @@ pub(super) fn prompt_form(
             note(
                 doc,
                 &match model.unread {
-                    Some(why) => format!("{why}, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+])."),
-                    None if model.named => "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in the terminal (Ctrl+]).".into(),
-                    None => "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in the terminal (Ctrl+]).".into(),
+                    Some(why) => format!(
+                        "{why}, so Fractal offers only what needs no reading. Or answer it in {}.",
+                        the_terminal(place)
+                    ),
+                    None if model.named => format!(
+                        "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in {}.",
+                        the_terminal(place)
+                    ),
+                    None => format!(
+                        "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in {}.",
+                        the_terminal(place)
+                    ),
                 },
             );
             doc.blank();
@@ -378,10 +397,10 @@ pub(super) fn prompt_form(
         let line = doc.lines.len();
         note(
             doc,
-            match place {
-                Place::Band => "The call is too long to show here in full: click here to read it whole in Inbox, or answer it in the terminal (Ctrl+]).",
-                Place::Inbox => "The call is too long to show here in full: answer it in the terminal (Ctrl+]).",
-                Place::Terminal => "The call is too long to show here in full: click here to read it whole in Inbox, or answer it in this terminal.",
+            &match place {
+                Place::Band => format!("The call is too long to show here in full: click here to read it whole in Inbox, or answer it in {}.", the_terminal(place)),
+                Place::Inbox => format!("The call is too long to show here in full: answer it in {}.", the_terminal(place)),
+                Place::Terminal => "The call is too long to show here in full: click here to read it whole in Inbox, or answer it in this terminal.".to_owned(),
             },
         );
         // Outside Inbox the note is the way in to the whole call.
@@ -396,8 +415,13 @@ pub(super) fn prompt_form(
             }
         }
     }
-    if let Some(elsewhere) = &model.form.elsewhere {
-        note(doc, elsewhere);
+    if model.form.elsewhere.is_some() {
+        let elsewhere = if place == Place::Terminal {
+            "Other choices are available in this terminal.".to_owned()
+        } else {
+            format!("Other choices: {}.", screens::terminal_route())
+        };
+        note(doc, &elsewhere);
     }
     doc.blank();
     // The keys, as the harness's dialog lists its own.
@@ -897,10 +921,11 @@ impl Ui {
                 card.wrap(
                     &[text::run(
                         format!(
-                            "{} · {} seat{} share this sign-in. Sign in in the seat's terminal (Ctrl+]).",
+                            "{} · {} seat{} share this sign-in. Sign in in the seat's terminal ({}).",
                             first_line(login),
                             seats.len().max(1),
-                            if seats.len() > 1 { "s" } else { "" }
+                            if seats.len() > 1 { "s" } else { "" },
+                            screens::terminal_route()
                         ),
                         theme::dim(),
                     )],
@@ -1042,8 +1067,8 @@ impl Ui {
         card.wrap(
             &[text::run(
                 match place {
-                    Place::Terminal => "Its form does not fit here: click here to answer it in Inbox, or answer it in this terminal.",
-                    Place::Band | Place::Inbox => "Its form does not fit here: click here to answer it in Inbox, or answer it in the terminal (Ctrl+]).",
+                    Place::Terminal => "Its form does not fit here: click here to answer it in Inbox, or answer it in this terminal.".to_owned(),
+                    Place::Band | Place::Inbox => format!("Its form does not fit here: click here to answer it in Inbox, or answer it in {}.", the_terminal(place)),
                 },
                 theme::dim(),
             )],
@@ -1286,7 +1311,7 @@ impl Ui {
         } else if answer == "answer" {
             self.flash("Choose an answer to each question first");
         } else {
-            self.flash("That answer is not in view in full here: open it in Inbox, or answer it in the terminal (Ctrl+])");
+            self.flash(format!("That answer is not in view in full here: open it in Inbox, or answer it in the terminal ({})", screens::terminal_route()));
         }
     }
 
@@ -1308,7 +1333,7 @@ impl Ui {
             AttentionKind::Prompt { call: None, .. }
                 if matches!(answer, "allow" | "approve" | "answer") =>
             {
-                self.flash("Fractal does not say which call this asks about: answer it in the terminal (Ctrl+])");
+                self.flash(format!("Fractal does not say which call this asks about: answer it in the terminal ({})", screens::terminal_route()));
                 return;
             }
             // st allows only the one call it serves beside the prompt, whole. The card may have
@@ -1317,7 +1342,7 @@ impl Ui {
                 if matches!(answer, "allow" | "approve" | "answer")
                     && !(*allow && prompt_calls(item).is_ok_and(|calls| calls.len() == 1)) =>
             {
-                self.flash("Fractal does not let this call through from here: answer it in the terminal (Ctrl+])");
+                self.flash(format!("Fractal does not let this call through from here: answer it in the terminal ({})", screens::terminal_route()));
                 return;
             }
             AttentionKind::Prompt { answers, .. }
@@ -1389,7 +1414,10 @@ impl Ui {
                 self.flash(notice);
             }
             Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash("Fractal does not offer that answer here: answer it in the terminal (Ctrl+])"),
+            None => self.flash(format!(
+                "Fractal does not offer that answer here: answer it in the terminal ({})",
+                screens::terminal_route()
+            )),
         }
     }
 
@@ -1448,6 +1476,7 @@ mod tests {
     fn prompt(id: &str, answers: &[&str], text: &str) -> Attention {
         Attention {
             deadline: None,
+            requested_at: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: "builder is waiting for permission".into(),
@@ -2345,6 +2374,7 @@ mod tests {
         let request: fractal_client::StructuredRequest = serde_json::from_value(value).unwrap();
         Attention {
             deadline: None,
+            requested_at: None,
             id: "attention/release".into(),
             tier: Tier::Stopped,
             title: "How far does the release go?".into(),

@@ -41,7 +41,13 @@ peer holds. Every node computes the same graph from the same admitted claims. Th
 the table at startup and hourly: rows older than `[observations] retention` (default `7d`, at
 least `1h`) and rows beyond `max_per_subject_kind` (default 20,000) go. The newest row of each
 subject and kind stays. An older build that still writes such a kind as a claim replicates it as
-before, and readers merge those claims with the local rows.
+before, and readers merge those claims with the local rows. `daemon.diagnostic` is local: no
+control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
+proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a
+collector is configured. `/v1/claims` and `st trace show` list only those older builds wrote.
+`harness.diagnostic` is split by code (`local_codes` in retention.toml): its observability codes
+are local in the same way, and the seat's conversation timeline on its own node still shows them.
+Its control codes stay claims.
 
 A kind of `system-local` retention is local when the system records it without an actor and a
 claim when a person or agent writes it as its actor. The reconciler's own `runtime.action.*`
@@ -128,6 +134,12 @@ publishes a backlog. Admission binds the Unix peer to its seat and checks the pu
 inside the daemon's writer transaction. Source runtime, spool sequence, claim kind and usage
 semantics identify an exact retry; changed input is rejected. Graph-derived claim fields are
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
+Byte-identical snapshot reports leave both the snapshot and event queue untouched after ownership
+validation. WAL commits retain full synchronization and SQLite's default 1,000-page automatic
+checkpoint threshold. Connections defer last-close checkpoints only while the existing WAL is
+below a 1,000-page byte budget (32-byte header plus 1,000 page frames). At or above that budget,
+SQLite's ordinary last-close checkpoint remains enabled. This also recycles the WAL across
+zero-connection gaps, when SQLite rebuilds shared-memory backfill/restart state.
 
 Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
 at most 64 per thread. At either limit a thread evicts its least recently used connection;
@@ -142,8 +154,10 @@ The outbox is transport recovery state, not graph authority. The daemon retains 
 observation under its existing local/latest/durable policy. Producer snapshots remain local
 coalescing and ownership evidence; timeline producers read only the previous matching entry and
 latest status instead of parsing/replacing a retained JSON log. That auxiliary timeline history
-is bounded to 4,096 operations and 2 MiB, independently of unacknowledged events. An outbox with 64 MiB of pending payload
-rejects a producer transaction and reports the failure rather than dropping queued events.
+is exposed as at most 4,096 operations and 2 MiB, independently of unacknowledged events.
+Physical retention permits up to 256 additional operations or 128 KiB before deleting a batch;
+readers do not expose that slack. An outbox with 64 MiB of pending payload rejects a producer
+transaction and reports the failure rather than dropping queued events.
 An evidence deadline queues derived unknown once after fifteen minutes without fresh state;
 a concurrent heartbeat supersedes that deadline. Native transcripts and session bindings retain
 their existing source paths.

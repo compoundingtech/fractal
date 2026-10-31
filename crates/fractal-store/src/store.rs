@@ -724,7 +724,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h82624af80f95 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h806ead738248 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -734,6 +734,10 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Shared action-key admission must seek one actor/key, never scan retained resolutions.
+CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
+ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
+WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -4094,6 +4098,42 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Whether every other member hears this node's seats, as the seat freshness pusher last
+    /// recorded it (see `fleet_hears_seats_tx`).
+    pub fn fleet_hears_seats(&self) -> Result<bool> {
+        Ok(self
+            .readers
+            .get()
+            .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get::<_, String>(0))
+            .optional()?
+            .as_deref()
+            == Some("1"))
+    }
+
+    /// Record whether every other member can ask this node about its seats' freshness (see
+    /// `fleet_hears_seats_tx`). Writes only when it changes.
+    pub fn set_fleet_hears_seats(&self, hears: bool) -> Result<()> {
+        let value = if hears { "1" } else { "0" };
+        let current: Option<String> = self
+            .readers
+            .get()
+            .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get(0))
+            .optional()?;
+        if current.as_deref() == Some(value) {
+            return Ok(());
+        }
+        self.connection
+            .batched(|transaction| {
+                transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h57ca7f8e343f owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES ('fleet_hears_seats', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [value],
+                )
+            })
+            .map_err(anyhow::Error::msg)??;
+        Ok(())
+    }
+
     /// The last local observation the OpenTelemetry exporter delivered.
     pub fn otlp_export_cursor(&self) -> Result<u64> {
         let connection = self.readers.get();
@@ -5678,6 +5718,66 @@ impl Store {
     }
 
     /// The newest claim or local observation of `kind` for `subject`.
+    /// The seat's newest local harness report: its incarnation and when this node heard it. Local
+    /// observations never replicate, so only the node that runs the seat has one; it hears every
+    /// re-stamp, replicated or not. One seek in `local_observations_subject_kind_index`, whatever
+    /// the log holds.
+    pub fn local_harness_newest(&self, subject: &str) -> Result<Option<(String, u128)>> {
+        let connection = self.readers.get();
+        let newest: Option<(i64, Option<String>)> = connection
+            .prepare_cached(
+                "SELECT observed_at_unix_ms, json_extract(body, '$.fields.incarnation_id')
+                 FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=?1 AND kind='harness.observed' ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row(/* sqlite-large-value: allow-for-now lv-hdfe967515468 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        Ok(newest.and_then(|(at, incarnation)| Some((incarnation?, at.max(0) as u128))))
+    }
+
+    /// [`Self::local_harness_newest`] for many seats in one statement: one seek per seat in
+    /// `local_observations_subject_kind_index`, so a roster read is one query, not one per card.
+    pub fn local_harness_newest_many(&self, subjects: &[&str]) -> Result<HashMap<String, (String, u128)>> {
+        if subjects.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT seats.value, local.observed_at_unix_ms, json_extract(local.body, '$.fields.incarnation_id')
+             FROM json_each(?1) AS seats
+             JOIN local_observations AS local ON local.id=(
+                 SELECT id FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=seats.value AND kind='harness.observed' ORDER BY id DESC LIMIT 1)",
+        )?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        let mut newest = HashMap::new();
+        for row in rows {
+            let (subject, at, incarnation) = row?;
+            if let Some(incarnation) = incarnation {
+                newest.insert(subject, (incarnation, at.max(0) as u128));
+            }
+        }
+        Ok(newest)
+    }
+
+    /// When this node last heard `subject`'s harness report for `incarnation`, from its local log.
+    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        Ok(self
+            .local_harness_newest(subject)?
+            .filter(|(of, _)| of == incarnation)
+            .map(|(_, at)| at))
+    }
+
+    /// When this node, or the seat's host as it last pushed, heard `subject`'s harness for
+    /// `incarnation`.
+    pub fn heard_harness_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        let local = self.local_harness_observed_at(subject, incarnation)?;
+        let relayed = self.extension::<RelayedFreshness>().heard_at(subject, incarnation);
+        Ok(local.max(relayed))
+    }
+
     pub fn latest_observation(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let claim = self.latest_claim(subject, Some(kind))?;
@@ -8518,6 +8618,13 @@ pub fn local_retention(kind: &str) -> bool {
         .is_some_and(|spec| spec.retention == fractal_schema::Retention::Local)
 }
 
+/// Whether the retention policy names this claim's `code` as observability only, so it goes to
+/// the local observation log although its kind replicates. See `local_codes` in retention.toml.
+pub fn local_code(input: &ClaimInput) -> bool {
+    fractal_schema::retention::policy()
+        .local_code(&input.kind, input.fields.get("code").and_then(Value::as_str))
+}
+
 pub fn system_local_retention(kind: &str) -> bool {
     fractal_schema::registry()
         .claim(kind)
@@ -9154,17 +9261,20 @@ fn harness_view_rests_on_tx(
 /// from the subject's latest replicated observation. When the harness stops working, its
 /// usage that is still only local replicates too.
 ///
-/// An unchanged observation refreshes the replicated one at most once a minute, but only while
-/// the harness works or when `heartbeat` is set. A resting native driver re-stamps its state
-/// every five minutes; its event was admitted against the seat's running runtime row, so no
-/// reader needs that re-stamp replicated (a stuck runtime row is what makes the card overlay
-/// read a report's age). Those re-stamps were most of the fleet's `harness.observed` claims.
+/// An unchanged observation (a re-stamp) stays in the local log. Freshness comes from the seat's
+/// host instead: its own cards read its local log, and every other member asks it
+/// (`seat_freshness`). While `fleet_hears` is false, some member cannot ask yet, so an unchanged
+/// report still refreshes the replicated one every [`RESTAMP_FALLBACK_MS`]: that member's
+/// freshness, readiness and down rule (661 seconds) read report ages. A resting native driver's
+/// re-stamp never needed that once its event was admitted against the seat's running runtime
+/// row, unless `heartbeat` says it came from a poster without one.
 fn publish_changed_harness_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
     now: u128,
     heartbeat: bool,
+    fleet_hears: bool,
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
@@ -9212,21 +9322,24 @@ fn publish_changed_harness_state_tx(
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
     let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
-    // Refresh remote freshness at most once a minute, without manufacturing transitions. A
-    // working harness keeps refreshing: a wake counts as taken up by a working report accepted
-    // after it was sent. A resting one replicates its unchanged state only when readers would
-    // otherwise fold the seat to something newer than it.
-    let refreshed = latest
-        .as_ref()
-        .is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000);
-    if unchanged
-        && (refreshed
-            || (resting && !heartbeat
-                && match &latest {
-                    Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
-                    None => false,
-                }))
-    {
+    // An unchanged report never manufactures a transition. A resting one replicates when readers
+    // would otherwise fold the seat to something newer than it, as before at most once a minute.
+    // Otherwise it refreshes the replicated report only for members that cannot ask the seat's
+    // host, at most every five minutes.
+    let age = latest.as_ref().map(|claim| now.saturating_sub(claim.accepted_at_unix_ms));
+    let skip = unchanged && {
+        let view_rests = resting
+            && match &latest {
+                Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
+                None => false,
+            };
+        if resting && !view_rests {
+            age.is_some_and(|age| age < 60_000)
+        } else {
+            (resting && !heartbeat) || fleet_hears || age.is_some_and(|age| age < RESTAMP_FALLBACK_MS)
+        }
+    };
+    if skip {
         if resting {
             publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage), ended)?;
         }
@@ -11318,6 +11431,17 @@ fn merge_actual_value(
     if let Value::Object(fields) = source {
         if kind == "resource.observed" {
             resources::merge_observation(merged, &fields);
+            return;
+        }
+        // A compact item state lays its facts over the item's observed facts, as the resource
+        // projection does, and names the item's kind when no observation did.
+        if kind == fractal_schema::github_plugin::ITEM_STATE {
+            if let Some(item_kind) = fields.get("item_kind") {
+                merged.entry("kind").or_insert_with(|| item_kind.clone());
+            }
+            if let Some(facts) = merged.entry("facts").or_insert_with(|| json!({})).as_object_mut() {
+                fractal_schema::github_plugin::overlay_item_state(facts, &fields);
+            }
             return;
         }
         let registry = fractal_schema::registry();
@@ -21283,6 +21407,10 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Write the claim as a build from before its kind became a local observation did: a
+    /// replicated claim. Tests use it for the claims older members still replicate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub as_older_build: bool,
 }
 
 pub fn append_claim_with_commit_context(
@@ -21333,8 +21461,14 @@ pub fn append_claim_with_commit_context(
     if !context.retirement_writer {
         validate_claim_input(input)?;
     }
-    if local_retention(&input.kind)
-        || (input.actor.is_none() && system_local_retention(&input.kind))
+    #[cfg(any(test, feature = "test-support"))]
+    let older_build = context.as_older_build;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let older_build = false;
+    if !older_build
+        && (local_retention(&input.kind)
+            || local_code(input)
+            || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
         let connection = graph.readers.get();
         admission(&connection)?;
@@ -21755,9 +21889,46 @@ fn append_local_observation_fenced(
                     return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
                 }
             }
+            // A key an older build recorded as a replicated claim, before the kind became local,
+            // still names that request: a retry gets the claim and a changed request is refused.
+            if let Some(claim) = replicated_operation_outcome_tx(transaction, input)? {
+                return Ok((claim, false));
+            }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
         .map_err(|error| St3Error::new("internal", error))?
+}
+
+/// The outcome of `input`'s idempotency key in the replicated operation registry, as a claim
+/// append would settle it: the stored claim for a retry, an error for a changed or conflicting
+/// request or a checkpointed one, and `None` when no claim was ever written for the key.
+fn replicated_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+) -> Result<Option<ClaimRecord>, St3Error> {
+    let Some((operation_id, request_digest)) = claim_operation(input)? else {
+        return Ok(None);
+    };
+    if let Some((stored_digest, canonical_claim, state)) =
+        operation_tx(transaction, &operation_id).map_err(internal)?
+    {
+        if state == "conflict" {
+            return Err(St3Error::new("idempotency-conflict", "the replicated operation has conflicting requests")
+                .with_detail("operation_id", operation_id));
+        }
+        if stored_digest != request_digest {
+            return Err(St3Error::new("idempotency-mismatch", "the idempotency key already identifies a different request")
+                .with_detail("operation_id", operation_id)
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest));
+        }
+        return claim_by_id_tx(transaction, &canonical_claim)
+            .map_err(internal)?
+            .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))
+            .map(Some);
+    }
+    checkpointed_operation_outcome(transaction, &operation_id, &request_digest)?;
+    Ok(None)
 }
 
 /// Record an observation of `latest` retention. The local observation log keeps every
@@ -21802,6 +21973,7 @@ pub fn append_latest_observation_publication(
                 "harness.observed" => {
                     publish_changed_harness_state_tx(
                         transaction, &graph.origin, input, now, event_runtime.is_none(),
+                        fleet_hears_seats_tx(transaction)?,
                     )?
                 }
                 "harness.usage" => {
@@ -22317,3 +22489,48 @@ pub mod checkpoint_agreement_tests_shared_attention_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
+
+/// When each seat's host last heard it, as the host pushed it (`seat_freshness`), kept in memory
+/// by the member it pushed to. It is never stored: a restart starts empty, and each host pushes
+/// its seats in full to a member whose `daemon.started` changed. The card's freshness rule ages
+/// the time itself, so an answer needs no expiry: a host that stops pushing reads stale.
+#[derive(Default)]
+pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, (String, u128)>>);
+
+impl RelayedFreshness {
+    /// Record when the seat's host heard each `(agent, incarnation, heard_at)`, keeping the newest.
+    pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>) {
+        let mut heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (agent, incarnation, heard_at) in seats {
+            let newer = heard
+                .get(&agent)
+                .is_none_or(|(of, at)| *of != incarnation || *at < heard_at);
+            if newer {
+                heard.insert(agent, (incarnation, heard_at));
+            }
+        }
+    }
+
+    /// When the seat's host last said it heard `subject`'s `incarnation`.
+    pub fn heard_at(&self, subject: &str, incarnation: &str) -> Option<u128> {
+        let heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        heard.get(subject).filter(|(of, _)| of == incarnation).map(|(_, at)| *at)
+    }
+}
+
+/// How often an unchanged harness report still replicates while some member cannot ask the
+/// seat's host how recently it heard the seat. Within an older member's 661-second down rule.
+pub const RESTAMP_FALLBACK_MS: u128 = 5 * 60_000;
+
+/// Whether every other member can ask this node how recently it heard its seats: each advertises
+/// `seat_freshness`, so none reads re-stamp ages from the replicated log. The daemon's seat
+/// freshness poll keeps it in this node's `meta`, which never replicates; until it has, it is
+/// false and re-stamps keep their fallback.
+fn fleet_hears_seats_tx(transaction: &Transaction<'_>) -> Result<bool, St3Error> {
+    Ok(transaction
+        .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(internal)?
+        .as_deref()
+        == Some("1"))
+}

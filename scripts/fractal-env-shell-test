@@ -117,12 +117,12 @@ SH
 cat >"$work/bin/python3" <<'SH'
 #!/bin/sh
 printf '%s:%s\n' "$FRACTAL_INSTANCE" "$ST_INSTANCE" >"$OBSERVED"
-cp "$3/st3" "$5/st3"
+cp "$3/fractal" "$5/fractal"
 SH
 mkdir -p "$work/source" "$work/home"
-printf '#!/bin/sh\nexit 0\n' >"$work/source/st3"
-cp "$work/source/st3" "$work/source/st3-migrate"
-chmod +x "$work/bin/uname" "$work/bin/python3" "$work/source/st3" "$work/source/st3-migrate"
+printf '#!/bin/sh\nexit 0\n' >"$work/source/fractal"
+cp "$work/source/fractal" "$work/source/st3-migrate"
+chmod +x "$work/bin/uname" "$work/bin/python3" "$work/source/fractal" "$work/source/st3-migrate"
 env -i HOME="$work/home" PATH="$work/bin:$PATH" OBSERVED="$work/observed" \
   FRACTAL_INSTANCE=inherited-new ST_INSTANCE=inherited-old \
   bash "$repo/scripts/install" --from "$work/source" --instance selected >/dev/null
