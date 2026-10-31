@@ -43,7 +43,8 @@ pub use staged::plan_staged;
 /// redundant receipts of recovered episodes after seven days.
 /// Version 21 covers ordered membership heads, live ordering, counters and lifecycle dependencies;
 /// it adds no drop rule and retains absent/hidden membership winners.
-pub const RULES_VERSION: u32 = 21;
+/// Version 22 keeps the observation a mission request names as its discovery.
+pub const RULES_VERSION: u32 = 22;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -81,7 +82,7 @@ proof=the-sealed-claims-and-the-blobs-they-reference
 graph=shared-projection-tables-including-arrangements,arrangement_registers,ordered-membership-raw/live/counts/lifecycle-and-shared-reverse-edges-even-when-empty
 replay=clear-arrangements,arrangement_registers-and-ordered-membership-projections,rebuild-from-retained-claims
 reader-usage=rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas,cost-complete-single-currency
-guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
+guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,request-discovery,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot-but-harness-questions
 carriers=every-rule-but-loop.state-and-harness-questions-keeps-the-newest-carrier-of-each-field
 review=retain-binding,withdrawal,verdict,actor-evidence,attempt-relation-references";
@@ -688,9 +689,9 @@ pub fn status_source(claim: &ClaimRecord) -> bool {
         && seat_status::history_source(claim)
 }
 
-/// The claim IDs a claim cites as evidence, pins as a mission run's input, or references as a
-/// review record (binding, withdrawal, verdict, attempt relation, predecessors). Those claims are
-/// read by their IDs, so they stay.
+/// The claim IDs a claim cites as evidence, pins as a mission run's input, names as a mission
+/// request's discovery, or references as a review record (binding, withdrawal, verdict, attempt
+/// relation, predecessors). Those claims are read by their IDs, so they stay.
 pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let body = &claim.body;
     let evidence = body
@@ -705,6 +706,12 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
         .into_iter()
         .flat_map(|inputs| inputs.values())
         .filter_map(|input| input.get("claim_id").and_then(Value::as_str));
+    // A request's evidence need not include its discovery: mention and repository requests cite
+    // other claims, and older requests may cite none.
+    let discovery = (claim.kind == "subscription.mission-requested")
+        .then(|| body.pointer("/fields/discovery").and_then(Value::as_str))
+        .flatten()
+        .into_iter();
     let review = fractal_schema::review::claim_references(&claim.kind, body);
     let predecessors = fractal_schema::review::KINDS
         .contains(&claim.kind.as_str())
@@ -714,7 +721,7 @@ pub fn cited_by(claim: &ClaimRecord) -> impl Iterator<Item = &str> {
     let lineage = (claim.kind == fractal_schema::slo_breaches::KIND)
         .then(|| body.pointer("/fields/record/previous_recovery").and_then(Value::as_str))
         .flatten().into_iter();
-    evidence.chain(inputs).chain(review).chain(predecessors).chain(lineage)
+    evidence.chain(inputs).chain(discovery).chain(review).chain(predecessors).chain(lineage)
 }
 
 /// Whether claims of `kind` are never dropped, because their validation reads them: a kind that
