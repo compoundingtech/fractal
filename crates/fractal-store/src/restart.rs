@@ -6,6 +6,8 @@ use anyhow::Result;
 
 pub const WHEN_IDLE: &str = "restart-when-idle";
 pub const ATTENTION_AFTER_MS: u128 = 30 * 60 * 1_000;
+/// A failed launch cannot turn old restart intent into an unbounded retry grant.
+pub const FAILED_START_RETRY_MAX_AGE_MS: u128 = 60 * 60 * 1_000;
 
 pub fn latest_request(store: &Store, subject: &str) -> Result<Option<ClaimRecord>> {
     Ok(store

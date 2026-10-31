@@ -1,6 +1,6 @@
 # Retention
 
-How long st keeps each claim kind is one policy file:
+How long Fractal keeps each claim kind is one policy file:
 [`crates/fractal-schema/retention.toml`](../../crates/fractal-schema/retention.toml). It names every
 registered claim kind once, with its class, where its writes go and, for a transition, its window.
 It also holds the checkpoint rules, in order: which claims of a kind a checkpoint may drop.
@@ -36,6 +36,17 @@ the registry.
 | `local` | `local` | only the local observation log of the node that made it |
 | `system-local` | `system-local` | local when the system writes it without an actor; replicated when a person or agent writes it as its actor |
 
+A kind whose claims carry a `code` can name some codes in `local_codes`: those writes go only to
+the local observation log, whatever `log` says, and every other code follows `log`.
+`harness.diagnostic` uses it. Its control codes stay replicated claims, because other members and
+control logic read them: login and update fences, the channel attach fence, admission, capacity
+retries, prompts and their answers, suspension, wake failures and stop deferrals. Its
+observability codes, such as render warnings, codex and pi driver failures and the Claude
+channel's initialization and receipt reports, are read only by people; they stay on the node that
+wrote them and go to OpenTelemetry. A code `local_codes` does not name stays a claim, so a new code
+replicates until someone classes it. An older member keeps replicating every code it writes, and
+this build stores those claims as before.
+
 The local observation log is trimmed by each node on its own, after `[observations] retention`
 (seven days by default); [Data authority](data-authority.md) describes it. A replicated claim is
 dropped only by a checkpoint, which every member agrees to.
@@ -69,6 +80,16 @@ Each rule has:
 
 The first rule of a kind whose conditions hold applies.
 
+## Full-value families
+
+`crates/fractal-schema/src/full_value.rs` lists the kinds whose every claim carries the complete
+value of its logical key, so the newest claim of a key in canonical order answers every reader
+alone. `subscription.state`, keyed by subject and writer, is the first: it is a state transition,
+so a field a claim leaves out is cleared rather than inherited. Each family's readers are tested
+against that contract: any trim that keeps each key's canonical newest claim leaves their answers
+unchanged. A declaration removes nothing and adds no rule; removing a family's older claims is a
+separate, reviewed step, and until then the kind keeps its `pending` reason here.
+
 ## Changing the policy
 
 Changing a class, a window or a `pending` reason changes nothing a checkpoint does. Changing a
@@ -98,6 +119,11 @@ cargo run --release -p fractal --example retention_plan -- /private/dir/clone.sq
 It opens and migrates the clone, so never point it at a live store or at the copy you keep. Two
 builds that plan the same clone with the same rules report the same digests.
 
+SLO breach transitions keep the onset, dispatch, owner and recovery fences. A checkpoint
+can compact only redundant receipts after the episode's recovery is at least seven days
+old and existing reference/envelope guards permit it. The minimum claim id of each event
+and a differing-body conflict witness remain, so replay preserves both idempotence and
+UNKNOWN conflict states. Ordinary mission and active fix history retain their own rules.
 ## Giving space back
 
 A trim or an expiry deletes rows, and SQLite keeps their pages as free pages inside the file. A

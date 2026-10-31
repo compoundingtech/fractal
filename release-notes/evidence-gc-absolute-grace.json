@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "evidence-gc never deletes a dead tree or input key whose newest record is younger than grace_hours; soft_records no longer deletes anything (it removed every in-grace group once the live set outgrew it, including the first records of a signing run in progress, #4186); the summary gains grace_records",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The GC summary and plan gain grace_records."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes. GC deletes strictly less: nothing younger than grace_hours. .st/evidence-retention.json is unchanged and soft_records is still read and checked."},
+  "compatibility": {"status": "none", "detail": "The GC timer runs main's evidence-gc, so this applies at the next run once on main."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "changed", "detail": "The evidence-gc timer on the build host that runs it was disabled on 2026-10-29 until this lands: re-enable it (systemctl --user enable --now evidence-gc.timer) after merge, and remove ~/.local/state/evidence-gc/PAUSED."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}

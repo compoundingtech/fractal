@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "evidence-flip-ready judges an unlogged pass by the published log: explained when a log head at most 240 s after the run was created lists the record (CI publishes its records minutes after observing them, and a gate can read the head one pull late); without a readable log it falls back to observed_at, and a field printed as None names no time",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The report gains log_clock."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; the gate's decisions do not change, only how the flip trigger counts unlogged passes."},
+  "compatibility": {"status": "none", "detail": "Read only, as before; it now also fetches the published log head history (shallow, about 6 MB a day) into its cache directory."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No operator actions."},
+  "recovery": {"status": "none", "detail": "Its cache directory can be removed at any time."}
+}

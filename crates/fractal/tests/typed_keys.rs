@@ -1,5 +1,5 @@
 //! Keys reach the text box as a terminal sends them. A terminal that reports every key as an
-//! escape code sends Shift+i as `i` with Shift; the actual stui binary, under a PTY that plays
+//! escape code sends Shift+i as `i` with Shift; the actual Fractal TUI binary, under a PTY that plays
 //! such a terminal, must still type `I`, `:` and `J`. (Decoded key events in unit tests cannot
 //! show this: the bug lived between the terminal's bytes and the key event.)
 

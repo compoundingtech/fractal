@@ -1,4 +1,4 @@
-//! Fixtures of `api::tests` that the tests of the crates above (st3-api-mailbox) use too.
+//! Fixtures of `api::tests` that the tests of the crates above (fractal-api-mailbox) use too.
 use super::*;
 use std::path::PathBuf;
 
@@ -17,6 +17,9 @@ pub fn state(root: &Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 

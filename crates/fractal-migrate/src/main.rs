@@ -37,7 +37,7 @@ const EXPERIMENTAL_WARNING: &str =
 #[command(
     name = "st3-migrate",
     version,
-    about = "Offline st2 to st3 KDL transformer"
+    about = "Offline st2 to Fractal KDL transformer"
 )]
 struct Cli {
     #[command(subcommand)]

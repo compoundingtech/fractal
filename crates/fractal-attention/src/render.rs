@@ -1,4 +1,4 @@
-//! The part of `render` that moved up from st3-seats.
+//! The part of `render` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::BTreeMap;
 use std::fs;

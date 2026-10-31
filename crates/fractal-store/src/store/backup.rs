@@ -37,6 +37,7 @@ impl Store {
                     (name, TableDigest { digest, count })
                 })
                 .collect(),
+            ledgers: super::backup_ledgers::digests(&connection)?,
         })
     }
 
@@ -145,7 +146,9 @@ impl Store {
                 // projection frontier covers its log can promise the same graph on restore.
                 self.check_backup_projection()?;
                 let mut header = self.backup_header()?;
-                if !owned.is_empty() {
+                if !header.ledgers.is_empty() {
+                    header.version = super::backup_format::VERSION_WITH_LEDGERS;
+                } else if !owned.is_empty() {
                     header.version = super::backup_format::VERSION_WITH_BODIES;
                 }
                 let mut hash = Sha256::new();
@@ -221,6 +224,11 @@ impl Store {
                         }
                     }
                 }
+                // Every ledger row, after the manifest whose tombstones restore turns into some
+                // of the same rows again. The header already holds their digests.
+                super::backup_ledgers::write_pages(&self.readers.get(), |page| {
+                    write_record(output, &mut hash, &Record::Ledger(page))
+                })?;
                 if let Some(bodies) = bodies {
                     use base64::Engine as _;
                     for (subject, actor, sha256) in &owned {
@@ -298,6 +306,7 @@ impl Store {
                     );
                     store_envelope_signature_tx(
                         &transaction,
+                        None,
                         fleet,
                         &envelope.writer,
                         envelope.sequence,
@@ -363,6 +372,7 @@ impl Store {
             );
             store_envelope_signature_tx(
                 &transaction,
+                None,
                 fleet,
                 &signature.writer,
                 signature.sequence,
@@ -372,6 +382,16 @@ impl Store {
                 &now_ms().to_string(),
             )?;
         }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Add one archived ledger page by union. Admission reads none of these ledgers, and sequence
+    /// allocation reads them only for its own writer, which a restore names afresh.
+    pub fn receive_backup_ledger(&self, page: &super::backup_ledgers::LedgerPage) -> Result<()> {
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        super::backup_ledgers::union_page(&transaction, page)?;
         transaction.commit()?;
         Ok(())
     }
@@ -417,6 +437,16 @@ impl Store {
                 "restored claim source digest/count differs from backup: expected {:?}, got {:?}",
                 header.tables.get("claim_sources"),
                 actual.tables.get("claim_sources")
+            );
+        }
+        // The archive's ledgers, unioned with what the restored log and manifest imply, must be
+        // exactly the source's: a missing row is lost deletion knowledge, an extra one invented.
+        if header.version >= super::backup_format::VERSION_WITH_LEDGERS {
+            anyhow::ensure!(
+                actual.ledgers == header.ledgers,
+                "restored ledgers differ from backup: expected {:?}, got {:?}",
+                header.ledgers,
+                actual.ledgers
             );
         }
         let projections_match =
@@ -527,7 +557,7 @@ mod tests {
 
     fn diagnostic(store: &Store, reason: &str) {
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: format!("daemon/{}", store.origin()),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -553,6 +583,10 @@ mod tests {
     fn signed_backup_restores_the_log_documents_and_graph_with_a_new_writer() {
         let root = tempfile::tempdir().unwrap();
         let source = Store::open(&root.path().join("source.db"), "alder").unwrap();
+        source.connection.write().execute(
+            "INSERT INTO meta(key,value) VALUES('local_node_writer',?1)",
+            ["alder"],
+        ).unwrap();
         let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
         source.bind_fleet("test-fleet").unwrap();
         source.pin_fleet_anchor(key.public()).unwrap();
@@ -574,11 +608,23 @@ mod tests {
         let backup_path = root.path().join("graph.jsonl");
         let header = archive(&source, &backup_path);
         let path = root.path().join("restored.db");
-        let restored = backup::restore(&backup_path, &path).unwrap();
+        let restored = backup::restore(&backup_path, &path, root.path()).unwrap();
         assert!(restored.projections_match);
         assert_eq!(restored.graph_digest, header.graph_digest);
         assert!(Store::open(&path, "alder").is_err());
         let target = Store::open(&path, &restored.writer).unwrap();
+        let inherited_local_writer: bool = target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='local_node_writer')",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(!inherited_local_writer, "logical restore must not inherit the source's local writer binding");
+        let restore_writer: String = target.readers.get().query_row(
+            "SELECT value FROM meta WHERE key='backup_restore_writer'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(restore_writer, restored.writer);
         assert_eq!(
             source.replication_inventory().unwrap().digest,
             target.replication_inventory().unwrap().digest
@@ -597,7 +643,7 @@ mod tests {
         assert_eq!(target.writer_head(&restored.writer).unwrap().unwrap().0, 1);
         drop(target);
         assert!(
-            backup::restore(&backup_path, &path)
+            backup::restore(&backup_path, &path, root.path())
                 .unwrap_err()
                 .to_string()
                 .contains("already holds claims")
@@ -625,7 +671,7 @@ mod tests {
                 header.graph_digest = "older-projections".into();
             }
         });
-        let report = backup::restore(&path, &root.path().join("upgraded.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("upgraded.db"), root.path()).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
         assert!(!report.projections_match);
         assert_eq!(report.tables["claim_sources"].count, 1);
@@ -633,7 +679,7 @@ mod tests {
             records.retain(|record| !matches!(record, Record::Envelope(_)));
         });
         assert!(
-            backup::restore(&path, &root.path().join("missing.db"))
+            backup::restore(&path, &root.path().join("missing.db"), root.path())
                 .unwrap_err()
                 .to_string()
                 .contains("log digest")
@@ -649,10 +695,10 @@ mod tests {
         let header = archive(&source, &path);
         let target = root.path().join("empty.db");
         drop(Store::open(&target, "unused").unwrap());
-        let report = backup::restore(&path, &target).unwrap();
+        let report = backup::restore(&path, &target, root.path()).unwrap();
         assert_eq!(report.graph_digest, header.graph_digest);
         let second =
-            backup::create_from_database(&target, &root.path().join("again.jsonl")).unwrap();
+            backup::create_from_database(&target, root.path(), &root.path().join("again.jsonl")).unwrap();
         assert_eq!(second.log_digest, header.log_digest);
     }
 
@@ -665,7 +711,7 @@ mod tests {
         archive(&source, &path);
         let destination = root.path().join("live.db");
         let live = Store::open(&destination, "birch").unwrap();
-        assert!(backup::restore(&path, &destination).is_err());
+        assert!(backup::restore(&path, &destination, root.path()).is_err());
         assert!(live.claims_for("daemon/alder", None).unwrap().is_empty());
         diagnostic(&live, "still serving");
         assert_eq!(live.claims_for("daemon/birch", None).unwrap().len(), 1);
@@ -691,7 +737,7 @@ mod tests {
         let archive_path = root.path().join("older.jsonl");
         let header = archive(&older, &archive_path);
         assert_eq!(header.tables["claim_sources"].count, 0);
-        let report = backup::restore(&archive_path, &root.path().join("upgraded.db")).unwrap();
+        let report = backup::restore(&archive_path, &root.path().join("upgraded.db"), root.path()).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
         assert_eq!(report.tables["claim_sources"].count, 1);
         assert!(!report.projections_match);
@@ -725,7 +771,7 @@ mod tests {
         worker.project_replication_backlog().unwrap();
         let path = root.path().join("projected.jsonl");
         let header = archive(&source, &path);
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(header.graph_digest, report.graph_digest);
     }
 
@@ -749,9 +795,9 @@ mod tests {
         older.project_replication_backlog().unwrap();
         drop(older);
         let archive_path = root.path().join("upgraded.jsonl");
-        let header = backup::create_from_database(&path, &archive_path).unwrap();
+        let header = backup::create_from_database(&path, root.path(), &archive_path).unwrap();
         assert_eq!(header.tables["claim_sources"].count, 1);
-        let report = backup::restore(&archive_path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&archive_path, &root.path().join("restored.db"), root.path()).unwrap();
         assert!(report.projections_match);
     }
 
@@ -806,7 +852,7 @@ mod tests {
             );
             let archive_path = root.path().join("history.jsonl");
             let header = archive(&source, &archive_path);
-            let report = backup::restore(&archive_path, &root.path().join("restored.db"))
+            let report = backup::restore(&archive_path, &root.path().join("restored.db"), root.path())
                 .unwrap_or_else(|error| panic!("{name}: {error:#}"));
             assert!(report.projections_match, "{name}");
             assert_eq!(report.log_digest, header.log_digest, "{name}");
@@ -980,7 +1026,7 @@ mod tests {
         receiver.replay_replication_graph().unwrap();
         let path = root.path().join("repaired.jsonl");
         let header = archive(&receiver, &path);
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.tables, header.tables);
         assert!(report.projections_match);
     }
@@ -1019,7 +1065,7 @@ mod tests {
         receiver.project_replication_backlog().unwrap();
         let path = root.path().join("variants.jsonl");
         let header = archive(&receiver, &path);
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.envelopes, 2);
         assert_eq!(report.log_digest, header.log_digest);
         assert!(report.projections_match);
@@ -1051,7 +1097,7 @@ mod tests {
         source.project_replication_backlog().unwrap();
         let path = root.path().join("complete.jsonl");
         let header = archive(&source, &path);
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.graph_digest, header.graph_digest);
     }
 
@@ -1069,7 +1115,7 @@ mod tests {
             )
         });
         let destination = root.path().join("restored.db");
-        let error = backup::restore(&path, &destination).unwrap_err();
+        let error = backup::restore(&path, &destination, root.path()).unwrap_err();
         assert!(error.to_string().contains("predecessor"), "{error:#}");
         assert!(!destination.exists());
     }
@@ -1103,7 +1149,7 @@ mod tests {
         let path = root.path().join("trimmed.jsonl");
         let header = archive(&source, &path);
         let target = root.path().join("restored.db");
-        let report = backup::restore(&path, &target).unwrap();
+        let report = backup::restore(&path, &target, root.path()).unwrap();
         assert_eq!(report.graph_digest, header.graph_digest);
         let restored = Store::open(&target, &report.writer).unwrap();
         assert_eq!(
@@ -1139,7 +1185,7 @@ mod tests {
         assert!(source.checkpointed_envelopes().unwrap() > 0);
         let path = root.path().join("trimming.jsonl");
         let header = archive(&source, &path);
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
         assert!(report.projections_match);
     }
@@ -1180,9 +1226,132 @@ mod tests {
         );
         let path = root.path().join("certified.jsonl");
         let header = archive(&source, &path);
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
         assert!(report.projections_match);
+    }
+
+    fn trimmed_source(root: &Path) -> Store {
+        let source = Store::open(&root.join("source.db"), "alder").unwrap();
+        source.bind_fleet("test-fleet").unwrap();
+        for index in 0..12 {
+            diagnostic(&source, &format!("note-{index}"));
+        }
+        let context = CheckpointContext {
+            now_unix_ms: now_ms() + 3 * 86_400_000,
+            configured_peers: vec![],
+            scratch: root.join("scratch"),
+            reviewer: "person/operator".into(),
+        };
+        for _ in 0..3 {
+            source.checkpoint_step(&context).unwrap();
+        }
+        assert!(source.trimmed_checkpoint().unwrap().is_some());
+        source
+    }
+
+    fn ledgers(store: &Store) -> BTreeMap<String, TableDigest> {
+        super::super::backup_ledgers::digests(&store.readers.get()).unwrap()
+    }
+
+    #[test]
+    fn a_trimmed_backup_carries_its_ledgers_and_restores_them_by_union() {
+        let root = tempfile::tempdir().unwrap();
+        let source = trimmed_source(root.path());
+        // A tombstone an earlier adoption withdrew: only the ledger still knows it.
+        let withdrawn = "cd".repeat(32);
+        source
+            .connection
+            .write()
+            .execute_batch(&format!(
+                "INSERT INTO retired_claim_ids(id) VALUES (unhex('{withdrawn}'));
+                 INSERT INTO retired_claim_withdrawals(id, checkpoint)
+                 VALUES (unhex('{withdrawn}'), 'checkpoint/earlier');"
+            ))
+            .unwrap();
+        let path = root.path().join("trimmed.jsonl");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_LEDGERS);
+        assert_eq!(header.ledgers, ledgers(&source));
+        for table in ["retired_claim_ids", "retired_envelopes", "retired_claim_withdrawals"] {
+            assert!(header.ledgers.contains_key(table), "{table}: {:?}", header.ledgers);
+        }
+        let target = root.path().join("restored.db");
+        let report = backup::restore(&path, &target, root.path()).unwrap();
+        assert!(report.projections_match);
+        let restored = Store::open(&target, &report.writer).unwrap();
+        assert_eq!(ledgers(&restored), ledgers(&source));
+        let kept: bool = restored
+            .readers
+            .get()
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM retired_claim_withdrawals
+                     WHERE id=unhex('{withdrawn}') AND checkpoint='checkpoint/earlier')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(kept);
+        drop(restored);
+
+        // An archive that lost a ledger page cannot restore: that would forget a deletion.
+        let original = fs::read(&path).unwrap();
+        rewrite(&path, |records| {
+            records.retain(|record| {
+                !matches!(record, Record::Ledger(page) if page.table == "retired_claim_withdrawals")
+            })
+        });
+        let target = root.path().join("lost-page.db");
+        let error = backup::restore(&path, &target, root.path()).unwrap_err();
+        assert!(error.to_string().contains("restored ledgers differ"), "{error:#}");
+        assert!(!target.exists());
+
+        // A ledger page in an archive that does not declare version 3 is refused before restore.
+        fs::write(&path, &original).unwrap();
+        rewrite(&path, |records| {
+            if let Record::Header(header) = &mut records[0] {
+                header.version = super::super::backup_format::VERSION;
+            }
+        });
+        assert!(backup::verify_file(&path).unwrap_err().to_string().contains("does not declare"));
+
+        // What a version 1 archive of the same store keeps: the restored manifest's tombstones,
+        // without the withdrawn one. Version 3 exists to stop exactly this loss.
+        fs::write(&path, &original).unwrap();
+        rewrite(&path, |records| {
+            records.retain(|record| !matches!(record, Record::Ledger(_)));
+            if let Record::Header(header) = &mut records[0] {
+                header.version = super::super::backup_format::VERSION;
+                header.ledgers.clear();
+            }
+        });
+        let target = root.path().join("version-one.db");
+        let report = backup::restore(&path, &target, root.path()).unwrap();
+        let restored = Store::open(&target, &report.writer).unwrap();
+        let restored_ledgers = ledgers(&restored);
+        assert!(restored_ledgers.contains_key("retired_claim_ids"));
+        assert_ne!(restored_ledgers, ledgers(&source));
+        assert!(!restored_ledgers.contains_key("retired_claim_withdrawals"));
+    }
+
+    #[test]
+    fn an_untrimmed_backup_keeps_the_version_older_builds_restore() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        for index in 0..3 {
+            diagnostic(&source, &format!("note-{index}"));
+        }
+        // Every retained batch implies its writer's head, so none needs the archive.
+        assert!(source.writer_head("alder").unwrap().is_some());
+        let path = root.path().join("untrimmed.jsonl");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION);
+        assert!(header.ledgers.is_empty());
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"ledgers\"") && !text.contains("\"record\":\"ledger\""));
+        backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
     }
 
     #[test]
@@ -1201,7 +1370,7 @@ mod tests {
         }] {
             fs::write(&path, corrupted).unwrap();
             let target = root.path().join("target.db");
-            assert!(backup::restore(&path, &target).is_err());
+            assert!(backup::restore(&path, &target, root.path()).is_err());
             assert!(!target.exists());
         }
     }
@@ -1259,7 +1428,7 @@ mod tests {
             }
         });
         assert!(
-            backup::restore(&path, &root.path().join("bad-signature.db"))
+            backup::restore(&path, &root.path().join("bad-signature.db"), root.path())
                 .unwrap_err()
                 .to_string()
                 .contains("signature")
@@ -1271,7 +1440,7 @@ mod tests {
             }
         });
         assert!(
-            backup::restore(&path, &root.path().join("bad-digest.db"))
+            backup::restore(&path, &root.path().join("bad-digest.db"), root.path())
                 .unwrap_err()
                 .to_string()
                 .contains("graph digest")
@@ -1312,7 +1481,7 @@ mod tests {
         let header = source.write_backup(&mut output).unwrap();
         let path = root.path().join("snapshot.jsonl");
         fs::write(&path, output.bytes).unwrap();
-        let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
+        let report = backup::restore(&path, &root.path().join("restored.db"), root.path()).unwrap();
         assert_eq!(report.graph_digest, header.graph_digest);
         assert_eq!(report.tables["claim_sources"].count, 1);
         assert_eq!(
@@ -1370,7 +1539,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let archive_path = root.path().join("arrived.jsonl");
             let header = archive(&source, &archive_path);
-            let restored = backup::restore(&archive_path, &root.path().join("restored.db")).unwrap();
+            let restored = backup::restore(&archive_path, &root.path().join("restored.db"), root.path()).unwrap();
             assert_eq!(restored.log_digest, header.log_digest);
             assert!(restored.projections_match);
         }
@@ -1494,7 +1663,7 @@ mod tests {
                 |record| !matches!(record, Record::Envelope(envelope) if envelope.sequence == 1),
             ));
             let target = root.path().join("must-not-publish.db");
-            let restore = backup::restore(&archive_path, &target).unwrap_err().to_string();
+            let restore = backup::restore(&archive_path, &target, root.path()).unwrap_err().to_string();
             assert_eq!(create, restore);
             for part in ["writer=\"alder\"", "sequence=2", "predecessor_sequence=1",
                 "expected_hash=", "retained predecessor absent", "not covered by a checkpoint"] {
@@ -1622,13 +1791,13 @@ mod tests {
             assert_eq!(source.readers.live_read_report().snapshot_checkouts, 0);
             let old = root.path().join("old-cut.jsonl");
             fs::write(&old, output.bytes).unwrap();
-            let report = backup::restore(&old, &root.path().join("old-restored.db")).unwrap();
+            let report = backup::restore(&old, &root.path().join("old-restored.db"), root.path()).unwrap();
             assert_eq!(report.log_digest, header.log_digest);
             assert!(report.projections_match);
             let fresh = root.path().join("fresh.jsonl");
             let fresh_header = archive(&source, &fresh);
             assert_ne!(fresh_header.log_digest, header.log_digest);
-            let fresh_report = backup::restore(&fresh, &root.path().join("fresh-restored.db")).unwrap();
+            let fresh_report = backup::restore(&fresh, &root.path().join("fresh-restored.db"), root.path()).unwrap();
             assert_eq!(fresh_report.log_digest, fresh_header.log_digest);
             assert!(fresh_report.projections_match);
         }

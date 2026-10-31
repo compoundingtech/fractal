@@ -11,9 +11,11 @@ pub const TEST_FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
 pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationExchange {
     ReplicationExchange {
         build: None,
+        claim_ranges: None,
         projection_digests: Default::default(),
         peer: peer.into(),
         fleet_id: TEST_FLEET.into(),
+        shard_id: None,
         schema_digest: runtime::compatibility_digest(&fractal_schema::registry().digest()),
         projection_registry_digest: None,
         projection_versions: Default::default(),
@@ -32,6 +34,7 @@ pub fn exchange_of(peer: &str, envelopes: Vec<ReplicaEnvelope>) -> ReplicationEx
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         signature_requests: Vec::new(),

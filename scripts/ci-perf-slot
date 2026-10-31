@@ -215,7 +215,7 @@ def watchdog(directory, gate, result, slot_fd, args, owner, since):
     waitid(WNOWAIT) observes exit without freeing our child's PID/group identity.
     """
     os.setsid()
-    from st3_test_process import set_child_subreaper, reap_descendants
+    from fractal_test_process import set_child_subreaper, reap_descendants
     set_child_subreaper()
     for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         # Caught handlers reset to SIG_DFL on exec; SIG_IGN would survive

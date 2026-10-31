@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A cancelled run's finally step whose exec gate exits while the reconciler evaluates it now gets that gate's answer (failed, or passed) instead of being cancelled as having no live process: the step is cancelled only when it had no live process before its evaluation as well as after it",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, migrations or wire changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},
+  "compatibility": {"status": "changed", "detail": "Only the final-cancelled phase changes: a gate that ends during a pass is read on the next pass, which its exit already wakes, rather than lost. A finally step whose processes were already gone is cancelled exactly as before."},
+  "downtime": {"status": "none", "detail": "Normal daemon restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "No persistent state changes; an older build returns to the previous order."}
+}

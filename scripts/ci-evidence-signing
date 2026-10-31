@@ -4,7 +4,8 @@
   guard             may this job use the signing key? (event, ref, never a fork; a pull request: its authors)
   configure         write the signer's configuration and the key (mode 0600) and mask the key
   once CHECK        record that this job signs CHECK, and refuse a second signature for it
-  aggregate FILE    write the facts of an aggregate gate (from the `needs` context) for evidence-wrap
+  aggregate FILE    write the facts of an aggregate gate (from the `needs` context) for evidence-wrap; GATE_JOB names
+                    the gate: linux-gate (default) or fractal-web (the web lane's whole-check note)
   stage-facts FILE  write the facts of a stage that scripts/ci-linux already ran (its log and timing)
   step-facts FILE   write the facts of a job whose steps already ran (their outcomes), for jobs with no stage log
   cleanup           overwrite and remove the key and everything configure made (run it always)
@@ -80,6 +81,14 @@ def _git(*args):
     return done.stdout
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — this script is copied alone.
+def config_path(base, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    listing = _git('ls-tree', '-z', '--full-tree', base, '--', preferred, legacy)
+    names = {entry.partition('\t')[2] for entry in listing.split('\0') if entry}
+    return preferred if preferred in names else legacy
+
+
 def _strings(value, what):
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise Refused(f'{AUTHORS_FILE}: {what} must be a list of nonempty strings')
@@ -102,7 +111,7 @@ def check_authors(base, head, opener, *actors):
     if not base or not head:
         raise Refused('the pull request base and head commits are not known, so its authors cannot be checked')
     try:
-        allowed = json.loads(_git('show', f'{base}:{AUTHORS_FILE}'))
+        allowed = json.loads(_git('show', f'{base}:{config_path(base, AUTHORS_FILE)}'))
         logins = set(_strings(allowed['logins'], 'logins'))
         emails = set(_strings(allowed['emails'], 'emails'))
         noreply = [re.compile(r'(?:[0-9]+\+)?' + re.escape(login) + r'@users\.noreply\.github\.com', re.IGNORECASE)
@@ -179,7 +188,11 @@ def add_source_inputs(facts, check):
     (--project) from the same base scripts the rest of the signing uses; a record signed with it can be found
     by another tree whose declared paths are the same. No declaration, no base commit, a base whose
     evidence-verify has no --project yet, or any error: no key, and the record stays an exact-tree record.
-    The base is PROJECT_BASE_SHA when the step sets it, else the same choice taken from the event payload (event_base_sha)."""
+    The base is PROJECT_BASE_SHA when the step sets it, else the same choice taken from the event payload (event_base_sha).
+
+    The policy's base_inputs (a file at the accepted base the verdict depends on, such as linux-clippy's clippy-baseline) are recorded
+    too, taken at BASE_INPUTS_SHA, the base the job itself compared against (CLIPPY_BASE_SHA for clippy), else at the same base. When
+    the job compared against no base (BASE_INPUTS_SHA all zeros), none is recorded, so the record covers no run that judges a base."""
     base, repository = env('PROJECT_BASE_SHA') or event_base_sha(), env('GITHUB_REPOSITORY')
     verify = Path(__file__).resolve().parent / 'evidence-verify'
     if not (check and base and repository and verify.exists()):
@@ -196,6 +209,21 @@ def add_source_inputs(facts, check):
         pass
     if isinstance(key, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', key):
         facts['inputs']['source_inputs'] = key
+    # Set (even empty) by a job that compares against a base of its own: empty or all zeros means it compared against none.
+    inputs_base = env('BASE_INPUTS_SHA') if 'BASE_INPUTS_SHA' in os.environ else base
+    if not inputs_base or re.fullmatch(r'0+', inputs_base):
+        return
+    try:
+        done = subprocess.run([sys.executable, str(verify), '--project', '--check', check, '--revision', 'HEAD',
+                               '--policy-from', inputs_base, '--repository', repository],
+                              capture_output=True, text=True, env=clean, timeout=120)
+        values = json.loads(done.stdout).get('base_inputs') if done.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        values = None
+    for name, value in (values or {}).items() if isinstance(values, dict) else ():
+        if isinstance(name, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) and isinstance(value, str) \
+                and re.fullmatch(r'[0-9a-f]{64}|absent', value):
+            facts['inputs'][name] = value
 
 
 def event_base_sha():
@@ -214,7 +242,7 @@ def event_base_sha():
 
 # Required checks with their own notes that the aggregate note job waits for only to publish those notes: their
 # results are not in the linux-gate note and their gates' decisions do not stop it (docs/st3/gate-evidence.md).
-SEPARATE_CHECKS = ('genie-freshness', 'typescript-client')
+SEPARATE_CHECKS = ('genie-freshness', 'ci-script-tests', 'typescript-client')
 
 
 def aggregate(path):
@@ -223,6 +251,11 @@ def aggregate(path):
     Not the stages' commands, outputs, inventories, timings or toolchains: it did not run them.
     """
     needs = json.loads(env('NEEDS_JSON') or '{}')
+    if env('GATE_JOB') == 'fractal-web':
+        fractal_web_aggregate(path, needs)
+        return
+    # The web lane's jobs and its gate belong to the lane's own whole-check note (fractal_web_aggregate), never to this one.
+    needs = {name: entry for name, entry in needs.items() if name not in (*FRACTAL_WEB_JOBS, 'evidence-gate-fractal-web')}
     # The gate jobs only feed the skip check below; they are not part of the recorded command or results.
     # Neither is a job of the path-sensitive fractal-web lane: it is its own lane with its own notes, and it is
     # skipped whenever a change touches no web path, which must not stop the linux-gate verdict being recorded.
@@ -262,6 +295,63 @@ def aggregate(path):
     facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
     # The aggregate is what the linux-gate skip rests on, so it carries the input key its policy declares, like a stage note.
     add_source_inputs(facts, gate)
+    Path(path).write_text(json.dumps(facts, sort_keys=True))
+
+
+# The fractal-web check's jobs: detection, the execution shards (one matrix job) and the always-run verdict.
+FRACTAL_WEB_JOBS = ('fractal-web', 'fractal-web-changes', 'fractal-web-execution')
+
+
+def fractal_web_aggregate(path, needs):
+    """The fractal-web check's whole-check note: what the evidence note job knows about the lane's jobs in this run.
+
+    One note for the whole check, never one per shard: it is signed only when the lane ran (detection succeeded and said
+    a web path changed), every execution shard succeeded and the lane's evidence gate did not skip it. GitHub gives a
+    dependent job one result for a matrix job, `success` only when every shard succeeded, so a skipped, failed or
+    cancelled shard leaves no note at all: never a note that reads as success. The shard count and the test sets come
+    from the same expressions as the matrix (KIT_SHARD_COUNT, KIT_INPUTS, KIT_PLAY_SET, APP_TEST_SET), so a pull
+    request's one-shard per-commit run is recorded as exactly that. Each shard's own note still carries its own result.
+    """
+    missing = [name for name in FRACTAL_WEB_JOBS if name not in needs]
+    if missing:
+        raise Refused(f'the fractal-web job(s) {", ".join(missing)} are not among the needed jobs, so there is no verdict to record')
+    results = {name: str(needs[name].get('result', 'unknown')) for name in sorted(FRACTAL_WEB_JOBS)}
+    gate = needs.get('evidence-gate-fractal-web') or {}
+    if str((gate.get('outputs') or {}).get('skip', '')).lower() == 'true':
+        raise Refused('not recording: the fractal-web evidence gate skipped the lane in this run, so it did not test this tree itself')
+    detection = needs['fractal-web-changes']
+    relevant = str((detection.get('outputs') or {}).get('relevant', ''))
+    if results['fractal-web-changes'] != 'success' or relevant != 'true':
+        raise Refused(f'not recording: the fractal-web lane did not run in this run (detection ended {results["fractal-web-changes"]}, '
+                      f'relevant={relevant or "unknown"}), so it did not test this tree itself')
+    if results['fractal-web-execution'] != 'success':
+        raise Refused(f'not recording: fractal-web-execution ended {results["fractal-web-execution"]}, so at least one shard was '
+                      'skipped, failed or cancelled and the lane did not test this tree itself')
+    if results['fractal-web'] not in ('success', 'failure'):
+        raise Refused(f'not recording: the fractal-web verdict ended {results["fractal-web"]}, so the check did not finish')
+    count = env('KIT_SHARD_COUNT')
+    if not (count.isdigit() and 1 <= int(count) <= 16):
+        raise Refused(f'KIT_SHARD_COUNT must be the number of execution shards (1 to 16), not {count!r}')
+    sets = {'kit_inputs': (env('KIT_INPUTS'), ('true', 'false')), 'kit_play_set': (env('KIT_PLAY_SET'), ('commit', 'all')),
+            'app_test_set': (env('APP_TEST_SET'), ('related', 'all'))}
+    for name, (value, allowed) in sets.items():
+        if value not in allowed:
+            raise Refused(f'{name.upper()} must be one of {", ".join(allowed)}, not {value!r}')
+    shards = {str(index): results['fractal-web-execution'] for index in range(int(count))}
+    facts = {
+        'command': ['fractal-web', 'aggregate', *results],
+        'exit_code': 0 if results['fractal-web'] == 'success' else 1,
+        'output': {'gate': results['fractal-web'], 'needs': results, 'shards': shards},
+        'inputs': {
+            'run_id': env('GITHUB_RUN_ID'), 'run_attempt': env('GITHUB_RUN_ATTEMPT'), 'event_name': env('GITHUB_EVENT_NAME'),
+            'ref': env('GITHUB_REF'), 'run_started_at': env('RUN_STARTED_AT'), 'workflow': env('GITHUB_WORKFLOW'),
+            'needed_jobs': ','.join(results), 'stage_results': ','.join(f'{n}={r}' for n, r in results.items()),
+            'kit_shard_count': count, 'shard_results': ','.join(f'{n}={r}' for n, r in shards.items()),
+            **{name: value for name, (value, _) in sets.items()},
+        },
+    }
+    facts['inputs'] = {k: v for k, v in facts['inputs'].items() if v}
+    add_source_inputs(facts, 'fractal-web')
     Path(path).write_text(json.dumps(facts, sort_keys=True))
 
 

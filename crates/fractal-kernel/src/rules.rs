@@ -1,4 +1,4 @@
-//! The rules smalltalk ships, in terms of its own claim kinds. `st rules lockdown` sets them all,
+//! The rules Fractal ships, in terms of its own claim kinds. `st rules lockdown` sets them all,
 //! in audit mode: each logs what it would refuse until a person turns it to enforce.
 
 use smallclaims::rules::{Mode, Rule};

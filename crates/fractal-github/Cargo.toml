@@ -11,6 +11,7 @@ test-support = ["fractal-evidence/test-support"]
 
 [dependencies]
 fractal-evidence = { path = "../fractal-evidence" }
+fractal-schema = { path = "../fractal-schema" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 getrandom = "0.3"

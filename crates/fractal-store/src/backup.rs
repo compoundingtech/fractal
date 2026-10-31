@@ -12,7 +12,7 @@ use crate::message_body::BodyAttachment as _;
 
 pub use crate::store::backup_format::{
     FORMAT, Header, MessageBodyRecord, Record, RestoreReport, TableDigest, VERSION,
-    VERSION_WITH_BODIES,
+    VERSION_WITH_BODIES, VERSION_WITH_LEDGERS,
 };
 pub use crate::store::backup_format::{MAX_RECORD_BYTES, PAGE};
 
@@ -35,6 +35,9 @@ pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {
             "http://localhost/v1/backup".to_owned(),
         ),
         Endpoint::Http(base) => (reqwest::Client::new(), format!("{base}/v1/backup")),
+        Endpoint::Fabric(_) => anyhow::bail!(
+            "native Fabric endpoints only support client-v0 and health requests, not backups"
+        ),
     };
     let response = client.get(url).send().await?;
     let status = response.status();
@@ -59,7 +62,12 @@ pub async fn create(endpoint: &Endpoint, destination: &Path) -> Result<()> {
 }
 
 /// An offline export can migrate its input; callers must supply a private database copy.
-pub fn create_from_database(database: &Path, destination: &Path) -> Result<Header> {
+/// External message bodies remain in the product state root, independently of the database.
+pub fn create_from_database(
+    database: &Path,
+    state_root: &Path,
+    destination: &Path,
+) -> Result<Header> {
     use rusqlite::OptionalExtension;
     ensure!(database.exists(), "source database does not exist");
     ensure!(!destination.exists(), "backup file already exists");
@@ -89,9 +97,7 @@ pub fn create_from_database(database: &Path, destination: &Path) -> Result<Heade
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     let header = store.write_backup_with_bodies(
         &mut temporary,
-        Some(&crate::message_body::bodies(
-            database.parent().unwrap_or(Path::new(".")),
-        )),
+        Some(&crate::message_body::bodies(state_root)),
     )?;
     temporary.as_file().sync_all()?;
     temporary.persist_noclobber(destination)?;
@@ -118,7 +124,7 @@ fn read_record(input: &mut impl BufRead) -> Result<Option<(Record, Vec<u8>)>> {
 fn check_header(header: &Header) -> Result<()> {
     ensure!(
         header.format == FORMAT
-            && (header.version == VERSION || header.version == VERSION_WITH_BODIES),
+            && [VERSION, VERSION_WITH_BODIES, VERSION_WITH_LEDGERS].contains(&header.version),
         "unsupported claim backup format/version"
     );
     ensure!(
@@ -171,6 +177,10 @@ pub fn verify_file(path: &Path) -> Result<Header> {
                 );
                 body_bytes(&body)?;
             }
+            Record::Ledger(_) => ensure!(
+                header.version >= VERSION_WITH_LEDGERS,
+                "a ledger page in an archive that does not declare them"
+            ),
             Record::End {
                 envelopes: expected,
                 sha256,
@@ -192,7 +202,7 @@ pub fn verify_file(path: &Path) -> Result<Header> {
 }
 
 /// Build privately at the current schema. Failed restores never publish a partial graph.
-pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_store::backup TODO=chunk-or-reference-exact-wire-values */ fn restore(source: &Path, destination: &Path) -> Result<RestoreReport> {
+pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_store::backup TODO=chunk-or-reference-exact-wire-values */ fn restore(source: &Path, destination: &Path, state_root: &Path) -> Result<RestoreReport> {
     let header = verify_file(source)?;
     let existing = if destination.exists() {
         let connection = rusqlite::Connection::open(destination)?;
@@ -218,7 +228,9 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
         .unwrap_or(Path::new("."));
     fs::create_dir_all(directory)?;
     let stage = tempfile::tempdir_in(directory)?;
-    let staged_path = stage.path().join("claims.sqlite3");
+    let staged_path = stage
+        .path()
+        .join(fractal_client::product_dirs::STORE_DATABASE_FILES[0]);
     let writer = format!("restored-{}", uuid::Uuid::now_v7().simple());
     let store = Store::open(&staged_path, &writer)?;
     store.prepare_backup_restore(&header, &writer)?;
@@ -261,6 +273,7 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
             Record::Signatures(signatures) => {
                 store.receive_backup_signatures(&header, &signatures)?
             }
+            Record::Ledger(page) => store.receive_backup_ledger(&page)?,
             Record::Checkpoint(page) => {
                 ensure!(!checkpoint_finished, "duplicate checkpoint manifest");
                 let manifest = checkpoint.get_or_insert_with(|| CheckpointManifest {
@@ -339,8 +352,8 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h0f24faa60a9f owner=fractal_s
         fs::hard_link(&staged_path, destination)?;
     }
     drop(existing);
-    // The full texts of long messages this member owned go back beside the database.
-    let restored = crate::message_body::bodies(directory);
+    // External message bodies belong to the product state root, not the database directory.
+    let restored = crate::message_body::bodies(state_root);
     for (actor, message) in &verified {
         if let Some(bytes) = staged_bodies.read(actor, message)? {
             restored.put(actor, message, &bytes)?;

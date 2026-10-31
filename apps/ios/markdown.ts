@@ -1,4 +1,4 @@
-// Block markdown the way stui renders an assistant reply (crates/fractal-tui/src/ui/text.rs markdown
+// Block markdown the way the Fractal terminal UI renders an assistant reply (crates/fractal-tui/src/ui/text.rs markdown
 // and inline): headings, bullets with a hanging marker, fenced code, quotes, rules, and tables
 // kept as monospace rows. Anything else is a plain line. A `doc/…` reference is a link that opens
 // the document (docs/clients/ui-contract.md#documents).
@@ -58,13 +58,17 @@ export function inline(text: string): Run[] {
     } else if (rest.startsWith('`') && rest.indexOf('`', 1) > 0) {
       const end = rest.indexOf('`', 1);
       flush(); runs.push({ text: rest.slice(1, end), style: 'code' }); rest = rest.slice(end + 1);
+    } else if ((match = /^!\[([^\]]*)\]\(([^)]*)\)/.exec(rest))) {
+      // An image is a link that opens it, as in the Fractal terminal UI: one on the web is never fetched just to draw it.
+      flush(); runs.push({ text: `▣ ${match[1].trim() || 'image'}`, style: 'link', url: /^https?:\/\//.test(match[2]) ? match[2] : undefined, ...(filePath(match[2]) ? { path: filePath(match[2]) } : {}) });
+      plain += ' · image link'; rest = rest.slice(match[0].length);
     } else if ((match = /^\[([^\]]*)\]\(([^)]*)\)/.exec(rest))) {
       // An address opens; a path names a file on the machine the writer works on (an agent's
       // `[spec](/home/…/spec.md)`), which this phone cannot read but can copy.
       const document = parseDocumentReference(match[2].trim()) ? match[2].trim() : undefined;
       flush(); runs.push({ text: match[1], style: 'link', url: /^https?:\/\//.test(match[2]) ? match[2] : undefined, ...(filePath(match[2]) ? { path: filePath(match[2]) } : {}), ...(document ? { document } : {}) }); rest = rest.slice(match[0].length);
     } else if (!/[A-Za-z0-9/._~+@-]$/.test(plain) && leadingDocument(rest)) {
-      // A written-out document reference opens the document, as stui follows it.
+      // A written-out document reference opens the document, as the Fractal terminal UI follows it.
       const document = leadingDocument(rest)!;
       flush(); runs.push({ text: document, style: 'link', document }); rest = rest.slice(document.length);
     } else if ((match = /^https?:\/\//.exec(rest)) && (plain === '' || /[\s(\["'*]$/.test(plain)) && address(rest)) {

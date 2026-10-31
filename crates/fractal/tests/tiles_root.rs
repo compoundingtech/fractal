@@ -1181,6 +1181,9 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
                 native_session_home: None,
                 owning_person: None,
                 planner_default: fractal_daemon::model::PlannerSpec::default(),
+                harness_question_sink: None,
+                assistant_receipts: Default::default(),
+                private_notes: Default::default(),
             },
             host.registry.clone(),
         );

@@ -13,6 +13,9 @@ use fractal_missions::store::tests_shared_seats::{exchange_of, harness_state, ta
 // including columns the old graph digest did not cover. Local arrival cursors are tested through
 // the shared readers they accelerate rather than compared as if they were replicated identities.
 const SHARED_TABLES: &[(&str, &[&str])] = &[
+    ("slo_episode_events", &[]),
+    ("slo_episode_heads", &[]),
+    ("slo_pending", &[]),
     ("operations", &[]),
     ("blobs", &[]),
     ("documents", &["created_index"]),
@@ -21,6 +24,11 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
+    ("declared_resource_edges", &[]),
+    ("ordered_membership_heads", &[]),
+    ("ordered_membership_live", &[]),
+    ("ordered_membership_counts", &["changed_index"]),
+    ("ordered_membership_lifecycle", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
@@ -68,10 +76,14 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_range_digests",
         "claim_range_import",
         "claim_range_pending",
+        "retired_range_import",
+        "retired_range_pending",
         "retired_operation_receipts",
         "retired_claim_ancestry",
+        "local_trim_citations",
         "writer_heads",
         "projection_health",
+        "local_ordered_membership_pending",
         "replication_peers",
         "replication_refusals",
         "capabilities",
@@ -82,6 +94,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
         "local_mailbox_leases",
+        "local_native_delivery_receipts_v2",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -128,6 +141,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_claims",
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
+        // Member-local completion-health candidates and hydration progress, rebuilt from claims.
+        "local_completion_health_v1_claims",
+        "local_completion_health_v1_fields",
+        "local_completion_health_v1_pending",
+        "local_completion_health_v1_backfill",
         "local_glass_head_pending",
         "local_glass_head_dirty",
         "local_directive_note_pending",
@@ -261,7 +279,7 @@ pub fn shared_rows(store: &Store) -> BTreeMap<String, Vec<String>> {
                         || (*table == "documents" && name == "binding_key")
                         || (*table == "glass_heads" && matches!(name.as_str(), "created_key" | "head_key"))
                         || (*table == "person_directive_notes" && name == "head_key")
-                        || (matches!(*table, "arrangements" | "arrangement_registers")
+                        || (matches!(*table, "arrangements" | "arrangement_registers" | "ordered_membership_heads")
                             && name == "winner")
                     {
                         format!("hex({name})")
@@ -504,7 +522,7 @@ fn compare_shared(expected: &Store, actual: &Store, phase: &str, mismatches: &mu
 
 fn write_audit_history(source: &Store) {
     source.register_custom_kind(&custom::RegistrationRequest {
-        manifest: serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h515c67869859 owner=fractal_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json")).unwrap(),
+        manifest: serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hdbd17e987993 owner=fractal_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/fractal/custom-review.json")).unwrap(),
         actor: "agent/garden/seed".into(),
     }).unwrap();
     source.put_document("doc/garden/audit", b"Immutable audit context", &None, "garden-audit-context").unwrap();
@@ -519,7 +537,7 @@ fn write_audit_history(source: &Store) {
     publish_takeover(
         source,
         &format!(
-            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
+            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\"; resource \"change\" subject=\"resource/audit/pull-request/1\" reason=\"Review the change.\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
         ),
         "audit-desired",
     );
@@ -554,6 +572,19 @@ fn write_audit_history(source: &Store) {
             idempotency_key: None,
         })
         .unwrap();
+    let ordered = "arrangement/person/ada/019a0000-0000-7000-8000-000000000002";
+    source.append_claim(&ClaimInput {
+        subject: ordered.into(), kind: "arrangement.edited".into(), actor: Some("person/ada".into()),
+        fields: serde_json::from_value(json!({"owner":"person/ada","version":2,"operations":[{"op":"create","name":"Ordered audit"}]})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    source.edit_ordered_memberships(&ClaimInput {
+        subject: ordered.into(), kind: "ordered-membership.edited".into(), actor: Some("person/ada".into()),
+        fields: serde_json::from_value(json!({"owner":"person/ada","operations":[
+            {"op":"place","member":"glass/person/ada/019a0000-0000-7000-8000-000000000001","bucket":null,"key":"a0"},
+            {"op":"place","member":"agent/audit-not-declared","bucket":null,"key":"a1"}
+        ]})).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }, &BTreeMap::new()).unwrap();
     let declared_message = r#"version 2
 message "audit-declared" {
   from "agent/alder.worker"
@@ -856,6 +887,8 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose the release date".into(),
@@ -1254,6 +1287,17 @@ fn reopening_a_legacy_json_subtype_digest_reseeds_and_replaces_its_triggers() {
 fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
     let store = Store::open_memory("alder").unwrap();
     write_audit_history(&store);
+    // The SLO breach tables hold projected rows; the digest covers each of their columns, so this
+    // control writes one row of each directly, apart from the reducer that normally fills them.
+    // It stays out of the shared history, whose peers rebuild these rows from claims.
+    store.connection.batched(|tx| -> Result<()> {
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h96cc0d92ac25 owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_episode_events(episode,event,member,fleet,objective,ordinal,claim_id,body,conflict,dispatched_at_ms,recorded_at_ms)
+            VALUES('episode-a','pending','alder','fleet-a','objective-a',1,'claim-a','{}',0,NULL,1)", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h043ea9e4de4e owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_episode_heads(fleet,member,objective,episode,ordinal,conflict) VALUES('fleet-a','alder','objective-a','episode-a',1,0)", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9d9bf03dc42a owner=fractal_seats::store::canonical_audit TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO slo_pending(episode,fleet,member,objective,ordinal,onset_end_ms,onset_claim,body,body_key,mission_run)
+            VALUES('episode-a','fleet-a','alder','objective-a',1,1,'claim-a','{}','key-a',NULL)", [])?;
+        Ok(())
+    }).unwrap().unwrap();
     let mut connection = store.connection.lock().unwrap();
     // Deliberate projection corruption checks coverage independently of reducer semantics.
     connection
@@ -1297,6 +1341,8 @@ fn incremental_digests_cover_each_shared_column_and_roll_back_with_rows() {
             } else if *table == "desired" && column == "member" {
                 // The host index parses this JSON during UPDATE, before digest comparison.
                 "json_set(COALESCE(member,'{}'), '$.host', COALESCE(json_extract(member,'$.host'),'')||'-changed')".to_owned()
+            } else if *table == "ordered_membership_lifecycle" && column == "visible" {
+                "1-visible".to_owned()
             } else if kind == "INTEGER" {
                 format!("COALESCE({column},0)+1")
             } else if kind == "BLOB" {

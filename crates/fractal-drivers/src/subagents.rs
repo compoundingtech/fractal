@@ -24,6 +24,11 @@ use serde_json::Value;
 use crate::flock::{FileLock, Mode, Open, open};
 use crate::fsatomic::{self, Durability, Staging};
 
+/// Whether this driver reports subagents through hooks or native channel events.
+pub fn driver_observes_subagents(driver: &str) -> bool {
+    matches!(driver, "claude" | "codex" | "omp")
+}
+
 pub const LEDGER_FILE: &str = "harness-subagents";
 const LOCK_FILE: &str = ".harness-subagents.lock";
 

@@ -13,11 +13,19 @@ import {
 
 const envelope = (value: unknown) => ({
   api_version: 'st3.client.v0',
-  snapshot: { id: 'snapshot/test' },
+  snapshot: { id: 'snapshot/test', created_at: '1970-01-01T00:00:03Z' },
   value,
 })
 
 describe('native subject reads', () => {
+  it('classifies a getter that is not implemented as unsupported rather than a retryable failure', async () => {
+    const options: ClientOptions = { baseUrl: 'http://gateway.invalid', fetchImpl: async input =>
+      String(input).endsWith('/capabilities') ? Response.json(recording.capabilities) :
+        Response.json({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', code: 'unsupported', message: 'Not implemented', retryable: false, request_id: 'request/example-unsupported', details: {} }, { status: 501 }) }
+    const reads = gatewaySubjectReads({ options })
+    expect((await Effect.runPromise(Effect.flip(reads.session.read('session/example-details')))).reason).toBe('unsupported')
+    expect((await Effect.runPromise(Effect.flip(reads.agentQueue.read('agent/example-details')))).reason).toBe('unsupported')
+  })
   it('decodes fixture wire once before publishing rich values to typed registry consumers', () => {
     const feed = nativeSubjectFixture({ schema: Agent, wire: recording.cases.agent.payload.value })
     expect(feed._tag).toBe('Observed')
@@ -81,20 +89,25 @@ describe('native subject reads', () => {
           ),
         ),
       )
-    expect(Array.from(await one())[0]).toEqual(
-      observed({ value: { reference: 'blob/document', bytes: [65] } }),
-    )
+    const first = Array.from(await one())[0]!
+    expect(first).toEqual({
+      ...observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
+      readAt: expect.any(Number),
+    })
     failed = true
     expect(Array.from(await one())[0]).toEqual({
       _tag: 'Observed',
       value: { reference: 'blob/document', bytes: [65] },
+      snapshotCreatedAt: DateTime.makeUnsafe(3000),
+      readAt: first._tag === 'Observed' ? first.readAt : undefined,
       freshness: 'stale',
       error: { reason: 'failed', detail: 'Gateway disconnected' },
     })
     failed = false
-    expect(Array.from(await one())[0]).toEqual(
-      observed({ value: { reference: 'blob/document', bytes: [65] } }),
-    )
+    expect(Array.from(await one())[0]).toEqual({
+      ...observed({ value: { reference: 'blob/document', bytes: [65] }, snapshotCreatedAt: DateTime.makeUnsafe(3000) }),
+      readAt: expect.any(Number),
+    })
   })
 
   it('decodes the selected machine independently of unrelated malformed list rows', async () => {

@@ -53,6 +53,8 @@ pub struct PublishedList<R> {
     /// Numbers every publication this list swapped in, from one, so two publications at one cut
     /// never share an identity. Written under the `newest` lock.
     sequence: AtomicU64,
+    materializations: AtomicU64,
+    completed_materialization: AtomicU64,
     /// Rises with every publication, withdrawal, forget and end, for readers that wait for one.
     changes: tokio::sync::watch::Sender<u64>,
     /// Folds from nothing or in chunks, by why: each refolded many rows, not a few.
@@ -77,6 +79,8 @@ impl<R> Default for PublishedList<R> {
             generation: AtomicU64::new(0),
             newest_generation: AtomicU64::new(0),
             sequence: AtomicU64::new(0),
+            materializations: AtomicU64::new(0),
+            completed_materialization: AtomicU64::new(0),
             changes: tokio::sync::watch::Sender::new(0),
             rebuilds: Mutex::default(),
             #[cfg(any(test, feature = "test-support"))]
@@ -107,6 +111,13 @@ pub struct PublicationId {
     pub list: u64,
     pub generation: u64,
     pub sequence: u64,
+}
+
+/// A generation-fenced materialization begun before expensive presentation work.
+#[derive(Clone, Copy)]
+pub struct PublicationBuild {
+    pub generation: u64,
+    pub ticket: u64,
 }
 
 impl<R> PublishedList<R> {
@@ -165,6 +176,10 @@ impl<R> PublishedList<R> {
     /// Follows every publication, withdrawal, forget and end.
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.changes.subscribe()
+    }
+
+    pub fn has_subscribers(&self) -> bool {
+        self.changes.receiver_count() != 0
     }
 
     /// Ask the refresher to fold now rather than wait for its next commit or deadline.
@@ -248,6 +263,52 @@ impl<R> PublishedList<R> {
         Some(served)
     }
 
+    pub fn begin_materialization(&self) -> Option<PublicationBuild> {
+        let generation = self.generation();
+        let ticket = self.materializations.fetch_update(Ordering::AcqRel, Ordering::Acquire,
+            |ticket| ticket.checked_add(1)).ok()?.checked_add(1)?;
+        Some(PublicationBuild { generation, ticket })
+    }
+
+    /// Finish an identical materialization without fabricating a revision or new timestamp.
+    /// The compared Arc must still be current, and this completion fences older builders.
+    pub fn retain_materialization(&self, build: PublicationBuild, expected: &Arc<Publication<R>>) -> bool {
+        let newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.generation() != build.generation
+            || !newest.as_ref().is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            return false;
+        }
+        self.completed_materialization.fetch_max(build.ticket, Ordering::AcqRel);
+        true
+    }
+
+    /// Construct a publication with its final identity while holding the existing owner lock.
+    /// The builder must only wrap already materialized rows; folding and encoding belong outside.
+    pub fn publish_identified(
+        &self,
+        materialization: PublicationBuild,
+        build: impl FnOnce(PublicationId) -> Publication<R>,
+    ) -> Option<bool> {
+        let mut newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        let generation = materialization.generation;
+        if self.generation.load(Ordering::Acquire) != generation {
+            return None;
+        }
+        if materialization.ticket <= self.completed_materialization.load(Ordering::Acquire) {
+            return Some(self.serving.load(Ordering::Acquire));
+        }
+        let sequence = self.sequence.load(Ordering::Acquire).checked_add(1)?;
+        let publication = build(PublicationId { list: self.instance, generation, sequence });
+        *newest = Some(Arc::new(publication));
+        self.newest_generation.store(generation, Ordering::Release);
+        self.sequence.store(sequence, Ordering::Release);
+        self.completed_materialization.store(materialization.ticket, Ordering::Release);
+        let served = self.serving.swap(true, Ordering::AcqRel);
+        self.changes.send_modify(|changes| *changes += 1);
+        Some(served)
+    }
+
     /// Stop serving the list, as when its refresher keeps failing or stops, until a fold
     /// publishes again. Readers of a list its refresher governs refuse meanwhile; readers of
     /// another fold on read. Says whether it was served.
@@ -266,6 +327,16 @@ impl<R> PublishedList<R> {
         self.generation.fetch_add(1, Ordering::AcqRel);
         self.fold_from_nothing_next();
         self.changes.send_modify(|changes| *changes += 1);
+        self.wake.notify_one();
+    }
+
+    /// More of the admitted claims projected, so rows at the same cut may have changed with no
+    /// new claim: fold from nothing next, while readers keep being served the newest rows under
+    /// their own cut until that fold publishes. Unlike [`Self::forget`], the generation stays,
+    /// so a fold under way still publishes and continuations of the newest rows still read.
+    pub fn refold(&self) {
+        let _newest = self.newest.lock().unwrap_or_else(PoisonError::into_inner);
+        self.fold_from_nothing_next();
         self.wake.notify_one();
     }
 
@@ -502,5 +573,32 @@ mod tests {
         list.end();
         assert!(changes.has_changed().unwrap());
         assert!(matches!(list.current(), ListRead::Ended));
+    }
+
+    #[test]
+    fn a_refold_keeps_serving_the_newest_rows_until_a_fold_from_nothing_replaces_them() {
+        let list = PublishedList::<Vec<u64>>::default();
+        list.start();
+        list.publish(publication(4), 0);
+        let (_, first) = served(&list).unwrap();
+        // More claims projected at the same cut: readers keep the rows and their identity, so a
+        // continuation of them still reads, while the next fold starts from nothing.
+        list.refold();
+        assert_eq!(served(&list).unwrap(), (4, first));
+        assert_eq!(list.generation(), 0);
+        let (base, generation) = list.base();
+        assert!(base.is_none(), "the fold after a refold starts from nothing");
+        // A fold that began before another refold still publishes, and the one after it starts
+        // from nothing again: rows folded before a chunk projected are never the last word.
+        list.refold();
+        assert!(list.publish(publication(4), generation).is_some());
+        let (cut, second) = served(&list).unwrap();
+        assert_eq!(cut, 4);
+        assert_ne!(second, first, "the refolded rows at the same cut are a new publication");
+        assert!(list.base().0.is_none());
+        assert!(list.base().0.is_some(), "only once");
+        // A forget still stops serving at once.
+        list.forget();
+        assert!(matches!(list.current(), ListRead::NotReady));
     }
 }

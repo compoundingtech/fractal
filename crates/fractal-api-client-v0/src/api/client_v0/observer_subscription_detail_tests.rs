@@ -6,7 +6,7 @@ use rusqlite::{Connection, params};
 use std::sync::{Barrier, Mutex};
 
 
-// Only explicitly tracked fixture stores are counted (st3-api's `note_snapshot_construction`). Other
+// Only explicitly tracked fixture stores are counted (fractal-api-core's `note_snapshot_construction`). Other
 // parallel tests cannot affect this admission-order control, and the registration is removed on drop.
 use crate::api::SNAPSHOT_CONSTRUCTIONS;
 

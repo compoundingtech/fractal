@@ -6,11 +6,14 @@
 //! reporting; repair re-derives it again under the writer. A concurrent below-frontier
 //! mutation can introduce an inconsistency this pass misses: the next scheduled audit
 //! catches it. This is a detector and repair source, not a global consistency gate.
-//! Pages contain at most 128 rows, yield after 20 ms, and interrupt SQLite after 40 ms.
-//! The 100 ms snapshot target is cooperative: OS scheduling, an individual filesystem call,
-//! and a single SQLite JSON extraction cannot be preempted by its VM progress handler.
+//! Pages contain at most 128 rows and yield after 20 ms. SQLite checks the 40 ms local
+//! slice every 1,000 VM instructions. Empty interrupted slices double their minimum
+//! VM work allowance, so a finite seek can finish even if every wall-clock slice expires.
+//! The 100 ms snapshot target is cooperative, not a hard transaction deadline; caller
+//! cancellation remains active during the growing work allowance.
 use super::*;
 use std::time::{Duration, Instant};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 const CLAIM_REMAINDER_PAGE: &str =
     "SELECT json_extract(body,'$._operation.id'),
@@ -46,14 +49,41 @@ fn page(
     consume: &mut dyn FnMut(&rusqlite::Row<'_>) -> Result<()>,
     observer: &mut dyn FnMut(Duration),
 ) -> Result<usize> {
+    page_with_slice_deadline(connection, sql, parameters, consume, observer,
+        |elapsed| elapsed >= Duration::from_millis(40))
+}
+
+fn page_with_slice_deadline(
+    connection: &Connection,
+    sql: &str,
+    parameters: &[&dyn rusqlite::ToSql],
+    consume: &mut dyn FnMut(&rusqlite::Row<'_>) -> Result<()>,
+    observer: &mut dyn FnMut(Duration),
+    slice_expired: impl Fn(Duration) -> bool + Clone + Send + 'static,
+) -> Result<usize> {
     connection.busy_timeout(Duration::from_millis(40))?;
-    for attempt in 0..3 {
+    let locally_interrupted = Arc::new(AtomicBool::new(false));
+    let mut minimum_work = 1_u64;
+    let mut slice_count = 0_u64;
+    let mut interrupt_count = 0_u64;
+    loop {
         // Cheap empty/index seeks may not reach a VM progress callback. Preserve the
         // caller's cancellation before replacing the pool's one-step cancelled handler.
         smallclaims::read_budget::check()?;
         let started = Instant::now();
+        let local = Arc::clone(&locally_interrupted);
+        local.store(false, Ordering::Relaxed);
+        let expired = slice_expired.clone();
+        let mut work = 0_u64;
         connection.progress_handler(1000, Some(move || {
-            started.elapsed() >= Duration::from_millis(40) || smallclaims::read_budget::check().is_err()
+            if smallclaims::read_budget::check().is_err() { return true; }
+            work = work.saturating_add(1);
+            // A saturated allowance disables only local preemption. A finite query
+            // must eventually return a row or EOF; request cancellation still wins.
+            let interrupt = minimum_work != u64::MAX
+                && work >= minimum_work && expired(started.elapsed());
+            if interrupt { local.store(true, Ordering::Relaxed); }
+            interrupt
         }));
         let transaction = connection.unchecked_transaction()?;
         let mut count = 0;
@@ -76,15 +106,27 @@ fn page(
             Some(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == rusqlite::ErrorCode::OperationInterrupted
         );
-        if interrupted && smallclaims::read_budget::check().is_ok() {
-            // Consumed rows have already advanced the caller's cursor. Resume in a new
-            // snapshot rather than throwing away useful metadata after a cold-page stall.
+        slice_count += 1;
+        let local_interrupt = interrupted && locally_interrupted.load(Ordering::Relaxed);
+        if local_interrupt { interrupt_count += 1; }
+        tracing::debug!(
+            slice_count, interrupt_count, rows_per_slice = count, local_interrupt,
+            minimum_vm_callbacks = minimum_work,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "operation audit page slice"
+        );
+        // Cancellation is not a cooperative yield, including when it races a local
+        // interrupt or a cheap query that never invokes the handler.
+        smallclaims::read_budget::check()?;
+        if local_interrupt {
+            // Consumed rows have already advanced the caller's cursor. Zero rows
+            // are not EOF: retry with strictly more VM work before local preemption.
             if count != 0 { return Ok(count); }
-            if attempt < 2 { continue; }
+            minimum_work = minimum_work.saturating_mul(2);
+            continue;
         }
         return result;
     }
-    unreachable!("the final bounded page attempt always returns")
 }
 
 impl Store {
@@ -262,7 +304,7 @@ impl Store {
 
     /// Observe completed pages after their read snapshots end. The phases are `frontiers`,
     /// `claims`, `checkpoints`, `operations` and `recheck`; rows count the metadata consumed
-    /// in this page. Empty seeks count zero. Page sizes and deadlines stay unchanged.
+    /// in this page. Empty seeks count zero; interrupted empty slices are retried internally.
     #[cfg(feature = "test-support")]
     pub fn operation_projection_drift_with_snapshot_observer(
         &self,
@@ -280,6 +322,89 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_audit_unowned_interrupts_remain_errors() {
+        let connection = Connection::open_in_memory().unwrap();
+        let handle = Arc::new(connection.get_interrupt_handle());
+        let result = page_with_slice_deadline(
+            &connection,
+            "WITH RECURSIVE input(n) AS (
+                VALUES(1) UNION ALL SELECT n+1 FROM input WHERE n<10000
+             ) SELECT sum(n) FROM input",
+            &[],
+            &mut |_| panic!("external interruption must stop the query"),
+            &mut |_| {},
+            move |_| { handle.interrupt(); false },
+        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(error, _))
+                if error.code == rusqlite::ErrorCode::OperationInterrupted
+        ));
+        assert!(connection.is_autocommit());
+    }
+
+    // Expire every VM callback. The aggregate needs more than three slices before
+    // its first row; this crosses the old retry cliff without sleeps or clock races.
+    #[test]
+    fn operation_audit_zero_row_interrupts_make_progress() {
+        let connection = Connection::open_in_memory().unwrap();
+        for empty in [false, true] {
+            let mut slices = 0;
+            let mut values = Vec::new();
+            let threshold = if empty { i64::MAX } else { 0 };
+            let count = page_with_slice_deadline(
+                &connection,
+                "WITH RECURSIVE input(n) AS (
+                    VALUES(1) UNION ALL SELECT n+1 FROM input WHERE n<10000
+                 ) SELECT sum(n) FROM input HAVING sum(n)>?1",
+                &[&threshold],
+                &mut |row| { values.push(row.get::<_, i64>(0)?); Ok(()) },
+                &mut |_| {
+                    slices += 1;
+                    assert!(connection.is_autocommit(), "slice retained its snapshot");
+                },
+                |_| true,
+            ).unwrap();
+            assert!(slices > 3, "fixture must exceed the former retry limit");
+            if empty {
+                assert_eq!(count, 0);
+                assert!(values.is_empty());
+            } else {
+                assert_eq!(count, 1);
+                assert_eq!(values, [50_005_000]);
+            }
+            assert_eq!(connection.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn operation_audit_zero_row_interrupts_preserve_cancellation() {
+        let connection = Connection::open_in_memory().unwrap();
+        let budget = smallclaims::read_budget::ReadBudget::new(
+            "/operation-audit", Duration::from_secs(60));
+        let mut slices = 0;
+        let result = smallclaims::read_budget::with(Some(budget.clone()), || {
+            page_with_slice_deadline(
+                &connection,
+                "WITH RECURSIVE input(n) AS (
+                    VALUES(1) UNION ALL SELECT n+1 FROM input WHERE n<10000
+                 ) SELECT sum(n) FROM input",
+                &[],
+                &mut |_| panic!("cancelled before the first row"),
+                &mut |_| {
+                    slices += 1;
+                    if slices == 4 { budget.cancel(); }
+                },
+                |_| true,
+            )
+        });
+        assert!(result.is_err());
+        assert_eq!(slices, 4);
+        assert!(connection.is_autocommit());
+        assert_eq!(connection.query_row("SELECT 1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
 
     #[test]
     fn operation_audit_pages_seek_their_indexes_without_full_scans_or_sorts() {

@@ -121,7 +121,8 @@ struct Pass {
 }
 
 fn pass(claims: usize) -> Pass {
-    let directory = tempfile::tempdir().unwrap();
+    // A checkpoint refuses a filesystem with too little room, and its budget is about a disk.
+    let directory = fractal_daemon::test_support::disk_tempdir();
     let store = fractal_daemon::store::Store::open(&directory.path().join("claims.sqlite3"), "alder").unwrap();
     // The trim rests at least 100 ms after each 20 ms chunk so a daemon's writer keeps up. A
     // rest allocates nothing, and trim pacing has its own tests; without the rests this measures

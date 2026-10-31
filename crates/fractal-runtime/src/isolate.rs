@@ -27,6 +27,7 @@ use anyhow::{Context as _, Result};
 
 mod retirement;
 pub use retirement::{CgroupEnding, ScopeRetirementProof, end_scope_with_proof};
+pub(crate) use retirement::observe_closed_scope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Isolation {
@@ -158,15 +159,18 @@ pub(crate) fn sanitize(value: &str) -> String {
 }
 
 pub fn wrap(unit: &str, program: &OsStr, arguments: &[&OsStr]) -> Command {
-    wrap_in(unit, program, arguments, None)
+    wrap_in(unit, program, arguments, None, None, None)
 }
 
 /// Construct the launcher with its final environment before selecting the host systemd session.
+/// A `lane` ([`crate::lane::prepare`]) places the scope in the seat's capped slice.
 pub(crate) fn wrap_in(
     unit: &str,
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
+    lane: Option<&crate::lane::Lane>,
+    unlaned_seat: Option<&crate::UnlanedSeatPlacement>,
 ) -> Command {
     wrap_for_mode(
         mode(),
@@ -175,7 +179,20 @@ pub(crate) fn wrap_in(
         program,
         arguments,
         environment,
+        ScopePlacement { lane, unlaned_seat },
     )
+}
+
+/// Whether the user manager is systemd 254 or newer, which also supports OOMPolicy on a scope.
+pub(crate) fn systemd_254() -> bool {
+    // Detection sets the flag, so it runs first.
+    mode() == Isolation::Scope && *SCOPE_EXPANSION_FLAG.get().unwrap_or(&false)
+}
+
+#[derive(Default)]
+struct ScopePlacement<'a> {
+    lane: Option<&'a crate::lane::Lane>,
+    unlaned_seat: Option<&'a crate::UnlanedSeatPlacement>,
 }
 
 fn wrap_for_mode(
@@ -185,6 +202,7 @@ fn wrap_for_mode(
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
+    placement: ScopePlacement<'_>,
 ) -> Command {
     match isolation {
         Isolation::Scope => {
@@ -198,12 +216,19 @@ fn wrap_for_mode(
                     "--no-ask-password",
                 ])
                 .arg(format!("--unit={unit}"))
-                .arg("--description=st seat");
+                .arg("--description=Fractal seat");
             if expansion_flag {
                 command.arg("--expand-environment=no");
             }
             if let Some(environment) = environment {
                 command.env_clear().envs(environment);
+            }
+            if let Some(lane) = placement.lane {
+                command.args(lane.scope_arguments());
+                let seat = |key: &str| environment?.get(key).cloned();
+                command.envs(crate::lane::environment(lane, seat, |key| std::env::var(key).ok()));
+            } else if let Some(policy) = placement.unlaned_seat {
+                policy.apply(&mut command);
             }
             instance_scope_environment(&mut command, environment);
             command.arg("--").arg(program).args(arguments);
@@ -248,7 +273,7 @@ fn instance_scope_environment(
     }
 }
 
-fn systemctl() -> Command {
+pub(crate) fn systemctl() -> Command {
     let mut command = Command::new("systemctl");
     if std::env::var_os("ST_INSTANCE").is_some_and(|name| !name.is_empty()) {
         match std::env::var_os("ST_INSTANCE_HOST_XDG_RUNTIME_DIR").filter(|value| !value.is_empty())
@@ -575,6 +600,7 @@ mod tests {
             OsStr::new("provider"),
             &arguments,
             None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -598,6 +624,7 @@ mod tests {
             program,
             &arguments,
             None,
+            ScopePlacement::default(),
         );
         let actual = command.get_args().collect::<Vec<_>>();
         let separator = actual
@@ -607,7 +634,7 @@ mod tests {
         assert_eq!(actual[separator + 1], program);
         assert_eq!(&actual[separator + 2..], &arguments);
         assert!(!actual.contains(&OsStr::new("--expand-environment=no")));
-        assert!(actual[..separator].contains(&OsStr::new("--description=st seat")));
+        assert!(actual[..separator].contains(&OsStr::new("--description=Fractal seat")));
         assert!(actual.contains(&OsStr::new("--no-ask-password")));
         assert_eq!(command.get_program(), OsStr::new("systemd-run"));
     }
@@ -659,6 +686,7 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("%n:$HOME")],
             Some(&environment),
+            ScopePlacement::default(),
         );
         assert_eq!(
             command
@@ -745,6 +773,77 @@ mod tests {
             parse_control_group("LoadState=loaded\nControlGroup=\n"),
             None
         );
+    }
+
+    #[test]
+    fn unlaned_daemon_seat_placement_is_explicit_and_never_overrides_a_lane() {
+        let policy = crate::seat_placement::tests::policy();
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
+        let arguments = |lane: Option<&crate::lane::Lane>, policy: Option<&crate::UnlanedSeatPlacement>| {
+            wrap_for_mode(Isolation::Scope, true, "st3-work.scope",
+                OsStr::new("provider"), &[], None, ScopePlacement { lane, unlaned_seat: policy })
+                .get_args().map(std::ffi::OsString::from).collect::<Vec<_>>()
+        };
+        assert_eq!(arguments(None, None), [
+            "--user", "--scope", "--collect", "--quiet", "--no-ask-password",
+            "--unit=st3-work.scope", "--description=Fractal seat", "--expand-environment=no",
+            "--", "provider",
+        ].map(std::ffi::OsString::from));
+        assert_eq!(arguments(Some(&lane), Some(&policy)), arguments(Some(&lane), None));
+        let placed = arguments(None, Some(&policy));
+        assert_eq!(placed[8..], [
+            "--slice=app-seats.slice", "-p", "MemoryMax=1073741824", "-p",
+            "MemorySwapMax=0", "-p", "OOMPolicy=kill", "--", "provider",
+        ].map(std::ffi::OsString::from));
+        let detached = wrap_for_mode(Isolation::Detached, false, "unused.scope",
+            OsStr::new("provider"), &[], None, ScopePlacement { lane: None, unlaned_seat: Some(&policy) });
+        assert!(detached.get_args().next().is_none());
+    }
+
+    #[test]
+    fn a_lane_caps_the_scope_and_keeps_its_builds_inside() {
+        let environment = std::collections::BTreeMap::from([
+            ("PATH".to_owned(), "/bin".to_owned()),
+            ("XDG_RUNTIME_DIR".to_owned(), "/run/user/1000".to_owned()),
+        ]);
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
+        let command = wrap_for_mode(
+            Isolation::Scope,
+            true,
+            "st3-work.scope",
+            OsStr::new("provider"),
+            &[OsStr::new("--flag")],
+            Some(&environment),
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
+        );
+        let arguments = command.get_args().collect::<Vec<_>>();
+        let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
+        for property in lane.scope_arguments() {
+            assert!(arguments[..separator].contains(&OsStr::new(&property)), "{property}");
+        }
+        assert_eq!(&arguments[separator + 1..], [OsStr::new("provider"), OsStr::new("--flag")]);
+        let set = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(set("BUILDS_SLICE_ACTIVE").as_deref(), Some("1"));
+        assert_eq!(set("FRACTAL_LANE_SLICE"), Some(lane.slice.clone()));
+        assert!(set("SCCACHE_SERVER_UDS").unwrap().starts_with("/run/user/1000/sccache-lane-"));
+
+        let detached = wrap_for_mode(
+            Isolation::Detached,
+            false,
+            "unused.scope",
+            OsStr::new("provider"),
+            &[],
+            Some(&environment),
+            ScopePlacement { lane: Some(&lane), unlaned_seat: None },
+        );
+        assert!(detached.get_args().next().is_none());
+        assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));
     }
 
     #[test]

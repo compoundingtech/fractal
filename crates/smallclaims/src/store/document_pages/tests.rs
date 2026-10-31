@@ -1129,3 +1129,42 @@ fn isolated_blob_boundary_explains_the_retained_one_step_difference() {
         (0, 0, 0, 0)
     );
 }
+
+#[test]
+fn a_named_current_page_reads_one_version_however_many_the_name_has() {
+    // A poller that rewrites its state document and reads it back by name with limit 1 asks
+    // for two rows (limit + 1 for has_more). The second cannot exist, and looking for it
+    // walked every older version of the name: about 0.8 s of daemon CPU per call in production.
+    let work = |versions: u128| {
+        let store = node();
+        let mut last = None;
+        for version in 0..versions {
+            last = Some(bind(&store, "doc/probe/state", &format!("state-{version}"), 1000 + version, "probe", None));
+        }
+        bind(&store, "doc/probe/other", "other", 1000 + versions, "probe", None);
+        for limit in [2, 101] {
+            let page = read(&store, Some("doc/probe/state"), None, false, None, limit).unwrap();
+            assert_eq!(page.len(), 1);
+            assert!(page[0].latest);
+            assert_eq!(page[0].binding_claim_id, last.as_ref().unwrap().id);
+        }
+        let scope = SqliteWorkScope::start();
+        read(&store, Some("doc/probe/state"), None, false, None, 101).unwrap();
+        scope.finish()
+    };
+    let few = work(4);
+    let many = work(400);
+    assert_eq!(many.statements, few.statements);
+    assert!(
+        many.vm_steps <= few.vm_steps + 64,
+        "400 versions cost {} VM steps against {} for 4",
+        many.vm_steps,
+        few.vm_steps
+    );
+    // History still lists every version.
+    let store = node();
+    for version in 0..5 {
+        bind(&store, "doc/probe/state", &format!("state-{version}"), 1000 + version, "probe", None);
+    }
+    assert_eq!(read(&store, Some("doc/probe/state"), None, true, None, 10).unwrap().len(), 5);
+}

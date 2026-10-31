@@ -339,3 +339,34 @@ fn a_restart_resumes_sealing_at_the_stored_cursor_and_a_store_without_one_still_
     store.replication_snapshot().unwrap();
     assert_eq!(envelopes(), 4);
 }
+
+/// Every status read asks whether a local batch is still unsealed. Only batches past the
+/// sealing cursor can be, so the check must search that rowid range: on the origin index it
+/// walked every local batch ever written (0.9 s of daemon CPU per read on a 50 GB store).
+#[test]
+fn the_unsealed_local_batch_check_searches_past_the_sealing_cursor_only() {
+    const QUERY: &str = "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND +origin=?2)";
+    // The status reads this exact statement; a plan test of another string would prove nothing.
+    assert!(
+        include_str!("../src/store.rs").contains(&format!("\"{QUERY}\"")),
+        "the replication status no longer reads this statement"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("claims.sqlite3");
+    drop(Store::open(&path, "ada-laptop", Arc::new(Plain)).unwrap());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let plan = connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {QUERY}"))
+        .unwrap()
+        .query_map([1_i64.into(), rusqlite::types::Value::Text("ada-laptop".into())], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|line| line.starts_with("SEARCH batches USING INTEGER PRIMARY KEY (rowid>?)")),
+        "the unsealed check does not search the rowid range: {plan:#?}"
+    );
+}

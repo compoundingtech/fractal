@@ -2,7 +2,7 @@
 
 A laptop can run `st` as a paired client device. It holds a private read-only display cache and
 device credentials, connects to a member's client gateway, and sends confirmed actions through
-that member. It runs no st daemon or replication worker, holds no graph replica, and needs no
+that member. It runs no Fractal daemon or replication worker, holds no graph replica, and needs no
 fleet membership, member key, peer exposure, or fleet sync secret. Members continue to sync as
 described in [replication](replication.md) and [Fleet join](../fleet-join.md).
 
@@ -83,7 +83,9 @@ Credentials expire according to the member's API policy (currently thirty days).
 challenge and run the pairing command again to replace a route's grant. List and revoke devices
 on the member with `st devices --as person/avery ls` and
 `st devices --as person/avery revoke device/DEVICE_ID --reason "Retired laptop grant"`.
-Re-pairing creates a new grant; revoke any old grant that is no longer needed. Removing the
+Re-pairing creates a new grant; revoke any old grant that is no longer needed. A revocation is
+final: every member treats the grant as revoked, whatever order it received the pairing and the
+revocation in, and nothing pairs the same grant again. Removing the
 local profile makes the terminal UI select local mode again but does not revoke the server-side grants.
 
 ## Isolated verification
@@ -93,7 +95,7 @@ cargo test -p fractal --locked --test integration client_only
 cargo run -p fractal-client-codegen --locked -- --check
 ```
 
-The `client_only` end-to-end test launches the actual st binary in a PTY with an isolated
+The `client_only` end-to-end test launches the actual Fractal binary in a PTY with an isolated
 client home and deliberately absent local socket. Independent member routers and paired-only
 network carriers prove pairing, a confirmed remote action, loss of the gateway, retained data
 and a last-connected time, no queued action, offline cache after a client restart, automatic

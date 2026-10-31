@@ -1,3 +1,4 @@
+use crate::RetirementsStore;
 use crate::AttentionSnapshotStore;
 use crate::AttentionStore;
 use crate::ConversationReadsStore;
@@ -60,10 +61,34 @@ pub use crate::store::agent_queue_values::{
     AGENT_QUEUE_FIELDS, agent_queue_fields, agent_queue_metadata,
 };
 use crate::model::ClientReplicated;
-use crate::model::{ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput, ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer, ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest, DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord, GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest, LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption, LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest, LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt, MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest, MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest, MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView, OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec, PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningRevisionRequest, PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse, ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest, SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView, WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use crate::model::{
+    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
+    ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
+    DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
+    GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest,
+    LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption,
+    LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest,
+    LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
+    MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
+    MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView,
+    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec,
+    PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
+    PlanningProposalRequest, PlanningRevisionRequest,
+    PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
+    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
+    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
+    ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
+    RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
+    RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
+};
+use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
-use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
 pub mod wire_names;
@@ -71,6 +96,8 @@ mod client_blobs;
 mod client_documents;
 #[cfg(test)]
 mod terminal_gate_evidence;
+#[cfg(all(test, target_os = "linux"))]
+mod peer_process_tests;
 mod message_bodies;
 mod client_adapters;
 mod client_diagnostics;
@@ -85,18 +112,31 @@ mod harness_health_controls;
 mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
+mod github_plugin;
 mod github_watch;
 pub mod harness_events;
+mod harness_questions;
+pub use harness_questions::{
+    HarnessQuestion, HarnessQuestionAdapterError, HarnessQuestionSettleSink, live_input_session,
+};
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod delivery_metrics;
+pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
 mod owned_sets;
 pub mod published_attention;
+pub mod attention_history;
 pub use published_attention::start_attention_list;
 #[cfg(any(test, feature = "test-support"))]
-pub use published_attention::{published_attention_rows, refresh_attention_list};
+pub use revision_changes::revision_card;
+#[cfg(any(test, feature = "test-support"))]
+pub use published_attention::{
+    attention_fleet, present_attention, published_attention_rows, refresh_attention_list,
+    refresh_attention_list_with,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn refresh_agent_roster_for_test(store: &Store) -> anyhow::Result<()> {
@@ -110,6 +150,10 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod launch_card;
+pub mod prompt_card;
+pub mod waiting_on;
+mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
 #[cfg(target_os = "linux")]
@@ -119,6 +163,7 @@ pub use tile_endpoint::{
 };
 pub use published_lists::{start_published_lists, wait_published_lists_at_least};
 mod changes;
+mod deploy;
 
 #[cfg(test)]
 mod legacy_handler_guard_tests;
@@ -168,13 +213,31 @@ pub fn raw_terminal_owner_splice(
     Box::pin(raw_terminal_splice(socket, transport, None, None, None, None, None))
 }
 
-pub use crate::delivery_presence::claude_channel_attached;
+pub use crate::delivery_presence::{claude_channel_attached, claude_channel_proof_pending};
+
+pub fn configure_claude_ownership_observation(root: &Path, enabled: bool) {
+    delivery_presence::configure_observation(root, enabled);
+}
+
+/// The same answer as `claude_channel_attached`, with the delivery binding that proves it and
+/// the instant the proof lapses by itself. Both come from one presence predicate, so a push
+/// stream's deadline cannot drift from what the poll answers.
+pub fn claude_channel_attachment(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+) -> Option<(crate::mailbox::Fence, tokio::time::Instant)> {
+    delivery_presence::attachment_window(subject, incarnation)
+        .filter(|(_, until)| tokio::time::Instant::now() <= *until)
+        .filter(|(fence, _)| store.check_mailbox(fence).is_ok())
+}
 
 #[derive(Clone)]
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,
@@ -186,6 +249,11 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Native answering is unavailable unless an adapter is explicitly installed.
+    pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
+    /// Caller-bound assistant read receipts committed off the request path. Shut it down before
+    /// the store closes; the last state reference to drop commits what remains.
+    pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
@@ -378,7 +446,11 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "custody-pending"
             | "stale-subject"
+            | "stale-fence"
+            | "idempotency-conflict"
+            | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -388,12 +460,16 @@ impl ApiError {
             | "stale-launch-preview"
             | "fleet-leaving"
             | "glass-deleted"
+            | "person-rename-conflict"
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
+            | "forbidden"
             | "lane-approval-denied"
+            | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
@@ -473,7 +549,7 @@ pub fn router(state: AppState) -> Router {
     router_with(state, &[])
 }
 
-/// Routes a crate above this one serves (st3-api-mailbox's mailbox stream): each family is added to
+/// Routes a crate above this one serves (fractal-api-mailbox's mailbox stream): each family is added to
 /// the route table before the envelope and leave layers wrap it, so it is served exactly as the
 /// routes listed here. `router` without them is the route table this crate alone answers.
 pub type RouteFamily = fn(Router<AppState>) -> Router<AppState>;
@@ -500,6 +576,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
     crate::slo::install();
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route(
+            "/v1/deploy/verify-go",
+            post(deploy::verify_go).layer(Extension(transport)),
+        )
         .route("/v1/harnesses", get(operations::available_harnesses))
         .route("/v1/client/capabilities", get(client_capabilities))
         .route(
@@ -589,6 +669,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
         .route("/v1/agents/restart", post(agents::restart_agent))
@@ -668,6 +749,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
@@ -680,11 +762,13 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
         .route("/v1/doctor", get(operations::doctor))
         .route("/v1/repair", get(operations::operational_repair_plan))
         .route("/v1/repair/apply", post(operations::apply_operational_repair))
+        .route("/v1/repair/apply-attributed", post(operations::apply_attributed_operational_repair))
         .route("/v1/backup", get(operations::backup_export))
         .route("/v1/replication/status", get(replication::replication_status))
         .route("/v1/replication/records", get(replication::replication_records))
@@ -694,6 +778,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
+        .route("/v1/signatures/resume", post(replication::signature_resume))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -719,12 +804,24 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication::replication_checkpoint_need),
         )
         .route(
+            "/v1/internal/replication/answers",
+            post(replication::replication_answers),
+        )
+        .route(
+            "/v1/internal/replication/answers-check",
+            post(replication::replication_answers_check),
+        )
+        .route(
             "/v1/internal/replication/checkpoint-adopt",
             post(replication::replication_checkpoint_adopt)
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
         )
         .route("/v1/internal/fleet/membership", get(fleet::fleet_membership_view))
         .route("/v1/internal/fleet/leave-state", get(fleet::fleet_leave_state))
+        .route(
+            "/v1/internal/fleet/pairing-admission",
+            post(fleet::fleet_pairing_admission),
+        )
         .route(
             "/v1/internal/fleet/admission-residue",
             get(fleet::fleet_admission_residue),
@@ -776,6 +873,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/report-to",
             post(runs::set_mission_run_report),
         )
+        .route(
+            "/v1/mission-runs/{run}/waiting-on",
+            get(waiting_on::get_run_waiting_on),
+        )
+        .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -799,6 +901,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/github/watches", get(github_watch::watches))
         .route("/v1/github/comment", post(github_watch::comment))
         .route("/v1/github/own", post(github_watch::own))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls", get(github_plugin::pulls))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
         .route("/v1/work", get(work::list_work))
@@ -907,11 +1013,19 @@ async fn response_envelope_unbounded(
         && request.uri().path() == "/v1/client/capabilities"
         && !request.headers().contains_key(axum::http::header::AUTHORIZATION)
     {
-        return Json(json!({
-            "api_version": CLIENT_API_VERSION,
-            "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-        }))
-        .into_response();
+        // The second capability goes only to a client that says it understands it
+        // (`?accepts=fabric-gateway-grant`): an older client validating this answer as exactly
+        // one `device-key-proofs` entry keeps getting exactly that.
+        let mut capabilities = vec![json!({"id":"device-key-proofs", "version":1, "state":"granted"})];
+        if request
+            .uri()
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "accepts=fabric-gateway-grant"))
+        {
+            capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
+        }
+        return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
+            .into_response();
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
@@ -1306,8 +1420,6 @@ fn request_trace(
     if !crate::otel::export_enabled() {
         return None;
     }
-    use opentelemetry::trace::TraceContextExt as _;
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
     let span_name = format!("{} {route}", method.as_str());
     let span = tracing::info_span!(
         target: "st3::http",
@@ -1333,16 +1445,7 @@ fn request_trace(
         "st.writer.wait_ms" = tracing::field::Empty,
         "st.writer.ops" = tracing::field::Empty,
     );
-    let remote = crate::otel::extract_remote_context(headers);
-    let parent = remote.span();
-    let context = parent.span_context();
-    if context.is_valid() {
-        span.record(
-            "st.parent.sampled",
-            context.is_sampled() && context.trace_state().get("st").is_none(),
-        );
-    }
-    span.set_parent(remote);
+    crate::otel::set_remote_parent(&span, crate::otel::extract_remote_context(headers));
     Some(span)
 }
 
@@ -1399,6 +1502,68 @@ pub fn request_latency_target_windows() -> Value {
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
+}
+
+/// Note what keeps this minute of the member's CPU from being idle.
+fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
+}
+
+/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
+/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// the `workers` replication workers this member runs has sent, note a replication catch-up, and
+/// check the seats of the minute closed one boundary earlier, once every harness observation
+/// stamped inside it has committed. The first boundary is this daemon's start.
+pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
+    use smallclaims::windows::cpu_minutes::Busy;
+    // This member's seats as of `seats_until`, which each minute's check carries into the next.
+    let mut seats = None;
+    let mut seats_until = 0;
+    let mut unsettled = None;
+    loop {
+        let minute = client_now_ms() as u64 / 60_000;
+        let (at, daemon_ns) = (Instant::now(), smallclaims::windows::process_cpu_ns());
+        let catching_up = store.replication_catching_up();
+        let closed = {
+            let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cpu = meter.cpu_minutes();
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            let closed = cpu.boundary(minute, at, daemon_ns, workers);
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            closed
+        };
+        if let Some(closed) = closed
+            && let Some(check) = unsettled.replace(closed)
+        {
+            let (from, until) = (check * 60_000, (check + 1) * 60_000);
+            let carried = seats.take().filter(|_| seats_until == from);
+            let reading = store.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                smallclaims::task_cpu::blocking("slo.cpu_minutes", || {
+                    reading.local_seats_busy(from, until, carried)
+                })
+            })
+            .await;
+            let busy = match checked {
+                Ok(Ok((busy, newest))) => {
+                    (seats, seats_until) = (Some(newest), until);
+                    Some(busy)
+                }
+                _ => None,
+            };
+            request_latency()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cpu_minutes()
+                .settle(check, busy);
+        }
+        let now = client_now_ms() as u64;
+        tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
+    }
 }
 
 pub use crate::peer::track_remote_reads;
@@ -1618,7 +1783,7 @@ pub fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot 
 }
 
 /// The snapshot at `store_index` when its acceptance time (`projection_time_at`) is already known.
-fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
+pub fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
     let created_at = client_timestamp(unix_ms);
     let fingerprint = hex::encode(Sha256::digest(
         format!(
@@ -1678,6 +1843,11 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-arrangement-subject" | "invalid-arrangement-action"
         | "invalid-arrangement-operations" | "invalid-arrangement-folder"
         | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference"
+        | "invalid-arrangement-version" | "invalid-arrangement-body"
+        | "unsupported-membership-container" | "membership-owner-forbidden"
+        | "invalid-membership-member" | "invalid-membership-bucket"
+        | "invalid-membership-key" | "invalid-membership-operations"
+        | "membership-edit-too-large"
     )) { return false; }
     matches!(
         code,
@@ -1705,15 +1875,27 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "agents-publication-row-too-large"
+        | "identity-cycle"
+        | "identity-occupied"
+        | "identity-retired-source"
+        | "identity-cross-kind"
+        | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "invalid-custody-successor"
+        | "custody-pending"
         | "not-found"
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
+        | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "invalid-answer"
+        | "not-answerable"
         | "idempotency-key-expired"
+        | "legacy-action-receipt-untrusted"
         | "issuer-required"
         | "suspend-authored-session-selection"
         | "arrangement-exists"
@@ -1731,12 +1913,22 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-arrangement-name"
         | "invalid-arrangement-key"
         | "invalid-subject-reference"
+        | "invalid-arrangement-version"
+        | "invalid-arrangement-body"
+        | "unsupported-membership-container"
+        | "membership-owner-forbidden"
+        | "invalid-membership-member"
+        | "invalid-membership-bucket"
+        | "invalid-membership-key"
+        | "invalid-membership-operations"
+        | "membership-edit-too-large"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
         | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
+        | "agent-roster-not-ready"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -1749,6 +1941,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
+        | "private-notes-unreachable"
+        | "private-notes-carrier-conflict"
+        | "private-notes-indeterminate"
         | "inventory-unavailable"
         | "conversation-content-invalidated"
         | "transcript-unavailable"
@@ -1767,18 +1962,23 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "message-send-unconfirmed"
         | "response-budget-exceeded"
         | "content-not-text"
+        | "invalid-document-reference"
+        | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"
+        | "invalid-person-rename"
+        | "unknown-person"
         | "answer-required"
         | "unsupported-person-request"
         | "missing-ask-owner"
@@ -1792,6 +1992,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-review-decision"
         | "feedback-gate-needs-step" => "validation-failed".into(),
         "wrong-reviewer" => "forbidden".into(),
+        "person-rename-conflict" => "conflict".into(),
         "stale-work-ask"
         | "stale-subject"
         | "missing-subject-token"
@@ -1855,7 +2056,9 @@ pub fn decode_client_cursor(cursor: &str) -> Result<ClientPageCursor, ApiError> 
 }
 
 pub fn decode_client_cursor_snapshot(cursor: &str) -> Result<ClientSnapshot, ApiError> {
-    if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
+    if cursor.starts_with(attention_history::CURSOR_PREFIX) {
+        attention_history::cursor_snapshot(cursor)
+    } else if cursor.starts_with(client_v0::NATIVE_PAGE_CURSOR_PREFIX) {
         client_v0::native_page_cursor_snapshot(cursor)
     } else {
         decode_client_cursor(cursor).map(|cursor| cursor.snapshot)
@@ -2101,6 +2304,7 @@ fn client_page_read_projected(
                 has_more,
                 next_cursor,
                 cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+                omitted_items: None,
             },
             sync: client_sync_notice(state),
             replicated: None,
@@ -2240,6 +2444,22 @@ where
     Ok((Extension(snapshot), Json(page)))
 }
 
+/// This host's replication as a stream frame states it (`sync`, docs/st3/client-v0/collections.md,
+/// Sync on the stream): a page's notice, or `level` said explicitly, since on the stream an
+/// absent `sync` is unknown.
+pub fn client_stream_sync(state: &AppState) -> Value {
+    match client_sync_notice(state) {
+        Some(notice) => json!({"state": notice.state, "peers": notice.peers}),
+        None => json!({"state": "level"}),
+    }
+}
+
+/// Whether this host is catching up with a peer and whether it has diverged from one: the two
+/// flags [`client_sync_notice`] reads before naming any peer, cheap enough to weigh on a commit.
+pub fn replication_flags(state: &AppState) -> (bool, bool) {
+    (state.store.replication_catching_up(), state.store.replication_diverged())
+}
+
 /// A host catching up with a peer can show early history as current, and a host whose graph
 /// diverged from a peer's can show it wrong, so each page it serves says so and with whom.
 pub fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
@@ -2327,11 +2547,16 @@ pub async fn client_capabilities(
     // The request snapshot may predate a checkpoint or legacy conversion. Advertise the
     // frontier and floor from one current read so the SDK's first event request can resume.
     let store = state.store.clone();
-    let (oldest, newest) =
-        blocking_store(move || store.read_snapshot(|_| store.event_bounds())).await?;
+    let capability_state = state.clone();
+    let capability_session = session.clone();
+    let (oldest, newest, capabilities) = blocking_store(move || {
+        // No further than the published index, as an event page (`read_event_page`).
+        let through = store.index()?;
+        let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
+        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session)))
+    }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&state, &session);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
@@ -2752,11 +2977,21 @@ pub fn client_agent_resources_cached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_agent_resources(snapshot_index, history, |changed| {
+    pinned_unless_enclosed(store, || store.cached_agent_resources(snapshot_index, history, |changed| {
         let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
         add_agent_todos(store, &mut items, snapshot_index)?;
         Ok(items)
-    })
+    }))
+}
+
+/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
+/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
+/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
+        return fold();
+    }
+    store.read_snapshot_unindexed(fold)
 }
 
 /// One agent's card for an exact agent selector, folded in its own projection rather than
@@ -2767,7 +3002,7 @@ pub fn client_exact_agent_resources(
     snapshot_index: u64,
     agent: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
+    pinned_unless_enclosed(store, || store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
         // A selected cold card needs only its own queue metadata, never roster refs.
         let metadata = changed.filter(|(_, previous)| previous.is_empty())
             .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;
@@ -2777,7 +3012,7 @@ pub fn client_exact_agent_resources(
         let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
         add_agent_todos(store, &mut items, snapshot_index)?;
         Ok(items)
-    })
+    }))
 }
 
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
@@ -2971,6 +3206,16 @@ pub const AUTHORITY_INDETERMINATE_REASON: &str =
 /// Live presentation of already folded cards: freshness, delivery presence, subagents, and the
 /// agent presentation that reads them (docs/clients/ui-contract.md, Agent).
 pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
+    overlay_agent_resources_at(store, items, at, client_now_ms(), None)
+}
+
+fn overlay_agent_resources_at(
+    store: &Store,
+    items: &mut [Value],
+    at: &str,
+    now: u128,
+    subagents: Option<Vec<crate::store::SubagentView>>,
+) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         for item in items.iter_mut() {
@@ -2986,12 +3231,12 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            let report_age_ms = harness
-                .as_ref()
-                .map(|harness| {
-                    u64::try_from(client_now_ms().saturating_sub(harness.observed_at_unix_ms))
-                        .unwrap_or(u64::MAX)
-                });
+            // The seat's host also hears the re-stamps that stay local, in one seek per card.
+            let heard_at = match &harness {
+                Some(harness) => Some(heard_at(store, item["id"].as_str().unwrap_or_default(), harness)?),
+                None => None,
+            };
+            let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
                 Some(age) if age > 90_000 => "stale",
@@ -3007,8 +3252,8 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                     item["state"] = json!("waiting");
                 }
             }
-            overlay_declaration_restart(item, client_now_ms());
-            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
+            overlay_declaration_restart(item, now);
+            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), now as u64);
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
             // row it cannot read goes without one; it never fails the read for every client.
@@ -3019,9 +3264,21 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                 Err(error) => eprintln!("st3: WARN agent {} has no presentation: {error}", item["id"]),
             }
         }
-        overlay_subagents(store, items)?;
+        if let Some(subagents) = subagents {
+            overlay_subagent_rows(items, subagents);
+        } else {
+            overlay_subagents(store, items)?;
+        }
         Ok(())
     })
+}
+
+/// When this node last heard the seat's harness: its replicated report, or on the seat's host the
+/// newest local re-stamp of the same incarnation, whichever is later. Re-stamps that change nothing
+/// stay in the host's local log, so without it the host's own cards read a resting seat stale.
+pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
+    let local = store.local_harness_observed_at(subject, &harness.incarnation_id)?;
+    Ok(local.map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)))
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.
@@ -3123,8 +3380,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     })
 }
 
-/// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
-/// without a claim, so this is read per request rather than cached with the agents.
+/// Each observing seat's running subagents: open, with a lease that runs past this read. A lease
+/// runs out without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -3139,6 +3396,11 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             store.running_subagents(now)
         }
     })?;
+    overlay_subagent_rows(items, subagents);
+    Ok(())
+}
+
+fn overlay_subagent_rows(items: &mut [Value], subagents: Vec<crate::store::SubagentView>) {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
     for subagent in subagents {
         running
@@ -3157,11 +3419,16 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             }));
     }
     for item in items {
+        if !item["driver"]
+            .as_str()
+            .is_some_and(fractal_drivers::subagents::driver_observes_subagents)
+        {
+            continue;
+        }
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let subagents = running.remove(id).unwrap_or_default();
         item["subagents"] = Value::Array(subagents);
     }
-    Ok(())
 }
 
 /// Delivery presence is independent of harness readiness: a local native seat waiting on a human
@@ -3171,10 +3438,20 @@ fn overlay_delivery_presence(item: &mut Value, local_host: &str) {
     let Some(assessment) = agent_delivery_presence(item, item["state"].as_str(), local_host) else {
         return;
     };
+    // Eligibility above already required a live local native seat with an id.
+    let attachment_push = (item["driver"].as_str() == Some("claude")).then(|| {
+        delivery_presence::attachment_push(
+            item["id"].as_str().unwrap_or_default(),
+            item["incarnation_id"].as_str(),
+        )
+    });
     if assessment.stale() {
         item["state"] = Value::String("waiting".into());
     }
     item["delivery"] = assessment.to_value();
+    if let Some(attachment_push) = attachment_push {
+        item["delivery"]["attachment_push"] = Value::String(attachment_push.into());
+    }
 }
 
 /// Share the live/local/native eligibility with scalar readers such as assistant summary
@@ -3196,19 +3473,22 @@ fn agent_delivery_presence(
     ))
 }
 
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn client_agent_resources_uncached(
     store: &Store,
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.status_for_subject_prefix_at(
-        "agent/",
-        Some(snapshot_index),
-        history,
-        crate::store::ClaimsReduction::Summary,
-    )?;
-    client_agent_resources_from_status(store, history, snapshot_index, None, status)
+    pinned_unless_enclosed(store, || {
+        let status = store.status_for_subject_prefix_at(
+            "agent/",
+            Some(snapshot_index),
+            history,
+            crate::store::ClaimsReduction::Summary,
+        )?;
+        client_agent_resources_from_status(store, history, snapshot_index, None, status)
+    })
 }
 
 fn client_agent_resources_selected(
@@ -3336,6 +3616,7 @@ fn client_agent_cards_presented(
         BTreeMap::new()
     };
     let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
+    let parked_seats = store.parked_seats_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3347,7 +3628,7 @@ fn client_agent_cards_presented(
     let mut card_reads = store.agent_card_reads(&agent_subjects, snapshot_index, &actual_claims)?;
     // Cards without a harness need only their actual claim's acceptance time, not its body.
     // Keep the existing per-claim fallback if the bulk metadata read cannot be completed.
-    let actual_claim_times = store.claim_acceptance_times(
+    let actual_claim_times = store.kept_claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -3357,6 +3638,15 @@ fn client_agent_cards_presented(
             })
             .collect::<Vec<_>>(),
     );
+    let declared_resources = status
+        .subjects
+        .iter()
+        .filter_map(|subject| {
+            let references = crate::graph::declared_resources(subject.desired.as_ref()?);
+            (!references.is_empty()).then(|| (subject.subject.clone(), references))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(declared_resources.values().flatten())?;
     let mut agents = status
         .subjects
         .into_iter()
@@ -3366,7 +3656,10 @@ fn client_agent_cards_presented(
         .filter(|subject| history || subject.projection.layer == "current")
         .map(|mut subject| -> anyhow::Result<(String, Value)> {
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
-            let member_fault = member_faults.get(&subject.subject);
+            // A seat st parked is a fault until it runs again, not a seat someone stopped.
+            let parked = end_reason::holding_park(&subject, parked_seats.get(&subject.subject), retired_subjects.contains(&subject.subject));
+            let member_fault = member_faults.get(&subject.subject)
+                .or_else(|| parked.map(|parked| &parked.reason));
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
@@ -3573,7 +3866,7 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -3601,6 +3894,7 @@ fn client_agent_cards_presented(
                 "owner_run_id": subject.owner_run,
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
+                "background_jobs": subject.harness.as_ref().and_then(|harness| harness.background_jobs),
                 "end_reason": end_reason,
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
@@ -3630,6 +3924,10 @@ fn client_agent_cards_presented(
                     "agent_id": relationship.agent,
                     "reason": relationship.reason
                 })).collect::<Vec<_>>(),
+                "resources": client_declared_resources(
+                    declared_resources.get(&subject.subject).map_or(&[][..], Vec::as_slice),
+                    &resource_uris,
+                ),
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
@@ -3639,6 +3937,13 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            // Fold the point read into a cached card. Presentation of a warm roster page
+            // must not repeat one retirement query for every retired row.
+            if state == "retired"
+                && let Some(custody) = store.mail_custody_status(&subject.subject).map_err(anyhow::Error::new)?
+            {
+                value["mail_custody"] = custody;
+            }
             if mailbox_faults.is_none() && fault.is_none() {
                 value["fault"] = previous_faults.get(&subject.subject).cloned()
                     .unwrap_or_else(|| json!("fault status unknown"));
@@ -3663,6 +3968,36 @@ fn client_agent_cards_presented(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(agents.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Read-only edges with an explicit authored kind and URI resolution state.
+/// Subject edges do not require a URI locator; missing URI locators are omitted, not null.
+pub fn client_declared_resources(
+    references: &[crate::model::DeclaredResourceReference],
+    uris: &BTreeMap<String, String>,
+) -> Vec<Value> {
+    references
+        .iter()
+        .map(|reference| {
+            let mut value = json!({
+                "name": reference.name,
+                "subject": reference.subject,
+                "kind": reference.kind,
+                "resolution": match reference.kind {
+                    crate::model::ResourceReferenceKind::Subject => "not-applicable",
+                    crate::model::ResourceReferenceKind::Uri if uris.contains_key(&reference.subject) => "resolved",
+                    crate::model::ResourceReferenceKind::Uri => "unresolved",
+                },
+                "reason": reference.reason,
+            });
+            if reference.kind == crate::model::ResourceReferenceKind::Uri
+                && let Some(uri) = uris.get(&reference.subject)
+            {
+                value["uri"] = json!(uri);
+            }
+            value
+        })
+        .collect()
 }
 
 fn desired_harness_driver(desired: &Value) -> Option<String> {
@@ -4076,6 +4411,13 @@ fn client_attention_resources_from_items(
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
         }
+        // An ask resolves by itself at its deadline, with its default answer if it has one.
+        if let Some(deadline) = item.deadline_unix_ms {
+            resource["deadline_at"] = json!(client_timestamp(deadline));
+        }
+        if let Some(default) = item.default_answer {
+            resource["default_answer"] = default;
+        }
         for (name, value) in [
             ("conversation_id", item.conversation),
             ("requester_id", item.requester_id),
@@ -4168,12 +4510,13 @@ pub fn client_attention_compatibility(items: &mut [Value], custom_forms: bool) {
     }
 }
 
-fn client_attention_resources_with_previews(
+pub fn client_attention_resources_with_previews(
     state: &AppState,
     person: Option<&str>,
     history: bool,
 ) -> anyhow::Result<Vec<Value>> {
     let mut items = client_attention_resources(&state.store, person, history)?;
+    published_attention::published_attention_presentations(&state.store, &mut items);
     for item in &mut items {
         if item["attention_kind"] != "launch-approval" {
             continue;
@@ -5135,6 +5478,7 @@ fn client_work_published_page(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -5240,21 +5584,56 @@ const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
 /// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
 /// refresh fails and is tried again on the next request.
 pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
+    let generation = store.agents_publication_build()?;
+    let Some(CapturedPresentedAgents { source, subagents, now }) =
+        refresh_agent_roster_source(store, history)? else { return Ok(()); };
+    let valid_until = source.valid_until_ms.map_or(now.saturating_add(1000),
+        |deadline| deadline.min(now.saturating_add(1000)));
+    let mut rows = (*source.rows).clone();
+    overlay_agent_resources_at(store, &mut rows, &client_timestamp(u128::from(now)),
+        u128::from(now), Some(subagents))?;
+    store.publish_presented_agents(generation, source, now, Some(valid_until), rows)
+}
+
+struct CapturedPresentedAgents {
+    source: crate::store::evidence::AgentsPublicationSource,
+    subagents: Vec<crate::store::SubagentView>,
+    now: u64,
+}
+
+fn capture_presented_agents(store: &Store, index: u64) -> anyhow::Result<CapturedPresentedAgents> {
+    let now = client_now_ms().min(u128::from(u64::MAX)) as u64;
+    Ok(CapturedPresentedAgents {
+        source: store.agents_publication_source(index)?,
+        subagents: store.running_subagents(now)?,
+        now,
+    })
+}
+
+fn refresh_agent_roster_source(
+    store: &Store, history: bool,
+) -> anyhow::Result<Option<CapturedPresentedAgents>> {
     store.begin_agent_roster_fault_retries(history);
-    if store.read_snapshot(|index| store.agent_roster_current(index, history))? {
-        return Ok(());
-    }
+    let (current, captured) = store.read_snapshot(|index| {
+        let current = store.agent_roster_current(index, history)?;
+        let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
+        Ok((current, captured))
+    })?;
+    if current { return Ok(captured); }
     let complete = |store: &Store| store.read_snapshot(|index| {
         if let Some(reason) =
             store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
         {
-            return Ok(Some(reason));
+            return Ok((Some(reason), None));
         }
-        client_agent_resources_cached(store, history, index).map(|_| None)
+        client_agent_resources_cached(store, history, index)?;
+        let captured = if history { None } else { Some(capture_presented_agents(store, index)?) };
+        Ok((None, captured))
     });
     for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
-        let Some(reason) = complete(store)? else {
-            return Ok(());
+        let (reason, captured) = complete(store)?;
+        let Some(reason) = reason else {
+            return Ok(captured);
         };
         store.note_agent_roster_chunked(&reason);
         let order = store.read_snapshot(|index| {
@@ -5269,8 +5648,9 @@ pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> 
             })?;
         }
     }
-    if complete(store)?.is_none() {
-        return Ok(());
+    let (reason, captured) = complete(store)?;
+    if reason.is_none() {
+        return Ok(captured);
     }
     anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
 }
@@ -5717,6 +6097,7 @@ pub fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
             | "stale-fence"
             | "validation-failed"
             | "forbidden"
+            | "peer-too-old"
             | "idempotency-conflict"
     ) {
         return remote_unavailable(host);
@@ -5926,72 +6307,8 @@ pub fn start_agent_roster(state: &AppState) {
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
-            let mut admission = store.admit_agent_resources("refresher").await;
             let first = std::mem::take(&mut head);
-            if !first {
-                record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
-            }
-            let reader = store.clone();
-            let mut warm_attributes = None;
-            if first {
-                // Warm without admission: nothing is published, and no reader folds.
-                drop(admission);
-                let reader = store.clone();
-                let submitted = crate::otel::export_enabled().then(Instant::now);
-                match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
-                    roster_worker(true, submitted, None, || {
-                        let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
-                        (result, crate::otel::take_roster_attributes())
-                    })
-                })).await {
-                    Ok((result, attributes)) => {
-                        warm_attributes = attributes;
-                        if let Err(error) = result {
-                            eprintln!("st3: agents roster warm-up failed: {error:#}");
-                        }
-                    }
-                    Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
-                }
-                admission = store.admit_agent_resources("refresher").await;
-            }
-            let submitted = crate::otel::export_enabled().then(Instant::now);
-            let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
-                let _admission = admission;
-                _admission.enter_worker();
-                // The first fold publishes only what windows and first pages show; the rest
-                // follows at once.
-                crate::task_cpu::performance_blocking("published_list.agents", || if first {
-                    reader.answer_agent_roster_requests(|| {
-                        reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
-                    })
-                } else {
-                    // Nothing published to start from: every card folds again from the log.
-                    let before = reader
-                        .published_agent_roster(u64::MAX, false)
-                        .map(|(cut, _, _)| cut);
-                    let cold = before.is_none();
-                    let folded = Instant::now();
-                    let refreshed = reader.answer_agent_roster_requests(|| {
-                        refresh_agent_roster(&reader, false)?;
-                        if reader.take_agent_roster_history_request() {
-                            refresh_agent_roster(&reader, true)?;
-                        }
-                        Ok(())
-                    });
-                    if let (Some(before), Some((cut, _, at))) =
-                        (before, reader.published_agent_roster(u64::MAX, false))
-                    {
-                        record_publish_latency(&reader, "agents", before, cut, at);
-                    }
-                    record_roster_stage(if cold {
-                        request_latency::RosterStage::RefreshCold
-                    } else {
-                        request_latency::RosterStage::Refresh
-                    }, folded.elapsed());
-                    refreshed
-                })
-            }))
-            .await;
+            let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => eprintln!("st3: agents roster refresh failed: {error:#}"),
@@ -6009,9 +6326,101 @@ pub fn start_agent_roster(state: &AppState) {
                 () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
                 () = store.fresh_agent_roster_wanted() => {}
             }
-            wake.notified().await;
+            // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
+            // paced by the existing refresh pause, never a timer per subscriber.
+            if store.agent_roster_refresh_failed() {
+                wake.notified().await;
+            }
+            wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// One owner iteration, including both queues that can outlive its readers.
+async fn refresh_agent_roster_admitted(
+    store: Arc<Store>,
+    first: bool,
+) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    let mut admission = store.admit_agent_resources("refresher").await;
+    if !first {
+        if !store.agents_publication_demand() {
+            return Ok(Ok(()));
+        }
+        record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
+    }
+    let reader = Arc::clone(&store);
+    let mut warm_attributes = None;
+    if first {
+        // Warm without admission: nothing is published, and no reader folds.
+        drop(admission);
+        let reader = Arc::clone(&store);
+        let submitted = crate::otel::export_enabled().then(Instant::now);
+        match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
+            roster_worker(true, submitted, None, || {
+                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                (result, crate::otel::take_roster_attributes())
+            })
+        })).await {
+            Ok((result, attributes)) => {
+                warm_attributes = attributes;
+                if let Err(error) = result {
+                    eprintln!("st3: agents roster warm-up failed: {error:#}");
+                }
+            }
+            Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
+        }
+        admission = store.admit_agent_resources("refresher").await;
+    }
+    let submitted = crate::otel::export_enabled().then(Instant::now);
+    tokio::task::spawn_blocking(move || {
+        // The blocking pool is another queue: losing demand there must also avoid a fold.
+        if !first && !reader.agents_publication_demand() {
+            return Ok(());
+        }
+        roster_worker(true, submitted, warm_attributes, || {
+            let _admission = admission;
+            _admission.enter_worker();
+            // Startup publishes a bounded head; complete presentation follows on demand.
+            crate::task_cpu::performance_blocking("published_list.agents", || if first {
+                reader.answer_agent_roster_requests(|| {
+                    // Queue the complete follow-on before publishing the head: a projection
+                    // reset after that publication must be able to cancel this old demand.
+                    reader.fractal.request_roster_refresh();
+                    reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                })
+            } else {
+                let before = reader.published_agent_roster(u64::MAX, false).map(|(cut, _, _)| cut);
+                let cold = before.is_none();
+                let folded = Instant::now();
+                let refreshed = reader.answer_agent_roster_requests(|| {
+                    refresh_agent_roster(&reader, false)?;
+                    if reader.take_agent_roster_history_request() {
+                        refresh_agent_roster(&reader, true)?;
+                    }
+                    Ok(())
+                });
+                if let (Some(before), Some((cut, _, at))) =
+                    (before, reader.published_agent_roster(u64::MAX, false))
+                {
+                    record_publish_latency(&reader, "agents", before, cut, at);
+                }
+                record_roster_stage(if cold {
+                    request_latency::RosterStage::RefreshCold
+                } else {
+                    request_latency::RosterStage::Refresh
+                }, folded.elapsed());
+                refreshed
+            })
+        })
+    }).await
+}
+
+async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
+    // Notifications may have been queued while readers were present. Recheck demand
+    // after consuming them rather than doing one last presentation fold on an idle node.
+    while !store.agents_publication_demand() {
+        wake.notified().await;
+    }
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
@@ -6177,7 +6586,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
         None => app,
     };
     let listener = socket.listen(1024)?;
-    // Only st3-fixture initializes this process-local state. Disable host ancestry while
+    // Only fractal-fixture initializes this process-local state. Disable host ancestry while
     // retaining native-driver identification, which mailbox subscriptions require.
     #[cfg(feature = "test-support")]
     let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();
@@ -6208,6 +6617,9 @@ async fn serve_reserved_unix_with_ancestor_ready(
         // Every local connection names its caller, so request counts by client are always on.
         let mut diagnostic_connection = crate::relay_trace::Connection::capture();
         let peer_pid = local_peer_pid(&stream);
+        // This must precede dispatch: the numeric peer PID can be recycled while
+        // a descendant continues using the connector's inherited socket.
+        let peer_process = local_peer_process(&stream).ok();
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -6243,6 +6655,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                 let bound_agent = bound_agent.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
+                let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
                     if let Some(connection) = diagnostic_connection {
@@ -6251,6 +6664,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
+                            peer_process,
                             ancestor: bound_agent.clone(),
                         });
                     }
@@ -6305,7 +6719,7 @@ fn harness_ancestor(mut pid: u32) -> Option<String> {
     let mut seen = BTreeSet::new();
     while pid > 1 && pid != std::process::id() && seen.insert(pid) {
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (key == name).then(|| value.to_owned())
@@ -6365,7 +6779,7 @@ fn native_delivery_identity(
             _ => None,
         }
     })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
         env.iter().find_map(|entry| {
             let (key, value) = entry.split_once('=')?;
@@ -6380,9 +6794,46 @@ fn native_delivery_identity(
         archives_inbox,
     })
 }
+/// Capture the kernel connector generation, independently of generic local auth.
+pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{FromRawFd as _, OwnedFd};
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        // Linux 6.5 added SO_PEERPIDFD; older libc headers may not name it yet.
+        const SO_PEERPIDFD: libc::c_int = 77;
+        let mut fd: libc::c_int = -1;
+        let mut length = std::mem::size_of_val(&fd) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, SO_PEERPIDFD,
+                (&mut fd as *mut libc::c_int).cast(), &mut length)
+        };
+        let pidfd = if result == 0 {
+            anyhow::ensure!(fd >= 0, "SO_PEERPIDFD returned an invalid descriptor");
+            // Successful SO_PEERPIDFD transfers a fresh descriptor to us.
+            let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+            anyhow::ensure!(length as usize == std::mem::size_of_val(&fd),
+                "SO_PEERPIDFD returned an invalid descriptor length");
+            owned
+        } else {
+            let error = std::io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
+                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+            }
+            anyhow::bail!("SO_PEERPIDFD failed: {error}");
+        };
+        fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+    }
+}
+
 
 #[cfg(target_os = "linux")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     stream
         .peer_cred()
         .ok()?
@@ -6391,7 +6842,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
-fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd as _;
     let mut pid: libc::pid_t = 0;
     let mut size = std::mem::size_of_val(&pid) as libc::socklen_t;
@@ -6409,7 +6860,7 @@ fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
+pub fn local_peer_pid(_stream: &tokio::net::UnixStream) -> Option<u32> {
     None
 }
 
@@ -6578,6 +7029,12 @@ pub async fn guard_bound_request(
         )));
     }
     let path = request.uri().path();
+    if path == "/v1/repair/apply" {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            "bound harnesses must use the attributed repair apply route",
+        )));
+    }
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
@@ -6591,6 +7048,7 @@ pub async fn guard_bound_request(
         "/v1/sets/",
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
+        "/v1/persons/rename",
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",
@@ -6614,6 +7072,8 @@ pub async fn guard_bound_request(
         "/v1/custom/reply",
         "/v1/diagnostic",
         "/v1/rules/",
+        "/v1/repair",
+        "/v1/signatures/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
@@ -6625,6 +7085,14 @@ pub async fn guard_bound_request(
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        if parts.uri.path() == "/v1/repair/apply-attributed"
+            && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
+        {
+            return Err(ApiError::bad(St3Error::new(
+                "foreign-agent-actor",
+                format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
+            )));
+        }
         for key in ["actor", "requester"] {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
@@ -6660,7 +7128,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":1},
     })))
 }
 
@@ -6872,6 +7340,8 @@ fn doctor_attention_items(
     let mut items = store.attention_snapshot(None, now)?;
     items.extend(store.fault_snapshot(now)?.into_iter().map(|fault| {
         crate::model::AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             person: fault.owner.unwrap_or_else(|| "no owning agent".into()),
             ..fault.item
         }
@@ -7332,27 +7802,9 @@ fn doctor_report_with_operation_drift(
             message: error.to_string(),
         }),
     }
-    match state.store.operational_repair_plan() {
-        Ok(plan) if plan.items.is_empty() => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "pass".into(),
-            message: "the graph has no repairable operational contradictions".into(),
-        }),
-        Ok(plan) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "warn".into(),
-            message: format!(
-                "{} graph-authorized repairs are available; inspect `st repair dry-run` token {}",
-                plan.items.len(),
-                plan.token
-            ),
-        }),
-        Err(error) => checks.push(DoctorCheck {
-            name: "operational-repair".into(),
-            status: "fail".into(),
-            message: format!("could not compute the operational repair plan: {error}"),
-        }),
-    }
+    checks.push(operations::operational_repair_check(
+        operations::owner_operational_repair_plan(state),
+    )?);
     checks.push(
         terminal_exec_gates_check(&state.store).unwrap_or_else(|error| DoctorCheck {
             name: "terminal-exec-gates".into(),
@@ -7893,6 +8345,12 @@ fn doctor_report_with_operation_drift(
         }),
     }
     checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+    if state.fleet_id.is_some() {
+        checks.push(crate::replication_worker_build::check(
+            &state.state_dir,
+            fractal_drivers::version::build_commit(),
+        ));
+    }
     match state.store.idempotency_conflicts(5) {
         Ok((0, _)) => checks.push(DoctorCheck {
             name: "idempotency-keys".into(),
@@ -7947,7 +8405,10 @@ fn doctor_report_with_operation_drift(
             let mut blocked = agents
                 .iter()
                 .filter(|agent| {
-                    agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
+                        || agent.pointer("/delivery/reason").and_then(Value::as_str)
+                            .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
+                                || reason.starts_with("ownership proof unavailable"))
                 })
                 .map(|agent| {
                     format!(
@@ -8130,12 +8591,24 @@ fn replication_receive_has_new_data(received: usize) -> bool {
 }
 
 /// Pure local memory update. Older daemons answer 404 rather than interpreting worker
-/// progress as a failed exchange during a worker/daemon rolling restart.
+/// progress as a failed exchange during a worker/daemon rolling restart. A report of the
+/// worker's process CPU, which carries no peer, feeds the member's CPU minutes instead.
 async fn replication_worker_status(
     State(state): State<AppState>,
     Json(request): Json<smallclaims::replication::ReplicationWorkerStatusRequest>,
 ) -> Json<Value> {
-    state.store.record_replication_worker(&request.peer, request.worker);
+    if let Some(worker) = request.worker {
+        state.store.record_replication_worker(&request.peer, worker);
+    }
+    if let Some(process) = request.process {
+        let catching_up = state.store.replication_catching_up();
+        let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cpu = meter.cpu_minutes();
+        cpu.note_worker((process.pid, process.started_at_unix_ms), process.cpu_ns, Instant::now());
+        if catching_up {
+            cpu.note(smallclaims::windows::cpu_minutes::Busy::CatchUp);
+        }
+    }
     Json(json!({ "recorded": true, "changed": false }))
 }
 
@@ -8269,6 +8742,30 @@ async fn refuse_while_leaving(
     next.run(request).await
 }
 
+/// Mission-only routes may publish the shared targets synthesized from their URI edges,
+/// but never an explicitly authored immediate declaration (even one with the same ID).
+fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
+    if intent.subjects.is_empty() {
+        return true;
+    }
+    let mission_roots = intent.normalized["declarations"].as_array().is_some_and(|nodes| {
+        nodes.iter().all(|node| node["name"] == "mission")
+    });
+    mission_roots && intent.subjects.values().all(|subject| {
+        subject.kind == "resource"
+            && subject.subject.starts_with("resource/uri/")
+            && subject.owner_run.is_none()
+            && subject.owner_generation.is_none()
+            && subject.owner_step.is_none()
+            && intent.missions.values().any(|mission| {
+                mission.resources.iter().any(|edge| {
+                    edge.kind == crate::model::ResourceReferenceKind::Uri
+                        && edge.subject == subject.subject
+                })
+            })
+    })
+}
+
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
@@ -8283,7 +8780,7 @@ fn launch_candidate_mission<'a>(
     };
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
-    if !intent.subjects.is_empty() || published != published_closure {
+    if !mission_only_subjects(intent) || published != published_closure {
         return Err(St3Error::new(
             "wrong-launch-mission",
             format!(
@@ -9639,7 +10136,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
     blocking_store(move || {
+        // A commit is visible here before its writer publishes the store index that client
+        // snapshots read at. A cursor past that index would let a client read a resource older
+        // than the events it already consumed, then wait for events that already came.
+        let through = store.index()?;
         store.read_snapshot(|frontier| {
+            let frontier = frontier.min(through);
             let (oldest, newest) = store.event_bounds()?;
             let floor = oldest.saturating_sub(1);
             if after < floor || after > newest {
@@ -9650,12 +10152,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     details: Box::new(serde_json::Map::from_iter([
                         ("full_resync".into(), json!(true)),
                         ("resume_floor".into(), json!(floor)),
-                        ("frontier".into(), json!(newest)),
+                        ("frontier".into(), json!(newest.min(through))),
                     ])),
                 }));
             }
             let (items, next_after, has_more) =
-                store.events_page(after, subject.as_deref(), owner.as_deref(), limit)?;
+                store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             Ok(Ok(EventPage {
                 items,
                 next_after,
@@ -9820,7 +10322,9 @@ fn scope_eval_desired_subjects(
     let mut shared = Vec::new();
     for (subject, desired) in &mut intent.subjects {
         let Some(current) = selected.get(subject.as_str()) else {
-            desired.owner_run = Some(owner_run.to_owned());
+            if crate::graph::declared_uri(&desired.desired).is_none() {
+                desired.owner_run = Some(owner_run.to_owned());
+            }
             continue;
         };
         if *current == desired {
@@ -10030,6 +10534,8 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
 #[derive(Clone, Debug)]
 pub struct LocalPeer {
     pub pid: u32,
+    /// Accept-time generation witness; absent if the platform cannot prove it.
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
     pub ancestor: Option<String>,
 }
 
@@ -10051,6 +10557,20 @@ async fn work_action_response(
     request: WorkRequest,
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
+) -> Result<Json<StepRunView>, ApiError> {
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+}
+
+/// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
+/// hierarchy, queue, timing, summaries and wake a reader would fold for it after COMMIT.
+async fn work_action_response_viewing(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+    extend_ms: Option<u64>,
+    handoff: Option<crate::model::WorkHandoffRequest>,
+    lease_view: bool,
 ) -> Result<Json<StepRunView>, ApiError> {
     let actor = request
         .actor
@@ -10079,7 +10599,7 @@ async fn work_action_response(
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
         }
-        if action == "renew" {
+        if action == "renew" && !lease_view {
             // A renewal caches its view without the fields the writer no longer folds.
             let store = state.store.clone();
             response = blocking_action(move || {
@@ -10114,10 +10634,11 @@ async fn work_action_response(
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_extending(&subject, &action, &request, extend_ms)?
+            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
         };
-
-        work_response::enrich_under(&store, &mut response)?;
+        if !lease_view {
+            work_response::enrich_under(&store, &mut response)?;
+        }
         Ok(response)
     })
     .await?;
@@ -10238,13 +10759,7 @@ pub async fn input_session_as(
     {
         return Ok(Json(session_control_response(&subject, &result)));
     }
-    let session = live_session(state, &subject, Some(&request.expected_incarnation))?;
-    if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
-            "unsupported-capability",
-            "session input requires a terminal session",
-        )));
-    }
+    let session = live_input_session(state, &subject, &request.expected_incarnation)?;
     let bytes = match request.mode {
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)

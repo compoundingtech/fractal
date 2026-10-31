@@ -7,12 +7,16 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 
 interface PhoneTab { readonly id: string; readonly label: string }
 
-/** React Aria owns keyboard navigation. A shared panel keeps the thread's portal host and drafts mounted. */
-export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, children }: {
+/**
+ * React Aria owns keyboard navigation. A shared panel keeps the thread's portal host and drafts mounted.
+ * `trailing` sits fixed at the row's end, outside the tablist: the tabs scroll and truncate before it, never under it.
+ */
+export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, trailing, children }: {
   readonly enabled?: boolean
   readonly tabs: readonly PhoneTab[]
   readonly selected: string
   readonly onSelect: (id: string) => void
+  readonly trailing?: React.ReactNode
   readonly children: React.ReactNode
 }) {
   const prefix = React.useId()
@@ -27,8 +31,11 @@ export function PhoneWorkspaceTabs({ enabled = true, tabs, selected, onSelect, c
   const { tabListProps } = useTabList({ 'aria-label': 'Workspace views' }, state, list)
   const panelId = `${prefix}-panel`
   return <div {...stylex.props(styles.root)}>
-    <div {...(enabled ? tabListProps : {})} ref={list} hidden={!enabled} {...stylex.props(styles.list, !enabled && styles.hidden)}>
-      {tabs.map((tab, i) => <PhoneTabButton key={tab.id} tab={tab} state={state} id={`${prefix}-tab-${i}`} panelId={panelId} />)}
+    <div hidden={!enabled} {...stylex.props(styles.row, !enabled && styles.hidden)}>
+      <div {...(enabled ? tabListProps : {})} ref={list} {...stylex.props(styles.list)}>
+        {tabs.map((tab, i) => <PhoneTabButton key={tab.id} tab={tab} state={state} id={`${prefix}-tab-${i}`} panelId={panelId} />)}
+      </div>
+      {trailing === undefined ? null : <div {...stylex.props(styles.trailing)}>{trailing}</div>}
     </div>
     <div id={panelId} role={enabled ? 'tabpanel' : undefined} aria-labelledby={enabled ? `${prefix}-tab-${index}` : undefined} tabIndex={enabled ? 0 : undefined} {...stylex.props(styles.panel)}>{children}</div>
   </div>
@@ -45,7 +52,9 @@ const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
   hidden: { display: 'none' },
   label: { maxWidth: '14ch', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  list: { display: 'flex', flexShrink: 0, overflowX: 'auto', minHeight: 44, paddingInlineStart: `max(${s.sm}, env(safe-area-inset-left))`, paddingInlineEnd: `max(${s.sm}, env(safe-area-inset-right))`, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
+  row: { display: 'flex', alignItems: 'stretch', flexShrink: 0, minHeight: 44, minWidth: 0, paddingInlineStart: `max(${s.sm}, env(safe-area-inset-left))`, paddingInlineEnd: `max(${s.sm}, env(safe-area-inset-right))`, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
+  list: { display: 'flex', flex: '1 1 0', minWidth: 0, overflowX: 'auto' },
+  trailing: { display: 'flex', alignItems: 'center', flexShrink: 0, paddingInlineStart: s.sm },
   tab: { display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: 44, minHeight: 44, paddingInline: s.lg, flexShrink: 0, boxSizing: 'border-box', fontSize: t.uiSize, color: c.fgMuted, cursor: 'pointer', borderBottomWidth: 2, borderBottomStyle: 'solid', borderBottomColor: 'transparent', ':is([data-selected])': { color: c.fg, borderBottomColor: c.primary }, ':is([data-focus-visible])': { outline: `2px solid ${c.primary}`, outlineOffset: -2 } },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0, outline: 'none', ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: -2 } },
 })

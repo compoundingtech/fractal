@@ -94,18 +94,18 @@ async fn real_feed_follows_and_typed_client_submits_fenced_send() {
                 Json(json!({"api_version":"st3.client.v0","request_id":"request/send","snapshot":snapshot(),"value":{"kind":"action-result","action_id":body["id"],"operation_id":"operation/demo","status":"completed","affected_ids":["message/demo"],"snapshot_id":"snapshot/demo/1"}}))
             }}))
             .route("/v1/client/collections/stream", get(|upgrade: WebSocketUpgrade| async {
-                upgrade.protocols(["st3.client.collections.v0"]).on_upgrade(|mut socket| async move {
+                upgrade.protocols(["fractal.client.collections.v0"]).on_upgrade(|mut socket| async move {
                     while let Some(Ok(Message::Text(text))) = socket.recv().await {
                         let command: Value = serde_json::from_str(&text).unwrap();
                         if command["kind"] != "subscribe" { continue; }
                         let frame = if command["collection"] == "conversation" {
                             assert_eq!(command["conversation"], "agent/writer");
                             let entries: Value = serde_json::from_str(include_str!("../../../fixtures/clients/transcripts/deliveries.json")).unwrap();
-                            json!({"kind":"conversation","id":command["id"],"session_id":"session/demo","replace":true,"has_more":false,"items":entries})
+                            json!({"kind":"conversation","id":command["id"],"collection":"conversation","session_id":"session/demo","replace":true,"has_more":false,"items":entries})
                         } else {
                             let items = if command["collection"] == "agents" { vec![agent("writer")] } else { vec![] };
                             let order = if items.is_empty() { vec![] } else { vec!["agent/writer"] };
-                            json!({"kind":"snapshot","id":command["id"],"snapshot":snapshot(),"items":items,"order":order,"has_more":false})
+                            json!({"kind":"snapshot","id":command["id"],"collection":command["collection"],"snapshot":snapshot(),"items":items,"order":order,"has_more":false})
                         };
                         socket.send(Message::Text(frame.to_string().into())).await.unwrap();
                     }

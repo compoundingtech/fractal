@@ -159,7 +159,7 @@ impl Scratch {
     }
     fn start(&mut self) -> Result<()> {
         let log = fs::File::create(self.root.path().join("daemon.log"))?;
-        let mut cmd = self.command(Path::new(test_env!("CARGO_BIN_EXE_st3-fixture")));
+        let mut cmd = self.command(Path::new(test_env!("CARGO_BIN_EXE_fractal-fixture")));
         cmd.args(["up", "--config"]).arg(self.root.path().join("config.toml"));
         // Own the daemon process group, including non-PTY helper children.
         use std::os::unix::process::CommandExt;
@@ -168,7 +168,7 @@ impl Scratch {
         Ok(())
     }
     fn cli(&self, args: &[&str]) -> Result<String> {
-        let output = self.command(Path::new(test_env!("CARGO_BIN_EXE_st3-fixture"))).arg("--endpoint").arg(self.root.path().join("run/st.sock")).args(args).output()?;
+        let output = self.command(Path::new(test_env!("CARGO_BIN_EXE_fractal-fixture"))).arg("--endpoint").arg(self.root.path().join("run/st.sock")).args(args).output()?;
         ensure!(output.status.success(), "CLI: {}", String::from_utf8_lossy(&output.stderr));
         Ok(String::from_utf8(output.stdout)?)
     }
@@ -339,10 +339,10 @@ async fn record_scenario() -> Result<()> {
     let output = fs::OpenOptions::new().write(true).create_new(true).open(std::env::var("ST3_SCENARIO_OUTPUT")?)?;
     let started_at = captured_at.to_rfc3339();
     let mut capture = Capture { file:output, start:Instant::now(), ordinal:0, root:scratch.root.path().display().to_string(), workspace:script.workspace.clone(), capabilities:BTreeMap::new(), native_sequences:BTreeMap::new() };
-    let version = scratch.command(Path::new(test_env!("CARGO_BIN_EXE_st3-fixture"))).arg("--version").output()?;
+    let version = scratch.command(Path::new(test_env!("CARGO_BIN_EXE_fractal-fixture"))).arg("--version").output()?;
     ensure!(version.status.success(), "daemon version unavailable");
     use sha2::Digest;
-    let mut binary = fs::File::open(test_env!("CARGO_BIN_EXE_st3-fixture"))?;
+    let mut binary = fs::File::open(test_env!("CARGO_BIN_EXE_fractal-fixture"))?;
     let mut digest = sha2::Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {

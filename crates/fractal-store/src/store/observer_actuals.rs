@@ -15,12 +15,12 @@ impl Store {
     /// Subscribe before the first authority read so a concurrent commit cannot be missed.
     /// Uses native writer-resolution notifications, not the API's broad reconciliation wakes.
     pub fn subscribe_runtime_authority(&self, subject: &str) -> tokio::sync::watch::Receiver<u64> {
-        self.smalltalk.observer_actuals.subscribe_authority(subject)
+        self.fractal.observer_actuals.subscribe_authority(subject)
     }
 
     /// Broad API wakes remain a safety source while native dependency coverage is disabled.
     pub fn runtime_authority_coverage_failed(&self) -> bool {
-        self.smalltalk.observer_actuals.0.lock()
+        self.fractal.observer_actuals.0.lock()
             .unwrap_or_else(PoisonError::into_inner).coverage_failed
     }
 }

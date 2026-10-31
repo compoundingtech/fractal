@@ -19,7 +19,7 @@ each other holds.
 
 This document explains how a checkpoint works and what trimming drops, with examples. It describes
 the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim),
-`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for st's own claim
+`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for Fractal's own claim
 kinds; see [Retention](retention.md)) and `crates/fractal-store/src/store/checkpoint_rules.rs` (the planner
 functions those rules name). Operating commands
 are in [Fleet replication](replication.md#checkpoints). Read this before changing a rule, the
@@ -88,11 +88,24 @@ sealed set do not invalidate this record; fixing a rule or reader changes its id
 
 The rules identity covers projection inputs and replay as well as retention: the graph proof includes
 `arrangements` and `arrangement_registers`, even when empty, and replay rebuilds them from sealed claims.
+Version 21 adds raw and live ordered memberships, live counters, their authoritative member
+lifecycle dependencies and the shared reverse-edge projection to proof/replay. Absent winners,
+hidden memberships and folder tombstones remain retained: no ordered-membership drop rule exists.
+Retiring a member changes visibility, not its retained pair position; redeclaring a reusable stable
+identity can restore that position.
+Repairing a retained member's selected claim refreshes its lifecycle dependency from
+unrepaired authority in the repair transaction, so incremental and replay witnesses agree.
+Local membership repair watermarks survive projection rebuilds but are excluded from
+shared checkpoint/digest answers.
 Different builds' rules digests must match exactly, not by version ordering: a mixed-version fleet waits
 at sealing until its participants use the same rules, including during rollback. Verification also
 refuses seal terms whose rules digest differs from the running build, without consuming the node's first
 verification. The normal step replaces terms only for the newest due cut; quiet retries there do not
 establish verification of an older cut.
+For the required N/N-1 rolling window, a sealing wait must not block work or
+schedules, and retained history must remain readable by admitted older members.
+The [mixed-fleet design and open implementation](compatibility.md#checkpoints-in-a-mixed-fleet)
+preserve these exact-digest checks rather than weakening verification.
 
 A status-history proof mismatch logs bounded source diagnostics from the same scratch proof reads:
 the checkpoint, seal row, cut, build and rules/drop identities, array lengths and first differing
@@ -119,6 +132,9 @@ checkpoint instead; see [Trimming](#trimming).
 The daemon does this work in the background, sleeping ten minutes after each pass, on a thread
 that never holds the store's writer for long. `[checkpoint] enabled = false` in a node's config stops that node
 sealing, and since every participant must seal, that stops trimming for the whole fleet.
+`[trim] local = true` takes a member out of checkpoints for local trim: it seals, verifies and
+adopts nothing and only finishes a trim it had already committed. That also stops checkpoints
+for the other members until a person excuses it; see [replication](replication.md).
 
 ## What a rule may drop
 

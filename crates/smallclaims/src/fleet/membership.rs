@@ -51,6 +51,8 @@ impl FleetClaim {
 pub struct Incarnation {
     pub name: String,
     pub member_key: String,
+    /// Fabric identity admitted by the sponsor's signed membership claim, if paired.
+    pub node_id: Option<String>,
     pub via: String,
     pub mode: String,
     pub sponsor: Option<String>,
@@ -69,6 +71,10 @@ pub struct Incarnation {
 }
 
 impl Incarnation {
+    pub fn endpoints_published(&self) -> bool {
+        self.endpoints_sequence.is_some()
+    }
+
     fn holds(&self, sequence: u64) -> bool {
         sequence >= self.start && self.end.is_none_or(|end| sequence <= end)
     }
@@ -158,6 +164,7 @@ impl Membership {
             incarnations.push(Incarnation {
                 name: name.to_owned(),
                 member_key: key.to_owned(),
+                node_id: claim.text("node_id").map(str::to_owned),
                 via: claim.text("via").unwrap_or_default().to_owned(),
                 mode: claim.text("mode").unwrap_or("listening").to_owned(),
                 sponsor: claim.text("sponsor").map(str::to_owned),
@@ -255,6 +262,29 @@ impl Membership {
 
     pub fn incarnations(&self) -> impl Iterator<Item = &Incarnation> {
         self.incarnations.values().flatten()
+    }
+
+    /// The window for an envelope of a named shard. Membership windows count a writer's
+    /// default-store sequences, which say nothing about its sequences in a shard, so a shard
+    /// trusts only the key of the writer's latest incarnation, and only while it has not ended:
+    /// a key that was superseded, left or removed never signs a shard envelope. A writer with no
+    /// incarnation is judged as the default store judges it: legacy, unless it was removed as a
+    /// configured peer.
+    pub fn shard_window(&self, writer: &str) -> Window {
+        let latest = self
+            .incarnations
+            .get(writer)
+            .into_iter()
+            .flatten()
+            .max_by(|left, right| {
+                (left.start, &left.admitted_claim).cmp(&(right.start, &right.admitted_claim))
+            });
+        match latest {
+            None if self.legacy_ends.contains_key(writer) => Window::Fenced,
+            None => Window::Legacy,
+            Some(latest) if latest.ended.is_some() => Window::Fenced,
+            Some(latest) => Window::Keyed(BTreeSet::from([latest.member_key.clone()])),
+        }
     }
 
     /// The keys whose incarnation windows hold this writer sequence.
@@ -381,6 +411,23 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn an_explicit_empty_endpoint_publication_ends_bootstrap_synthesis() {
+        let anchor = claim("anchor", MEMBER_ADMITTED, "host/a",
+            json!({"member_key":"anchor-key","via":"anchor"}), "a", 1, &["anchor-key"]);
+        let initial = Membership::fold(Some("anchor-key"), std::slice::from_ref(&anchor));
+        let MemberState::Current(before) = initial.state("a") else { panic!("anchor is current") };
+        assert!(!before.endpoints_published());
+        let empty = claim("empty", MEMBER_ENDPOINTS, "host/a",
+            json!({"member_key":"anchor-key","endpoints":[]}), "a", 2, &["anchor-key"]);
+        let published = Membership::fold(Some("anchor-key"), &[anchor, empty]);
+        let MemberState::Current(after) = published.state("a") else { panic!("anchor is current") };
+        assert!(after.endpoints.is_empty());
+        assert!(after.endpoints_published());
+        let view = super::super::view::FleetView::from_membership(&published);
+        assert!(view.members[0].endpoints_published);
+    }
+
     fn claim(
         id: &str,
         kind: &str,
@@ -463,6 +510,40 @@ mod tests {
             admitted("2-b", "b", "kb", "invite", "a", 4, "ka", None),
             admitted("3-r", "r", "kr", "invite", "a", 5, "ka", None),
         ]
+    }
+
+    fn left(id: &str, name: &str, key: &str, high_water: u64, sequence: u64) -> FleetClaim {
+        claim(
+            id,
+            MEMBER_LEFT,
+            &format!("host/{name}"),
+            json!({"member_key": key, "high_water": high_water}),
+            name,
+            sequence,
+            &[key],
+        )
+    }
+
+    /// A shard trusts only a writer's latest incarnation's key, and only until it ends: a
+    /// superseded key is refused even though its incarnation never ended, and a writer that
+    /// left or was removed is fenced. A writer outside membership stays legacy.
+    #[test]
+    fn a_shard_trusts_only_the_latest_unended_incarnation() {
+        let keyed = |key: &str| Window::Keyed(BTreeSet::from([key.to_owned()]));
+        let mut claims = base();
+        claims.push(admitted("4-b-again", "b", "kb2", "invite", "a", 6, "ka", Some(40)));
+        let rotated = Membership::fold(Some("ka"), &claims);
+        assert_eq!(rotated.shard_window("b"), keyed("kb2"));
+        assert_eq!(rotated.shard_window("r"), keyed("kr"));
+        assert_eq!(rotated.shard_window("legacy-peer"), Window::Legacy);
+        claims.push(left("5-b-leaves", "b", "kb2", 51, 51));
+        claims.push(removed("6-remove-r", "r", Some("kr"), 20, "a", 7, "ka"));
+        let ended = Membership::fold(Some("ka"), &claims);
+        assert_eq!(ended.shard_window("b"), Window::Fenced);
+        assert_eq!(ended.shard_window("r"), Window::Fenced);
+        claims.push(removed("7-remove-peer", "old-peer", None, 9, "a", 8, "ka"));
+        let legacy_removed = Membership::fold(Some("ka"), &claims);
+        assert_eq!(legacy_removed.shard_window("old-peer"), Window::Fenced);
     }
 
     #[test]

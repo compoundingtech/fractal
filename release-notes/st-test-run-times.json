@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test appends one JSON line per run (total and per-check seconds, and linux-gate's stages when scripts/ci-local prints its stage table) to ~/.local/state/st-test/runs.jsonl, and the new read-only scripts/st-test-report reports count, p50 and p90 of full warm runs against the per-PR suite's objective: 12 minutes or less on a dev box, breached when p90 is over 12 minutes or any full warm run is over 15.",
+  "replay": {"status": "none", "detail": "No record, signature, skip policy or verifier rule changes; what st-test runs and signs is unchanged."},
+  "schema": {"status": "none", "detail": "No database schema change. The runs file is a new local JSON Lines file (records carry \"v\": 1); ST_TEST_RUNS names another path or `off`."},
+  "rules": {"status": "none", "detail": "Recording is fail-soft: a file that cannot be written prints one line on stderr and never changes st-test's exit code."},
+  "compatibility": {"status": "none", "detail": "st-test's summary and exit codes are unchanged. linux-gate's output now passes through st-test (copied to the terminal as it comes and kept for the stage table) instead of going straight to the terminal; its time limit is unchanged."},
+  "downtime": {"status": "none", "detail": "Developer scripts only; no restart."},
+  "manual": {"status": "none", "detail": "Nothing: st-test is read from main. Set ST_TEST_RUNS=off to record nothing."},
+  "recovery": {"status": "none", "detail": "Revert this change; the runs file can be deleted."}
+}

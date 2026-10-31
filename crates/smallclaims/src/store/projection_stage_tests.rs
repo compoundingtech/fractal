@@ -177,6 +177,13 @@ fn store(runtime: &Arc<StageRuntime>, pending: usize) -> (tempfile::TempDir, Sto
     );
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("claims.sqlite3"), "node", runtime.clone()).unwrap();
+    // Each stage is timed against an injected sleep. A loaded disk's fsync once took 147 ms of a
+    // commit and failed a stage that was not the one slowed; durability is not what this checks.
+    store
+        .connection
+        .write()
+        .pragma_update(None, "synchronous", "OFF")
+        .unwrap();
     assert!(store.project_replication_backlog().unwrap());
     for index in 0..pending {
         store

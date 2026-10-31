@@ -128,6 +128,7 @@
         "workspace": "~/src/meadow/.worktrees/docs"
       }
     ],
+    "devices": [],
     "machines": [
       {
         "capacity": {
@@ -241,7 +242,8 @@
         "state": "running",
         "updated_at": "2030-01-01T11:58:00.000Z"
       }
-    ]
+    ],
+    "sessions": []
   },
   "timeline": [],
   "times": [

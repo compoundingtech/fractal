@@ -1013,7 +1013,7 @@ mod tests {
         );
         assert_eq!(
             clean_message_text("A long report\n[st truncated this native timeline value]"),
-            "A long report\n\n… st kept only the start of this"
+            "A long report\n\n… Fractal kept only the start of this"
         );
     }
 
@@ -1101,6 +1101,7 @@ mod tests {
                 store_index: 3,
                 projection_version: "client-projection.v0".into(),
                 created_at: "2026-09-20T11:00:00Z".into(),
+                published_at: None,
             }),
             truncated: false,
             sync: None,

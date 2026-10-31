@@ -41,10 +41,10 @@ export const syntheticReleaseCandidatePolish: WorldDefinition = {
     const record = terminalRecord(ctx, builder, run, startedMs)
     return {
       roster: { kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
-        state: { agents: generated.map((value) => value.agent), runtimes, order: ctx.cast.agents.map((member) => member.id),
+        state: { sessions: [], devices: [], agents: generated.map((value) => value.agent), runtimes, order: ctx.cast.agents.map((member) => member.id),
           machines: ctx.cast.hosts.map((host) => resources.machine(ctx, host, runtimes.filter((runtime) => runtime.owner_host_id === host.id).map((runtime) => runtime.id), [])) }, timeline: [] },
       details: { kind: 'details', variant: 'default', source, decode: 'strict', loading: false,
-        state: { missions: [resources.mission(ctx, mission, 'completed', -120_000)],
+        state: { launches: [], launch_variants: [], missions: [resources.mission(ctx, mission, 'completed', -120_000)],
           work: mission.steps.map((step, index) => resources.work(ctx, { mission, step: index, state: 'completed', updatedMs: -120_000, claimant: ctx.cast.agents[index]!, goals: [step.title] })) }, timeline: [] },
       attention: { kind: 'attention', variant: 'default', source, decode: 'strict', loading: false, state: { attention: [], messages: [] }, timeline: [] },
       conversation,

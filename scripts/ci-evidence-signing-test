@@ -23,6 +23,16 @@ GENV = dict(BASE, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', 
             GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live repository source, not old-layout fixtures.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
+
 def helper(*args, env=None, check=None, cwd=None):
     done = subprocess.run([sys.executable, str(HELPER), *args], capture_output=True, text=True, env=dict(BASE, **(env or {})), cwd=cwd)
     return done
@@ -71,7 +81,7 @@ with tempfile.TemporaryDirectory() as directory:
     repo.mkdir()
     git(repo, 'init', '-q', '-b', 'main')
     (repo / '.st').mkdir()
-    (repo / '.st/evidence-authors.json').write_text((ROOT / '.st/evidence-authors.json').read_text())
+    (repo / '.st/evidence-authors.json').write_text(root_config('evidence-authors.json').read_text())
 
     def commit(message, email, files=None, committer='me@nathanherald.com'):
         for name, text in (files or {'f.txt': message}).items():
@@ -148,9 +158,30 @@ with tempfile.TemporaryDirectory() as directory:
     badlist_head = commit('on top', 'me@nathanherald.com', {'z.txt': 'z'})
     refused = pr(badlist_base, badlist_head)
     assert refused.returncode == 1 and 'Traceback' not in refused.stderr + refused.stdout and 'nonempty strings' in refused.stdout, refused.stdout + refused.stderr
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — accepted author list wins in either layout.
+    git(repo, 'checkout', '-q', '-b', 'preferred-list', base)
+    preferred_base = commit('preferred author list', 'me@nathanherald.com',
+                            {'.fractal/evidence-authors.json': root_config('evidence-authors.json').read_text()})
+    preferred_head = commit('preferred head', 'me@nathanherald.com')
+    assert pr(preferred_base, preferred_head).returncode == 0
+    malformed_base = commit('malformed preferred list', 'me@nathanherald.com',
+                            {'.fractal/evidence-authors.json': '{broken'})
+    malformed_head = commit('malformed head', 'me@nathanherald.com')
+    assert pr(malformed_base, malformed_head).returncode == 1, 'valid old list must not rescue malformed new list'
+    assert pr(preferred_base, malformed_head).returncode == 0, 'candidate list cannot change the pinned base list'
+    commit('restore preferred list', 'me@nathanherald.com',
+           {'.fractal/evidence-authors.json': root_config('evidence-authors.json').read_text()})
+    git(repo, 'rm', '-q', '-r', '.st')
+    new_base = commit('new only list', 'me@nathanherald.com')
+    new_head = commit('new only head', 'me@nathanherald.com')
+    assert pr(new_base, new_head).returncode == 0
 # the address matcher itself, on forms a commit cannot carry or that look close to a listed one
 import importlib.machinery  # noqa: E402
-signing = importlib.machinery.SourceFileLoader('ci_evidence_signing', str(HELPER)).load_module()
+import importlib.util  # noqa: E402
+loader = importlib.machinery.SourceFileLoader('ci_evidence_signing', str(HELPER))
+spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+signing = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(signing)
 import re as _re  # noqa: E402
 _noreply = [_re.compile(r'(?:[0-9]+\+)?myobie@users\.noreply\.github\.com', _re.IGNORECASE)]
 _emails = {'me@nathanherald.com'}
@@ -194,8 +225,12 @@ with tempfile.TemporaryDirectory() as directory:
     repo = tmp / 'repo'
     subprocess.run(['git', 'init', '-q', str(repo)], check=True, env=GENV)
     (repo / 'flake.lock').write_text('{}\n')
+    (repo / '.st').mkdir()
+    (repo / '.st/evidence-keys').write_text(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
     git(repo, 'add', '.')
     git(repo, 'commit', '-q', '-m', 'one')
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — the wrapper must resolve a real accepted revision.
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
     signers = tmp / 'allowed'
     signers.write_text(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
     done = subprocess.run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', '1' * 64,
@@ -271,6 +306,63 @@ with tempfile.TemporaryDirectory() as directory:
     missing = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({'linux-tests': {'result': 'success'}})))
     assert missing.returncode == 1 and 'no verdict' in missing.stdout
     print('passed: the aggregate note records the needed jobs and the gate job\'s own verdict, and refuses to invent one')
+
+    # --- the fractal-web whole-check note (GATE_JOB=fractal-web): one note for the lane, only when the lane ran and every shard passed
+    lane = {'fractal-web': {'result': 'success'}, 'fractal-web-changes': {'result': 'success', 'outputs': {'relevant': 'true', 'kit-inputs': 'true'}},
+            'fractal-web-execution': {'result': 'success'}, 'evidence-gate-fractal-web': {'result': 'success', 'outputs': {'skip': 'false'}}}
+    linux = {**needs, 'evidence-gate-linux-gate': {'result': 'success', 'outputs': {'skip': 'false'}}}
+    queue_web = dict(GATE_JOB='fractal-web', KIT_SHARD_COUNT='4', KIT_INPUTS='true', KIT_PLAY_SET='all', APP_TEST_SET='all',
+                     GITHUB_EVENT_NAME='merge_group', GITHUB_REF=QUEUE, GITHUB_RUN_ID='9', GITHUB_RUN_ATTEMPT='1')
+    pull_web = dict(queue_web, KIT_SHARD_COUNT='1', KIT_PLAY_SET='commit', APP_TEST_SET='related', GITHUB_EVENT_NAME='pull_request',
+                    GITHUB_REF='refs/pull/1/merge')
+
+    def web_run(lane_needs, extra=None):
+        out.unlink(missing_ok=True)
+        done = helper('aggregate', str(out), env=dict(queue_web, NEEDS_JSON=json.dumps({**linux, **lane_needs}), **(extra or {})))
+        return done, json.loads(out.read_text()) if out.exists() else None
+
+    done, facts = web_run(lane)
+    assert done.returncode == 0, done.stdout
+    assert facts['command'] == ['fractal-web', 'aggregate', 'fractal-web', 'fractal-web-changes', 'fractal-web-execution'], facts['command']
+    assert facts['exit_code'] == 0 and facts['output']['shards'] == {'0': 'success', '1': 'success', '2': 'success', '3': 'success'}
+    assert {k: facts['inputs'][k] for k in ('kit_shard_count', 'shard_results', 'kit_inputs', 'kit_play_set', 'app_test_set', 'stage_results')} == {
+        'kit_shard_count': '4', 'shard_results': '0=success,1=success,2=success,3=success', 'kit_inputs': 'true', 'kit_play_set': 'all', 'app_test_set': 'all',
+        'stage_results': 'fractal-web=success,fractal-web-changes=success,fractal-web-execution=success'}, facts['inputs']
+    assert not [n for n in facts['output']['needs'] if n.startswith(('linux-', 'evidence-gate-'))], 'the linux-gate jobs and the gates are not the lane\'s'
+    # A pull request runs one shard of the per-commit set: the note says exactly that, never the merge queue's four shards of everything.
+    done = helper('aggregate', str(out), env=dict(pull_web, NEEDS_JSON=json.dumps({**linux, **lane})))
+    facts = json.loads(out.read_text())
+    assert done.returncode == 0 and (facts['inputs']['kit_shard_count'], facts['inputs']['shard_results'], facts['inputs']['kit_play_set'],
+                                     facts['inputs']['app_test_set']) == ('1', '0=success', 'commit', 'related'), facts['inputs']
+    # A skipped, failed or cancelled shard never reads as success: no note at all (GitHub reports the matrix's result, success only
+    # when every shard succeeded). The same for a lane that did not run, a detection that failed, and an unfinished verdict.
+    for result in ('skipped', 'failure', 'cancelled', ''):
+        done, facts = web_run({**lane, 'fractal-web-execution': {'result': result}})
+        assert done.returncode == 1 and facts is None and 'fractal-web-execution ended' in done.stdout, (result, done.stdout)
+    for changes in ({'result': 'success', 'outputs': {'relevant': 'false', 'kit-inputs': 'false'}}, {'result': 'success'},
+                    {'result': 'failure', 'outputs': {'relevant': 'true'}}):
+        done, facts = web_run({**lane, 'fractal-web-changes': changes, 'fractal-web-execution': {'result': 'skipped'}})
+        assert done.returncode == 1 and facts is None and 'did not run' in done.stdout, (changes, done.stdout)
+    for verdict in ('skipped', 'cancelled'):
+        done, facts = web_run({**lane, 'fractal-web': {'result': verdict}})
+        assert done.returncode == 1 and facts is None, verdict
+    done, facts = web_run({**lane, 'fractal-web': {'result': 'failure'}})
+    assert done.returncode == 0 and facts['exit_code'] == 1, 'every shard passed but the verdict failed (the kit coverage check): an honest failing note'
+    done, facts = web_run({**lane, 'evidence-gate-fractal-web': {'result': 'success', 'outputs': {'skip': 'true'}}})
+    assert done.returncode == 1 and facts is None and 'evidence gate skipped' in done.stdout, 'a lane its gate skipped tested nothing itself'
+    for name in ('fractal-web', 'fractal-web-changes', 'fractal-web-execution'):
+        done, facts = web_run({k: v for k, v in lane.items() if k != name})
+        assert done.returncode == 1 and facts is None and name in done.stdout, name
+    for bad in (dict(KIT_SHARD_COUNT=''), dict(KIT_SHARD_COUNT='0'), dict(KIT_SHARD_COUNT='two'), dict(KIT_INPUTS=''),
+                dict(KIT_PLAY_SET='some'), dict(APP_TEST_SET='')):
+        done, facts = web_run(lane, bad)
+        assert done.returncode == 1 and facts is None, bad
+    # The linux-gate note leaves the lane out entirely: its jobs are not in the command, and its gate's skip does not stop it.
+    done = helper('aggregate', str(out), env=dict(NEEDS_JSON=json.dumps({**linux, **lane, 'evidence-gate-fractal-web': {'outputs': {'skip': 'true'}},
+                                                                          'fractal-web-execution': {'result': 'skipped'}}), GITHUB_EVENT_NAME='merge_group'))
+    assert done.returncode == 0, done.stdout
+    assert json.loads(out.read_text())['command'] == ['linux-gate', 'aggregate', 'linux-clippy', 'linux-gate', 'linux-tests']
+    print('passed: the fractal-web whole-check note records the lane\'s jobs, shard count and test sets, and is refused when the lane did not run, a shard did not pass or its gate skipped')
 
     # --- stage-facts: the log digest and status of a stage that already ran
     logs = tmp / 'stage-runner/ci-logs'
@@ -357,6 +449,27 @@ with tempfile.TemporaryDirectory() as directory:
     assert 'source_inputs' not in project_run(dict(PROJECT_BASE_SHA=''))[1]['inputs'], 'no base commit, no key'
     print('passed: source_inputs is signed only when the base evidence-verify projects a well-formed key; every other case is an exact-tree note')
 
+    # --- base_inputs: the digest of a base file the verdict depends on, taken at the base the job compared against (BASE_INPUTS_SHA)
+    DIGEST = 'e' * 64
+    calls = tmp / 'verify-calls.jsonl'
+    with_verify(f'import json,sys\nopen({str(calls)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                f'print(json.dumps({{"source_inputs": {KEY!r}, "base_inputs": {{"clippy_base_baseline_sha256": {DIGEST!r}}}}}))\n')
+    done, facts = project_run(dict(BASE_INPUTS_SHA='c' * 40))
+    assert done.returncode == 0 and facts['inputs']['clippy_base_baseline_sha256'] == DIGEST, done.stdout + done.stderr
+    bases = [argv[argv.index('--policy-from') + 1] for argv in map(json.loads, calls.read_text().splitlines())]
+    assert bases == ['b' * 40, 'c' * 40], bases  # the key from the project base, the base inputs from the job's own base
+    calls.unlink()
+    assert project_run()[1]['inputs']['clippy_base_baseline_sha256'] == DIGEST, 'without BASE_INPUTS_SHA, the project base'
+    assert 'clippy_base_baseline_sha256' not in project_run(dict(BASE_INPUTS_SHA=''))[1]['inputs'], 'set but empty: no base'
+    assert 'clippy_base_baseline_sha256' not in project_run(dict(BASE_INPUTS_SHA='0' * 40))[1]['inputs'], \
+        'a job that compared against no base records none, so its note covers no run that judges one'
+    for bad in ('"E' + 'e' * 63 + '"', '"present"', '7', 'null'):
+        with_verify(f'print(\'{{"source_inputs": null, "base_inputs": {{"clippy_base_baseline_sha256": {bad}}}}}\')\n')
+        assert 'clippy_base_baseline_sha256' not in project_run()[1]['inputs'], bad
+    with_verify('print(\'{"source_inputs": null, "base_inputs": {"absent_base": "absent", "Bad-Name": "absent"}}\')\n')
+    assert project_run()[1]['inputs'].get('absent_base') == 'absent' and 'Bad-Name' not in project_run()[1]['inputs']
+    print('passed: base_inputs are signed from the base the job compared against, well-formed values only, none when it compared against none')
+
     # --- the linux-gate aggregate carries its input key too; its job sets no PROJECT_BASE_SHA, so the base comes from the event payload
     def aggregate_run(payload, extra=None):
         event = tmp / 'event.json'
@@ -381,6 +494,9 @@ with tempfile.TemporaryDirectory() as directory:
     for payload in ('not json', {'merge_group': {'base_sha': 'not-a-sha'}}, '[]'):
         done, facts = aggregate_run(payload, dict(GITHUB_SHA=''))
         assert done.returncode == 0 and 'source_inputs' not in facts['inputs'], (payload, 'an unreadable base is no base: an exact-tree note')
+    done, facts = aggregate_run({'pull_request': {'base': {'sha': 'e' * 40}}}, dict(NEEDS_JSON=json.dumps(lane), **pull_web, GITHUB_REPOSITORY='example/repo'))
+    assert done.returncode == 0 and facts['inputs']['source_inputs'] == KEY, done.stdout
+    assert json.loads(seen.read_text())[:3] == ['--project', '--check', 'fractal-web'], 'the whole-check note carries the fractal-web input key'
     print('passed: the aggregate note signs its input key, with the base from PROJECT_BASE_SHA or the event payload, and none when that is unreadable')
 
     # --- a job whose gate said skip makes no note even if its logs and steps look like a success
@@ -562,3 +678,16 @@ assert 'environment: evidence-signing' not in text, 'an unconditional environmen
 note = re.search(r'  evidence-note-linux-gate:\n(?:    .*\n)*?    if: (.*)\n', text)
 assert note and "(always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))" in note.group(1), 'the aggregate note job must run only for the merge queue, main and same-repository pull requests (the generator adds its own draft guard in front)'
 print(f'passed: all {len(environments)} jobs reach the signing environment only for merge_group, push to main, manual runs on main and same-repository pull requests; the aggregate note job skips forks')
+
+# The fractal-web note's kit_shard_count/shard_results come from the same expression as the execution matrix: GitHub gives the
+# note job one result for the matrix, so the per-shard results are exactly as true as that count. Every KIT_SHARD_COUNT and
+# kit_shard_count in the workflow must use the matrix's own condition, and its count must be the matrix's length.
+matrix = re.search(r"matrix: \$\{\{ fromJSON\((.+?) && '(\{\"shard\":\[[0-9,]+\]\})' \|\| '\{\"shard\":\[0\]\}'\) \}\}", text)
+assert matrix, 'the fractal-web execution matrix has the expected two-branch shape'
+condition, sharded = matrix.group(1), json.loads(matrix.group(2))['shard']
+assert sharded == list(range(len(sharded))) and len(sharded) >= 2, sharded
+counts = re.findall(r"(?:KIT_SHARD_COUNT: |kit_shard_count\":\")\$\{\{ (.+?) && '([0-9]+)' \|\| '1' \}\}", text.replace("''", "'"))
+assert len(counts) >= 3, counts
+for count_condition, count in counts:
+    assert count_condition == condition and int(count) == len(sharded), (count_condition, count, condition, sharded)
+print(f'passed: all {len(counts)} kit shard counts use the execution matrix condition and its {len(sharded)} shards')

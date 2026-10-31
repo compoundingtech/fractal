@@ -1,8 +1,76 @@
-//! The part of `store::missions` that moved up from st3-store.
+//! The part of `store::missions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
+
+/// The batches one resource observation seals its claims in. A claim whose retention class
+/// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
+/// class: an envelope is signed and deleted whole, so a durable message in an observer's batch
+/// would pin every superseded observation beside it. The one exception is a mission request,
+/// which travels with the discovery it names (see `with_observation`). Each batch is made at its
+/// first claim, so an observation that writes only one class seals one batch, as before.
+#[derive(Default)]
+pub struct ObservationBatches {
+    latest: Option<String>,
+    lasting: Option<String>,
+}
+
+impl ObservationBatches {
+    /// The batch a claim of `kind` goes in.
+    pub fn for_kind(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        kind: &str,
+    ) -> Result<String, St3Error> {
+        use fractal_schema::retention::Class;
+        let latest = matches!(
+            fractal_schema::retention::policy().kind(kind).class,
+            Class::Current | Class::Otel
+        );
+        self.for_class(transaction, origin, latest)
+    }
+
+    /// The latest-state batch, for a claim that must reach every member together with the
+    /// observation it names by ID. A subscription's mission request names its discovery, and
+    /// the host that starts the mission reads that claim when the request arrives, so the two
+    /// travel in one envelope. Few observations make a request, so few batches stay pinned.
+    pub fn with_observation(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+    ) -> Result<String, St3Error> {
+        self.for_class(transaction, origin, true)
+    }
+
+    fn for_class(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        latest: bool,
+    ) -> Result<String, St3Error> {
+        let slot = if latest { &mut self.latest } else { &mut self.lasting };
+        if let Some(batch) = slot {
+            return Ok(batch.clone());
+        }
+        let now = write_time(transaction, origin).map_err(internal)?;
+        let sequence = next_replica_sequence(transaction, origin).map_err(internal)?;
+        let previous_hash = previous_batch_hash(transaction, origin).map_err(internal)?;
+        let batch_hash = batch_header_hash(origin, sequence, previous_hash.as_deref(), now)
+            .map_err(internal)?;
+        let batch_id = format!("batch/{origin}/{sequence}/{batch_hash}");
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![batch_id, origin, sequence, previous_hash, batch_hash, now.to_string()],
+            )
+            .map_err(internal)?;
+        *slot = Some(batch_id.clone());
+        Ok(batch_id)
+    }
+}
 
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, St3Error> {
     let actor = normalize_actor(actor, "agent");
@@ -1247,6 +1315,10 @@ pub trait MissionsStore {
     fn mission_specs_for_runs(&self, runs: &[String]) -> Result<BTreeMap<String, MissionSpec>>;
     /// The mission behind each of these runs, in one read.
     fn run_missions(&self, runs: &[String]) -> Result<BTreeMap<String, String>>;
+    /// A run's header and the state of every step of its current generation, for what the run
+    /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
+    /// no claims, so its cost is the run's own steps, never the store's history.
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -1751,6 +1823,17 @@ pub trait MissionsStore {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error>;
+    /// [`Self::work_action_with_handoff`]. A renewal answers with the step's row view alone unless
+    /// `enrich_renewal`: its queue, timing, summaries and wake are folded from a reader after COMMIT.
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
     fn set_step_state(
@@ -1759,6 +1842,14 @@ pub trait MissionsStore {
             status: &str,
             reason: Option<&str>,
         ) -> Result<bool>;
+    /// Apply an evaluator transition only while the stored step is nonterminal.
+    /// Rechecks in the writer transaction; a terminal step produces no claim or update.
+    fn set_step_state_unless_terminal(
+        &self,
+        subject: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> Result<bool>;
     fn retry_step(&self, subject: &str, reason: &str, backoff_ms: u64) -> Result<bool>;
     fn retry_step_as(
             &self,
@@ -1899,10 +1990,103 @@ pub trait MissionsStore {
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>>;
 }
 
+// Both entry points share the same transaction and existing transition guards. Only
+// stale evaluator decisions refuse a terminal step; administrative transitions retain
+// their existing behavior.
+fn set_step_state_guarded(
+    store: &Store,
+    subject: &str,
+    status: &str,
+    reason: Option<&str>,
+    reject_terminal: bool,
+) -> Result<bool> {
+    let subject = normalize_step_run(subject);
+    store.connection
+        .batched(|transaction| -> Result<bool> {
+            let current: Option<StepStateRow> = transaction
+                .query_row(
+                    "SELECT step_runs.status,
+                                step_runs.generation_id=mission_runs.current_generation_id,
+                                step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
+                                run_generations.status, root_runs.status, root_runs.phase
+                         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
+                         JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
+                         JOIN run_generations ON run_generations.id=step_runs.generation_id
+                         WHERE step_runs.subject=?1",
+                    [&subject],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                current,
+                is_current,
+                current_epoch,
+                run_status,
+                run_phase,
+                generation_status,
+                root_status,
+                root_phase,
+            )) = current
+            else {
+                return Ok(false);
+            };
+            if (reject_terminal && matches!(current.as_str(), "completed" | "failed" | "cancelled"))
+                || !is_current
+                || current == status
+                || ((is_terminal_run_state(&run_status)
+                    || run_phase == "terminal"
+                    || is_terminal_generation_state(&generation_status)
+                    || is_terminal_run_state(&root_status)
+                    || root_phase == "terminal")
+                    && !matches!(status, "completed" | "failed" | "cancelled"))
+            {
+                return Ok(false);
+            }
+            let now = now_ms();
+            let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hed370910e4dc owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, blocked_reason=?3,
+                            lease_owner=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_owner END,
+                            lease_incarnation=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_incarnation END,
+                            lease_expires_at_unix_ms=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_expires_at_unix_ms END,
+                            not_before_unix_ms=CASE WHEN ?2='ready' THEN NULL ELSE not_before_unix_ms END,
+                            activated_at_unix_ms=CASE WHEN ?2='ready' THEN ?4 ELSE activated_at_unix_ms END,
+                            readiness_epoch=?5, updated_at_unix_ms=?4 WHERE subject=?1",
+                params![subject, status, reason, now.to_string(), readiness_epoch])?;
+            let body = json!({"fields": {"status": status, "reason": reason, "readiness_epoch": readiness_epoch}});
+            let claim = append_claim_tx(
+                transaction,
+                &store.origin,
+                &subject,
+                "step-run.state",
+                None,
+                &body,
+                &[],
+                None,
+            )?;
+            if status == "completed" {
+                arm_waiting_mission_deadline_tx(transaction, &subject, claim.accepted_at_unix_ms, false)?;
+            }
+            Ok(true)
+        })
+        .map_err(anyhow::Error::msg)?
+}
+
 impl MissionsStore for Store {
 
     fn agent_roster_refresher_running(&self) -> bool {
-        self.smalltalk.agent_roster_refresh.get().is_some()
+        self.fractal.agent_roster_refresh.get().is_some()
     }
 
     fn rebuild_planning_projection(&self) -> Result<()> {
@@ -1972,6 +2156,43 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {
+        let run = run.strip_prefix("mission-run/").unwrap_or(run);
+        let connection = self.readers.get();
+        let header = connection
+            .query_row(
+                "SELECT mission_id, status, current_generation_id FROM mission_runs WHERE id=?1",
+                [run],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()?;
+        let Some((mission, status, generation)) = header else {
+            return Ok(None);
+        };
+        let steps = connection
+            .prepare_cached(
+                "SELECT subject, step_path, title, status, updated_at_unix_ms FROM step_runs
+                 WHERE run_id=?1 AND generation_id=?2 ORDER BY step_path",
+            )?
+            .query_map([run, generation.as_str()], |row| {
+                Ok(crate::waiting_on::RunStep {
+                    subject: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                    updated_at_unix_ms: row.get::<_, String>(4)?.parse().unwrap_or_default(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(crate::waiting_on::RunSteps {
+            run: format!("mission-run/{run}"),
+            mission: format!("mission/{mission}"),
+            status,
+            generation: format!("run-generation/{generation}"),
+            steps,
+        }))
     }
 
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>> {
@@ -3987,6 +4208,7 @@ impl MissionsStore for Store {
                 params![retired.id, retired.revision, mission_state_name(&retired.state), claim.id],
             )
             .map_err(internal)?;
+        fractal_store::store::ordered_membership::flush(&transaction).map_err(internal)?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h87aff5859f70 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
@@ -5508,6 +5730,18 @@ impl MissionsStore for Store {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error> {
+        self.work_action_answering(subject, action, request, extend_ms, handoff, true)
+    }
+
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error> {
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(St3Error::new(
@@ -5611,7 +5845,7 @@ impl MissionsStore for Store {
                 }
                 // A revision carries a claim into the successor generation. Its worker may still name the
                 // step by the predecessor subject.
-                let (subject, current) = match (action != "claim")
+                let (subject, mut current) = match (action != "claim")
                     .then(|| carried_claim_successor_tx(transaction, &current, &actor))
                     .transpose()
                     .map_err(internal)?
@@ -5620,6 +5854,9 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject, current),
                 };
+                if handoff.is_some() {
+                    enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
+                }
                 let (run_status, run_phase, current_generation, generation_status, root_status, root_phase): (
                     String,
                     String,
@@ -5919,14 +6156,27 @@ impl MissionsStore for Store {
                 let readiness_epoch = current
                     .readiness_epoch
                     .saturating_add(u32::from(status == "ready" && current.status != "ready"));
-                transaction
-                    .execute(
-                        /* sqlite-large-value: allow-for-now lv-hc0f4401bbed1 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
+                if !publish {
+                    // A quiet renewal preserves ownership and state. Naming those indexed
+                    // columns in UPDATE still makes SQLite maintain their indexes, even
+                    // when every value is unchanged.
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-h8d3cdf97e396 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
+                                updated_at_unix_ms=?3 WHERE subject=?1",
+                            params![subject, claim_expiry.map(|value| value.to_string()), now.to_string()],
+                        )
+                        .map_err(internal)?;
+                } else {
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-hc0f4401bbed1 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
                                 lease_expires_at_unix_ms=?6, blocked_reason=CASE WHEN ?10 THEN ?7 ELSE blocked_reason END, readiness_epoch=?8,
                                 updated_at_unix_ms=?9 WHERE subject=?1",
-                        params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
-                    )
-                    .map_err(internal)?;
+                            params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
+                        )
+                        .map_err(internal)?;
+                }
                 renew_nested_ancestor_leases_tx(
                     transaction,
                     &current.generation,
@@ -5964,6 +6214,12 @@ impl MissionsStore for Store {
                 }
                 if let Some(input) = handoff {
                     adhoc_work::transfer_tx(transaction, &self.origin, &current, input, &mut body)?;
+                }
+                if matches!(action, "complete" | "fail" | "release") {
+                    // The run is judged on its origin, maybe another member, as soon as the step
+                    // ends, and a loop's token budget reads the seat's replicated usage then: its
+                    // held rollups replicate with this receipt, not when their hour is over.
+                    fractal_store::store::flush_held_usage_tx(transaction, &self.origin, &actor, now)?;
                 }
                 let claim_kind = match action {
                     "claim" => "work.claimed",
@@ -6009,6 +6265,9 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)?;
                 }
+                if let Some(input) = handoff {
+                    adhoc_work::clear_eta_tx(transaction, &self.origin, &current, input)?;
+                }
                 let mut view = transaction.query_row(
                     "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                             lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
@@ -6035,7 +6294,7 @@ impl MissionsStore for Store {
             })
             .map_err(|error| St3Error::new("internal", error))?;
         let mut view = committed?;
-        if action == "renew" {
+        if action == "renew" && enrich_renewal {
             // An exact retry of a renewal also replays a view cached without these fields.
             self.enrich_work_response(&mut view)
                 .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
@@ -6047,92 +6306,17 @@ impl MissionsStore for Store {
         enrich_step_queue(&self.readers.get(), view).map_err(Into::into)
     }
 
-    fn set_step_state(
-            &self,
-            subject: &str,
-            status: &str,
-            reason: Option<&str>,
-        ) -> Result<bool> {
-        let subject = normalize_step_run(subject);
-        self.connection
-            .batched(|transaction| -> Result<bool> {
-                let current: Option<StepStateRow> = transaction
-                    .query_row(
-                        "SELECT step_runs.status,
-                                step_runs.generation_id=mission_runs.current_generation_id,
-                                step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
-                                run_generations.status, root_runs.status, root_runs.phase
-                         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-                         JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
-                         JOIN run_generations ON run_generations.id=step_runs.generation_id
-                         WHERE step_runs.subject=?1",
-                        [&subject],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                                row.get(5)?,
-                                row.get(6)?,
-                                row.get(7)?,
-                            ))
-                        },
-                    )
-                    .optional()?;
-                let Some((
-                    current,
-                    is_current,
-                    current_epoch,
-                    run_status,
-                    run_phase,
-                    generation_status,
-                    root_status,
-                    root_phase,
-                )) = current
-                else {
-                    return Ok(false);
-                };
-                if !is_current
-                    || current == status
-                    || ((is_terminal_run_state(&run_status)
-                        || run_phase == "terminal"
-                        || is_terminal_generation_state(&generation_status)
-                        || is_terminal_run_state(&root_status)
-                        || root_phase == "terminal")
-                        && !matches!(status, "completed" | "failed" | "cancelled"))
-                {
-                    return Ok(false);
-                }
-                let now = now_ms();
-                let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
-                transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hed370910e4dc owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, blocked_reason=?3,
-                            lease_owner=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_owner END,
-                            lease_incarnation=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_incarnation END,
-                            lease_expires_at_unix_ms=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_expires_at_unix_ms END,
-                            not_before_unix_ms=CASE WHEN ?2='ready' THEN NULL ELSE not_before_unix_ms END,
-                            activated_at_unix_ms=CASE WHEN ?2='ready' THEN ?4 ELSE activated_at_unix_ms END,
-                            readiness_epoch=?5, updated_at_unix_ms=?4 WHERE subject=?1",
-                    params![subject, status, reason, now.to_string(), readiness_epoch])?;
-                let body = json!({"fields": {"status": status, "reason": reason, "readiness_epoch": readiness_epoch}});
-                let claim = append_claim_tx(
-                    transaction,
-                    &self.origin,
-                    &subject,
-                    "step-run.state",
-                    None,
-                    &body,
-                    &[],
-                    None,
-                )?;
-                if status == "completed" {
-                    arm_waiting_mission_deadline_tx(transaction, &subject, claim.accepted_at_unix_ms, false)?;
-                }
-                Ok(true)
-            })
-            .map_err(anyhow::Error::msg)?
+    fn set_step_state(&self, subject: &str, status: &str, reason: Option<&str>) -> Result<bool> {
+        set_step_state_guarded(self, subject, status, reason, false)
+    }
+
+    fn set_step_state_unless_terminal(
+        &self,
+        subject: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        set_step_state_guarded(self, subject, status, reason, true)
     }
 
     fn retry_step(&self, subject: &str, reason: &str, backoff_ms: u64) -> Result<bool> {
@@ -6697,28 +6881,10 @@ impl MissionsStore for Store {
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
+                        recorded_items: Vec::new(),
                     }, false)));
                 }
-                let now = write_time(transaction, &self.origin).map_err(internal)?;
-                let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
-                let previous_hash = previous_batch_hash(transaction, &self.origin).map_err(internal)?;
-                let batch_hash = batch_header_hash(&self.origin, sequence, previous_hash.as_deref(), now)
-                    .map_err(internal)?;
-                let batch_id = format!("batch/{}/{sequence}/{batch_hash}", self.origin);
-                transaction
-                    .execute(
-                        /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![
-                            batch_id,
-                            self.origin,
-                            sequence,
-                            previous_hash,
-                            batch_hash,
-                            now.to_string()
-                        ],
-                    )
-                    .map_err(internal)?;
+                let mut batches = ObservationBatches::default();
                 let mut receipt_key = Some(idempotency_key.as_str());
                 let observer_predecessors = latest_claim_id_tx(transaction, observer)
                     .map_err(internal)?
@@ -6736,7 +6902,7 @@ impl MissionsStore for Store {
                             "revision": desired_revision,
                         }}),
                         &observer_predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "observer.state")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -6749,6 +6915,8 @@ impl MissionsStore for Store {
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
+                        // For a repository observer, only how far it has read: its version maps
+                        // stay in the polling member's GitHub plugin database.
                         "cursor": cursor,
                         "changed": changed,
                     });
@@ -6766,7 +6934,7 @@ impl MissionsStore for Store {
                         None,
                         &json!({"fields": observer_fields}),
                         &observer_predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "observer.observed")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -6796,7 +6964,7 @@ impl MissionsStore for Store {
                                 "changed_fields": repository_changed_fields,
                             }}),
                             &predecessors,
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
                             &mut receipt_key,
                         )
                         .map_err(internal)?,
@@ -6807,6 +6975,7 @@ impl MissionsStore for Store {
                 let mut collection_discoveries = BTreeMap::<String, Vec<(String, String)>>::new();
                 let mut item_claims = Vec::new();
                 let mut item_mentions = Vec::new();
+                let mut mirrored_items = Vec::new();
                 for (field, item) in discovered {
                     let DiscoveredItem {
                         subject,
@@ -6872,10 +7041,16 @@ impl MissionsStore for Store {
                             "changed_fields": item_changed_fields,
                         }, "evidence": evidence}),
                         &predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
+                    mirrored_items.push(crate::model::RecordedItem {
+                        subject: subject.clone(),
+                        kind: kind.to_owned(),
+                        facts: item_facts.clone(),
+                        claim: claim.id.clone(),
+                    });
                     if !data_types.is_empty() {
                         let prior = recorded_items.get(&subject).cloned().flatten();
                         let mentions = if data_types.contains("mentions") {
@@ -6915,7 +7090,7 @@ impl MissionsStore for Store {
                                 "reason": (!target_exists).then_some("the delivery target is absent"),
                             }}),
                             &predecessors,
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "subscription.state")?),
                             &mut receipt_key,
                         )
                         .map_err(internal)?;
@@ -6949,7 +7124,7 @@ impl MissionsStore for Store {
                             continue;
                         }
                         message_subjects.extend(github_workflow_failures::deliver_tx(
-                            transaction, &self.origin, &batch_id, observer, resource,
+                            transaction, &self.origin, &mut batches, observer, resource,
                             subject, &subscription.to,
                             current_object.get("repository_id").unwrap_or(&Value::Null),
                             failures, workflow_baseline,
@@ -7039,7 +7214,7 @@ impl MissionsStore for Store {
                                         "tags": wake.tags,
                                     }, "evidence": [item_claim]}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7053,7 +7228,7 @@ impl MissionsStore for Store {
                                 end_watch_tx(
                                     transaction,
                                     &self.origin,
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "subscription.watch-ended")?),
                                     subscription_subject,
                                     watch,
                                     if merged { "merged" } else { "closed" },
@@ -7124,7 +7299,7 @@ impl MissionsStore for Store {
                             let entries = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batch_id,
+                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 &subscription.to,
@@ -7167,7 +7342,7 @@ impl MissionsStore for Store {
                                         "delivery_key": delivery_key,
                                     }, "evidence": entries.iter().map(|(_, claim, _)| claim).collect::<Vec<_>>()}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "subscription.batched")?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7201,7 +7376,7 @@ impl MissionsStore for Store {
                             let unowned = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batch_id,
+                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 mission,
@@ -7272,7 +7447,7 @@ impl MissionsStore for Store {
                                     .map(|(_, claim, _)| claim.clone())
                                     .collect::<Vec<_>>()}),
                                 &[],
-                                Some(&batch_id),
+                                Some(&batches.with_observation(transaction, &self.origin)?),
                                 &mut receipt_key,
                             )
                             .map_err(claim_append_error)?;
@@ -7373,7 +7548,7 @@ impl MissionsStore for Store {
                                     message_subjects.extend(route_item_to_owner_tx(
                                         transaction,
                                         &self.origin,
-                                        &batch_id,
+                                        &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                         subscription_subject,
                                         &delivery_resource,
                                         &owner,
@@ -7420,7 +7595,7 @@ impl MissionsStore for Store {
                                     None,
                                     &json!({"fields": request_fields, "evidence": evidence}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.with_observation(transaction, &self.origin)?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7474,18 +7649,19 @@ impl MissionsStore for Store {
                                 "tags": ["resource-change", subscription_subject],
                             }, "evidence": evidence}),
                             &[],
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                             &mut receipt_key,
                         )
                         .map_err(claim_append_error)?;
                         message_subjects.push(message_subject);
                     }
                 }
-                let outcome = ResourceObservationOutcome {
+                let mut outcome = ResourceObservationOutcome {
                     baseline,
                     changed_fields,
                     observation_claim: observation_claim.map(|claim| claim.id),
                     message_subjects,
+                    recorded_items: Vec::new(),
                 };
                 transaction
                     .execute(
@@ -7496,6 +7672,7 @@ impl MissionsStore for Store {
                         ],
                     )
                     .map_err(internal)?;
+                outcome.recorded_items = mirrored_items;
                 Ok(Some((outcome, true)))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;

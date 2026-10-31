@@ -1,10 +1,12 @@
-import type { Attention, TimelineEntry } from '@fractal/client';
+import type { Attention, AttentionPrompt, TimelineEntry } from '@fractal/client';
 import { ago } from './time.ts';
 
-// Home, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
-// attention): the requests and reviews st holds for the person that are not resolved, grouped by
-// how urgently someone is waiting. Messages stay in conversations, and st sends a fault to the
-// agent that owns it, so neither is ever on Home.
+// Home, drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/screens.rs home_list, adapt.rs
+// attention): the requests and reviews Fractal holds for the person that are not resolved, grouped by
+// how urgently someone is waiting. Fractal presents each item (`Attention.presentation`, see
+// docs/clients/ui-contract.md, Attention row): its group, its card and the step it holds. A
+// message stays in its conversation, and Fractal sends a fault to the agent that owns it, so Fractal puts
+// neither on Now.
 
 export const TIERS = ['stopped', 'today', 'later'] as const;
 export type Tier = typeof TIERS[number];
@@ -16,7 +18,10 @@ export function tierTitle(tier: Tier): string {
   }
 }
 
-export type HomeKind = 'review' | 'launch' | 'revision' | 'request' | 'update' | 'prompt' | 'login';
+/** `unplaced`: an item Fractal did not place in a way this client knows (an older Fractal presents
+ * nothing; a newer one may name a group or card this client does not know). It shows what Fractal
+ * says, where Fractal's alert flag puts it, and the app offers only the answers Fractal lists. */
+export type HomeKind = 'review' | 'launch' | 'revision' | 'request' | 'update' | 'prompt' | 'login' | 'unplaced';
 /** Semantic colors; renderers resolve them through their own palette. */
 export type HomeColor = 'person' | 'green';
 export type HomeRow = {
@@ -26,31 +31,48 @@ export type HomeRow = {
   glyph: string;
   color: HomeColor;
   title: string;
-  /** Who or what is waiting, when st says: `step build`. */
+  /** Who or what is waiting, when Fractal says: `step build`. */
   waiting: string | null;
   age: string;
 };
 
-type Kindish = Pick<Attention, 'attention_kind'> & { update?: unknown };
-/** Where Home shows an item, or null for a kind that is not a request or a review. */
+const HOME_KINDS: readonly string[] = ['review', 'launch', 'revision', 'request', 'update', 'prompt', 'login'];
+
+/** An optional field as the plain model gives it (`T | null`) or as the web app's decoded model gives it (an Effect `Option`, which has a `_tag`). */
+type OptionLike<T> = { readonly _tag: 'None' } | { readonly _tag: 'Some'; readonly value: T };
+type Optional<T> = T | null | OptionLike<T>;
+function plain<T>(value: Optional<T> | undefined): T | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'object' && '_tag' in value && (value._tag === 'None' || value._tag === 'Some')) return value._tag === 'Some' ? (value as { readonly value: T }).value : null;
+  return value as T;
+}
+/** What Home reads of `Attention.presentation`, in either shape. */
+type PresentationLike = { readonly kind: Optional<string>; readonly tier: Optional<string>; readonly waiting: Optional<{ readonly path: string }> };
+type Kindish = { readonly attention_kind: string; readonly presentation?: PresentationLike | undefined; alert?: boolean; update?: unknown };
+/**
+ * Where Home shows an item, as Fractal presents it, or null for one Fractal puts on no Now (a null group
+ * or card). A feedback gate is a review here. An item Fractal places in a way this client does not
+ * know (an older Fractal presents nothing; a newer one may name a group or card this client does not
+ * know) is unplaced, where Fractal's alert flag puts it, never dropped; Fractal puts neither a message nor
+ * a fault on Now.
+ */
 export function homeKind(item: Kindish): { tier: Tier; kind: HomeKind } | null {
-  switch (item.attention_kind as string) {
-    case 'human-gate': return { tier: 'stopped', kind: 'review' };
-    // Information the person asked for (`st work update`): nothing waits on it.
-    case 'person-step': return item.update ? { tier: 'later', kind: 'update' } : { tier: 'stopped', kind: 'request' };
-    case 'agent-request': return { tier: 'stopped', kind: 'request' };
-    case 'launch-approval': return { tier: 'today', kind: 'launch' };
-    case 'revision-approval': return { tier: 'today', kind: 'revision' };
-    // A native prompt a seat's harness waits on, and a provider sign-in a seat needs: alerts in
-    // the seat's conversation, and on Home beside every other thing that waits on the person.
-    case 'harness-prompt': return { tier: 'stopped', kind: 'prompt' };
-    case 'harness-login': return { tier: 'stopped', kind: 'login' };
-    default: return null;
+  const presented = item.presentation;
+  const fallback: Tier = isAlert(item) ? 'stopped' : 'later';
+  if (!presented) {
+    const offNow = item.attention_kind === 'unread-message' || item.attention_kind === 'fault';
+    return offNow ? null : { tier: fallback, kind: 'unplaced' };
   }
+  const presentedTier = plain(presented.tier);
+  const presentedKind = plain(presented.kind);
+  if (presentedTier === null || presentedKind === null || presentedKind === 'fault') return null;
+  const tier = TIERS.find(tier => tier === presentedTier) ?? fallback;
+  const kind = presentedKind === 'feedback' ? 'review' : presentedKind;
+  return { tier, kind: HOME_KINDS.includes(kind) ? kind as HomeKind : 'unplaced' };
 }
 
 export function kindGlyph(kind: HomeKind): { glyph: string; color: HomeColor } {
-  return kind === 'update' ? { glyph: '✦', color: 'green' } : { glyph: '◆', color: 'person' };
+  return kind === 'update' ? { glyph: '✦', color: 'green' } : kind === 'unplaced' ? { glyph: '?', color: 'person' } : { glyph: '◆', color: 'person' };
 }
 
 export const HOME_LEGEND: ReadonlyArray<{ glyph: string; color: HomeColor; word: string }> = [
@@ -58,7 +80,7 @@ export const HOME_LEGEND: ReadonlyArray<{ glyph: string; color: HomeColor; word:
   { glyph: '✦', color: 'green', word: 'to read' },
 ];
 
-/** Whether Home shows an item: it is not resolved and, when st names a person, it is for this one. */
+/** Whether Home shows an item: it is not resolved and, when Fractal names a person, it is for this one. */
 /** The person a session acts for: a paired device acts as `person/NAME/session/ID`. */
 export function sessionPerson(actor: string | undefined): string | undefined {
   return actor?.replace(/\/session\/.*$/, '');
@@ -69,12 +91,12 @@ export function onHome(item: Pick<Attention, 'state' | 'person_id'>, actor: stri
   return item.state !== 'resolved' && (!person || !item.person_id || item.person_id === person);
 }
 
-/** An item st stopped listing (or resolved) that stays on Home until the person clears it. */
+/** An item Fractal stopped listing (or resolved) that stays on Home until the person clears it. */
 export type KeptAttention = Attention & { closedElsewhere?: boolean };
 
 /**
- * What stays on Home when st's list changes: nothing leaves by itself (Nathan, 2026-10-07).
- * An item shown before that st no longer lists as open, and that the person did not act on from
+ * What stays on Home when Fractal's list changes: nothing leaves by itself (Nathan, 2026-10-07).
+ * An item shown before that Fractal no longer lists as open, and that the person did not act on from
  * here, is kept, marked closed, with no actions, until the person clears it.
  */
 export const RECENTLY_CLOSED = 5;
@@ -94,16 +116,34 @@ export function keepClosed(previous: readonly KeptAttention[], next: readonly At
   return over > 0 ? kept.filter(item => !(item.closedElsewhere && over-- > 0)) : kept;
 }
 
+function rowOf(item: KeptAttention, place: { tier: Tier; kind: HomeKind }, now: number, unplaced = 'Fractal names a card this app does not know'): HomeRow {
+  const step = plain(item.presentation?.waiting)?.path;
+  const waiting = item.closedElsewhere ? 'closed; stays until you clear it'
+    : !item.presentation ? 'Fractal does not say what this is: this host\'s Fractal is older, or has not presented it yet'
+    : place.kind === 'unplaced' ? unplaced
+    : step ? `step ${step}` : null;
+  return { item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting, age: ago(item.requested_at, now) };
+}
+
 export function homeRows(items: KeptAttention[], actor: string | undefined, now = Date.now()): HomeRow[] {
   const rows = items.filter(item => onHome(item, actor)).flatMap((item): HomeRow[] => {
     const place = homeKind(item);
-    if (!place) return [];
-    const step = item.step_run_id?.split('/').pop();
-    return [{ item, ...place, ...kindGlyph(place.kind), title: cleanTitle(item.title), waiting: item.closedElsewhere ? 'closed; stays until you clear it' : step ? `step ${step}` : null, age: ago(item.requested_at, now) }];
+    return place ? [rowOf(item, place, now)] : [];
   });
-  // A stable sort by tier keeps st's order within each tier; what st closed sits last, apart.
+  // A stable sort by tier keeps Fractal's order within each tier; what Fractal closed sits last, apart.
   const rank = (row: HomeRow) => (row.item.closedElsewhere ? TIERS.length : 0) + TIERS.indexOf(row.tier);
   return rows.map((row, index) => ({ row, index })).sort((a, b) => rank(a.row) - rank(b.row) || a.index - b.index).map(({ row }) => row);
+}
+
+/**
+ * The row an item's own screen shows: the row Home lists, or, for an item Home does not list
+ * (Fractal puts it on no Now, as a fault or a message, opened by a link), an unplaced row where Fractal's
+ * alert flag puts it, so the screen always has one to read.
+ */
+export function detailRow(item: KeptAttention, now = Date.now()): HomeRow {
+  const place = homeKind(item);
+  if (place) return rowOf(item, place, now);
+  return rowOf(item, { tier: isAlert(item) ? 'stopped' : 'later', kind: 'unplaced' }, now, 'Fractal keeps this off Now');
 }
 
 export type HomeSection = { tier: Tier; title: string; count: number; rows: HomeRow[]; closed?: boolean };
@@ -112,7 +152,7 @@ export function homeSections(rows: HomeRow[]): HomeSection[] {
   for (const row of rows) {
     const closed = !!row.item.closedElsewhere;
     const last = sections.at(-1);
-    // Items st closed while they were shown stay under a heading of their own, never mixed with
+    // Items Fractal closed while they were shown stay under a heading of their own, never mixed with
     // what needs the person (Nathan, 2026-10-07: "2 need you", 4 listed).
     if (closed) {
       if (last?.closed) { last.rows.push(row); last.count++; }
@@ -134,7 +174,7 @@ function cleanTitle(title: string): string {
 
 type Alertish = Pick<Attention, 'attention_kind'> & { alert?: boolean; update?: unknown };
 
-/** Whether the item is an alert. A daemon that predates alerts does not say, and then everything but an update or an unread message is one. */
+/** Whether the item is an alert, as Fractal's CLI reads it. A daemon that predates alerts does not say, and then everything but an update or an unread message is one. */
 export function isAlert(item: Alertish): boolean {
   return item.alert ?? (!item.update && item.attention_kind !== 'unread-message');
 }
@@ -147,7 +187,7 @@ export type AlertRow = Pick<Attention, 'state' | 'person_id' | 'attention_kind' 
 
 /**
  * The alerts the person can see: open, theirs, an alert, of a kind the app shows, and not an item
- * st closed that only waits to be cleared. The same rows Home lists, so the count and the list agree.
+ * Fractal closed that only waits to be cleared. The same rows Home lists, so the count and the list agree.
  */
 export function openAlerts<T extends AlertRow>(items: readonly T[], actor: string | undefined): T[] {
   return items.filter(item => !item.closedElsewhere && onHome(item, actor) && isAlert(item) && homeKind(item) !== null);
@@ -180,8 +220,8 @@ export function alertsIn<T extends AlertRow>(items: readonly T[], agentId: strin
 export type PromptAnswers = {
   target_id: string; episode: string; answers: string[];
   /**
-   * The exact call the prompt asks about (a tool use or Codex item id), or null when its harness
-   * named none; undefined from a daemon that predates it.
+   * The exact call the prompt asks about (a tool use or Codex item id), or null when st names
+   * none. A prompt that names none is only denied from here: no unanswered call is guessed at.
    */
   call_id?: string | null;
 };
@@ -195,7 +235,7 @@ export function promptAnswers(item: { readonly actions: readonly string[]; reado
   const episode = typeof parameters.episode === 'string' ? parameters.episode : item.episode ?? '';
   if (!episode) return null;
   const prompt: PromptAnswers = { target_id, episode, answers };
-  if ('call_id' in parameters) prompt.call_id = typeof parameters.call_id === 'string' ? parameters.call_id : null;
+  prompt.call_id = typeof parameters.call_id === 'string' ? parameters.call_id : null;
   return prompt;
 }
 
@@ -209,8 +249,11 @@ export function promptAlertKey(item: { readonly id: string; readonly revision: s
   return [item.id, promptAnswers(item)?.episode ?? item.episode ?? '', item.revision].join('\n');
 }
 
-/** The call a harness recorded before it asked, in full: its tool and each input, lines intact. */
-export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown };
+/**
+ * The call a harness recorded before it asked: its tool and each input, lines intact. `complete`
+ * is false when st cut its input to its bound, and then nobody allows it from a client.
+ */
+export type PendingCall = { id: string; tool: string; lines: string[]; input?: unknown; complete?: boolean };
 
 function inputLines(args: unknown): string[] {
   let value = args;
@@ -232,8 +275,43 @@ function parsedInput(args: unknown): unknown {
 }
 
 /**
- * Every tool call with no result yet, oldest first. A permission prompt asks about one of them,
- * but the prompt carries no call ID, so with more than one unanswered a client cannot say which.
+ * A prompt as st serves it beside its card (`presentation.prompt`): the calls without a result in
+ * the seat's conversation, each as a person reads it, and whether a client may allow or answer the
+ * call it asks about; or why st serves none (it cannot read the conversation, or it is older).
+ */
+export type ServedPrompt = { calls: PendingCall[]; allow: boolean } | { calls: null; allow: false; why: string };
+export function servedPrompt(item: { readonly presentation?: { readonly prompt?: AttentionPrompt } | null }): ServedPrompt {
+  const prompt = item.presentation?.prompt;
+  if (!prompt) return { calls: null, allow: false, why: "This host's st is older and does not say which call the prompt asks about." };
+  if (!prompt.calls) return { calls: null, allow: false, why: prompt.unknown_reason ?? "st cannot read the agent's conversation." };
+  return {
+    calls: prompt.calls.map(call => ({
+      id: call.call_id, tool: call.tool || 'tool', lines: inputLines(call.input),
+      input: call.input_complete ? parsedInput(call.input) : call.input, complete: call.input_complete,
+    })),
+    allow: prompt.allow,
+  };
+}
+
+/**
+ * The answers a client offers beside a prompt st serves. `allow` and `approve` only where st
+ * allows them, beside the one call shown; `answer` only where st allows it and that call's
+ * questions can be shown and chosen from; every other answer (deny, and a screen prompt's or
+ * denial's own answers) always.
+ */
+export function servedAnswers(prompt: PromptAnswers, served: ServedPrompt): string[] {
+  const shown = served.calls === null ? [] : promptCalls(prompt, served.calls);
+  const certain = served.allow && shown.length === 1;
+  return prompt.answers.filter(answer => {
+    if (answer === 'allow' || answer === 'approve') return certain;
+    if (answer === 'answer') return certain && pendingQuestions(shown) !== null;
+    return true;
+  });
+}
+
+/**
+ * Every tool call with no result yet, oldest first: Fractal's own alerts still read a prompt's
+ * calls this way. A client that reads `presentation.prompt` uses `servedPrompt` instead.
  */
 export function pendingCalls(entries: ReadonlyArray<Pick<TimelineEntry, 'type' | 'body' | 'id'>>): PendingCall[] {
   const answered = new Set<string>();
@@ -313,8 +391,9 @@ export function answerLabel(answer: string): string {
 }
 
 /**
- * The answers a client may offer. `allow` and `approve` only beside the exact call the prompt asks
- * about, shown in full (from an older daemon: the one call unanswered); `answer` only when that
+ * The answers a client may offer from calls it read itself, as Fractal's own alerts still do
+ * (`servedAnswers` reads st's). `allow` and `approve` only beside the exact call the prompt asks
+ * about, shown in full; `answer` only when that
  * call's questions can be shown and chosen from; every other answer (deny, and a screen prompt's
  * or denial's own answers) always.
  */
@@ -329,11 +408,9 @@ export function offeredAnswers(prompt: PromptAnswers, calls: readonly PendingCal
 }
 
 /**
- * The calls to show beside a prompt's answers: the exact call it asks about, when its daemon names
- * it (none when it named none); from a daemon that predates that, every unanswered call, of which
- * only a lone one is certain.
+ * The call to show beside a prompt's answers: the exact call it asks about, when st names it and
+ * it is pending. A prompt that names none has none beside it.
  */
 export function promptCalls(prompt: PromptAnswers, calls: readonly PendingCall[]): PendingCall[] {
-  if (prompt.call_id === undefined) return [...calls];
   return calls.filter(call => call.id === prompt.call_id);
 }

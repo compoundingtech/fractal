@@ -312,3 +312,132 @@ fn a_clean_watch_stage_retains_fault_but_a_failed_safety_pass_retries() {
     );
     assert!(!reconciler.incremental.needs(ITEM, now_ms()));
 }
+
+#[tokio::test]
+async fn repository_aliases_share_one_request_and_fan_out_without_rewriting_watches() {
+    struct Capture {
+        requests: Arc<tokio::sync::Mutex<Vec<ObservationRequest>>>,
+        facts: Arc<tokio::sync::Mutex<Value>>,
+    }
+    impl ResourceProvider for Capture {
+        fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+            dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+        >> {
+            Box::pin(async move {
+                self.requests.lock().await.push(request);
+                Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.lock().await.clone(),
+                    cursor: Some("shared-alias-cursor".into()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                })
+            })
+        }
+    }
+    let fixture = WatchFixture::new();
+    let planner = "agent/example.planner";
+    let reviewer = "agent/example.reviewer";
+    let original = fixture.watch("acme/garden#12", planner);
+    let renamed = fixture.watch("acme/orchid#12", reviewer);
+    let other = WatchFixture {
+        store: fixture.store.clone(),
+        observer: "observer/github/acme/orchid".into(),
+        resource: "resource/github/acme/orchid".into(),
+    };
+    for source in [&fixture, &other] {
+        let mut facts = json!({"repository_id": 1310762902, "pull_requests": [
+            watched_pull(12, json!({"recent_comments": []}))
+        ]});
+        if source.observer == fixture.observer {
+            facts["moved_to"] = json!("resource/github/acme/orchid");
+        }
+        source.observe(facts);
+    }
+    let declarations = [original.clone(), renamed.clone()].map(|subject| {
+        fixture.store.desired_subjects_named(&[subject]).unwrap().remove(0).desired
+    });
+    let at = chrono::Utc::now().to_rfc3339();
+    let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let observed = Arc::new(tokio::sync::Mutex::new(json!({
+        "repository_id": 1310762902, "pull_requests": [
+            watched_pull(12, json!({"recent_comments": [{
+                "kind": "comment", "id": 912, "author": "fern", "at": at,
+                "url": "https://github.com/acme/orchid/pull/12#issuecomment-912"
+            }]}))
+        ]
+    })));
+    let reconciler = Reconciler::new(
+        fixture.store.clone(), Arc::new(FakeRuntime::default()), "node".into(),
+        Arc::new(Notify::new()),
+    ).with_resource_provider(Arc::new(Capture {
+        requests: requests.clone(),
+        facts: observed.clone(),
+    }));
+    for source in [&fixture, &other] {
+        let revision = fixture.store.selected_desired_revision(&source.observer).unwrap().unwrap();
+        reconciler.observer_deadlines.lock().unwrap()
+            .insert(format!("{}:{revision}", source.observer), 0);
+    }
+    reconciler.reconcile_resource_observers(&fixture.store.desired_subjects().unwrap(), &[]).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while fixture.wakes(planner).is_empty() || fixture.wakes(reviewer).is_empty() {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("one observation wakes both original alias subscribers");
+    {
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 1, "aliases must not start independent provider requests");
+        assert_eq!(captured[0].locator, "acme/orchid");
+        assert!(captured[0].fields.contains("comments"));
+        assert!(captured[0].fields.contains("pull_requests"));
+    }
+    assert_eq!(fixture.wakes(planner).len(), 1);
+    assert_eq!(fixture.wakes(reviewer).len(), 1);
+    for (index, subject) in [original, renamed.clone()].into_iter().enumerate() {
+        assert_eq!(fixture.store.desired_subjects_named(&[subject]).unwrap()[0].desired,
+            declarations[index], "deduplication must not migrate declarations or watch deadlines");
+    }
+    // The surviving old-name watch must keep the canonical resource's item history.
+    // A second rename must follow through the now-intermediate alias even when
+    // neither the intermediate nor current name has a remaining direct watcher.
+    let latest_thread = crate::github_watch::ThreadRef::parse("acme/rose#12").unwrap();
+    fixture.store.ensure_watch_observer(&latest_thread).unwrap();
+    let latest = WatchFixture {
+        store: fixture.store.clone(),
+        observer: latest_thread.observer(),
+        resource: latest_thread.resource(),
+    };
+    latest.observe(observed.lock().await.clone());
+    observed.lock().await["pull_requests"][0]["head"] = json!("b".repeat(40));
+    latest.observe(observed.lock().await.clone());
+    other.observe(json!({"repository_id": 1310762902, "moved_to": latest.resource}));
+    assert_eq!(fixture.wakes(planner).len(), 2, "the terminal resource delivered the head change");
+    fixture.store.end_watch(&renamed, "unwatched", None).unwrap();
+    reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
+    assert!(!fixture.running(&other.observer));
+    let revision = fixture.store.selected_desired_revision(&fixture.observer).unwrap().unwrap();
+    let key = format!("{}:{revision}", fixture.observer);
+    reconciler.armed_observers.lock().unwrap().clear();
+    reconciler.observer_deadlines.lock().unwrap().insert(key.clone(), 0);
+    reconciler.reconcile_resource_observers(&fixture.store.desired_subjects().unwrap(), &[]).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while reconciler.observer_deadlines.lock().unwrap().get(&key) == Some(&0) {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("the remaining old alias continues observing");
+    let captured = requests.lock().await;
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[1].locator, "acme/rose");
+    assert_eq!(fixture.wakes(planner).len(), 2, "old alias must not redeliver known head transitions");
+}
+
+#[test]
+fn ending_the_last_watch_stops_only_the_unsubscribed_repository() {
+    let _clock = Clock::at(START);
+    let (fixture, reconciler) = fixture();
+    let first = fixture.watch("acme/garden#12", "agent/example.planner");
+    fixture.watch("acme/orchid#12", "agent/example.reviewer");
+    fixture.store.end_watch(&first, "unwatched", None).unwrap();
+    reconciler.reconcile_github_watches(&fixture.store.github_watch_declarations().unwrap()).unwrap();
+    assert!(!fixture.running(&fixture.observer));
+    assert!(fixture.running("observer/github/acme/orchid"));
+}

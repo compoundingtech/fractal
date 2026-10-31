@@ -49,6 +49,14 @@ describe('public conversation change captures', () => {
     expect(snapshot[2]?.provenance.sender).toBeUndefined()
     expect(capturedProvenance(snapshot[2]!)).toContain('Reported sender unknown · Tool: Edit · Call: call/edit')
   })
+  it('renders legacy product provenance as Fractal and leaves the reported sender unchanged', () => {
+    const sender = { kind: 'st-agent' as const, label: 'worker', via: 'st' }
+    const change = { provenance: { sender, name: 'Edit', callId: 'call/1', at: 't' } }
+    expect(capturedProvenance(change as never)).toContain('Reported sender: worker (agent) via Fractal')
+    expect(sender).toEqual({ kind: 'st-agent', label: 'worker', via: 'st' })
+    expect(capturedProvenance({ provenance: { sender: { kind: 'human', label: 'a', via: 'wf / st' }, name: 'Edit', callId: 'call/1', at: 't' } } as never)).toContain('via wf / Fractal')
+    expect(capturedProvenance({ provenance: { sender: { kind: 'human', label: 'a', via: 'please use st' }, name: 'Edit', callId: 'call/1', at: 't' } } as never)).toContain('via please use st')
+  })
   it('keeps repeated captures distinct and local selection inside the authoritative snapshot', () => {
     const snapshot = changes([call, { ...call, id: 'second-call', input: { file_path: 'src/example.ts', old_string: 'new', new_string: 'final' } }])
     expect(snapshot).toHaveLength(2)

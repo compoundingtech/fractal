@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { RegistryContext } from '@effect/atom-react'
-import type { ActionOf, Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@fractal/client'
+import type { ActionOf, Arrangement, ArrangementBodyV1, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@fractal/client'
 import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { ActionRefused } from '@fractal/sdk/effect'
 import { Effect } from 'effect'
@@ -48,7 +48,7 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
     collectionStream: async (options) => {
       streamOptions = options
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
     },
     actions: {
       snapshot: Effect.sync(() => `snapshot/fresh/${++snapshots}`),
@@ -216,7 +216,7 @@ it('Try again after a concurrent Sidebar replacement refuses with fixed copy and
     expect(h.requests.every((request) => request.parameters.subject === legacySidebar.id)).toBe(true)
     expect(h.container.textContent).toContain('The folder layout changed elsewhere; make the change again.')
     expect(h.container.querySelector('button')).toBeNull()
-    expect(h.items().find((item) => item.id === testSelection.subject)?.body.placements['agent/example']?.value.folder).toBe(a)
+    expect((h.items().find((item) => item.id === testSelection.subject)?.body as ArrangementBodyV1 | undefined)?.placements['agent/example']?.value.folder).toBe(a)
   } finally { h.close() }
 })
 
@@ -246,7 +246,7 @@ it('Try again after the dragged row key is rebound to another agent refuses inst
     await vi.waitFor(() => expect(h.registry.get(h.source).phase).not.toBe('pending'))
     await React.act(async () => undefined)
     expect(h.requests).toHaveLength(1)
-    expect(h.items()[0]?.body.placements['agent/replacement']?.value.folder).toBe(a)
+    expect((h.items()[0]?.body as ArrangementBodyV1 | undefined)?.placements['agent/replacement']?.value.folder).toBe(a)
     expect(h.container.textContent).toContain('This agent changed; select it again.')
   } finally { h.close() }
 })

@@ -35,7 +35,7 @@ it('checks the declared person owning a session actor rather than requiring the 
 
 const empty: WorldDefinition = { ...fleetMidRefactor, id: 'variant-empty', slices: (ctx) => {
   const base = fleetMidRefactor.slices(ctx)
-  return { ...base, roster: { ...base.roster, state: { agents: [], runtimes: [], machines: [], order: [] }, timeline: [] }, details: { ...base.details, state: { missions: [], work: [] }, timeline: [] }, attention: { ...base.attention, state: { attention: [], messages: [] }, timeline: [] }, conversation: { ...base.conversation, state: { threads: [] }, timeline: [] }, terminal: { ...base.terminal, state: { terminals: [] }, timeline: [] } }
+  return { ...base, roster: { ...base.roster, state: { sessions: [], devices: [], agents: [], runtimes: [], machines: [], order: [] }, timeline: [] }, details: { ...base.details, state: { launches: [], launch_variants: [], missions: [], work: [] }, timeline: [] }, attention: { ...base.attention, state: { attention: [], messages: [] }, timeline: [] }, conversation: { ...base.conversation, state: { threads: [] }, timeline: [] }, terminal: { ...base.terminal, state: { terminals: [] }, timeline: [] } }
 } }
 const contaminated: WorldDefinition = { ...fleetMidRefactor, id: 'variant-unknown', slices: (ctx) => {
   const base = fleetMidRefactor.slices(ctx)

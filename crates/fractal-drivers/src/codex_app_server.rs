@@ -383,6 +383,15 @@ fn codex_error_class(
     Some((reason, class, word.to_string()))
 }
 
+/// The HTTP status a single-key `CodexErrorInfo` object carries, such as
+/// `{"responseTooManyFailedAttempts":{"httpStatusCode":429}}`.
+fn codex_http_status(error_info: Option<&Value>) -> Option<u64> {
+    let Some(Value::Object(map)) = error_info else {
+        return None;
+    };
+    map.values().next()?.get("httpStatusCode")?.as_u64()
+}
+
 /// The `CodexErrorInfo` word that names a rejected provider credential.
 ///
 /// It is the 401/invalid-credential arm of Codex's own closed error vocabulary and is distinct
@@ -1187,8 +1196,9 @@ impl CodexInboxDelivery {
     /// Let a standing turn error name itself in the observed record.
     ///
     /// The delivery-relevant [`CodexObservedState`] is untouched: a hold still blocks delivery,
-    /// and a terminal turn still permits `turn/start`. Once a retryable connection turn is proven
-    /// ended, its thread can accept another turn, so the incarnation remains idle with its cause.
+    /// and a terminal turn still permits `turn/start`. Once a connection-class turn (a dropped
+    /// stream, or a 429 Codex stopped retrying) is proven ended, its thread can accept another
+    /// turn, so the incarnation remains idle with its cause: `connection` or `rateLimited`.
     ///
     /// The rule is that the CAUSE outranks the ACTIVITY. `active` with no reason, `ended` with the
     /// bare word `systemError`, and every hold reason describe what kind of work the thread
@@ -1210,16 +1220,17 @@ impl CodexInboxDelivery {
         {
             return observation;
         }
-        // `systemError` describes the failed turn, not the app-server's lifetime. A typed
-        // retryable connection failure can start a new turn on the same thread (Codex 0.160.1).
-        // While Codex still owns an active retry or a hold, leave the activity alone.
+        // `systemError` describes the failed turn, not the app-server's lifetime. A turn that
+        // failed on a typed connection cause, including a 429 after Codex used up its own few
+        // retries, leaves a thread that takes the next turn (Codex 0.160.1): the incarnation stays
+        // idle with its cause, and st's provider backoff resumes it. While Codex still owns an
+        // active retry or a hold, leave the activity alone.
         if matches!(
             observed,
             CodexObservedState::TerminalError {
                 reason: CodexTerminalError::SystemError,
             }
         ) && error.reason == driver_diagnostic::Reason::TurnConnection
-            && error.will_retry
         {
             observation.state = Activity::Idle;
         }
@@ -1272,6 +1283,15 @@ impl CodexInboxDelivery {
                     // The credential arm. `observe_provider_auth` owns it from `turn/completed`,
                     // where the same rejection arrives with the turn's own typed result.
                     return false;
+                };
+                // A connection-class failure whose last HTTP status was 429 is the provider
+                // refusing for now, which a reader acts on differently from a broken network.
+                let word = if reason == driver_diagnostic::Reason::TurnConnection
+                    && codex_http_status(error.get("codexErrorInfo")) == Some(429)
+                {
+                    "rateLimited"
+                } else {
+                    word
                 };
                 // Codex 0.160.1 reduces an exhausted responseStreamDisconnected retry to
                 // `other` on its final error notification. That generic frame does not refute
@@ -2905,7 +2925,7 @@ pub fn run_controlled_paths(
     );
     let codex_argv = if let Some(mode) = crate::access::AccessMode::from_environment()? {
         let workspace = std::env::current_dir().context("reading managed Codex workspace")?;
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let endpoint = crate::contracts::env("ST3_ENDPOINT");
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         let permissions = crate::access::Permissions::from_environment()?;
@@ -3255,7 +3275,7 @@ fn run_controlled_owned(
     prepare_socket_for_launch(&socket_path)?;
 
     let endpoint = format!("unix://{}", socket_path.display());
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let mission_run = crate::contracts::env("ST_MISSION_RUN");
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     let unattended = mission_run_is_unattended(mission_run.as_deref());
@@ -3284,6 +3304,8 @@ fn run_controlled_owned(
         .append(true)
         .mode(0o600)
         .open(state_dir.join("app-server.log"))?;
+    // Only this attempt's output belongs to its failure, never an earlier incarnation's.
+    let log_start = log.metadata()?.len();
     let mut server_args = prepared.server_args;
     if resume_thread.is_some() && authored_bypasses_hook_trust(&codex_argv[1..])? {
         let hook_cwd = controlled_hook_cwd(&codex_argv[1..])?;
@@ -3342,8 +3364,43 @@ fn run_controlled_owned(
         }
         .into());
     }
+    let observed_exit = server.child_mut().try_wait().ok().flatten();
     server.terminate();
-    result
+    result.map_err(|error| {
+        let tail = app_server_log_tail(&state_dir.join("app-server.log"), log_start)
+            .unwrap_or_default();
+        error.context(format!(
+            "Codex app-server outcome: {}; last stderr/output lines:\n{}",
+            describe_tui_exit(observed_exit),
+            if tail.is_empty() { "(no output)" } else { &tail },
+        ))
+    })
+}
+
+/// Bound both disk reads and the diagnostic while retaining the provider's final lines.
+fn app_server_log_tail(path: &Path, start: u64) -> Result<String> {
+    let mut file = File::open(path)?;
+    let end = file.metadata()?.len();
+    let offset = start.max(end.saturating_sub(8 * 1024)).min(end);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(8 * 1024).read_to_end(&mut bytes)?;
+    Ok(diagnostic_output_tail(&bytes))
+}
+
+fn diagnostic_output_tail(bytes: &[u8]) -> String {
+    let bytes = &bytes[bytes.len().saturating_sub(8 * 1024)..];
+    let text = String::from_utf8_lossy(bytes);
+    // Replacement characters can expand invalid input threefold. Bound the UTF-8
+    // diagnostic itself, not just the bytes read from the provider.
+    let mut start = text.len().saturating_sub(8 * 1024);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let text = &text[start..];
+    let mut lines: Vec<_> = text.lines().rev().take(20).collect();
+    lines.reverse();
+    lines.join("\n")
 }
 
 /// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and

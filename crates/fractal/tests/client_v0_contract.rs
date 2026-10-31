@@ -122,6 +122,36 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 }
 
 #[test]
+fn agents_publication_contract_is_complete_and_unbounded() {
+    let validator = contract_validator("AgentsPublication");
+    let resources = fixture("resources.json");
+    let agent = resources.as_array().unwrap().iter()
+        .find(|row| row["kind"] == "agent").unwrap();
+    let rows = (0..401).map(|index| {
+        let mut row = agent.clone();
+        row["id"] = serde_json::json!(format!("agent/publication-{index}"));
+        row
+    }).collect::<Vec<_>>();
+    let order = rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+    let mut publication = serde_json::json!({
+        "publication": {
+            "node_epoch": "18a992c2-f834-4946-b412-211f358ff531",
+            "revision": 9_007_199_254_740_991_u64,
+            "status_watermark": {"store_index": 8, "local_frontier": 3},
+            "materialized_at_ms": 1_700_000_000_000_u64
+        },
+        "items": rows, "order": order, "has_more": false
+    });
+    assert_conforms(&validator, "401 complete current agents", &publication);
+    publication["has_more"] = serde_json::json!(true);
+    assert!(!validator.is_valid(&publication), "a partial head cannot be complete");
+    publication["has_more"] = serde_json::json!(false);
+    publication["publication"]["revision"] = serde_json::json!(9_007_199_254_740_992_u64);
+    assert!(!validator.is_valid(&publication), "revision exhaustion requires another epoch");
+}
+
+
+#[test]
 fn consumers_accept_future_enum_cases_but_producers_reject_them() {
     for (definition, known) in [
         ("MissionState", "running"),
@@ -148,6 +178,56 @@ fn consumers_accept_future_enum_cases_but_producers_reject_them() {
             !consumer.is_valid(&Value::from(1)),
             "{definition} accepted a number"
         );
+    }
+}
+
+#[test]
+fn ordered_membership_frames_and_pages_match_only_their_membership_variants() {
+    let fixture = json(Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients/ordered-memberships-v2.json"));
+    for validator in [contract_validator("CollectionFrame"), consumer_validator("CollectionFrame")] {
+        assert_conforms(&validator, "membership snapshot", &fixture["snapshot_frame"]);
+        assert_conforms(&validator, "membership changes", &fixture["changes_frame"]);
+        assert_conforms(&validator, "outside-window membership changes", &fixture["outside_window_changes_frame"]);
+        // Every membership window frame carries the whole container's strict state.
+        for frame in ["snapshot_frame", "changes_frame"] {
+            let mut missing_state = fixture[frame].clone();
+            missing_state.as_object_mut().unwrap().remove("membership");
+            assert!(!validator.is_valid(&missing_state), "{frame} without membership state");
+            for field in ["container", "live_count", "changed_index"] {
+                let mut partial = fixture[frame].clone();
+                partial["membership"].as_object_mut().unwrap().remove(field);
+                assert!(!validator.is_valid(&partial), "{frame} membership without {field}");
+            }
+            let mut negative = fixture[frame].clone();
+            negative["membership"]["changed_index"] = serde_json::json!(-1);
+            assert!(!validator.is_valid(&negative), "{frame} with a negative changed_index");
+        }
+        // Empty windows stay unambiguous: the collection, not the rows, picks the variant.
+        let mut empty = fixture["snapshot_frame"].clone();
+        empty["items"] = serde_json::json!([]);
+        empty["order"] = serde_json::json!([]);
+        assert_conforms(&validator, "empty membership snapshot", &empty);
+        empty["collection"] = serde_json::json!("agents");
+        assert!(!validator.is_valid(&empty), "resource windows carry no membership state");
+        empty.as_object_mut().unwrap().remove("membership");
+        assert_conforms(&validator, "empty resource snapshot", &empty);
+        let mut missing_bucket = fixture["changes_frame"].clone();
+        missing_bucket["upserts"][0]["position"].as_object_mut().unwrap().remove("bucket");
+        assert!(!validator.is_valid(&missing_bucket), "a missing bucket is not the root");
+        let mut resource_rows = fixture["snapshot_frame"].clone();
+        resource_rows["collection"] = serde_json::json!("agents");
+        assert!(!validator.is_valid(&resource_rows), "membership rows are not resources");
+    }
+    for validator in [contract_validator("Envelope"), consumer_validator("Envelope")] {
+        assert_conforms(&validator, "empty membership page", &fixture["envelope"]);
+        let mut nonempty = fixture["envelope"].clone();
+        nonempty["value"] = fixture["page"].clone();
+        assert_conforms(&validator, "membership page", &nonempty);
+        let mut resources = fixture["envelope"].clone();
+        resources["value"]["collection"] = serde_json::json!("agents");
+        assert_conforms(&validator, "empty resource page", &resources);
+        nonempty["value"]["items"][0]["position"].as_object_mut().unwrap().remove("bucket");
+        assert!(!validator.is_valid(&nonempty), "a missing bucket is not the root");
     }
 }
 
@@ -355,6 +435,8 @@ async fn emitted_person_ask_mission_list_and_detail_conform_and_decode() {
     .unwrap();
     state.store.apply_internal(&intent, "contract-person-asker").unwrap();
     let ask = state.store.ask_person(&fractal_daemon::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
         legacy_request: None,
         person: "person/avery".into(),
         title: "Choose a release date".into(),
@@ -423,7 +505,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         axum::routing::get(move |upgrade: WebSocketUpgrade| {
             let sender = sender.clone();
             async move {
-                upgrade.protocols(["st3.client.collections.v0"]).on_upgrade(
+                upgrade.protocols(["fractal.client.collections.v0"]).on_upgrade(
                     move |mut socket| async move {
                         while let Some(Ok(message)) = socket.next().await {
                             if let Ok(text) = message.to_text() {
@@ -980,6 +1062,7 @@ fn resource_fixture_covers_every_resource_kind_with_stable_unique_ids() {
     let expected = BTreeSet::from([
         "agent",
         "attention",
+        "harness-question",
         "history",
         "launch",
         "launch-approval",
@@ -1152,24 +1235,80 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
-        store: Arc::new(
-            Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
-        ),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-baseline".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
+    AppState { owning_person: None,
+    // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
+    store: Arc::new(
+        Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
+    ),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-baseline".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(),  }
+}
+
+#[test]
+fn old_shape_subscribe_and_proposed_trace_preserve_collection_contract() {
+    let validator = contract_validator("CollectionCommand");
+    let old = fixture("collection-subscribe.json");
+    assert_conforms(&validator, "old-shape subscribe without trace", &old);
+    assert!(old.get("trace").is_none());
+    let mut proposed = fixture("collection-subscribe-trace-proposed.json");
+    assert_conforms(&validator, "proposed subscribe trace", &proposed);
+    proposed.as_object_mut().unwrap().remove("trace");
+    assert_eq!(proposed, old, "trace does not change subscription fields");
+    for malformed in [
+        Value::Null, serde_json::json!(42), serde_json::json!([]),
+        serde_json::json!({"traceparent":"not-a-traceparent"}),
+    ] {
+        proposed["trace"] = malformed;
+        assert_conforms(&validator, "malformed telemetry preserves frame contract", &proposed);
     }
+}
+
+#[tokio::test]
+async fn collection_socket_accepts_out_of_range_ignored_trace() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("client.sock");
+    let state = test_state(root.path());
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut request = "ws://localhost/v1/client/collections/stream".into_client_request().unwrap();
+    request.headers_mut().insert("sec-websocket-protocol", "st3.client.collections.v0".parse().unwrap());
+    request.headers_mut().insert("x-st3-person", "person/ada".parse().unwrap());
+    let (mut stream, _) = tokio_tungstenite::client_async(
+        request, tokio::net::UnixStream::connect(&socket).await.unwrap(),
+    ).await.unwrap();
+    stream.send(Message::Text(
+        r#"{"kind":"subscribe","id":"ignored-trace","collection":"missions","trace":1e999}"#.into()
+    )).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let message = stream.next().await.unwrap().unwrap();
+            if let Message::Text(text) = message {
+                break serde_json::from_str::<Value>(&text).unwrap();
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(frame["kind"], "snapshot", "{frame}");
+    assert_eq!(frame["id"], "ignored-trace");
+    assert_conforms(&contract_validator("CollectionFrame"), "ignored out-of-range trace", &frame);
+    stream.close(None).await.unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -1299,6 +1438,8 @@ async fn attention_socket_evicts_completed_sources_and_reconnects_without_cached
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose date".into(),
@@ -1724,6 +1865,60 @@ async fn client_post_json_person(
     let value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     (status, value)
+}
+
+#[tokio::test]
+async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
+    // A commit is visible to readers before its writer publishes the store index that client
+    // snapshots read at. An event or resume cursor past that index lets a client consume a change,
+    // read the resource it names at the older index, and wait for an event that already came.
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let append = |number: usize| {
+        state
+            .store
+            .append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "custom/test/published".into(),
+                kind: "custom.test.recorded".into(),
+                actor: None,
+                fields: Default::default(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("published-{number}")),
+            })
+            .unwrap()
+            .store_index
+    };
+    let first = append(0);
+    let second = append(1);
+    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    let app = fractal_daemon::api::router(state.clone());
+    let path = format!("/v1/client/events?after=event-cursor/{}/{first}", state.node);
+    let (status, page) = client_json(app.clone(), &path).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let sequences = |page: &Value| {
+        page["value"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(sequences(&page).iter().all(|sequence| *sequence <= first), "an event past the published index: {page}");
+    assert!(
+        !page["value"]["resume_cursor"].as_str().unwrap().contains(&format!("/{second}")),
+        "a resume cursor past the published index: {page}"
+    );
+    // A tail read (no cursor) bounds its query before its limit: the unpublished event must
+    // not take the only place and leave the newest published one out.
+    let (status, tail) = client_json(app.clone(), "/v1/client/events?limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{tail}");
+    assert_eq!(sequences(&tail), vec![first], "the newest published event: {tail}");
+
+    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    let (status, page) = client_json(app, &path).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(sequences(&page).contains(&second), "{page}");
 }
 
 #[tokio::test]
@@ -2243,6 +2438,8 @@ async fn paired_credential_exercises_only_its_exact_person_delegation() {
     let ask = |person: &str| {
         store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: person.into(),
                 title: format!("Decision for {person}"),
@@ -2629,6 +2826,8 @@ async fn read_only_pairing_reads_projections_but_is_denied_attention_and_launch_
     store.apply_internal(&intent, "read-only-asker").unwrap();
     let step = store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/ada".into(),
             title: "Decision for Ada".into(),
@@ -3073,14 +3272,16 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
         "agent/example/operator"
     );
     let receipts = store
-        .claims_for_kind_at("custom.client.action-result", None, true, 100)
+        .local_observations_tail(100)
         .unwrap()
-        .claims;
+        .into_iter()
+        .filter(|receipt| receipt.kind == "client.action-result")
+        .collect::<Vec<_>>();
     assert!(!receipts.is_empty());
     for receipt in receipts {
-        let actor = receipt.actor.as_deref().unwrap();
+        assert!(receipt.actor.is_none(), "action receipts are server-written");
+        let actor = receipt.body["fields"]["authority_actor"].as_str().unwrap();
         assert!(actor.starts_with("agent/example/"), "{actor}");
-        assert_eq!(receipt.body["fields"]["authority_actor"], actor);
     }
 }
 
@@ -3459,6 +3660,8 @@ mission "ios-proof" state="ready" {
     let ask = state
         .store
         .ask_person(&fractal_daemon::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/alex".into(),
             title: "Repair simulator components".into(),
@@ -3576,6 +3779,8 @@ mission "release-proof" state="ready" {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Allocate capacity?".into(),
@@ -4299,7 +4504,7 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     let mut manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
-        "../../../examples/st3/custom-review.json"
+        "../../../examples/fractal/custom-review.json"
     )).unwrap();
     manifest.attention.as_mut().unwrap().episode = fractal_schema::custom::Expr::Constant {
         value: serde_json::json!("garden question; keep"),

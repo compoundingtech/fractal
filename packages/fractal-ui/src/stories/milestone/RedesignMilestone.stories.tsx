@@ -19,6 +19,7 @@ import { borderVars as border, spaceVars as sp, surfaceVars as surface, textVars
 type Args = Omit<RedesignMilestoneProps, 'persistKey' | 'reload'>
 
 const meta: Meta<Args> = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Redesign milestone',
   parameters: {
     layout: 'fullscreen',
@@ -37,6 +38,33 @@ const meta: Meta<Args> = {
   render: (args, context) => <RedesignMilestone key={JSON.stringify(args)} {...args} persistKey={`rm1-${context.id}`} />,
 }
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Decisions:contract-fixture',
+  'EmptyRoster:contract-fixture',
+  'EmptyRosterLight:contract-fixture',
+  'EmptyThread:contract-fixture',
+  'EmptyThreadLight:contract-fixture',
+  'ErrorRecovery:contract-fixture',
+  'HideChanges:contract-fixture',
+  'Loading:contract-fixture',
+  'LoadingLight:contract-fixture',
+  'Navigation:contract-fixture',
+  'NavigationKeyboard:contract-fixture',
+  'NavigationLight:contract-fixture',
+  'NoMatch:contract-fixture',
+  'NoMatchLight:contract-fixture',
+  'RosterError:contract-fixture',
+  'RosterErrorLight:contract-fixture',
+  'Slice:contract-fixture',
+  'SliceLight:contract-fixture',
+  'Stale:contract-fixture',
+  'StaleLight:contract-fixture',
+  'ThreadRecovery:contract-fixture',
+  'ThreadUnavailable:contract-fixture',
+  'ThreadUnavailableLight:contract-fixture',
+]
 type Story = StoryObj<Args>
 
 const light = (story: Story): Story => ({ ...story, args: { ...story.args, scheme: 'light' } })

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "isolation-vm can be signed on a machine with /dev/kvm: scripts/st-test --all (and --check isolation-vm) runs `nix develop -c bash scripts/ci-local isolation-vm`, which builds the workspace test archive and the production gateway in place and runs both VM drivers, as CI's isolation-vm job does; the policy admits host and agent notes for pull requests with that command, through a new lane. Skipping stays off (enforce false).",
+  "replay": {
+    "status": "none",
+    "detail": "A new local command, lane and host/agent signer levels for one check; no protocol or schema change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "A new local command, lane and host/agent signer levels for one check; no protocol or schema change."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The isolation-vm wrapper kind now trusts host and agent notes for pull_request runs whose command is the new local lane's (by_level, lane: true); merge_group still runs it, and enforce stays false, so nothing skips yet."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "A new local command, lane and host/agent signer levels for one check; no protocol or schema change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "A new local command, lane and host/agent signer levels for one check; no protocol or schema change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None. A machine that signs it needs /dev/kvm read-write for its user."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the policy and lane entries; CI keeps running and signing isolation-vm as before."
+  }
+}

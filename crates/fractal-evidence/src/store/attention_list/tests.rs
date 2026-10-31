@@ -16,7 +16,7 @@ fn a_view_failing_for_its_limit_is_withdrawn_until_it_publishes_again() {
     // A first failure is not yet a withdrawal; one that has lasted the limit is.
     store.note_view_refreshed("summary", false);
     assert!(store.published_view_serving("summary"));
-    store.smalltalk.attention_list.health[3]
+    store.fractal.attention_list.health[3]
         .failing_since
         .store(now_ms() as u64 - WITHDRAW_AFTER_MS - 1, AtomicOrdering::Release);
     store.note_view_refreshed("summary", false);
