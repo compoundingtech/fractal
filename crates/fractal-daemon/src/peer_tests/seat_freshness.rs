@@ -358,10 +358,11 @@ async fn an_older_member_is_never_pushed_and_an_older_worker_answers_none() {
     assert!(ahead.pushed.is_empty() && ahead.failed.is_empty(), "no answer, and nothing to retry");
 }
 
-/// Re-stamps stay local only once every other member can ask this node: each advertises the
-/// route in its own `daemon.started`, and this node is not a dial-out member nobody can dial.
+/// Re-stamps stay local only once every other member hears this node: each advertises the route
+/// in its own `daemon.started` and a push from this node reached it, and this node is not a
+/// dial-out member nobody can dial.
 #[test]
-fn the_fleet_hears_a_node_only_when_every_other_member_can_ask_it() {
+fn the_fleet_hears_a_node_only_when_every_other_member_can_be_pushed_to() {
     let node = Store::open_memory("conversation-gateway").unwrap();
     let sources = [("alder", Store::open_memory("alder").unwrap()), ("birch", Store::open_memory("birch").unwrap())];
     let advertise = |member: &str, feature: bool| {
@@ -371,16 +372,58 @@ fn the_fleet_hears_a_node_only_when_every_other_member_can_ask_it() {
         node.import_replication(member, &source.export_replication(0).unwrap()).unwrap();
     };
     let members = ["conversation-gateway".to_owned(), "alder".to_owned(), "birch".to_owned()];
-    let hears = |dial_out| {
-        crate::api::seat_freshness::fleet_hears_seats(&node, "conversation-gateway", &members, dial_out).unwrap()
+    let reached = |alder: Option<bool>, birch: Option<bool>| {
+        [("alder", alder), ("birch", birch)]
+            .into_iter()
+            .filter_map(|(name, reached)| reached.map(|reached| (name.to_owned(), reached)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let hears = |dial_out, reached: &std::collections::BTreeMap<String, bool>| {
+        crate::api::seat_freshness::fleet_hears_seats(&node, "conversation-gateway", &members, dial_out, reached).unwrap()
     };
     advertise("alder", true);
     advertise("birch", false);
-    assert!(!hears(false), "birch runs an older build and reads re-stamp ages");
+    assert!(!hears(false, &reached(Some(true), Some(true))), "birch runs an older build and reads re-stamp ages");
     advertise("birch", true);
-    assert!(hears(false), "every other member can ask");
-    assert!(!hears(true), "nobody can dial a dial-out member to ask it");
-    // The flag gates the store's re-stamp rule through this node's meta, which never replicates.
-    node.set_fleet_hears_seats(true).unwrap();
-    node.set_fleet_hears_seats(true).unwrap();
+    assert!(hears(false, &reached(Some(true), Some(true))), "every other member advertises and was reached");
+    assert!(!hears(false, &reached(Some(true), Some(false))), "birch advertises but no push reaches it");
+    assert!(!hears(false, &reached(Some(true), None)), "birch was never reached");
+    assert!(!hears(true, &reached(Some(true), Some(true))), "nobody can dial a dial-out member to ask it");
+}
+
+/// Through the running pusher: a member that advertises the route but cannot be pushed to (its
+/// worker lacks it) keeps this node's re-stamps replicating; one the push reaches lets them stay
+/// local.
+#[tokio::test]
+async fn the_pusher_keeps_re_stamps_replicating_for_a_member_it_cannot_reach() {
+    for (routes, expected) in [
+        (axum::Router::new(), false),
+        (fractal_routes(crate::api::raw_terminal_owner_splice), true),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let host = Arc::new(Store::open(&root.path().join("host.db"), HOST).unwrap());
+        let cedar = declare(&host, "cedar", HOST);
+        report(&host, &cedar, "one");
+        let receiver = Arc::new(Store::open(&root.path().join("receiver.db"), RECEIVER).unwrap());
+        receiver.import_replication(HOST, &host.export_replication(0).unwrap()).unwrap();
+        advertise(&Store::open_memory(RECEIVER).unwrap(), &host, true);
+        let url = worker(&serve(root.path(), app(receiver.clone(), RECEIVER, root.path())).await, routes).await;
+        host.set_fleet_hears_seats(!expected).unwrap();
+        crate::api::seat_freshness::spawn_seat_freshness_push(
+            host.clone(),
+            relay(root.path(), &[(RECEIVER, url)]),
+            HOST.into(),
+            crate::api::seat_freshness::SeatFreshnessPace {
+                coalesce: Duration::from_millis(20),
+                answer: Duration::from_secs(5),
+                retry: Duration::from_millis(100),
+                longest_retry: Duration::from_millis(200),
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.fleet_hears_seats().unwrap() != expected && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(host.fleet_hears_seats().unwrap(), expected, "a worker that serves the route: {expected}");
+    }
 }

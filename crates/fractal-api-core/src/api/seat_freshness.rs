@@ -70,12 +70,22 @@ pub fn seat_freshness_start(store: &Store, member: &str) -> anyhow::Result<Optio
 
 /// Whether every other member can hear this node's seats: each advertises the route, and this
 /// node is not a dial-out member, which no other member can dial back. Re-stamps then stay local.
-pub fn fleet_hears_seats(store: &Store, node: &str, members: &[String], dial_out: bool) -> anyhow::Result<bool> {
+///
+/// An advertisement is not delivery: a member counts only once a push from this node reached it
+/// and it answered (`reached`, kept across rounds; a member with no direct route, such as a
+/// dial-out one, or with a worker that lacks the route, answers nothing and does not count).
+pub fn fleet_hears_seats(
+    store: &Store,
+    node: &str,
+    members: &[String],
+    dial_out: bool,
+    reached: &BTreeMap<String, bool>,
+) -> anyhow::Result<bool> {
     if dial_out {
         return Ok(false);
     }
     for member in members.iter().filter(|member| member.as_str() != node) {
-        if seat_freshness_start(store, member)?.is_none() {
+        if seat_freshness_start(store, member)?.is_none() || reached.get(member) != Some(&true) {
             return Ok(false);
         }
     }
@@ -104,6 +114,11 @@ pub struct SeatFreshnessRound {
     pub pushed: BTreeMap<String, usize>,
     pub failed: BTreeSet<String>,
     pub owed: BTreeSet<String>,
+    /// Members a push reached and that answered it, whatever they recorded.
+    pub reached: BTreeSet<String>,
+    /// Members no push can reach: no direct route (a dial-out member), or a worker without
+    /// the route.
+    pub unreachable: BTreeSet<String>,
 }
 
 /// One round: read this node's seats' newest local reports, and push each capable member what
@@ -201,12 +216,15 @@ pub async fn push_seat_freshness(
                 for seat in &seats {
                     to.seats.insert(seat.agent.clone(), (seat.incarnation_id.clone(), u128::from(seat.heard_at_unix_ms)));
                 }
+                round.reached.insert(member.clone());
                 if !seats.is_empty() {
                     round.pushed.insert(member, seats.len());
                 }
             }
             // Its advertisement was ahead of its build, or no route reaches it directly.
-            Ok(None) => {}
+            Ok(None) => {
+                round.unreachable.insert(member);
+            }
             Err(error) => {
                 eprintln!("st3: seat freshness to {member}: {error:#}");
                 round.failed.insert(member);
@@ -277,6 +295,8 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
     tokio::spawn(crate::task_cpu::account("seat_freshness.push", async move {
         let _observer = observer;
         let mut pushed = SeatFreshnessPushed::default();
+        // Whether this node's last push to each member reached it; a failed push keeps the last.
+        let mut reached = BTreeMap::<String, bool>::new();
         let mut retry: Option<Duration> = None;
         // The first round needs no commit: what this node heard before it started is owed.
         let mut first = true;
@@ -293,26 +313,34 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
             }
             tokio::time::sleep(pace.coalesce).await;
             let members = seat_freshness_members(&relay);
-            // Membership and advertisements arrive as commits too, so each round settles whether
-            // every other member can hear this node's seats.
+            let again = match push_seat_freshness(&store, &relay, &node, &members, &mut pushed, pace.answer).await {
+                Ok(round) => {
+                    for member in &round.reached {
+                        reached.insert(member.clone(), true);
+                    }
+                    for member in &round.unreachable {
+                        reached.insert(member.clone(), false);
+                    }
+                    !round.failed.is_empty() || !round.owed.is_empty()
+                }
+                Err(error) => {
+                    eprintln!("st3: seat freshness push failed: {error:#}");
+                    true
+                }
+            };
+            // Membership, advertisements and starts arrive as commits too, so each round settles,
+            // from what its pushes reached, whether every other member can hear this node's seats.
             let dial_out = relay.fleet_view().members.iter().any(|member| member.name == node && member.mode == "dial-out");
             let flag = {
-                let (store, node, members) = (Arc::clone(&store), node.clone(), members.clone());
+                let (store, node, members, reached) = (Arc::clone(&store), node.clone(), members.clone(), reached.clone());
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                    store.set_fleet_hears_seats(fleet_hears_seats(&store, &node, &members, dial_out)?)
+                    store.set_fleet_hears_seats(fleet_hears_seats(&store, &node, &members, dial_out, &reached)?)
                 })
                 .await
             };
             if let Err(error) = flag.map_err(anyhow::Error::from).and_then(|result| result) {
                 eprintln!("st3: seat freshness: {error:#}");
             }
-            let again = match push_seat_freshness(&store, &relay, &node, &members, &mut pushed, pace.answer).await {
-                Ok(round) => !round.failed.is_empty() || !round.owed.is_empty(),
-                Err(error) => {
-                    eprintln!("st3: seat freshness push failed: {error:#}");
-                    true
-                }
-            };
             retry = again.then(|| retry.map_or(pace.retry, |after| (after * 2).min(pace.longest_retry)));
         }
     }));

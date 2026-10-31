@@ -4095,6 +4095,18 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Whether every other member hears this node's seats, as the seat freshness pusher last
+    /// recorded it (see `fleet_hears_seats_tx`).
+    pub fn fleet_hears_seats(&self) -> Result<bool> {
+        Ok(self
+            .readers
+            .get()
+            .query_row("SELECT value FROM meta WHERE key='fleet_hears_seats'", [], |row| row.get::<_, String>(0))
+            .optional()?
+            .as_deref()
+            == Some("1"))
+    }
+
     /// Record whether every other member can ask this node about its seats' freshness (see
     /// `fleet_hears_seats_tx`). Writes only when it changes.
     pub fn set_fleet_hears_seats(&self, hears: bool) -> Result<()> {
