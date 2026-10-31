@@ -26,6 +26,8 @@ routes for backward compatibility. To let fleet preference select the carrier,
 remove the explicit override. Legacy operation without `fleet.toml` retains
 Tailscale-first automatic routing among locally available carriers.
 
+Fabric fleet readers accept `st3/fleet/<fleet>` and `fractal/fleet/<fleet>` for the same fleet; default writers still use `st3/fleet/<fleet>`.
+
 Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
 front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
@@ -47,7 +49,12 @@ preference and enabled transports unchanged.
 ## Local adapter membership and leave authority
 
 Local adapters may read `GET /v1/internal/fleet/membership` on the daemon's Unix
-socket. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
+socket. Internal routes (`/v1/internal/...`) serve only the node's own processes: its
+replication worker, its adapters and its operator's CLI. They refuse seat callers, meaning a
+process running under an agent seat's harness, with `foreign-agent-actor`. A seat reads the
+fleet views it may see through public routes with the same answers: `GET /v1/fleet/status`,
+`/v1/fleet/membership`, `/v1/fleet/admission-residue` and `/v1/fleet/invites`. The CLI and the
+client use those first, and fall back to the internal route on a daemon that predates them. Its response is the sealed `smallclaims::fleet::FleetView`: `anchor`,
 `members`, and legacy removals. A member's `member_key` identifies its incarnation;
 names are not identity. `state = "current"` is application membership authority.
 An ended member is not authorized for ordinary replication or owner RPC, even if
@@ -310,6 +317,34 @@ session. Relays require it for session detail and child conversation reads; abse
 incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-too-old`
 with “This host runs an older Fractal version; update it to open subagent conversations.”
 No session-detail POST or changed child ID is sent to that peer.
+
+Seat freshness has its own member-authenticated route, `POST /v1/peer/seat-freshness`, on which
+a seat's host pushes when it last heard its seats. A re-stamp that changes nothing stays in the
+host's local observation log, so this is how another member hears a resting seat.
+
+The push is reactive:
+- A commit on the host wakes its pusher. Within 10 seconds of that commit it reads the newest
+  local `harness.observed` of every seat its declarations place on it, in one statement.
+- It sends each other member, or configured peer, only the seats that changed since its last
+  push to that member. Every member is sent at once, directly, never through a relay hop. A push
+  names up to 2,048 seats, each with its incarnation and the time the host heard it.
+- It pushes only to a member whose own newest `daemon.started` advertises
+  `features.seat_freshness = 1`. A member whose `daemon.started` changed restarted, and gets
+  every seat again.
+- A failed push is retried a minute later, with or without a new commit, and the round runs once
+  when the daemon starts. Otherwise nothing is sent while nothing changes.
+
+The receiver records a seat only when its declaration places the seat on the member that pushed
+it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
+recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed. The
+host retries it a minute later without waiting for a commit, then less often while it stays owed,
+doubling up to every 15 minutes. An agent card's freshness and a
+mail hold read the latest of the replicated report, the local log, and that time. The card's
+90-second rule ages it, so a host that stops pushing reads stale.
+
+A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
+re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
+route records nothing. Its peers read the replicated report, as before.
 
 Writers emit only three-field child IDs. At the link boundary, readers still accept
 two-field native-parent/task links because open or bookmarked links can outlive the
@@ -1386,8 +1421,12 @@ with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only i
 sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
 drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
-and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited
+and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is.
+An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
+fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
+raw record, signature and verdict rows and position), its ID goes into the retired ledger, and
+admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
+envelopes atomic. Two audited
 rules stay out because a reader reads the history they drop, which no projection digest covers.
 `harness.observed`'s rule drops a credential transition that moves the `since` of a seat's
 needs-login state. `resource.observed`'s keeps only the newest observation of a GitHub pull request,

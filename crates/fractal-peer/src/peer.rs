@@ -44,6 +44,8 @@ use crate::store::{
     CheckpointManifestRequest,
 };
 mod raw_lease;
+mod seat_freshness;
+pub use seat_freshness::*;
 
 /// The peer listener's shared state, with this node's daemon as the store.
 type PeerState = smallclaims::sync::PeerState<MainBackend>;
@@ -1997,6 +1999,8 @@ pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
             post(receive_client_read).get(client_read_capabilities).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(RAW_TERMINAL_PATH, get(receive_raw_terminal).layer(axum::Extension(splice)))
+        .route(SEAT_FRESHNESS_PATH,
+            post(seat_freshness::receive_seat_freshness).layer(DefaultBodyLimit::max(MAX_SEAT_FRESHNESS_BYTES)))
 }
 
 /// Serve a conversation owner's peer listener for tests, and return the client relay of a

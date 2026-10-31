@@ -339,6 +339,10 @@ impl Seat {
     }
 
     fn snapshotting(&self) -> (String, String, MemberSpec) {
+        self.snapshotting_from("amber")
+    }
+
+    fn snapshotting_from(&self, source_host: &str) -> (String, String, MemberSpec) {
         self.busy(false);
         let (token, old) = rollout::launched_member(&self.store, SUBJECT, "original-1")
             .unwrap()
@@ -353,7 +357,7 @@ impl Seat {
         // continuity and source-stop completion, not snapshot filesystem capture.
         self.suspension_claim(
             "runtime.action.succeeded",
-            json!({"action":"suspend","operation_status":"snapshotting","harness":"claude","native_session_id":"native-one","source_host":"amber"}),
+            json!({"action":"suspend","operation_status":"snapshotting","harness":"claude","native_session_id":"native-one","source_host":source_host}),
             vec![request.id.clone()],
             Some(crate::suspension::suspend_snapshot_key(&request.id)),
         );
@@ -372,7 +376,11 @@ impl Seat {
     }
 
     fn finish_suspend(&self) -> (String, String, MemberSpec) {
-        let captured = self.snapshotting();
+        self.finish_suspend_from("amber")
+    }
+
+    fn finish_suspend_from(&self, source_host: &str) -> (String, String, MemberSpec) {
+        let captured = self.snapshotting_from(source_host);
         self.reconcile();
         self.reconcile();
         assert_eq!(
@@ -1692,6 +1700,37 @@ fn suspended_non_launch_publications_preserve_hold_and_resume_updated_environmen
                 );
             }
         }
+    }
+}
+
+/// A suspended seat resumes from the transcript path its suspended incarnation bound, but only on
+/// the host that recorded it: a seat suspended on another host resumes by native ID from the
+/// inventory its snapshot restored here, since the bound path names the other host's file.
+#[test]
+fn a_moved_seat_resumes_by_native_id_without_the_source_hosts_transcript_path() {
+    for (source_host, carries_path) in [("amber", true), ("birch", false)] {
+        let seat = Seat::new_with_owned_publication(false);
+        seat.append(
+            "harness.session-file",
+            json!({"harness":"claude","session_id":"native-one","incarnation_id":"original-1",
+                   "agent":SUBJECT,"path":"/srv/amber/transcripts/native-one.jsonl"}),
+        );
+        let (operation, _, _) = seat.finish_suspend_from(source_host);
+        let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+        seat.suspension_claim(
+            "runtime.action.requested",
+            json!({"action":"resume"}),
+            vec![token, operation],
+            None,
+        );
+        seat.reconcile();
+        let started = seat.runtime.starts.lock().unwrap()[0].clone();
+        assert_eq!(started.environment[crate::suspension::RESUME_ENV], "native-one", "{source_host}");
+        assert_eq!(
+            started.environment.get(crate::rollout::RESUME_PATH_ENV).map(String::as_str),
+            carries_path.then_some("/srv/amber/transcripts/native-one.jsonl"),
+            "suspended on {source_host}"
+        );
     }
 }
 
