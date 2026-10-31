@@ -3,7 +3,7 @@
 //! Proves a tile's boundary on a real Linux host, with synthetic accounts.
 //!
 //! ```sh
-//! ST_TILES_ROOT_TEST=1 cargo test -p fractal --test integration tiles_root:: -- --nocapture
+//! ST_TILES_ROOT_TEST=1 cargo test -p st3 -p fractal --test integration tiles_root:: -- --nocapture
 //! ```
 //!
 //! It needs passwordless `sudo -n`, systemd as PID 1, cgroups v2 and `python3` on a Nix host,

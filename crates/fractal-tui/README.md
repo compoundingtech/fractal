@@ -42,7 +42,7 @@ and fresh fences; there is no offline mutation queue.
 
 Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
 with a running Fractal daemon. For source development, use
-`ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
+`ST3_PERSON=person/<your-id> cargo run -p st3 --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Inbox and devices show the right data.
 
@@ -125,9 +125,9 @@ Verification:
 
 ```sh
 cargo test -p fractal-tui --locked --lib
-cargo test -p fractal --locked --test integration typed_keys
-cargo test -p fractal --locked --test integration client_only
-cargo build -p fractal --locked
+cargo test -p st3 -p fractal --locked --test integration typed_keys
+cargo test -p st3 -p fractal --locked --test integration client_only
+cargo build -p st3 --locked
 ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
