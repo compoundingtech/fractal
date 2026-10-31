@@ -60,13 +60,16 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
     await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
     const run = (time: number) => queued.splice(0).forEach(callback => callback(time))
     const left = () => viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
-    if (queued.length > 0) {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      run(1000)
+      await expect(left(), 'reduced motion returns at once').toBeLessThanOrEqual(1)
+    } else {
       run(1000)
       run(1000 + motionNumbers.standard / 2)
-      await expect(left()).toBeGreaterThan(1)
+      await expect(left(), 'half way through the ease the lane has not landed').toBeGreaterThan(1)
       run(1000 + motionNumbers.standard)
+      await expect(left(), 'the ease lands at its duration').toBeLessThanOrEqual(1)
     }
-    await expect(left()).toBeLessThanOrEqual(1)
   } finally {
     window.requestAnimationFrame = realFrame
   }

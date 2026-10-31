@@ -182,11 +182,13 @@ try {
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
     await page.clock.runFor(offset - elapsed)
   }
-  // The pane's module is requested while the page loads, before any step below, so this wait has to
-  // start here. Its 10s default would run from this line through every replay step to the await, so it
-  // has no limit of its own: the script's 90-second deadline is the one bound on the whole run.
+  // The dev server builds the pane's module on its first request, and a loaded host can take longer
+  // than the 10s a response wait allows. Build it here, outside the wait, so the wait below sees
+  // the page's own request answered from a built module. The script's 90-second deadline bounds this.
+  await server.warmupRequest('/src/web/ConversationPane.tsx')
+  const paneRequestedAt = Date.now()
   const paneResponse = page.waitForResponse(response =>
-    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'), { timeout: 0 })
+    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   await roster.waitFor({ state: 'visible' })
   const replayStartedAt = await page.evaluate(() => Date.now())
@@ -207,6 +209,7 @@ try {
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
   await (await paneResponse).finished()
+  console.log(`pane module answered ${Date.now() - paneRequestedAt}ms after its wait began`)
   const pane = page.getByTestId('conversation-history-host')
   const transcript = page.getByTestId('transcript-scroll')
   while (!await pane.isVisible() || !await transcript.getByTestId('transcript-empty').isVisible()) {
