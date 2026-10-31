@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose strict Manifest v1 canonicalization and SHA-256 identity with shared valid/invalid golden vectors, including the pinned reveal text-node digest and zero-reader rotation pilot.",
+  "replay": {"status": "none", "detail": "No claims or replay changes."},
+  "schema": {"status": "none", "detail": "Shared manifest identity library and fixtures only; no registry or storage changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule changes."},
+  "compatibility": {"status": "none", "detail": "Additive canonicalization and digest APIs validate the exact transmitted document before hashing. No active route or writer changes."},
+  "downtime": {"status": "none", "detail": "No service changes."},
+  "manual": {"status": "none", "detail": "No operator steps."},
+  "recovery": {"status": "none", "detail": "Revert the library addition; no persisted state is changed."}
+}
