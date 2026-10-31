@@ -26,7 +26,6 @@ pub fn verify_rename_proof(
         _ => return Err(malformed("unknown identity kind")),
     };
     let history = verify_sealed_history(&bundle.envelopes, &bundle.fleet_id, fleet_anchor)?;
-    history.validate_rename_claims()?;
     let records = &history.records;
     let membership = &history.membership;
     let authentication = Authentication { records, membership };
@@ -41,6 +40,10 @@ pub fn verify_rename_proof(
         let record = records.get(id).ok_or_else(|| chain_error("missing previous revision"))?;
         if record.claim.kind != rename_kind || &record.claim.subject != storage_id { return Err(chain_error("cross-identity previous revision")); }
         authentication.require(id)?;
+        super::authentication::validate_rename_schema(&record.claim)?;
+        if !crate::naming::admits_replicated(&record.claim).map_err(|error| malformed(error.to_string()))? {
+            return Err(chain_error("naming claim disagrees with immutable runtime admission"));
+        }
         let fields = &record.claim.body["fields"];
         let request_actor = fields["request"]["actor"].as_str()
             .ok_or_else(|| chain_error("rename request has no actor"))?;
@@ -148,6 +151,11 @@ fn require_declaration(
     }
 }
 
+fn admitted_naming(claim: &crate::claim::ClaimRecord) -> bool {
+    crate::naming::admits_replicated(claim).unwrap_or(false)
+        && super::authentication::validate_rename_schema(claim).is_ok()
+}
+
 /// Only principal-authenticated facts can reserve names or fence another identity.
 fn naming_projection(authentication: &Authentication<'_>, bundle: &RenameProofBundle) -> crate::naming::Projection<()> {
     use crate::naming::{Fact, Head};
@@ -167,7 +175,9 @@ fn naming_projection(authentication: &Authentication<'_>, bundle: &RenameProofBu
     let mut operations = BTreeMap::<String, crate::operation_metadata::OperationMetadata>::new();
     for record in authentication.records.values() {
         let claim = &record.claim;
-        if !repaired.contains(claim.id.as_str()) && authentication.require(&claim.id).is_ok() {
+        if !repaired.contains(claim.id.as_str()) && authentication.require(&claim.id).is_ok()
+            && admitted_naming(claim)
+        {
             if let Some((operation, digest)) = crate::store::operation_parts(&claim.body) {
                 operations.entry(operation.into()).or_default().include(digest.into(), claim.id.clone(), true);
             }
@@ -191,7 +201,7 @@ fn naming_projection(authentication: &Authentication<'_>, bundle: &RenameProofBu
         let declaration_kind = match claim.kind.as_str() {
             "agent.renamed" => "intent.desired", "mission.renamed" => "mission.published", _ => continue,
         };
-        if authentication.require(&claim.id).is_err() { continue; }
+        if authentication.require(&claim.id).is_err() || !admitted_naming(claim) { continue; }
         let fields = &claim.body["fields"];
         let identity = &claim.subject;
         heads.entry(identity.clone()).or_insert_with(|| Head { kind: (), canonical: identity.clone(), revision: None, blocked: Some("pending-replication") });
@@ -215,3 +225,4 @@ fn naming_projection(authentication: &Authentication<'_>, bundle: &RenameProofBu
 #[cfg(test)]
 #[path = "rename_tests.rs"]
 mod tests;
+

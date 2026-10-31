@@ -199,3 +199,19 @@ fn authenticated_repair_excludes_replaced_naming_fact() {
         json!({"fields":{"record":reference,"replacement":replacement}}))]);
     assert!(verify_rename_proof(&bundle, key.public(), None).is_err());
 }
+
+#[test]
+fn signed_malformed_sibling_cannot_fence_valid_rename_or_its_operation() {
+    for key_name in ["malformed-sibling", "rename-example"] {
+        let (mut bundle, key) = fixture();
+        let mut body = rename_body("mission/example", "mission/example", "mission/requested", &bundle.declaration, None, key_name);
+        body["fields"]["to"] = json!("mission/different");
+        let sibling = append(&mut bundle, &key, vec![("mission/example", "mission.renamed", body)])[0].clone();
+        let history = verify_sealed_history(&bundle.envelopes, FLEET, key.public()).unwrap();
+        history.verify_claim(&sibling).unwrap();
+        assert!(!crate::naming::admits_replicated(history.claim(&sibling).unwrap()).unwrap());
+        assert!(verify_rename_proof(&bundle, key.public(), None).is_ok());
+        select(&mut bundle, &sibling, "mission/different", vec![sibling.clone()]);
+        assert!(verify_rename_proof(&bundle, key.public(), None).is_err());
+    }
+}
