@@ -5991,7 +5991,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     }).unwrap();
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
-        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
