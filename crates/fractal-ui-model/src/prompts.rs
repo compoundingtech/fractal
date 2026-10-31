@@ -322,10 +322,10 @@ pub fn prompt_form(harness: Harness, answers: &[String], prompt: &str, calls: &[
         .or_else(|| options.iter().position(|option| !option.refuses));
     let elsewhere = match (harness, kind) {
         (Harness::Claude, Kind::Permission | Kind::Plan) => {
-            Some("Claude's other choices are in its terminal (Ctrl+]).".into())
+            Some("Claude's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane).".into())
         }
         (Harness::Codex, Kind::Permission) => {
-            Some("Codex's other choices are in its terminal (Ctrl+]).".into())
+            Some("Codex's other choices are in its terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane).".into())
         }
         _ => None,
     };

@@ -1349,7 +1349,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             card.blank();
             card.wrap(
                 &text::inline(
-                    "One sign-in in the seat's terminal (Ctrl+]) fixes every seat; this clears when the next authenticated turn succeeds.",
+                    &format!("One sign-in in the seat's terminal ({}) fixes every seat; this clears when the next authenticated turn succeeds.", terminal_route()),
                     theme::dim(),
                 ),
                 inner,
@@ -1730,9 +1730,9 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
 /// state once the harness is signed in again, on the same run: no restart (Nathan, 2026-10-04).
 pub fn login_guidance(agent: &Agent) -> String {
     let how = match agent.harness {
-        Harness::Claude => "open its terminal (ctrl+]) and run /login".to_owned(),
+        Harness::Claude => format!("open its terminal ({}) and run /login", terminal_route()),
         Harness::Codex => format!("run `codex login` on {} (or in its terminal)", agent.host),
-        _ => "open its terminal (ctrl+]) and log it in".to_owned(),
+        _ => format!("open its terminal ({}) and log it in", terminal_route()),
     };
     let provider = match agent.harness {
         Harness::Claude => "Claude",
@@ -2724,6 +2724,21 @@ fn demo_banner(doc: &mut Doc, width: usize) {
 
 // ------------------------------------------------------------------ popovers
 
+/// The chord (with Ctrl) that opens an agent's actions menu from its conversation.
+pub const ACTIONS_CHORD: char = 'a';
+/// The actions menu's key for attaching the agent's terminal in its tab.
+pub const TERMINAL_ACTION: char = 't';
+
+/// How to get to an agent's terminal from where its conversation shows, said as the keys that
+/// do it: the actions menu, then its Terminal row. The Attach button lives only on a detached
+/// terminal pane, where Enter does the same.
+pub fn terminal_route() -> String {
+    format!(
+        "Ctrl+{} then {TERMINAL_ACTION} from the conversation",
+        ACTIONS_CHORD.to_ascii_uppercase()
+    )
+}
+
 /// The small card a clicked reference opens: enough to recognise the subject, and a way
 /// to go to it.
 /// One row of the agent actions menu: its key, what it says, and what it does.
@@ -2752,7 +2767,11 @@ pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
     if agent.terminal {
-        rows.push(row('t', "Terminal", "attach its terminal (ctrl+] too)"));
+        rows.push(row(
+            TERMINAL_ACTION,
+            "Terminal",
+            "attach its terminal in this tab",
+        ));
     }
     rows.push(row('d', "Details", "what it is doing and what is queued (ctrl+d too)"));
     rows.push(row('f', "Find", "find in its conversation (ctrl+f too)"));
