@@ -17,6 +17,8 @@ pub const SEAT_FRESHNESS_COALESCE: Duration = Duration::from_secs(10);
 pub const SEAT_FRESHNESS_ANSWER: Duration = Duration::from_secs(10);
 /// How soon a push that failed, or left a seat owed, is tried again, even with no new commit.
 const SEAT_FRESHNESS_RETRY: Duration = Duration::from_secs(60);
+/// How far ahead of this node's clock a pushed time may be.
+pub const SEAT_FRESHNESS_CLOCK_SKEW: Duration = Duration::from_secs(60);
 /// The longest wait between retries while seats stay owed.
 const SEAT_FRESHNESS_LONGEST_RETRY: Duration = Duration::from_secs(15 * 60);
 
@@ -37,11 +39,14 @@ pub async fn seat_freshness(
             .filter(|desired| desired.member.as_ref().is_some_and(|member| member.host == received.from))
             .map(|desired| desired.subject)
             .collect::<BTreeSet<_>>();
+        // A host's clock may run ahead: a time past this node's now plus a minute is taken as
+        // that, so a skewed clock cannot keep a seat looking fresh.
+        let latest = smallclaims::store::now_ms() + SEAT_FRESHNESS_CLOCK_SKEW.as_millis();
         let seats = received
             .seats
             .into_iter()
             .filter(|seat| hosted.contains(&seat.agent))
-            .map(|seat| (seat.agent, seat.incarnation_id, u128::from(seat.heard_at_unix_ms)))
+            .map(|seat| (seat.agent, seat.incarnation_id, u128::from(seat.heard_at_unix_ms).min(latest)))
             .collect::<Vec<_>>();
         let recorded = seats.iter().map(|(agent, _, _)| agent.clone()).collect();
         store.extension::<RelayedFreshness>().record(seats);
@@ -61,6 +66,30 @@ pub fn seat_freshness_start(store: &Store, member: &str) -> anyhow::Result<Optio
                 && claim.body.pointer(&format!("/fields/features/{SEAT_FRESHNESS_FEATURE}")).and_then(Value::as_u64) == Some(1)
         })
         .map(|claim| claim.id))
+}
+
+/// Whether every other member can hear this node's seats: each advertises the route, and this
+/// node is not a dial-out member, which no other member can dial back. Re-stamps then stay local.
+///
+/// An advertisement is not delivery: a member counts only once a push from this node reached it
+/// and it answered (`reached`, kept across rounds; a member with no direct route, such as a
+/// dial-out one, or with a worker that lacks the route, answers nothing and does not count).
+pub fn fleet_hears_seats(
+    store: &Store,
+    node: &str,
+    members: &[String],
+    dial_out: bool,
+    reached: &BTreeMap<String, bool>,
+) -> anyhow::Result<bool> {
+    if dial_out {
+        return Ok(false);
+    }
+    for member in members.iter().filter(|member| member.as_str() != node) {
+        if seat_freshness_start(store, member)?.is_none() || reached.get(member) != Some(&true) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Each seat's incarnation and the time it was heard, by seat.
@@ -85,6 +114,11 @@ pub struct SeatFreshnessRound {
     pub pushed: BTreeMap<String, usize>,
     pub failed: BTreeSet<String>,
     pub owed: BTreeSet<String>,
+    /// Members a push reached and that answered it, whatever they recorded.
+    pub reached: BTreeSet<String>,
+    /// Members no push can reach: no direct route (a dial-out member), or a worker without
+    /// the route.
+    pub unreachable: BTreeSet<String>,
 }
 
 /// One round: read this node's seats' newest local reports, and push each capable member what
@@ -182,12 +216,15 @@ pub async fn push_seat_freshness(
                 for seat in &seats {
                     to.seats.insert(seat.agent.clone(), (seat.incarnation_id.clone(), u128::from(seat.heard_at_unix_ms)));
                 }
+                round.reached.insert(member.clone());
                 if !seats.is_empty() {
                     round.pushed.insert(member, seats.len());
                 }
             }
             // Its advertisement was ahead of its build, or no route reaches it directly.
-            Ok(None) => {}
+            Ok(None) => {
+                round.unreachable.insert(member);
+            }
             Err(error) => {
                 eprintln!("st3: seat freshness to {member}: {error:#}");
                 round.failed.insert(member);
@@ -239,6 +276,10 @@ impl Default for SeatFreshnessPace {
 /// retried after [`SEAT_FRESHNESS_RETRY`] even with no new commit, then less often.
 pub fn start_seat_freshness_push(state: &AppState) {
     let Some(relay) = state.client_relay.clone() else {
+        // Not in a fleet: no other member reads this node's re-stamps.
+        if let Err(error) = state.store.set_fleet_hears_seats(true) {
+            eprintln!("st3: seat freshness: {error:#}");
+        }
         return;
     };
     spawn_seat_freshness_push(state.store.clone(), relay, state.node.clone(), SeatFreshnessPace::default());
@@ -254,6 +295,8 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
     tokio::spawn(crate::task_cpu::account("seat_freshness.push", async move {
         let _observer = observer;
         let mut pushed = SeatFreshnessPushed::default();
+        // Whether this node's last push to each member reached it.
+        let mut reached = BTreeMap::<String, bool>::new();
         let mut retry: Option<Duration> = None;
         // The first round needs no commit: what this node heard before it started is owed.
         let mut first = true;
@@ -271,12 +314,35 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
             tokio::time::sleep(pace.coalesce).await;
             let members = seat_freshness_members(&relay);
             let again = match push_seat_freshness(&store, &relay, &node, &members, &mut pushed, pace.answer).await {
-                Ok(round) => !round.failed.is_empty() || !round.owed.is_empty(),
+                Ok(round) => {
+                    for member in &round.reached {
+                        reached.insert(member.clone(), true);
+                    }
+                    // A member no push reaches, or whose push failed, cannot hear this node's seats
+                    // until a push reaches it again.
+                    for member in round.unreachable.iter().chain(&round.failed) {
+                        reached.insert(member.clone(), false);
+                    }
+                    !round.failed.is_empty() || !round.owed.is_empty()
+                }
                 Err(error) => {
                     eprintln!("st3: seat freshness push failed: {error:#}");
                     true
                 }
             };
+            // Membership, advertisements and starts arrive as commits too, so each round settles,
+            // from what its pushes reached, whether every other member can hear this node's seats.
+            let dial_out = relay.fleet_view().members.iter().any(|member| member.name == node && member.mode == "dial-out");
+            let flag = {
+                let (store, node, members, reached) = (Arc::clone(&store), node.clone(), members.clone(), reached.clone());
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    store.set_fleet_hears_seats(fleet_hears_seats(&store, &node, &members, dial_out, &reached)?)
+                })
+                .await
+            };
+            if let Err(error) = flag.map_err(anyhow::Error::from).and_then(|result| result) {
+                eprintln!("st3: seat freshness: {error:#}");
+            }
             retry = again.then(|| retry.map_or(pace.retry, |after| (after * 2).min(pace.longest_retry)));
         }
     }));
