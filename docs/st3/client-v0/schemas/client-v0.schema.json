@@ -2058,7 +2058,7 @@
     "ActionRequest": {
       "allOf": [{ "$ref": "#/$defs/ActionCommon" }],
       "oneOf": [
-        {"properties": {"type": {"const": "harness.answer"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}}},
+        {"properties": {"type": {"const": "harness.answer"}, "id": {"allOf": [{"$ref": "#/$defs/Id"}, {"maxLength": 256}], "description": "The retained harness receipt limits the action ID to 256 UTF-8 bytes."}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}}},
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},

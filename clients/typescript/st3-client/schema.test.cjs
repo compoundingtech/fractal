@@ -26,6 +26,10 @@ test('harness questions and answers round-trip only ids, positions, and resoluti
     const decodeAction = Rich.decodeUnknownSync(Rich.ActionRequest, 'strict');
     assert.deepEqual(Schema.encodeSync(Rich.ActionRequest)(decodeAction(action)), action);
     assert.throws(() => decodeAction({ ...action, fence: { snapshot_id: 'snapshot/tester', subject_revisions: {} } }));
+    const maximumActionId = `action/${'a'.repeat(249)}`;
+    assert.deepEqual(Schema.encodeSync(Rich.ActionRequest)(decodeAction({ ...action, id: maximumActionId })),
+        { ...action, id: maximumActionId });
+    assert.throws(() => decodeAction({ ...action, id: `${maximumActionId}a` }));
     for (const invalid of [
         { positions: [4294967296] }, { positions: [-1] }, { positions: [0.5] },
         { positions: [0], note: '' }, { positions: [0], other: '' },

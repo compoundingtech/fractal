@@ -67,8 +67,10 @@ without question text, option labels or the internal receipt. The web view joins
 timeline. Each resource has `answer.state` and, when unavailable, a typed reason:
 `adapter_missing`, `adapter_unavailable` or `resolved`.
 
-`harness.answer` takes `{question, answers}`, where `answers` maps question ids to
-`{positions: [0, 2]}`. Positions are zero-based. No text, Other value or note is accepted.
+`harness.answer` takes `{question, answers}`, where `answers` maps opaque native question ids to
+`{positions: [0, 2]}`. Positions are zero-based. An id such as `actor` is question data, never an
+identity selector; actor and credential fields outside that map remain forbidden. No text, Other
+value or note is accepted. The action id is at most 256 UTF-8 bytes, checked before native settlement.
 The action requires `terminal.control` and the authenticated person's authority over the
 agent's live runtime. Every agent actor is refused, including agents in Unix free mode.
 
@@ -79,10 +81,12 @@ changed question or restarted runtime.
 
 An accepted answer returns `harness_answer.status: accepted` and the resolution, including the
 harness's native `timed_out` for every answer. An identical retry uses the same action id,
-idempotency key and parameters. Reusing a key with another action id or different parameters
-returns `idempotency-conflict`. An unknown key is new; a new key for a resolved question returns
-`already_resolved` before adapter availability or answer validation. Receipts live only inside
-the resolution claim and expire with it, not in the generic action receipt store.
+idempotency key and parameters. Reusing an actor's retained key with another action id or different
+parameters returns `idempotency-conflict`, including reuse across harness answers and generic
+actions in either direction. Both paths inspect both retained receipt stores before dispatch.
+An unknown key is new; a new key for a resolved question returns `already_resolved` before adapter
+availability or answer validation. Harness receipts live only inside the resolution claim and
+expire with it, not in the generic action receipt store. No tombstone is retained.
 
 Invalid answers return `invalid-answer` with typed `details.reason`: `unknown_option`,
 `too_many`, `required_missing`, `empty_single`, `too_long`, `unknown_question`,

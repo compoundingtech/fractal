@@ -10178,18 +10178,34 @@ async fn import_external_session_action(
     Ok(vec![external.id, import.subject])
 }
 
+fn is_identity_selector(key: &str) -> bool {
+    matches!(key, "actor" | "credential" | "fleet_secret" | "shared_secret")
+}
+
 fn contains_identity_selector(value: &Value) -> bool {
     match value {
         Value::Object(object) => object.iter().any(|(key, value)| {
-            matches!(
-                key.as_str(),
-                "actor" | "credential" | "fleet_secret" | "shared_secret"
-            ) || contains_identity_selector(value)
+            is_identity_selector(key) || contains_identity_selector(value)
         }),
         Value::Array(values) => values.iter().any(contains_identity_selector),
         _ => false,
     }
 }
+fn action_parameters_select_identity(request: &ActionRequest) -> bool {
+    if request.action_type == "harness.answer"
+        && let Some(parameters) = request.parameters.as_object()
+    {
+        return parameters.iter().any(|(key, value)| {
+            if key == "answers" && let Some(answers) = value.as_object() {
+                // Native question IDs are opaque data, not authority selectors.
+                return answers.values().any(contains_identity_selector);
+            }
+            is_identity_selector(key) || contains_identity_selector(value)
+        });
+    }
+    contains_identity_selector(&request.parameters)
+}
+
 
 fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<(), ApiError> {
     let target = client_detail_id("step-run", target);
@@ -11680,6 +11696,51 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         serde_json::to_vec(&content).map_err(ApiError::internal)?,
     )))
 }
+/// Both action paths share the actor/key gate and inspect both retained receipt stores.
+/// Harness receipts remain solely on their resolutions and expire with the question.
+fn retained_action_receipt(
+    state: &AppState,
+    session: &ClientSession,
+    request: &ActionRequest,
+    request_digest: &str,
+    actor_key: &str,
+) -> Result<(String, Option<ClaimRecord>), ApiError> {
+    let receipt_digest = hex::encode(Sha256::digest(
+        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
+    ));
+    let subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    let receipt = state.store.claims_for(&subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.pop();
+    if receipt.as_ref().is_some_and(|receipt| {
+        receipt.body.pointer("/fields/request_digest").and_then(Value::as_str) != Some(request_digest)
+    }) {
+        return Err(action_idempotency_conflict());
+    }
+    let resolved = state.store.status_for_claim_kind_at(
+        st3_schema::harness_questions::RESOLVED, None, false,
+    ).map_err(ApiError::internal)?;
+    let now = client_now_ms();
+    for subject in resolved.subjects {
+        if let Some(question) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)?
+            && let Some(receipt) = question.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
+            && receipt.actor_key == actor_key
+            && receipt.request_digest != request_digest
+        {
+            return Err(action_idempotency_conflict());
+        }
+    }
+    Ok((subject, receipt))
+}
+
+fn action_idempotency_conflict() -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "idempotency-conflict".into(),
+        message: "the idempotency key was already used for a different action".into(),
+        details: Box::default(),
+    }
+}
+
 
 fn validate_action_admission(
     session: &ClientSession,
@@ -11688,12 +11749,13 @@ fn validate_action_admission(
     if request.api_version != CLIENT_API_VERSION
         || !request.id.starts_with("action/")
         || !(16..=256).contains(&request.idempotency_key.len())
+        || (request.action_type == "harness.answer" && request.id.len() > 256)
     {
         return Err(validation(
             "the action version, ID, or idempotency key is invalid",
         ));
     }
-    if contains_identity_selector(&request.parameters) {
+    if action_parameters_select_identity(request) {
         return Err(validation(
             "client actions cannot select an actor, credential, or fleet secret",
         ));
@@ -11848,28 +11910,10 @@ async fn action_inner(
         None => gate.lock_owned().await,
     };
     let request_digest = action_request_digest(&request)?;
-    let receipt_digest = hex::encode(Sha256::digest(
-        format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
-    ));
-    let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
-    if let Some(receipt) = state
-        .store
-        .claims_for(&receipt_subject, Some("custom.client.action-result"))
-        .map_err(ApiError::internal)?
-        .last()
-    {
-        let old_digest = receipt
-            .body
-            .pointer("/fields/request_digest")
-            .and_then(Value::as_str);
-        if old_digest != Some(request_digest.as_str()) {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "idempotency-conflict".into(),
-                message: "the idempotency key was already used for a different action".into(),
-                details: Box::default(),
-            });
-        }
+    let actor_key = st3_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
+    let (receipt_subject, receipt) =
+        retained_action_receipt(&state, &session, &request, &request_digest, &actor_key)?;
+    if let Some(receipt) = receipt {
         let mut result = receipt
             .body
             .pointer("/fields/result")

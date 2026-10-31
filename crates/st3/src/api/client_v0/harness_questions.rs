@@ -149,6 +149,9 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     let mut provenance = request.fence.clone();
     provenance.subject_revisions.clear();
     validate_fence(state, &provenance)?;
+    let digest = action_request_digest(request)?;
+    let actor_key = st3_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
+    retained_action_receipt(state, session, request, &digest, &actor_key)?;
     let id = parameter_string(&request.parameters, "question")?;
     // Serialize different people and different keys settling the same native call as well.
     let mut owner = session.clone();
@@ -157,28 +160,8 @@ pub(super) async fn answer(state: &AppState, session: &ClientSession, request: &
     let _question_guard = question_gate.lock_owned().await;
     let question = held(state, &id)?;
     live_input_session(state, &question.agent, &question.runtime_incarnation)?;
-    let digest = action_request_digest(request)?;
-    let actor_key = st3_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
-    // Receipts live only on retained resolutions. Reusing this actor's key for a different
-    // question is a conflict too; expiry removes the receipt together with its question.
-    let resolved = state.store.status_for_claim_kind_at(st3_schema::harness_questions::RESOLVED, None, false)
-        .map_err(ApiError::internal)?;
-    let now = client_now_ms();
-    for subject in resolved.subjects {
-        if subject.subject == id { continue; }
-        if let Some(other) = state.store.harness_question(&subject.subject, now).map_err(ApiError::internal)?
-            && other.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
-                .is_some_and(|receipt| receipt.actor_key == actor_key) {
-            return Err(ApiError { status: StatusCode::CONFLICT, code:"idempotency-conflict".into(),
-                message:"the idempotency key already settled a different question".into(), details:Box::default() });
-        }
-    }
-    if let Some(receipt) = question.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
-        .filter(|receipt| receipt.actor_key == actor_key) {
-        if receipt.request_digest != digest {
-            return Err(ApiError { status: StatusCode::CONFLICT, code: "idempotency-conflict".into(),
-                message: "the idempotency key was already used for a different action".into(), details: Box::default() });
-        }
+    if question.resolution.as_ref().and_then(|resolution| resolution.receipt.as_ref())
+        .is_some_and(|receipt| receipt.actor_key == actor_key) {
         return Ok(result(state, request, &question, "accepted", &digest));
     }
     if request.fence.runtime_incarnation.as_deref() != Some(question.runtime_incarnation.as_str()) {
@@ -260,6 +243,89 @@ mod tests {
     async fn invoke(state: &AppState, session: &ClientSession, request: &ActionRequest) -> Result<Json<Value>, ApiError> {
         action_inner(State(state.clone()), Extension(new_client_snapshot(state)), Extension(session.clone()), Json(request.clone()), None).await
     }
+    #[tokio::test]
+    async fn oversized_receipt_action_ids_refuse_before_settlement() {
+        let (_root, mut state, session, question, mut request) = fixture();
+        let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+        state.harness_question_sink = Some(sink.clone());
+        let before = state.store.index().unwrap();
+        for suffix in ["a".repeat(250), "é".repeat(125)] {
+            request.id = format!("action/{suffix}");
+            assert_eq!(request.id.len(), 257);
+            assert_eq!(invoke(&state, &session, &request).await.unwrap_err().code, "validation-failed");
+            assert_eq!(state.store.index().unwrap(), before);
+            assert!(held(&state, &question.id).unwrap().resolution.is_none());
+            assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+        }
+        request.id = format!("action/{}", "a".repeat(249));
+        assert_eq!(request.id.len(), 256);
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
+        let accepted = state.store.index().unwrap();
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
+        assert_eq!(state.store.index().unwrap(), accepted);
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn opaque_question_ids_are_not_identity_selectors() {
+        let (_root, mut state, session, _question, mut request) = fixture();
+        let ids = ["actor", "credential", "fleet_secret", "shared_secret"];
+        let question = state.store.observe_harness_question(&QuestionObservation {
+            agent:"agent/ada".into(), session:"tester".into(), native_id:"operator".into(), runtime_incarnation:"tester".into(),
+            questions:ids.iter().map(|id| Question { id:(*id).into(), options:2, multi:false, required:true }).collect(),
+        }).unwrap();
+        request.parameters = json!({"question":question.id, "answers":ids.iter()
+            .map(|id| ((*id).to_owned(), json!({"positions":[1]}))).collect::<BTreeMap<_, _>>()});
+        request.fence.snapshot_id = new_client_snapshot(&state).id;
+        request.fence.subject_revisions = BTreeMap::from([(question.id.clone(), question.revision.clone())]);
+        let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+        state.harness_question_sink = Some(sink.clone());
+        let before = state.store.index().unwrap();
+        for key in ids {
+            let mut invalid = request.clone();
+            invalid.parameters[key] = json!("person/alex");
+            assert_eq!(invoke(&state, &session, &invalid).await.unwrap_err().code, "validation-failed");
+            let mut invalid = request.clone();
+            invalid.parameters["answers"]["actor"][key] = json!("person/alex");
+            assert_eq!(invoke(&state, &session, &invalid).await.unwrap_err().code, "validation-failed");
+        }
+        assert_eq!(state.store.index().unwrap(), before);
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
+        assert_eq!(sink.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retained_keys_conflict_across_generic_and_harness_receipts_in_both_orders() {
+        for harness_first in [false, true] {
+            let (_root, mut state, _session, _question, request) = fixture();
+            let session = ClientSession::for_tests_scoped("person/alex", "person/alex",
+                &["terminal.control", "read.projections", "control.arrangements"]);
+            let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+            state.harness_question_sink = Some(sink.clone());
+            let arrangement = "arrangement/person/alex/019a0000-0000-7000-8000-000000000001";
+            let generic = ActionRequest {
+                api_version:CLIENT_API_VERSION.into(), id:"action/operator".into(),
+                action_type:"arrangement.edit".into(), idempotency_key:request.idempotency_key.clone(),
+                fence:Fence { snapshot_id:new_client_snapshot(&state).id, ..Fence::default() },
+                parameters:json!({"subject":arrangement,"owner":"person/alex","operations":[{"op":"create","name":"Sidebar"}]}),
+            };
+            let (first, second) = if harness_first { (&request, &generic) } else { (&generic, &request) };
+            let accepted = invoke(&state, &session, first).await.unwrap().0;
+            let before = state.store.index().unwrap();
+            assert_eq!(invoke(&state, &session, second).await.unwrap_err().code, "idempotency-conflict");
+            assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(sink.calls.load(Ordering::SeqCst), usize::from(harness_first));
+            assert_eq!(invoke(&state, &session, first).await.unwrap().0["operation_id"], accepted["operation_id"]);
+            assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(sink.calls.load(Ordering::SeqCst), usize::from(harness_first));
+            assert_eq!(held(&state, request.parameters["question"].as_str().unwrap()).unwrap().resolution.is_some(), harness_first);
+            if harness_first {
+                assert!(state.store.claims_for(arrangement, Some("arrangement.edited")).unwrap().is_empty());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn harness_answer_without_adapter_is_unavailable_and_writes_nothing() {
         let (_root, state, session, question, request) = fixture();

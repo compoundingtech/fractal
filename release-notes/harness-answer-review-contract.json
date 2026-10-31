@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Refuse oversized harness answer action IDs before native settlement, accept opaque question IDs, and detect retained idempotency conflicts across harness and generic actions",
+  "replay": {"status": "none", "detail": "No replay or projection rebuild."},
+  "schema": {"status": "none", "detail": "No database, claim schema, receipt format or retention change."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordination rule changes."},
+  "compatibility": {"status": "changed", "detail": "The harness.answer action ID is limited to 256 UTF-8 bytes before settlement. Native question IDs remain opaque, including actor and credential. Reusing an actor's retained key for a different action conflicts across both existing receipt stores; harness receipts remain resolution-only and expire with the question, without tombstones."},
+  "downtime": {"status": "none", "detail": "Ordinary daemon deployment only."},
+  "manual": {"status": "none", "detail": "No adapter wiring or operator action."},
+  "recovery": {"status": "none", "detail": "Exact accepted retries still replay their retained receipt. An unknown key remains new and a new key after resolution returns already_resolved."}
+}
