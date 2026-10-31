@@ -146,21 +146,34 @@ the plugin store, and 2 from step 3b, which also takes typed relayed reads.
 
 ### Compact mode
 
-Per repository, the poller stops writing `resource.observed` snapshots of its pull requests and
-issues, and records each item's change as `vcs.item.state` alone, while both of these hold:
+Per repository, the poller records a change confined to compact facts as `vcs.item.state` alone,
+with no `resource.observed` snapshot, while both of these hold:
 
 1. **Its mirror is filled.** Each look is then compared with, and merged into, the mirror's facts
-   for each item instead of the graph's. The mirror keeps what compact mode no longer records,
-   such as recent comments, so a comment already delivered is not delivered again.
-2. **Every member that depends on the repository's full item facts advertises the plugin.**
-   These are:
-   - the host of each seat that watches the repository;
-   - each member that declared a subscription on one of its observers;
-   - each member running a mission run with an input pinned to one of its items.
+   for each item instead of the graph's.
+2. **Every current member of the fleet advertises the plugin.** This fails closed. A member of an
+   older build, a held one included, keeps snapshots on for every repository until it upgrades,
+   so no member's view of a repository's items is ever frozen. The poller decides it again on
+   every look, and logs each switch, on or off, with the member that holds snapshots on.
 
-The poller decides this again on every look, so a dependent of an older build turns snapshots
-back on at the next look, and its readers keep reading full facts. Outside compact mode the
-poller writes the snapshot and, on change, the compact state beside it.
+**What compact mode skips.** It skips the snapshot of a change confined to compact facts, and of
+changes to facts no wake or delivery reads, such as the per-check list, title and labels. In
+practice these are check states, heads, drafts and queue positions.
+
+**What still gets a full snapshot.** A change to any of these, so the graph stays exact for
+every fact a wake or a delivery reads:
+- a new item;
+- comments, `last_comment`, mentions, reactions and reviews;
+- `required_checks.execution`.
+
+Outside compact mode the poller writes the snapshot and, on change, the compact state beside it.
+
+**After a move.** When polling moves to a member without a filled mirror, or a mirror is lost,
+the new poller's first look compares each item whose newest record is compact-only on its
+compact and delivery facts, which the graph holds exactly. It takes the facts that drifted as a
+baseline, so it delivers nothing twice. Until the next snapshot, the graph's copies of those
+drifted facts, such as the title or per-check list, can be behind; `/v1/plugins/github/*` has
+them.
 
 In compact mode a delivered item always has a compact state to pin. Mission discovery pins it,
 and the readers of a pinned or discovered claim read a `vcs.item.state` as an observation whose
