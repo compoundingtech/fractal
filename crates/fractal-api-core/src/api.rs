@@ -7113,6 +7113,7 @@ pub async fn guard_bound_request(
         "/v1/rules/",
         "/v1/repair",
         "/v1/signatures/",
+        "/v1/checkpoint/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
