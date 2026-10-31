@@ -1441,15 +1441,16 @@ with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only i
 sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
 drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed` and `harness.observed`. Everything else is kept, as a protected claim is.
+and the trimmed log: today `observer.observed`, `harness.observed` and `resource.observed`. Everything
+else is kept, as a protected claim is.
 An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
 fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
 raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
 admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
-envelopes atomic. One audited
-rule stays out because a reader reads the history it drops, which no projection digest covers:
-`resource.observed`'s keeps only the newest observation of a GitHub pull request, and a watch walks
-those observations back to find when the pull request left the merge queue. `harness.observed`
+envelopes atomic. `resource.observed` keeps what its readers walk back through (rules version
+23), such as a pull request's observations back to the newest one outside "open and out of the
+merge queue", which the idle nudge walks to find when it left the queue; the test compares that
+walk, the folded state and the projection between the full and the trimmed log. `harness.observed`
 joined once its rule kept the credential report where a seat's needs-login run begins (rules
 version 24, see #4237). Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything
