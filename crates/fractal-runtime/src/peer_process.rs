@@ -11,7 +11,7 @@ use std::{os::fd::AsRawFd as _, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct PeerProcessIdentity {
     pid: u32,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     start_token: u64,
     #[cfg(target_os = "linux")]
     pidfd: Arc<OwnedFd>,
@@ -45,6 +45,28 @@ impl PeerProcessIdentity {
         self.pid
     }
 
+    /// Pin a process explicitly enrolled by the trusted launcher before listening.
+    pub fn capture_pid(pid: u32) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd as _;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            anyhow::ensure!(fd >= 0, "cannot pin enrolled worker: {}", std::io::Error::last_os_error());
+            Self::capture(pid, unsafe { OwnedFd::from_raw_fd(fd as i32) })
+        }
+        #[cfg(target_os = "macos")]
+        { Self::capture_native(pid) }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        { let _ = pid; anyhow::bail!("worker process witnesses unavailable") }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn capture_native(pid: u32) -> Result<Self> {
+        let identity = Self { pid, start_token: native_start_token(pid)? };
+        identity.validate()?;
+        Ok(identity)
+    }
+
     /// Refuse exited connectors and numeric PID reuse, even if their socket survives.
     pub fn validate(&self) -> Result<()> {
         #[cfg(target_os = "linux")]
@@ -71,9 +93,32 @@ impl PeerProcessIdentity {
             anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector exited during validation");
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            anyhow::ensure!(native_start_token(self.pid)? == self.start_token,
+                "socket connector exited or its PID was reused");
+            Ok(())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
     }
+}
+
+#[cfg(target_os = "macos")]
+fn native_start_token(pid: u32) -> Result<u64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskallinfo>::uninit();
+    let size = std::mem::size_of_val(&info);
+    let count = unsafe {
+        libc::proc_pidinfo(i32::try_from(pid)?, libc::PROC_PIDTASKALLINFO, 0,
+            info.as_mut_ptr().cast(), size as i32)
+    };
+    anyhow::ensure!(count == size as i32, "cannot observe socket connector generation");
+    let info = unsafe { info.assume_init() }.pbsd;
+    anyhow::ensure!(info.pbi_pid == pid && info.pbi_status != 5,
+        "socket connector has exited");
+    info.pbi_start_tvsec.checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(info.pbi_start_tvusec))
+        .ok_or_else(|| anyhow::anyhow!("process generation overflow"))
 }
 
 #[cfg(all(test, target_os = "linux"))]

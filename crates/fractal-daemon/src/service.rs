@@ -1207,6 +1207,43 @@ WantedBy=default.target\n",
     )
 }
 
+/// Observe the worker through its supervisor, never through caller-supplied argv.
+pub(crate) fn replication_worker_pid() -> Result<u32> {
+    let service = lookup::native()?.replication;
+    #[cfg(target_os = "linux")]
+    let output = host_command("systemctl")
+        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
+        .output()?;
+    #[cfg(target_os = "macos")]
+    let output = host_command("launchctl")
+        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
+        .output()?;
+    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+    let text = std::str::from_utf8(&output.stdout)?;
+    #[cfg(target_os = "linux")]
+    let pid = text.trim().parse::<u32>()?;
+    #[cfg(target_os = "macos")]
+    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+        .context("replication worker has no supervised PID")?.parse::<u32>()?;
+    anyhow::ensure!(pid != 0, "replication worker is not running");
+    Ok(pid)
+}
+
+pub(crate) fn daemon_is_service_managed() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // Inspect kernel cgroup placement, not caller-controlled service environment variables.
+        let groups = fs::read_to_string("/proc/self/cgroup")?;
+        Ok(groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
+            .any(|path| path.trim_end_matches('/').ends_with(".service")))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // launchd directly owns the daemon; a reparented foreground process also fails closed.
+        Ok(unsafe { libc::getppid() } == 1)
+    }
+}
+
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
     render_launchd_plist_for_label(spec, service_label())
 }
