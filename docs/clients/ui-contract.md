@@ -271,6 +271,9 @@ Rows show the content title and space name. On every terminal type, Ctrl+^
 Ctrl+\ then r opens it even over an attached program. Enter opens the selected destination
 in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
 flips between the last two places. Direct Ctrl+^ reaches attached programs unchanged.
+While the popup is open, pasted text filters its rows and mouse input never reaches the
+underlying terminal. The child loses input focus until the popup closes. The selected
+destination remains visible even at the minimum supported viewport.
 
 
 
