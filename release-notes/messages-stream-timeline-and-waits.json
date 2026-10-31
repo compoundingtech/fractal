@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "Rolling back to the previous release is safe: earlier builds ignore the shard and its tables, and no graph claim was written. A conversation follower holding a cursor from this build reloads the conversation once."
+    "detail": "Rolling back to the previous release is safe: earlier builds ignore the shard and its tables, and no graph claim was written. A conversation follower holding a cursor from this build reloads the conversation once. After rolling back and then forward again, stream items admitted while the older build ran are recorded at the graph index of the first read after the re-upgrade: they sort late in the timeline, and none is lost."
   }
 }
