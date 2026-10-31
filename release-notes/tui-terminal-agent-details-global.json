@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Agent terminals show a 36-column details sidebar when the pane is at least 120 columns wide, using the existing device-local visibility preference.",
+  "replay": {"status": "none", "detail": "No replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "Uses the existing TUI-local agent_details preference. No shared schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
+  "compatibility": {"status": "changed", "detail": "PTY fits the remaining pane and can narrow the shared grid for other attached writable viewers. Terminal passthrough keys are unchanged unless details explicitly have focus."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "Conversation Ctrl+D and terminal leader i toggle the shared preference. Leader d or click focuses terminal details; Esc or Tab returns to passthrough."},
+  "recovery": {"status": "none", "detail": "Older clients ignore the additive local preference field."}
+}

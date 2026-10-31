@@ -4435,7 +4435,7 @@ impl Ui {
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
-    const LEADER_KEYS: [(&'static str, &'static str); 16] = [
+    const LEADER_KEYS: [(&'static str, &'static str); 18] = [
         ("\\", "close this tab"),
         ("c", "the conversation (leave the terminal)"),
         ("t", "a new tab"),
@@ -4446,6 +4446,8 @@ impl Ui {
         ("[ ]", "back, forward in place history"),
         ("o", "zoom the split, and back"),
         ("s", "show or hide the sidebar"),
+        ("d", "focus agent details (Esc returns to terminal)"),
+        ("i", "show or hide agent details"),
         ("g", "another space, or a new one"),
         ("h", "Home"),
         ("k", "the palette"),
@@ -4483,6 +4485,19 @@ impl Ui {
                 'x' => self.split_group(Side::Below),
                 'k' => self.open_palette(None, Open::Here),
                 's' => self.toggle_sidebar(),
+                'd' => {
+                    let key = self.focused_pane().and_then(|pane| match pane {
+                        Pane::Terminal(agent) => Some(format!("details:{agent}")),
+                        _ => None,
+                    });
+                    self.terminal_details_focused = key.is_some_and(|key| {
+                        self.frame.borrow().panes.iter().any(|pane| pane.key == key)
+                    });
+                    if !self.terminal_details_focused {
+                        self.flash("Agent details need a pane at least 120 columns wide");
+                    }
+                }
+                'i' => self.toggle_details(),
                 'g' => self.open_glasses_palette(),
                 'h' => self.open_home(),
                 'o' => {
@@ -5065,6 +5080,100 @@ mod tests {
         let mut ui = Ui::new(demo::test_world());
         ui.glasses.sidebar.shown = false;
         ui
+    }
+
+    fn terminal_details_fixture() -> Ui {
+        let mut ui = glass();
+        let agent = "agent/example/atlas/builder";
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.attach_terminal(agent);
+        ui.open_in_glass(Pane::Terminal(agent.into()), Open::Here);
+        let view = ui.terminal.as_mut().unwrap();
+        view.lines = vec![
+            Line::from("Claude Code · prototype terminal fixture"),
+            Line::from("Working on the assigned step…"),
+            Line::from("> passthrough input stays with the program"),
+        ];
+        view.stale = None;
+        ui.effects.clear();
+        ui
+    }
+
+    #[test]
+    fn terminal_details_captures_and_focus_keep_passthrough_isolated() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let agent = "agent/example/atlas/builder";
+        for width in [100, 140, 200] {
+            let mut ui = terminal_details_fixture();
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            for hidden in [true, false] {
+                ui.agent_details = !hidden;
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+                let has_details = ui.frame.borrow().panes.iter()
+                    .any(|pane| pane.key == format!("details:{agent}"));
+                assert_eq!(has_details, !hidden && width >= 120);
+            }
+            ctrl(&mut ui, '\\');
+            press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE);
+            assert_eq!(ui.terminal_details_focused, width >= 120);
+            ui.effects.clear();
+            if width >= 120 {
+                press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
+                press(&mut ui, KeyCode::Char('z'), KeyModifiers::NONE);
+                assert!(ui.effects.is_empty(), "details keys never reach the program");
+                ui.paste("must not reach the program or conversation".into());
+                assert!(ui.effects.is_empty());
+                assert!(ui.input_terminal().is_none());
+                press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+                assert!(!ui.terminal_details_focused);
+                assert!(ui.input_terminal().is_some());
+            }
+            press(&mut ui, KeyCode::Char('z'), KeyModifiers::NONE);
+            assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if key.code == KeyCode::Char('z')));
+            for (code, modifiers) in [
+                (KeyCode::Tab, KeyModifiers::NONE),
+                (KeyCode::Esc, KeyModifiers::NONE),
+                (KeyCode::Down, KeyModifiers::NONE),
+                (KeyCode::Char('a'), KeyModifiers::CONTROL),
+            ] {
+                ui.effects.clear();
+                press(&mut ui, code, modifiers);
+                assert!(matches!(ui.effects.last(), Some(Effect::TerminalKey(key)) if key.code == code && key.modifiers == modifiers));
+            }
+            if width >= 120 {
+                let details = ui.frame.borrow().panes.iter()
+                    .find(|pane| pane.key == format!("details:{agent}")).unwrap().rect;
+                mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), details.x, details.y);
+                assert!(ui.terminal_details_focused);
+                ctrl(&mut ui, '\\');
+                press(&mut ui, KeyCode::Char('i'), KeyModifiers::NONE);
+                assert!(!ui.agent_details);
+                assert!(!ui.terminal_details_focused);
+                terminal.draw(|frame| ui.render(frame)).unwrap();
+                assert!(!ui.frame.borrow().panes.iter().any(|pane| pane.key.starts_with("details:")));
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_details_native_geometry_uses_only_the_program_pane() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use std::os::unix::net::UnixStream;
+        // The space contributes a one-column border on either side of its pane.
+        for (width, expected) in [(100, 98), (140, 100), (200, 160)] {
+            let mut ui = terminal_details_fixture();
+            let (client, _peer) = UnixStream::pair().unwrap();
+            ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
+                client, "agent/example/atlas/builder", "one".into(), 24, 80,
+            ));
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            assert_eq!(ui.terminal_size.get().1, expected);
+            let body = ui.terminal_body.get().unwrap();
+            assert_eq!(body.width, expected);
+            assert!(ui.frame.borrow().panes.iter().filter(|pane| pane.key.starts_with("details:"))
+                .all(|pane| pane.rect.x >= body.right()));
+        }
     }
 
     fn press(ui: &mut Ui, code: KeyCode, modifiers: KeyModifiers) {
@@ -6819,6 +6928,9 @@ mod tests {
         assert!(!ui.agent_details);
         ui.open_in_glass(Pane::Agent(Some("agent/example/cos".into())), Open::Tab);
         assert!(!ui.agent_details);
+        ctrl(&mut ui, '\\');
+        press(&mut ui, KeyCode::Char('i'), KeyModifiers::NONE);
+        assert!(ui.agent_details, "the leader and conversation share one choice");
         // Ctrl+P is the simplified view and Ctrl+E opens the tool calls, on a Mac too.
         ui.open_in_glass(Pane::Agent(Some(atlas.clone())), Open::Here);
         let simple = ui.simple;

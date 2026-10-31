@@ -542,6 +542,8 @@ pub struct Ui {
     pub(crate) terminal_size: Cell<(u16, u16)>,
     /// Where the attached terminal's screen was last drawn, for its mouse.
     terminal_body: Cell<Option<Rect>>,
+    /// Leader+d gives the agent details the keys; Escape/Tab returns to passthrough.
+    terminal_details_focused: bool,
     /// Where the attached terminal's cursor is on screen and its shape, when the terminal has
     /// the keys: the person's own cursor shows it.
     terminal_cursor: Cell<Option<pty::Cursor>>,
@@ -852,6 +854,7 @@ impl Ui {
             cursor: edit::Cursor::default(),
             terminal_size: Cell::new((24, 80)),
             terminal_body: Cell::new(None),
+            terminal_details_focused: false,
             terminal_cursor: Cell::new(None),
             terminal_selecting: false,
             terminal_selection_mode: false,
@@ -1245,6 +1248,7 @@ impl Ui {
     /// One device-local visibility choice for every agent and both views.
     fn toggle_details(&mut self) {
         self.agent_details = !self.agent_details;
+        self.terminal_details_focused = false;
         self.save_prefs();
     }
 
@@ -1500,6 +1504,9 @@ impl Ui {
     pub fn paste(&mut self, text: String) {
         // The recent popup is modal over an attached program: a paste filters it instead.
         if self.recent_paste(&text) {
+            return;
+        }
+        if self.terminal_details_have_focus() && !self.palette_open() {
             return;
         }
         if self.terminal_focused()
@@ -2584,38 +2591,7 @@ impl Ui {
             return;
         };
         let narrow = area.width < 90;
-        let details = self.agent_details;
-        let area = if details && !agent.unmanaged && area.width >= 90 {
-            let side = (area.width / 3).clamp(30, 44);
-            let pane = Rect {
-                x: area.x + area.width - side,
-                width: side,
-                ..area
-            };
-            for y in area.y..area.y + area.height {
-                buf[(pane.x - 1, y)]
-                    .set_symbol("│")
-                    .set_style(Style::default().fg(theme::SURFACE0).bg(theme::BASE));
-            }
-            let doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner());
-            self.pane(
-                buf,
-                &format!("details:{}", agent.id),
-                Rect {
-                    x: pane.x + 1,
-                    width: side - 1,
-                    ..pane
-                },
-                doc,
-                false,
-            );
-            Rect {
-                width: area.width - side - 2,
-                ..area
-            }
-        } else {
-            area
-        };
+        let area = self.draw_agent_details(buf, area, agent, 90, None);
         let width = area.width.saturating_sub(1) as usize;
         let header = screens::agent_header(&self.world, agent, width, self.spinner());
         let header_height = header.lines.len() as u16 + 1;
@@ -3260,6 +3236,46 @@ impl Ui {
         }
     }
 
+    /// The same details document beside either agent view. Terminal panes reserve at least
+    /// 82 columns for the program; conversation panes keep their existing responsive width.
+    fn draw_agent_details(
+        &self,
+        buf: &mut Buffer,
+        area: Rect,
+        agent: &view::Agent,
+        minimum: u16,
+        fixed_width: Option<u16>,
+    ) -> Rect {
+        if !self.agent_details || agent.unmanaged || area.width < minimum {
+            return area;
+        }
+        let side = fixed_width.unwrap_or_else(|| (area.width / 3).clamp(30, 44));
+        let pane = Rect { x: area.right() - side, width: side, ..area };
+        for y in area.y..area.bottom() {
+            buf[(pane.x - 1, y)]
+                .set_symbol("│")
+                .set_style(Style::default().fg(theme::SURFACE0).bg(theme::BASE));
+        }
+        let mut doc = screens::agent_details(&self.world, agent, side as usize - 3, self.spinner());
+        if fixed_width.is_some() {
+            let focused = self.terminal_details_focused
+                && self.focused_pane() == Some(Pane::Terminal(agent.id.clone()));
+            doc.lines[0] = Line::styled(
+                if focused { "details · Esc → terminal" } else { "details · Ctrl+\\ d to focus" },
+                theme::strong(theme::ACCENT),
+            );
+            doc.targets.retain(|target| !matches!(target.hit, Hit::Key('i')));
+        }
+        self.pane(
+            buf,
+            &format!("details:{}", agent.id),
+            Rect { x: pane.x + 1, width: side - 1, ..pane },
+            doc,
+            false,
+        );
+        Rect { width: area.width - side - 2, ..area }
+    }
+
     fn draw_terminal(&self, buf: &mut Buffer, area: Rect, agent: &str) {
         let Some(view) = self.terminal_view(agent) else {
             buf.set_stringn(
@@ -3287,6 +3303,8 @@ impl Ui {
             }
             return;
         };
+        let area = self.world.agents.items().iter().find(|row| row.id == agent)
+            .map_or(area, |row| self.draw_agent_details(buf, area, row, 120, Some(36)));
         if let Some(native) = view.native.as_ref() {
             // One line for where this is and how to leave; the PTY gets the rest of the pane.
             let scrolled = native.scrolled();
@@ -3370,7 +3388,8 @@ impl Ui {
                 && !self.help
                 && self.popover.is_none()
                 && self.context.is_none()
-                && !self.palette_open();
+                && !self.palette_open()
+                && !self.terminal_details_have_focus();
             let cursor = native.draw(buf, body, real);
             if real {
                 self.terminal_cursor.set(cursor);
@@ -4147,8 +4166,19 @@ impl Ui {
         true
     }
 
+    fn terminal_details_have_focus(&self) -> bool {
+        self.terminal_details_focused
+            && self.focused_pane().is_some_and(|pane| match pane {
+                Pane::Terminal(agent) => self.frame.borrow().panes.iter().any(|pane| {
+                    pane.key.strip_prefix("details:") == Some(agent.as_str())
+                }),
+                _ => false,
+            })
+    }
+
     fn input_terminal(&self) -> Option<String> {
         (self.terminal_focused()
+            && !self.terminal_details_have_focus()
             && !self.recent_open()
             && !self.palette_open()
             && !self.help
@@ -4255,6 +4285,40 @@ impl Ui {
                 self.leader_key(key);
             }
             return;
+        }
+        if self.terminal_details_focused
+            && !self.palette_open()
+            && !self.help
+            && self.popover.is_none()
+            && self.context.is_none()
+            && self.voice.is_none()
+            && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
+            && !terminal_space_key(key)
+            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            let pane = self.focused_pane().and_then(|pane| match pane {
+                Pane::Terminal(agent) => Some(format!("details:{agent}")),
+                _ => None,
+            });
+            let visible = pane.as_ref().is_some_and(|key| {
+                self.frame.borrow().panes.iter().any(|pane| &pane.key == key)
+            });
+            if visible {
+                if key.kind != KeyEventKind::Release {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => {
+                            self.terminal_details_focused = false;
+                        }
+                        KeyCode::Up => self.scroll_pane(pane.as_ref().unwrap(), -1),
+                        KeyCode::Down => self.scroll_pane(pane.as_ref().unwrap(), 1),
+                        KeyCode::PageUp => self.scroll_pane(pane.as_ref().unwrap(), -10),
+                        KeyCode::PageDown => self.scroll_pane(pane.as_ref().unwrap(), 10),
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            self.terminal_details_focused = false;
         }
         if key.kind != KeyEventKind::Press {
             // Repeats and releases belong to the child, never to Fractal TUI shortcuts or confirmations.
@@ -5941,6 +6005,14 @@ impl Ui {
                 _ => {}
             }
             return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(Pane::Terminal(agent)) = self.focused_pane()
+        {
+            let key = format!("details:{agent}");
+            self.terminal_details_focused = self.frame.borrow().panes.iter().any(|pane| {
+                pane.key == key && contains(pane.rect, mouse.column, mouse.row)
+            });
         }
         // Tabs own a middle press through release, even when released outside the strip.
         if mouse.kind == MouseEventKind::Drag(MouseButton::Middle) && self.middle_tab.is_some() {

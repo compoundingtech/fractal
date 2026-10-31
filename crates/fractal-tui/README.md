@@ -96,10 +96,20 @@ In a conversation, letters type into its message box and commands are chords: `C
 `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
-Agent details visibility is one device-local preference for every agent, saved as
-`agent_details` in the existing `stui/prefs.json`; absent defaults to visible.
-Conversation `Ctrl+D` flips that preference. Below 90 pane columns details auto-hide
-instead of replacing the conversation.
+Managed agents show their details beside the terminal by default
+when the **pane** is at least 120 columns wide (not the whole window). The details use
+36 columns plus two columns of separation; shells and unmanaged agents are unchanged.
+The PTY is fitted to the remaining program pane, not hidden under the details. PTY's
+pinned daemon negotiates the per-axis minimum over writable attached clients, so this
+can narrow the harness for everyone attached to that session; read-only viewers do not
+constrain it. Below the breakpoint the details auto-hide and the program regains the width.
+`Ctrl+\` then `i` and conversation `Ctrl+D` toggle the same global visibility for every
+agent and both views. The choice is saved in this device's existing `stui/prefs.json`
+as `agent_details`; an older file defaults to visible. Conversations auto-hide details
+below their existing 90-column threshold instead of replacing the conversation.
+`Ctrl+\` then `d`, or clicking the details, gives them the keys: arrows/PageUp/PageDown
+scroll; `Esc` or `Tab` returns to terminal passthrough. Details links remain clickable.
+The details heading names the focus; no new raw terminal key is intercepted.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
 conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
@@ -109,8 +119,8 @@ device that saved the older `terminal_first` keeps attaching. An alert for the a
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
 green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
-the full reason and answers needing your words stay in Inbox. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
-answers an alert. When the link to the
+answers needing your words stay in Inbox. Keys go to the terminal (`Ctrl+K` and `Ctrl+\` aside)
+unless details explicitly have focus, so typing never answers an alert. When the link to the
 terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
 it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Inbox cards show
 their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps its list and
