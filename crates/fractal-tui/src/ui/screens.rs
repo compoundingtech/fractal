@@ -2733,7 +2733,10 @@ pub const TERMINAL_ACTION: char = 't';
 /// do it: the actions menu, then its Terminal row. The Attach button lives only on a detached
 /// terminal pane, where Enter does the same.
 pub fn terminal_route() -> String {
-    format!("Ctrl+{} then {TERMINAL_ACTION} from the conversation", ACTIONS_CHORD.to_ascii_uppercase())
+    format!(
+        "Ctrl+{} then {TERMINAL_ACTION} from the conversation",
+        ACTIONS_CHORD.to_ascii_uppercase()
+    )
 }
 
 /// The small card a clicked reference opens: enough to recognise the subject, and a way
@@ -2764,7 +2767,11 @@ pub fn agent_actions(agent: &Agent) -> Vec<AgentAction> {
         rows.push(row('u', "Resume", "resume a suspended seat on the same session"));
     }
     if agent.terminal {
-        rows.push(row(TERMINAL_ACTION, "Terminal", "attach its terminal in this tab"));
+        rows.push(row(
+            TERMINAL_ACTION,
+            "Terminal",
+            "attach its terminal in this tab",
+        ));
     }
     rows.push(row('d', "Details", "what it is doing and what is queued (ctrl+d too)"));
     rows.push(row('f', "Find", "find in its conversation (ctrl+f too)"));

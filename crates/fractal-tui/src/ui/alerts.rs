@@ -294,9 +294,18 @@ pub(super) fn prompt_form(
             note(
                 doc,
                 &match model.unread {
-                    Some(why) => format!("{why}, so Fractal offers only what needs no reading. Or answer it in {}.", the_terminal(place)),
-                    None if model.named => format!("What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in {}.", the_terminal(place)),
-                    None => format!("Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in {}.", the_terminal(place)),
+                    Some(why) => format!(
+                        "{why}, so Fractal offers only what needs no reading. Or answer it in {}.",
+                        the_terminal(place)
+                    ),
+                    None if model.named => format!(
+                        "What it asks about is not in the conversation yet, so Fractal offers only what needs no reading. Or answer it in {}.",
+                        the_terminal(place)
+                    ),
+                    None => format!(
+                        "Fractal does not say which call this asks about, so it offers only what needs no reading. Or answer it in {}.",
+                        the_terminal(place)
+                    ),
                 },
             );
             doc.blank();
@@ -1407,7 +1416,10 @@ impl Ui {
                 self.flash(notice);
             }
             Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash(format!("Fractal does not offer that answer here: answer it in the terminal ({})", screens::terminal_route())),
+            None => self.flash(format!(
+                "Fractal does not offer that answer here: answer it in the terminal ({})",
+                screens::terminal_route()
+            )),
         }
     }
 

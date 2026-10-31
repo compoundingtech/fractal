@@ -6955,7 +6955,11 @@ mod tests {
             terminal.draw(|frame| ui.render(frame)).unwrap();
             let buffer = terminal.backend().buffer();
             (0..buffer.area.height)
-                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -6968,7 +6972,10 @@ mod tests {
         ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
         // Enter in a conversation keeps its meaning: it never attaches.
         key(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(ui.terminal.is_none() && !ui.editing, "Enter alone never attaches");
+        assert!(
+            ui.terminal.is_none() && !ui.editing,
+            "Enter alone never attaches"
+        );
         // Expand the band with a click on its drawn toggle.
         let shown = wide(&ui);
         let hits = ui.frame.borrow().hits.clone();
@@ -6976,11 +6983,15 @@ mod tests {
             !hits.iter().any(|(_, hit)| matches!(hit, Hit::Attach)),
             "the conversation draws no Attach control: {shown}"
         );
-        let toggle = hits.iter()
+        let toggle = hits
+            .iter()
             .find(|(_, hit)| matches!(hit, Hit::Alert(_, AlertTap::Toggle)))
             .map(|(rect, _)| *rect)
             .expect("the band draws its toggle");
-        for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)] {
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
             ui.input_event(Event::Mouse(MouseEvent {
                 kind,
                 column: toggle.x,
@@ -6991,7 +7002,10 @@ mod tests {
         let shown = wide(&ui);
         let route = shown
             .lines()
-            .find_map(|line| line.split_once("answer it in the terminal (").map(|(_, rest)| rest.to_owned()))
+            .find_map(|line| {
+                line.split_once("answer it in the terminal (")
+                    .map(|(_, rest)| rest.to_owned())
+            })
             .unwrap_or_else(|| panic!("the band says how to reach the terminal: {shown}"));
         let route = route.split(')').next().unwrap();
         assert_eq!(route, screens::terminal_route(), "{shown}");
@@ -7005,14 +7019,18 @@ mod tests {
         key(&mut ui, KeyCode::Char(chord), KeyModifiers::CONTROL);
         let menu = wide(&ui);
         assert!(
-            menu.lines().any(|line| line.contains(&format!(" {action}  Terminal"))),
+            menu.lines()
+                .any(|line| line.contains(&format!(" {action}  Terminal"))),
             "the actions menu draws the hinted Terminal row: {menu}"
         );
         assert!(ui.terminal.is_none(), "opening the menu attaches nothing");
         key(&mut ui, KeyCode::Char(action), KeyModifiers::NONE);
         // The conversation's tab turns into its attached terminal, focused and drawn.
         assert_eq!(tabs(&ui).2[0], vec![format!("terminal:{agent}")]);
-        assert_eq!(ui.terminal.as_ref().map(|view| view.agent.as_str()), Some(agent));
+        assert_eq!(
+            ui.terminal.as_ref().map(|view| view.agent.as_str()),
+            Some(agent)
+        );
         assert!(ui.terminal_focused());
         assert!(screen(&ui).contains("demo terminal"));
     }

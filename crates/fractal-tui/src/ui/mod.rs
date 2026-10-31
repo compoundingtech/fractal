@@ -1126,7 +1126,10 @@ impl Ui {
         self.conversation_first = Some(!self.conversation_first());
         self.save_prefs();
         let said = if self.conversation_first() {
-            format!("Conversation first: agents open on their conversation · {} opens the terminal", screens::terminal_route())
+            format!(
+                "Conversation first: agents open on their conversation · {} opens the terminal",
+                screens::terminal_route()
+            )
         } else {
             "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation".to_owned()
         };
