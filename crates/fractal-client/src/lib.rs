@@ -2110,6 +2110,17 @@ impl Client {
     pub async fn capabilities(&self) -> Result<Envelope<Capabilities>, ClientError> {
         self.capabilities_internal().await
     }
+    pub async fn device_command_get(
+        &self,
+        id: &str,
+        wait: bool,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.get(&format!(
+            "/v1/client/device-commands/{}?wait={wait}",
+            percent_encode(id)
+        ))
+        .await
+    }
     pub async fn document_get(&self, name: &str) -> Result<Envelope<DocumentContent>, ClientError> {
         self.get(&format!(
             "/v1/client/documents/content?name={}",
@@ -3437,6 +3448,21 @@ impl Client {
     pub async fn push_unregister(&self) -> Result<PushRegistrationResponse, ClientError> {
         self.request(Method::DELETE, "/v1/client/push-registration", None)
             .await
+    }
+
+    /// Issue one expiring command. This is not a durable action or replay queue.
+    pub async fn device_command(
+        &self,
+        command: &DeviceCommandRequest,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-commands", command).await
+    }
+
+    pub async fn device_result(
+        &self,
+        result: &DeviceResult,
+    ) -> Result<Envelope<DeviceCommand>, ClientError> {
+        self.post("/v1/client/device-results", result).await
     }
 
     pub async fn pairing_begin(

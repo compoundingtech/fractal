@@ -71,6 +71,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("sets.list", "/v1/client/sets"),
     ("sets.get", "/v1/client/sets/{id}"),
     ("capabilities.get", "/v1/client/capabilities"),
+    ("device-command.get", "/v1/client/device-commands/{id}"),
     ("document.get", "/v1/client/documents/content"),
     ("documents.list", "/v1/client/documents"),
     ("document-references.get", "/v1/client/document-references"),

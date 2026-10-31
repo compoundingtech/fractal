@@ -287,6 +287,7 @@ public actor FractalClient {
     public func hostRepositories(id: String) async throws -> Envelope<HostRepositories> { try await get("v1/client/hosts/\(id)/repositories") }
     public func setsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("sets", cursor: cursor, limit: limit, history: history) }
     public func setsGet(id: String) async throws -> Envelope<Resource> { try await resource("sets", id: id) }
+    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> { let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id; return try await get("v1/client/device-commands/\(escaped)", query: [.init(name: "wait", value: String(wait))]) }
     public func documentGet(name: String) async throws -> Envelope<DocumentContent> { try await get("v1/client/documents/content", query: [.init(name: "name", value: name)]) }
     public func documentsList(prefix: String? = nil, history: Bool = false, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<DocumentsPage> { var query: [URLQueryItem] = []; for (name, value) in [("prefix", prefix), ("cursor", cursor)] { if let value { query.append(.init(name: name, value: value)) } }; if history { query.append(.init(name: "history", value: "true")) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/documents", query: query) }
     public func documentReferencesGet(subject: String) async throws -> Envelope<DocumentReferences> { try await get("v1/client/document-references", query: [.init(name: "subject", value: subject)]) }
@@ -423,6 +424,10 @@ public actor FractalClient {
     /// Replace this paired device's local-only registration. No graph receipt.
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }
     public func pushUnregister() async throws -> PushRegistrationResponse { try await request("v1/client/push-registration", query: [], method: "DELETE", body: nil) }
+
+    /// Issue one expiring foreground command, without durable receipt or replay.
+    public func deviceCommand(_ command: DeviceCommandRequest) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-commands", command) }
+    public func deviceResult(_ result: DeviceResult) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-results", result) }
 
     public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: fractalClientAPIVersion, deviceName: deviceName, personID: personID)) }
     public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }

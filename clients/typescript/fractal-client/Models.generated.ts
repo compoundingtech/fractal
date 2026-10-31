@@ -646,9 +646,7 @@ export type AssistantAgentItem = {
 
 export type AssistantAgentPage = {
   collection: "assistant.agents";
-  filters: {
-
-};
+  filters: Record<string, never>;
   items: Array<AssistantAgentItem>;
   kind: "page";
   page: PageInfo;
@@ -681,9 +679,7 @@ export type AssistantAttentionItem = {
 
 export type AssistantAttentionPage = {
   collection: "assistant.attention";
-  filters: {
-
-};
+  filters: Record<string, never>;
   items: Array<AssistantAttentionItem>;
   kind: "page";
   page: PageInfo;
@@ -798,9 +794,7 @@ export type AssistantMissionItem = {
 
 export type AssistantMissionPage = {
   collection: "assistant.missions";
-  filters: {
-
-};
+  filters: Record<string, never>;
   items: Array<AssistantMissionItem>;
   kind: "page";
   page: PageInfo;
@@ -1289,6 +1283,12 @@ export type ClientDiagnosticsBatch = {
 };
 
 export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+  collection: "commands";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;
@@ -1435,6 +1435,7 @@ export type CollectionName =
   | "usage"
   | "machines"
   | "devices"
+  | "commands"
   | "sessions"
   | "terminals"
 ;
@@ -1591,6 +1592,61 @@ export type Device = ResourceHeader & {
   grant_kind: "assistant";
   person_id?: never;
 });
+
+export type DeviceCommand = {
+  args: (PhoneInspectArgs | PhoneNavigateArgs | PhoneMessageReadArgs);
+  command_kind: "phone.inspect" | "phone.navigate" | "phone.message.read";
+  device_id: string;
+  error_code?: string;
+  expires_at: Timestamp;
+  id: string;
+  issued_at: Timestamp;
+  issued_by: Id;
+  kind: "device-command";
+  result?: unknown;
+  session_actor: Id;
+  state: DeviceCommandState;
+} & ResourceHeader & ({
+  args?: PhoneInspectArgs;
+  command_kind?: "phone.inspect";
+} | {
+  args?: PhoneNavigateArgs;
+  command_kind?: "phone.navigate";
+} | {
+  args?: PhoneMessageReadArgs;
+  command_kind?: "phone.message.read";
+});
+
+export type DeviceCommandOutcome = "completed" | "not-foreground" | "expired" | "refused" | "failed";
+
+export type DeviceCommandRequest = ({
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  args: PhoneInspectArgs;
+  device: string;
+  kind: "phone.inspect";
+  ttl_ms?: number;
+} | {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  args: PhoneNavigateArgs;
+  device: string;
+  kind: "phone.navigate";
+  ttl_ms?: number;
+} | {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  args: PhoneMessageReadArgs;
+  device: string;
+  kind: "phone.message.read";
+  ttl_ms?: number;
+});
+
+export type DeviceCommandState = "pending" | "delivered" | "completed" | "not-foreground" | "expired" | "refused" | "failed";
+
+export type DeviceResult = {
+  command_id: string;
+  error_code?: string;
+  outcome: DeviceCommandOutcome;
+  result?: unknown;
+};
 
 export type DeviceSignature = {
   chain: Array<string>;
@@ -2654,6 +2710,45 @@ export type PersonUpdate = {
   version: 1;
 };
 
+export type PhoneInspectArgs = Record<string, never>;
+
+export type PhoneMessageReadArgs = {
+  attention_id: string;
+};
+
+export type PhoneNavigateArgs = ({
+  screen: "NowRoot" | "Agents" | "Missions" | "Usage" | "History";
+} | {
+  params: {
+  id: PhoneRouteString;
+};
+  screen: "Mission" | "Attention" | "Launch";
+} | {
+  params: {
+  sessionId?: PhoneRouteString;
+  target: PhoneRouteString;
+};
+  screen: "Conversation";
+} | {
+  params: {
+  terminalId: PhoneRouteString;
+};
+  screen: "Terminal";
+} | {
+  params?: {
+  prefix?: PhoneRouteString;
+};
+  screen: "Documents";
+} | {
+  params: {
+  reference: PhoneRouteString;
+  trail: Array<PhoneRouteString>;
+};
+  screen: "Document";
+});
+
+export type PhoneRouteString = string;
+
 export type PlannerConfig = {
   effort?: string;
   model?: string;
@@ -2790,7 +2885,7 @@ export type RequestSubject = {
   url?: string;
 };
 
-export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | Operation | History | Session | Glass | Arrangement | OwnedSet);
+export type Resource = (ConnectedClient | Usage | Summary | Attention | Message | Launch | LaunchVariant | LaunchDecision | LaunchApproval | Mission | Work | Agent | Runtime | Observer | Subscription | Lane | Machine | Device | DeviceCommand | Operation | History | Session | Glass | Arrangement | OwnedSet);
 
 export type ResourceCollectionName = 
   "missions"
@@ -2804,6 +2899,7 @@ export type ResourceCollectionName =
   | "usage"
   | "machines"
   | "devices"
+  | "commands"
   | "sessions"
   | "terminals"
 ;
@@ -2826,6 +2922,7 @@ export type ResourceHeader = {
   | "lane"
   | "machine"
   | "device"
+  | "device-command"
   | "operation"
   | "history"
   | "session"

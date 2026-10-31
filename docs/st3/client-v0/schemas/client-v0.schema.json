@@ -9,6 +9,8 @@
     { "$ref": "#/$defs/ObservationResponse" },
     { "$ref": "#/$defs/PushRegistration" },
     { "$ref": "#/$defs/PushRegistrationResponse" },
+    { "$ref": "#/$defs/DeviceCommandRequest" },
+    { "$ref": "#/$defs/DeviceResult" },
     { "$ref": "#/$defs/Envelope" },
     { "$ref": "#/$defs/ErrorEnvelope" },
     { "$ref": "#/$defs/ActionRequest" },
@@ -197,6 +199,55 @@
     "PushRegistration": {"type": "object", "additionalProperties": false, "required": ["token", "environment", "bundle_id", "app_version"], "description": "A paired phone's APNs device token. The person and device come only from the paired session; any other field, including a person or device identity, is refused. The token is a secret: it is stored only on the member that issued the pairing and never appears in claims, replication, resources, logs or error messages.", "properties": {"token": {"x-st-codec": "redacted", "type": "string", "pattern": "^(?:[0-9a-fA-F]{2}){1,256}$", "minLength": 2, "maxLength": 512, "description": "Hex-encoded APNs device token, 1–256 bytes."}, "environment": {"$ref": "#/$defs/PushEnvironment"}, "bundle_id": {"type": "string", "pattern": "^[A-Za-z0-9.-]{1,255}$", "minLength": 1, "maxLength": 255}, "app_version": {"type": "string", "pattern": "^[\\x20-\\x7E]{1,64}$", "minLength": 1, "maxLength": 64, "description": "Printable ASCII."}}},
     "PushRegistrationStatus": {"description": "Safe registration summary; never carries the token. `environment` is present exactly when `registered` is true.", "oneOf": [{"type": "object", "additionalProperties": false, "required": ["registered"], "properties": {"registered": {"const": false}}}, {"type": "object", "additionalProperties": false, "required": ["registered", "environment"], "properties": {"registered": {"const": true}, "environment": {"$ref": "#/$defs/PushEnvironment"}}}]},
     "PushRegistrationResponse": {"type": "object", "additionalProperties": false, "required": ["api_version", "request_id", "value"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "request_id": {"$ref": "#/$defs/RequestId"}, "value": {"$ref": "#/$defs/PushRegistrationStatus"}}},
+    "PhoneInspectArgs": {"type": "object", "additionalProperties": false, "properties": {}},
+    "PhoneMessageReadArgs": {"type": "object", "additionalProperties": false, "required": ["attention_id"], "properties": {"attention_id": {"type": "string", "pattern": "^attention/.+", "maxLength": 4096}}},
+    "PhoneRouteString": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"},
+    "PhoneNavigateArgs": {
+      "description": "Restricted phone navigation routes; parameters are specific to the selected screen.",
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["screen"], "properties": {"screen": {"enum": ["NowRoot", "Agents", "Missions", "Usage", "History"]}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"enum": ["Mission", "Attention", "Launch"]}, "params": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"const": "Conversation"}, "params": {"type": "object", "additionalProperties": false, "required": ["target"], "properties": {"target": {"$ref": "#/$defs/PhoneRouteString"}, "sessionId": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"const": "Terminal"}, "params": {"type": "object", "additionalProperties": false, "required": ["terminalId"], "properties": {"terminalId": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen"], "properties": {"screen": {"const": "Documents"}, "params": {"type": "object", "additionalProperties": false, "properties": {"prefix": {"$ref": "#/$defs/PhoneRouteString"}}}}},
+        {"type": "object", "additionalProperties": false, "required": ["screen", "params"], "properties": {"screen": {"const": "Document"}, "params": {"type": "object", "additionalProperties": false, "required": ["reference", "trail"], "properties": {"reference": {"$ref": "#/$defs/PhoneRouteString"}, "trail": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/PhoneRouteString"}}}}}}
+      ]
+    },
+    "DeviceCommandRequest": {
+      "description": "One expiring foreground command. Default TTL is 30000 ms, maximum 60000 ms; at most eight pending commands per device.",
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.inspect"}, "args": {"$ref": "#/$defs/PhoneInspectArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.navigate"}, "args": {"$ref": "#/$defs/PhoneNavigateArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}},
+        {"type": "object", "additionalProperties": false, "required": ["api_version", "device", "kind", "args"], "properties": {"api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]}, "device": {"type": "string", "pattern": "^device/.+"}, "kind": {"const": "phone.message.read"}, "args": {"$ref": "#/$defs/PhoneMessageReadArgs"}, "ttl_ms": {"type": "integer", "minimum": 1, "maximum": 60000, "default": 30000}}}
+      ]
+    },
+    "DeviceCommandOutcome": {"enum": ["completed", "not-foreground", "expired", "refused", "failed"]},
+    "DeviceCommandState": {"enum": ["pending", "delivered", "completed", "not-foreground", "expired", "refused", "failed"]},
+    "DeviceResult": {
+      "type": "object", "additionalProperties": false, "required": ["command_id", "outcome"],
+      "properties": {"command_id": {"type": "string", "pattern": "^device-command/.+"}, "outcome": {"$ref": "#/$defs/DeviceCommandOutcome"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}},
+      "description": "Terminal phone report; authenticated pairing supplies the device identity. The daemon clock adjudicates expiry."
+    },
+    "DeviceCommand": {
+      "allOf": [{"$ref": "#/$defs/ResourceHeader"}],
+      "type": "object",
+      "required": ["id", "kind", "command_kind", "args", "device_id", "session_actor", "issued_by", "issued_at", "expires_at", "state"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^device-command/.+"},
+        "kind": {"const": "device-command"},
+        "command_kind": {"enum": ["phone.inspect", "phone.navigate", "phone.message.read"]},
+        "args": {"oneOf": [{"$ref": "#/$defs/PhoneInspectArgs"}, {"$ref": "#/$defs/PhoneNavigateArgs"}, {"$ref": "#/$defs/PhoneMessageReadArgs"}]},
+        "device_id": {"type": "string", "pattern": "^device/.+"},
+        "session_actor": {"$ref": "#/$defs/Id"}, "issued_by": {"$ref": "#/$defs/Id"},
+        "issued_at": {"$ref": "#/$defs/Timestamp"}, "expires_at": {"$ref": "#/$defs/Timestamp"},
+        "state": {"$ref": "#/$defs/DeviceCommandState"}, "result": {}, "error_code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.-]+$"}
+      },
+      "oneOf": [
+        {"properties": {"command_kind": {"const": "phone.inspect"}, "args": {"$ref": "#/$defs/PhoneInspectArgs"}}},
+        {"properties": {"command_kind": {"const": "phone.navigate"}, "args": {"$ref": "#/$defs/PhoneNavigateArgs"}}},
+        {"properties": {"command_kind": {"const": "phone.message.read"}, "args": {"$ref": "#/$defs/PhoneMessageReadArgs"}}}
+      ]
+    },
     "PairingAdvertisement": {
       "description": "Static unauthenticated pairing preflight; no envelope, presence update or graph information.",
       "type": "object", "additionalProperties": false,
@@ -358,6 +409,7 @@
       "lane",
       "machine",
       "device",
+      "device-command",
       "operation",
       "history",
       "session",
@@ -658,6 +710,7 @@
           "lane",
           "machine",
           "device",
+          "device-command",
           "operation",
           "history",
           "session",
@@ -2588,7 +2641,7 @@
       }
     },
     "Resource": {
-      "oneOf": [{"$ref": "#/$defs/ConnectedClient"}, {"$ref": "#/$defs/Usage"}, {"$ref": "#/$defs/Summary"}, {"$ref": "#/$defs/Attention"}, {"$ref": "#/$defs/Message"}, {"$ref": "#/$defs/Launch"}, {"$ref": "#/$defs/LaunchVariant"}, {"$ref": "#/$defs/LaunchDecision"}, {"$ref": "#/$defs/LaunchApproval"}, {"$ref": "#/$defs/Mission"}, {"$ref": "#/$defs/Work"}, {"$ref": "#/$defs/Agent"}, {"$ref": "#/$defs/Runtime"}, {"$ref": "#/$defs/Observer"}, {"$ref": "#/$defs/Subscription"}, {"$ref": "#/$defs/Lane"}, {"$ref": "#/$defs/Machine"}, {"$ref": "#/$defs/Device"}, {"$ref": "#/$defs/Operation"}, {"$ref": "#/$defs/History"}, {"$ref": "#/$defs/Session"}, {"$ref": "#/$defs/Glass"}, {"$ref": "#/$defs/Arrangement"}, {"$ref": "#/$defs/OwnedSet"}, {"$ref": "#/$defs/UnknownResource"}]
+      "oneOf": [{"$ref": "#/$defs/ConnectedClient"}, {"$ref": "#/$defs/Usage"}, {"$ref": "#/$defs/Summary"}, {"$ref": "#/$defs/Attention"}, {"$ref": "#/$defs/Message"}, {"$ref": "#/$defs/Launch"}, {"$ref": "#/$defs/LaunchVariant"}, {"$ref": "#/$defs/LaunchDecision"}, {"$ref": "#/$defs/LaunchApproval"}, {"$ref": "#/$defs/Mission"}, {"$ref": "#/$defs/Work"}, {"$ref": "#/$defs/Agent"}, {"$ref": "#/$defs/Runtime"}, {"$ref": "#/$defs/Observer"}, {"$ref": "#/$defs/Subscription"}, {"$ref": "#/$defs/Lane"}, {"$ref": "#/$defs/Machine"}, {"$ref": "#/$defs/Device"}, {"$ref": "#/$defs/DeviceCommand"}, {"$ref": "#/$defs/Operation"}, {"$ref": "#/$defs/History"}, {"$ref": "#/$defs/Session"}, {"$ref": "#/$defs/Glass"}, {"$ref": "#/$defs/Arrangement"}, {"$ref": "#/$defs/OwnedSet"}, {"$ref": "#/$defs/UnknownResource"}]
     },
     "GoldenResourceSet": {
       "type": "array",
@@ -4017,6 +4070,7 @@
       "usage",
       "machines",
       "devices",
+      "commands",
       "sessions",
       "terminals"
     ] },
@@ -4032,6 +4086,7 @@
       "usage",
       "machines",
       "devices",
+      "commands",
       "sessions",
       "terminals"
     ] },
@@ -4087,6 +4142,7 @@
     "CollectionCommand": {
       "oneOf": [
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
           "type": "object",

@@ -1379,3 +1379,47 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
     assert_eq!(fixture.counts(), counts(&[("work", 3)]));
     assert_eq!(state.store.direct_work_reads(), direct);
 }
+
+#[tokio::test]
+async fn phone_commands_delivery_is_isolated_to_the_addressed_session_socket() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "commands-delivery-isolation");
+    let target = super::commands_tests::pair(&state, "device/target", "person/ada", &["read.projections"]);
+    let other = super::commands_tests::pair(&state, "device/other", "person/ada", &["read.projections"]);
+    let stranger = super::commands_tests::pair(&state, "device/stranger", "person/grace", &["read.projections"]);
+    let mut addressed = Fixture::open_as(state.clone(), target, true, None, &["commands"]).await;
+    let mut unrelated = Fixture::open_as(state.clone(), other, true, None, &["commands"]).await;
+    let mut private = Fixture::open_as(state.clone(), stranger, true, None, &["commands"]).await;
+    for fixture in [&mut addressed, &mut unrelated, &mut private] {
+        let frame = fixture.frame().await;
+        assert_eq!(frame["kind"], "snapshot", "{frame}");
+        assert_eq!(frame["items"], json!([]), "{frame}");
+    }
+    let owner = ClientSession::local(Some("person/ada")).unwrap();
+    let command = super::super::client_commands::issue(
+        &state, &owner, super::commands_tests::request("device/target", "phone.inspect"),
+    ).unwrap();
+    let frame = addressed.frame().await;
+    assert_eq!(frame["kind"], "changes", "{frame}");
+    assert_eq!(frame["upserts"][0]["id"], command["id"], "{frame}");
+    assert_eq!(frame["upserts"][0]["session_actor"], "person/ada/session/target");
+    unrelated.quiet().await;
+    private.quiet().await;
+}
+
+#[tokio::test]
+async fn unknown_collection_subscribe_preserves_the_existing_error_frame() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "commands-unknown-collection");
+    let mut fixture = Fixture::open(state, true, None, &[]).await;
+    // A future collection sent to an old-style decoder follows the same rejection path;
+    // capability probing prevents phones from sending `commands` to older daemons.
+    fixture.subscribe("unknown", "unknown-collection").await;
+    let frame = fixture.frame().await;
+    assert_eq!(frame["kind"], "error", "{frame}");
+    assert!(frame.get("code").is_some(), "{frame}");
+    fixture.subscribe("devices", "devices").await;
+    let frame = fixture.frame().await;
+    assert_eq!(frame["kind"], "error", "{frame}");
+    // Local anonymous device reads are refused, proving the socket still decodes commands.
+}

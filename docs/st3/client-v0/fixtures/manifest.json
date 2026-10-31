@@ -32,6 +32,8 @@
     { "file": "pairing.json", "definition": "Envelope" },
     { "file": "push-registration.json", "definition": "PushRegistration" },
     { "file": "push-registration-response.json", "definition": "PushRegistrationResponse" },
+    { "file": "device-command.json", "definition": "Envelope" },
+    { "file": "device-command-result.json", "definition": "DeviceResult" },
     { "file": "assistant-pairing-begin.json", "definition": "PairingBegin" },
     { "file": "assistant-pairing-challenge.json", "definition": "Envelope" },
     { "file": "assistant-pairing.json", "definition": "Envelope" },

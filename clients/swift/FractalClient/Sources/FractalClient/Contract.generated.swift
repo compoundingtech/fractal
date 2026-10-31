@@ -72,6 +72,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case setsList = "sets.list"
     case setsGet = "sets.get"
     case capabilitiesGet = "capabilities.get"
+    case deviceCommandGet = "device-command.get"
     case documentGet = "document.get"
     case documentsList = "documents.list"
     case documentReferencesGet = "document-references.get"
@@ -156,6 +157,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .setsList: "/v1/client/sets",
     .setsGet: "/v1/client/sets/{id}",
     .capabilitiesGet: "/v1/client/capabilities",
+    .deviceCommandGet: "/v1/client/device-commands/{id}",
     .documentGet: "/v1/client/documents/content",
     .documentsList: "/v1/client/documents",
     .documentReferencesGet: "/v1/client/document-references",

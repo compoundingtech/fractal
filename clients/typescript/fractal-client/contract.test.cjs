@@ -239,6 +239,43 @@ test('push registration commands use paired credentials and a local response wit
     assert.equal(calls[1][1].body, undefined);
 });
 
+test('phone commands preserve typed bodies, full ids, reactive wait and normal envelopes', async () => {
+    const wire = require('../../../docs/st3/client-v0/fixtures/device-command.json');
+    const report = require('../../../docs/st3/client-v0/fixtures/device-command-result.json');
+    const command = { api_version: 'st3.client.v0', device: wire.value.device_id, kind: 'phone.navigate', args: wire.value.args, ttl_ms: 30000 };
+    const calls = [];
+    const controller = new AbortController();
+    const client = new FractalClient({
+        baseUrl: 'https://example.test', credential: () => 'phone-credential',
+        fetchImpl: async (url, init) => {
+            calls.push([String(url), init]);
+            return response(wire);
+        },
+    });
+    assert.deepEqual(await client.deviceCommand(command), wire);
+    assert.deepEqual(await client.deviceCommandGet(wire.value.id, { wait: true }, { signal: controller.signal }), wire);
+    assert.deepEqual(await client.deviceResult(report), wire);
+    assert.deepEqual(calls.map(([url, init]) => [url, init.method]), [
+        ['https://example.test/v1/client/device-commands', 'POST'],
+        [`https://example.test/v1/client/device-commands/${encodeURIComponent(wire.value.id)}?wait=true`, 'GET'],
+        ['https://example.test/v1/client/device-results', 'POST'],
+    ]);
+    assert.deepEqual(JSON.parse(calls[0][1].body), command);
+    assert.deepEqual(JSON.parse(calls[2][1].body), report);
+    assert.equal(calls[1][1].signal, controller.signal);
+    assert(calls.every(([, init]) => init.headers.Authorization === 'Bearer phone-credential'));
+});
+
+test('commands windows use existing snapshot and changes frames with resource discriminators', () => {
+    const command = require('../../../docs/st3/client-v0/fixtures/device-command.json').value;
+    const initial = { kind: 'snapshot', id: 'commands', collection: 'commands', snapshot, items: [command], order: [command.id], has_more: false };
+    const window = applyWindow(undefined, initial);
+    assert.equal(window.items[0].kind, 'device-command');
+    const completed = { ...command, state: 'completed', revision: `${command.id}:completed`, result: { route: 'Conversation' } };
+    const changed = applyWindow(window, { kind: 'changes', id: 'commands', collection: 'commands', snapshot, upserts: [completed], removes: [], order: [command.id], has_more: false });
+    assert.deepEqual(changed.items, [completed]);
+});
+
 test('every HTTP API keeps cancellation in transport options, including all manifest reads and actions', async () => {
     const manifest = require('../../../docs/st3/client-v0/schemas/operations.json');
     const methodName = id => {
@@ -249,6 +286,7 @@ test('every HTTP API keeps cancellation in transport options, including all mani
     const readArguments = (id, options) => {
         switch (id) {
             case 'slo.history': return ['objective/example', {}, options];
+            case 'device-command.get': return ['device-command/example', { wait: true }, options];
             case 'capabilities.get': case 'notes.list': case 'slo.list': case 'clients.list': case 'mail-backlog.summary': return [options];
             case 'arrangements.list': return ['person/example', {}, options];
             case 'arrangements.get': return ['example', 'arrangement-id', options];
@@ -293,6 +331,8 @@ test('every HTTP API keeps cancellation in transport options, including all mani
         ['terminalsListFiltered', options => [{}, options]],
         ['pushRegister', options => [{ token: 'ab'.repeat(32), environment: 'development', bundle_id: 'example.push', app_version: '1.0' }, options]],
         ['pushUnregister', options => [options]],
+        ['deviceCommand', options => [{ api_version: 'st3.client.v0', device: 'device/phone', kind: 'phone.inspect', args: {} }, options]],
+        ['deviceResult', options => [{ command_id: 'device-command/example', outcome: 'completed' }, options]],
     );
     for (const [method, argumentsFor] of cases) {
         const requests = [];

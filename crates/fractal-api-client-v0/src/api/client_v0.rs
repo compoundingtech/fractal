@@ -56,6 +56,8 @@ mod agents_window_tests;
 #[cfg(test)]
 mod push_tests;
 #[cfg(test)]
+mod commands_tests;
+#[cfg(test)]
 mod pairing_order_tests;
 #[cfg(test)]
 mod collection_refresh_tests;
@@ -520,6 +522,28 @@ async fn collection_items_with_windows(
     read_permit: tokio::sync::OwnedSemaphorePermit,
     windows: Option<Arc<collection_windows::Windows>>,
 ) -> Result<(ClientSnapshot, Vec<Value>, bool, Option<CollectionRevision>), ApiError> {
+    // Commands are ephemeral local state, not graph projections or published windows.
+    // Preserve normal frame delivery while bypassing durable collection admission.
+    if request.collection == "commands" {
+        if request.person.is_some() || request.actor.is_some() || request.status.is_some()
+            || request.subject.is_some() || request.agent.is_some()
+        {
+            return Err(validation("commands select only the authenticated session"));
+        }
+        let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
+        if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
+            return Err(validation("collection limit must be 1 through 200"));
+        }
+        let state = state.clone();
+        let session = session.clone();
+        return crate::api::read_deadline::spawn_blocking(move || {
+            let _permit = read_permit;
+            let mut items = super::client_commands::collection_items(&state, &session)?;
+            let has_more = items.len() > limit as usize;
+            items.truncate(limit as usize);
+            Ok((new_client_snapshot(&state), items, has_more, None))
+        }).await.map_err(ApiError::internal)?;
+    }
     if !matches!(
         request.collection.as_str(),
         "missions" | "attention" | "agents" | "work" | "glasses" | "arrangements" | "ordered-memberships" | "summary"
@@ -2072,6 +2096,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
     let mut views = state.store.subscribe_collection_views();
     let mut presence_changes = super::client_presence::subscribe();
     let mut push_changes = super::client_push::subscribe();
+    let mut command_changes = super::client_commands::subscribe();
     let mut native_watch: Option<inventory::NativeWatch> = None;
     let mut native_watch_pending: Option<tokio::task::JoinHandle<Result<inventory::NativeWatch, ApiError>>> = None;
     let windows = collection_windows::Windows::attach(&state.store);
@@ -2523,6 +2548,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 reread_due.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "devices").map(|(id, _)| id.clone()));
                 if last_reread.elapsed() < COLLECTION_REREAD_INTERVAL { continue; }
                 refresh.extend(reread_due.iter().cloned());
+            }
+            result = command_changes.recv(), if !command_waiting => {
+                if result.as_ref().is_ok_and(|member| member != &state.node) { continue; }
+                if matches!(result, Err(tokio::sync::broadcast::error::RecvError::Closed)) { return; }
+                refresh.extend(subscriptions.iter().filter(|(_, s)| s.request.collection == "commands").map(|(id, _)| id.clone()));
             }
             result = roster.changed(), if !command_waiting => {
                 if result.is_err() { return; }

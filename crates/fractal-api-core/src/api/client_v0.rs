@@ -655,6 +655,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"conversation-delivery-links", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"push-registration", "version":1, "state":if session.pairing_issued_here && session.transport != "unix" {"granted"} else {"unavailable"}}));
+    capabilities.push(json!({"id":"phone-commands", "version":1, "state":if super::client_commands::capable(session) {"granted"} else {"unavailable"}}));
     capabilities.push(json!({"id":"messages-paging", "version":2, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"assistant.grants.v1", "version":1,
         "state":if assistant::trusted_issuer(state, session).is_ok() {"granted"} else {"ungranted"}}));

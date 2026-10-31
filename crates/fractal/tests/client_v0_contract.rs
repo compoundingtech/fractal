@@ -122,6 +122,67 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 }
 
 #[test]
+fn device_commands_have_strict_arguments_terminal_reports_and_existing_stream_frames() {
+    let command = fixture("device-command.json");
+    let result = fixture("device-command-result.json");
+    assert_conforms(&contract_validator("Envelope"), "device command response", &command);
+    assert_conforms(&contract_validator("DeviceCommand"), "device command resource", &command["value"]);
+    assert_conforms(&contract_validator("DeviceResult"), "phone terminal report", &result);
+    let request_validator = contract_validator("DeviceCommandRequest");
+    let mut request = serde_json::json!({
+        "api_version": "st3.client.v0", "device": "device/device-7",
+        "kind": "phone.inspect", "args": {}
+    });
+    assert_conforms(&request_validator, "inspect request", &request);
+    request["args"]["unexpected"] = serde_json::json!(true);
+    assert!(!request_validator.is_valid(&request), "inspect args are closed");
+    request["kind"] = serde_json::json!("phone.message.read");
+    request["args"] = serde_json::json!({"attention_id": "attention/message"});
+    assert_conforms(&request_validator, "message-read request", &request);
+    request["args"] = serde_json::json!({});
+    assert!(!request_validator.is_valid(&request), "message-read requires an attention id");
+    request["kind"] = serde_json::json!("phone.navigate");
+    request["args"] = command["value"]["args"].clone();
+    assert_conforms(&request_validator, "navigate request", &request);
+    for ttl in [0, 60001] {
+        request["ttl_ms"] = serde_json::json!(ttl);
+        assert!(!request_validator.is_valid(&request), "TTL {ttl} is out of bounds");
+    }
+    request["ttl_ms"] = serde_json::json!(60000);
+    assert_conforms(&request_validator, "maximum TTL", &request);
+    request["args"] = serde_json::json!({"screen": "Conversation", "params": {"id": "agent/worker"}});
+    assert!(!request_validator.is_valid(&request), "route-specific parameters are required");
+    request["args"] = serde_json::json!({"screen": "Settings"});
+    assert!(!request_validator.is_valid(&request), "arbitrary routes are not supported");
+    let result_validator = contract_validator("DeviceResult");
+    for outcome in ["pending", "delivered"] {
+        let mut invalid = result.clone();
+        invalid["outcome"] = serde_json::json!(outcome);
+        assert!(!result_validator.is_valid(&invalid), "phone reports must be terminal");
+    }
+    let mut wrong_discriminator = command["value"].clone();
+    wrong_discriminator["kind"] = serde_json::json!("phone.navigate");
+    assert!(!contract_validator("DeviceCommand").is_valid(&wrong_discriminator));
+    let mut wrong_args = command["value"].clone();
+    wrong_args["command_kind"] = serde_json::json!("phone.inspect");
+    assert!(!contract_validator("DeviceCommand").is_valid(&wrong_args));
+    let subscription = serde_json::json!({"kind": "subscribe", "id": "commands", "collection": "commands"});
+    assert_conforms(&contract_validator("CollectionCommand"), "commands subscription", &subscription);
+    let snapshot = serde_json::json!({
+        "kind": "snapshot", "id": "commands", "collection": "commands",
+        "snapshot": command["snapshot"], "items": [command["value"]], "order": [command["value"]["id"]],
+        "has_more": false
+    });
+    assert_conforms(&contract_validator("CollectionFrame"), "commands snapshot", &snapshot);
+    let changes = serde_json::json!({
+        "kind": "changes", "id": "commands", "collection": "commands",
+        "snapshot": command["snapshot"], "upserts": [command["value"]], "removes": [],
+        "order": [command["value"]["id"]], "has_more": false
+    });
+    assert_conforms(&contract_validator("CollectionFrame"), "commands changes", &changes);
+}
+
+#[test]
 fn agents_publication_contract_is_complete_and_unbounded() {
     let validator = contract_validator("AgentsPublication");
     let resources = fixture("resources.json");
@@ -1864,6 +1925,97 @@ async fn client_post_json_person(
     let value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
     (status, value)
+}
+
+#[test]
+fn native_client_decodes_device_command_fixtures_and_preserves_discriminators() {
+    let wire = fixture("device-command.json");
+    let decoded: fractal_client::Envelope<fractal_client::Resource> =
+        serde_json::from_value(wire.clone()).unwrap();
+    let fractal_client::Resource::DeviceCommand(command) = &decoded.value else {
+        panic!("device command must decode as a known resource");
+    };
+    assert!(matches!(&command.command, fractal_client::DeviceCommandBody::Navigate(_)));
+    assert_eq!(command.state, fractal_client::DeviceCommandState::Pending);
+    let encoded = serde_json::to_value(&decoded.value).unwrap();
+    assert_eq!(encoded["kind"], "device-command");
+    assert_eq!(encoded["command_kind"], "phone.navigate");
+    assert_eq!(encoded["args"], wire["value"]["args"]);
+    let result: fractal_client::DeviceResult =
+        serde_json::from_value(fixture("device-command-result.json")).unwrap();
+    assert_eq!(result.outcome, fractal_client::DeviceCommandOutcome::Completed);
+    let request = fractal_client::DeviceCommandRequest {
+        api_version: "st3.client.v0".into(), device: command.device_id.clone(),
+        command: fractal_client::PhoneCommand::Inspect(fractal_client::PhoneInspectArgs {}),
+        ttl_ms: Some(30000),
+    };
+    let encoded = serde_json::to_value(request).unwrap();
+    assert_eq!(encoded["kind"], "phone.inspect");
+    assert_eq!(encoded["args"], serde_json::json!({}));
+    assert_conforms(&contract_validator("DeviceCommandRequest"), "native inspect request", &encoded);
+}
+
+#[tokio::test]
+async fn device_command_routes_return_resources_and_reactively_wait_for_phone_results() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let local = fractal_daemon::api::router(state.clone());
+    let gateway = fractal_daemon::api::fabric_router(state);
+    let (status, challenge) = client_post_json_person(
+        local.clone(), "/v1/client/pairings", "person/alex",
+        serde_json::json!({"api_version": "st3.client.v0", "device_name": "Command contract phone", "person_id": "person/alex"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{challenge}");
+    let pairing = challenge["value"]["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let (status, paired) = client_post_json(
+        gateway.clone(), &format!("/v1/client/pairings/{pairing}/complete"),
+        serde_json::json!({
+            "api_version": "st3.client.v0", "code": challenge["value"]["code"],
+            "device_public_key": "phone-command-contract-key-0000000000000000"
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{paired}");
+    let credential = paired["value"]["credential"].as_str().unwrap();
+    let (status, issued) = client_post_json_person(
+        local.clone(), "/v1/client/device-commands", "person/alex",
+        serde_json::json!({
+            "api_version": "st3.client.v0", "device": paired["value"]["device_id"],
+            "kind": "phone.inspect", "args": {}
+        }),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{issued}");
+    assert_conforms(&contract_validator("Envelope"), "issued command", &issued);
+    assert_conforms(&contract_validator("DeviceCommand"), "issued resource", &issued["value"]);
+    assert_eq!(issued["value"]["kind"], "device-command");
+    assert_eq!(issued["value"]["command_kind"], "phone.inspect");
+    assert_eq!(issued["value"]["state"], "pending");
+    let id = issued["value"]["id"].as_str().unwrap();
+    let route = format!("/v1/client/device-commands/{}?wait=true", id.replace('/', "%2F"));
+    let wait = client_json_person(local.clone(), &route, "person/alex");
+    tokio::pin!(wait);
+    // Poll the actual mounted GET once before reporting: it must not return a pending row.
+    tokio::select! {
+        biased;
+        response = &mut wait => panic!("wait returned before a terminal result: {response:?}"),
+        () = std::future::ready(()) => {}
+    }
+    let report = serde_json::json!({"command_id": id, "outcome": "completed", "result": {"foreground": true}});
+    let (status, completed) = client_post_json_auth(
+        gateway.clone(), "/v1/client/device-results", credential, report.clone(),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_conforms(&contract_validator("Envelope"), "phone result response", &completed);
+    assert_conforms(&contract_validator("DeviceCommand"), "completed resource", &completed["value"]);
+    assert_eq!(completed["value"]["state"], "completed");
+    assert_ne!(completed["value"]["revision"], issued["value"]["revision"]);
+    let (status, waited) = tokio::time::timeout(std::time::Duration::from_secs(1), &mut wait)
+        .await.expect("phone result must wake the mounted GET");
+    assert_eq!(status, StatusCode::OK, "{waited}");
+    assert_conforms(&contract_validator("Envelope"), "waited command", &waited);
+    assert_eq!(waited["value"], completed["value"]);
+    let (status, repeated) = client_post_json_auth(gateway, "/v1/client/device-results", credential, report).await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(repeated["value"], completed["value"]);
 }
 
 #[tokio::test]

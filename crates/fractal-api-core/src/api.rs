@@ -141,6 +141,7 @@ mod directive_notes;
 mod request_latency;
 mod client_observations;
 pub mod client_push;
+pub mod client_commands;
 pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
@@ -592,6 +593,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/client/push-registration", post(client_push::register)
             .delete(client_push::unregister)
             .layer(DefaultBodyLimit::max(client_push::MAX_BODY_BYTES)))
+        .route("/v1/client/device-commands", post(client_commands::issue_route)
+            .layer(DefaultBodyLimit::max(client_commands::MAX_BODY_BYTES)))
+        .route("/v1/client/device-commands/{*id}", get(client_commands::read_route))
+        .route("/v1/client/device-results", post(client_commands::result_route)
+            .layer(DefaultBodyLimit::max(client_commands::MAX_BODY_BYTES)))
         .route("/v1/client/mail-backlog", get(mail_backlog::get))
         .route("/v1/client/attention", get(client_reads::client_attention))
         .route("/v1/client/attention/{*id}", get(client_reads::client_attention_detail))

@@ -627,6 +627,159 @@ public struct DeviceResource: Codable, Sendable {
     public let principal: AssistantPrincipal?; public let senderClass: AssistantSenderClass?; public let grantKind, grantID, grantExpiresAt: String?; public let policyRevision: UInt64?; public let minimalReadMode: AssistantMinimalReadMode?
     enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", personID = "person_id", name, sessionActor = "session_actor", state, scopes, expiresAt = "expires_at", push, operational, principal, senderClass = "sender_class", grantKind = "grant_kind", grantID = "grant_id", grantExpiresAt = "grant_expires_at", policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode" }
 }
+public enum DeviceCommandOutcome: String, Codable, Sendable { case completed, notForeground = "not-foreground", expired, refused, failed }
+public enum DeviceCommandState: String, Codable, Sendable { case pending, delivered, completed, notForeground = "not-foreground", expired, refused, failed }
+/// Associated values prevent constructing navigation parameters for the wrong screen.
+public enum PhoneNavigateArgs: Codable, Sendable, Equatable {
+    case nowRoot, agents, missions, usage, history
+    case mission(id: String), attention(id: String), launch(id: String)
+    case conversation(target: String, sessionID: String? = nil), terminal(terminalID: String)
+    case documents(prefix: String? = nil), document(reference: String, trail: [String])
+    private enum Keys: String, CodingKey { case screen, params }
+    private struct IDParams: Codable { let id: String }
+    private struct ConversationParams: Codable { let target: String; let sessionId: String? }
+    private struct TerminalParams: Codable { let terminalId: String }
+    private struct DocumentsParams: Codable { let prefix: String? }
+    private struct DocumentParams: Codable { let reference: String; let trail: [String] }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        let screen = try box.decode(String.self, forKey: .screen)
+        switch screen {
+        case "NowRoot": self = .nowRoot
+        case "Agents": self = .agents
+        case "Missions": self = .missions
+        case "Usage": self = .usage
+        case "History": self = .history
+        case "Mission": self = .mission(id: try box.decode(IDParams.self, forKey: .params).id)
+        case "Attention": self = .attention(id: try box.decode(IDParams.self, forKey: .params).id)
+        case "Launch": self = .launch(id: try box.decode(IDParams.self, forKey: .params).id)
+        case "Conversation":
+            let params = try box.decode(ConversationParams.self, forKey: .params)
+            self = .conversation(target: params.target, sessionID: params.sessionId)
+        case "Terminal": self = .terminal(terminalID: try box.decode(TerminalParams.self, forKey: .params).terminalId)
+        case "Documents": self = .documents(prefix: try box.decodeIfPresent(DocumentsParams.self, forKey: .params)?.prefix)
+        case "Document":
+            let params = try box.decode(DocumentParams.self, forKey: .params)
+            self = .document(reference: params.reference, trail: params.trail)
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .screen, in: box, debugDescription: "Unknown phone navigation screen")
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .nowRoot: try box.encode("NowRoot", forKey: .screen)
+        case .agents: try box.encode("Agents", forKey: .screen)
+        case .missions: try box.encode("Missions", forKey: .screen)
+        case .usage: try box.encode("Usage", forKey: .screen)
+        case .history: try box.encode("History", forKey: .screen)
+        case .mission(let id):
+            try box.encode("Mission", forKey: .screen); try box.encode(IDParams(id: id), forKey: .params)
+        case .attention(let id):
+            try box.encode("Attention", forKey: .screen); try box.encode(IDParams(id: id), forKey: .params)
+        case .launch(let id):
+            try box.encode("Launch", forKey: .screen); try box.encode(IDParams(id: id), forKey: .params)
+        case .conversation(let target, let sessionID):
+            try box.encode("Conversation", forKey: .screen); try box.encode(ConversationParams(target: target, sessionId: sessionID), forKey: .params)
+        case .terminal(let terminalID):
+            try box.encode("Terminal", forKey: .screen); try box.encode(TerminalParams(terminalId: terminalID), forKey: .params)
+        case .documents(let prefix):
+            try box.encode("Documents", forKey: .screen)
+            if let prefix { try box.encode(DocumentsParams(prefix: prefix), forKey: .params) }
+        case .document(let reference, let trail):
+            try box.encode("Document", forKey: .screen); try box.encode(DocumentParams(reference: reference, trail: trail), forKey: .params)
+        }
+    }
+}
+public enum PhoneCommand: Codable, Sendable, Equatable {
+    case inspect, navigate(PhoneNavigateArgs), messageRead(attentionID: String)
+    private enum Keys: String, CodingKey { case kind, commandKind = "command_kind", args }
+    private struct EmptyArgs: Codable {}
+    private struct MessageReadArgs: Codable { let attentionID: String; enum CodingKeys: String, CodingKey { case attentionID = "attention_id" } }
+    public init(from decoder: Decoder) throws { try self.init(from: decoder, resource: false) }
+    fileprivate init(from decoder: Decoder, resource: Bool) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        let key: Keys = resource ? .commandKind : .kind
+        switch try box.decode(String.self, forKey: key) {
+        case "phone.inspect": _ = try box.decode(EmptyArgs.self, forKey: .args); self = .inspect
+        case "phone.navigate": self = .navigate(try box.decode(PhoneNavigateArgs.self, forKey: .args))
+        case "phone.message.read": self = .messageRead(attentionID: try box.decode(MessageReadArgs.self, forKey: .args).attentionID)
+        default: throw DecodingError.dataCorruptedError(forKey: key, in: box, debugDescription: "Unknown phone command")
+        }
+    }
+    public func encode(to encoder: Encoder) throws { try encode(to: encoder, resource: false) }
+    fileprivate func encode(to encoder: Encoder, resource: Bool) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        let key: Keys = resource ? .commandKind : .kind
+        switch self {
+        case .inspect: try box.encode("phone.inspect", forKey: key); try box.encode(EmptyArgs(), forKey: .args)
+        case .navigate(let args): try box.encode("phone.navigate", forKey: key); try box.encode(args, forKey: .args)
+        case .messageRead(let attentionID): try box.encode("phone.message.read", forKey: key); try box.encode(MessageReadArgs(attentionID: attentionID), forKey: .args)
+        }
+    }
+}
+public struct DeviceCommandRequest: Codable, Sendable {
+    public let apiVersion, device: String
+    public let command: PhoneCommand
+    public let ttlMS: UInt64?
+    public init(device: String, command: PhoneCommand, ttlMS: UInt64? = nil, apiVersion: String = "st3.client.v0") {
+        self.apiVersion = apiVersion; self.device = device; self.command = command; self.ttlMS = ttlMS
+    }
+    private enum Keys: String, CodingKey { case apiVersion = "api_version", device, ttlMS = "ttl_ms" }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        apiVersion = try box.decode(String.self, forKey: .apiVersion)
+        device = try box.decode(String.self, forKey: .device)
+        ttlMS = try box.decodeIfPresent(UInt64.self, forKey: .ttlMS)
+        command = try PhoneCommand(from: decoder)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        try box.encode(apiVersion, forKey: .apiVersion); try box.encode(device, forKey: .device)
+        try box.encodeIfPresent(ttlMS, forKey: .ttlMS); try command.encode(to: encoder)
+    }
+}
+public struct DeviceResult: Codable, Sendable {
+    public let commandID: String
+    public let outcome: DeviceCommandOutcome
+    public let result: JSONValue?
+    public let errorCode: String?
+    public init(commandID: String, outcome: DeviceCommandOutcome, result: JSONValue? = nil, errorCode: String? = nil) {
+        self.commandID = commandID; self.outcome = outcome; self.result = result; self.errorCode = errorCode
+    }
+    enum CodingKeys: String, CodingKey { case commandID = "command_id", outcome, result, errorCode = "error_code" }
+}
+public struct DeviceCommand: Codable, Sendable, Identifiable {
+    public let id, kind, revision, updatedAt, deviceID, sessionActor, issuedBy, issuedAt, expiresAt: String
+    public let command: PhoneCommand
+    public let state: DeviceCommandState
+    public let result: JSONValue?
+    public let errorCode: String?
+    private enum Keys: String, CodingKey {
+        case id, kind, revision, updatedAt = "updated_at", deviceID = "device_id", sessionActor = "session_actor"
+        case issuedBy = "issued_by", issuedAt = "issued_at", expiresAt = "expires_at", state, result, errorCode = "error_code"
+    }
+    public init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: Keys.self)
+        id = try box.decode(String.self, forKey: .id); kind = try box.decode(String.self, forKey: .kind)
+        revision = try box.decode(String.self, forKey: .revision); updatedAt = try box.decode(String.self, forKey: .updatedAt)
+        deviceID = try box.decode(String.self, forKey: .deviceID); sessionActor = try box.decode(String.self, forKey: .sessionActor)
+        issuedBy = try box.decode(String.self, forKey: .issuedBy); issuedAt = try box.decode(String.self, forKey: .issuedAt)
+        expiresAt = try box.decode(String.self, forKey: .expiresAt); state = try box.decode(DeviceCommandState.self, forKey: .state)
+        result = try box.decodeIfPresent(JSONValue.self, forKey: .result); errorCode = try box.decodeIfPresent(String.self, forKey: .errorCode)
+        command = try PhoneCommand(from: decoder, resource: true)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: Keys.self)
+        try box.encode(id, forKey: .id); try box.encode(kind, forKey: .kind)
+        try box.encode(revision, forKey: .revision); try box.encode(updatedAt, forKey: .updatedAt)
+        try box.encode(deviceID, forKey: .deviceID); try box.encode(sessionActor, forKey: .sessionActor)
+        try box.encode(issuedBy, forKey: .issuedBy); try box.encode(issuedAt, forKey: .issuedAt)
+        try box.encode(expiresAt, forKey: .expiresAt); try box.encode(state, forKey: .state)
+        try box.encodeIfPresent(result, forKey: .result); try box.encodeIfPresent(errorCode, forKey: .errorCode)
+        try command.encode(to: encoder, resource: true)
+    }
+}
 public struct OperationResource: Codable, Sendable { public let id, kind, revision, updatedAt, component, severity, state, summary: String; public let targets: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", component, severity, state, summary, targets, operational } }
 public struct HistoryResource: Codable, Sendable { public let id, kind, revision, updatedAt, eventType, occurredAt, summary: String; public let storeIndex: UInt64; public let targets: [String]; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", eventType = "event_type", occurredAt = "occurred_at", storeIndex = "store_index", summary, targets, operational } }
 public struct SessionResource: Codable, Sendable { public let id, kind, revision, updatedAt, ownerID, state, startedAt, timelineCursor: String; public let endedAt, runtimeIncarnation: String?; public let usage: UsageSummary?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", ownerID = "owner_id", state, startedAt = "started_at", endedAt = "ended_at", runtimeIncarnation = "runtime_incarnation", timelineCursor = "timeline_cursor", usage, operational } }
@@ -663,6 +816,7 @@ public struct UsageResource: Codable, Sendable, Identifiable {
 public enum Resource: Codable, Sendable, Identifiable {
     case connectedClient(ConnectedClientResource), usage(UsageResource)
     case summary(SummaryResource)
+    case deviceCommand(DeviceCommand)
     case attention(AttentionResource), message(MessageResource), launch(LaunchResource), launchVariant(LaunchVariantResource), launchDecision(LaunchDecisionResource), launchApproval(LaunchApprovalResource), mission(MissionResource), work(WorkResource), agent(AgentResource), runtime(RuntimeResource), observer(ObserverResource), subscription(SubscriptionResource), lane(LaneResource), machine(MachineResource), device(DeviceResource), operation(OperationResource), history(HistoryResource), session(SessionResource), glass(GlassResource), ownedSet(OwnedSetResource)
     /// A kind this client does not know, from a member newer than it: kept whole so an older
     /// client skips it or shows it plainly instead of failing the page it came in.
@@ -689,6 +843,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case "lane": self = .lane(try LaneResource(from: decoder))
         case "machine": self = .machine(try MachineResource(from: decoder))
         case "device": self = .device(try DeviceResource(from: decoder))
+        case "device-command": self = .deviceCommand(try DeviceCommand(from: decoder))
         case "operation": self = .operation(try OperationResource(from: decoder))
         case "history": self = .history(try HistoryResource(from: decoder))
         case "session": self = .session(try SessionResource(from: decoder))
@@ -718,6 +873,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .lane(let v): try v.encode(to: encoder)
         case .machine(let v): try v.encode(to: encoder)
         case .device(let v): try v.encode(to: encoder)
+        case .deviceCommand(let v): try v.encode(to: encoder)
         case .operation(let v): try v.encode(to: encoder)
         case .history(let v): try v.encode(to: encoder)
         case .session(let v): try v.encode(to: encoder)
@@ -727,7 +883,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .deviceCommand(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {

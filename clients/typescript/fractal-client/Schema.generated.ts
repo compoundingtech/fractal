@@ -2294,6 +2294,7 @@ export type ClientDiagnosticsBatchEncoded = typeof ClientDiagnosticsBatch.Encode
 
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "agents_publication_version": Schema.Literal(1), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "capability": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "incarnation": Schema.optionalKey(Schema.Never), "limit": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "terminal": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "collection": Schema.Literal("commands"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "trace": optionalKey(SubscribeTraceContext), "actor": Schema.optionalKey(Schema.Never), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "capability": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "incarnation": Schema.optionalKey(Schema.Never), "person": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "status": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "terminal": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "trace": optionalKey(SubscribeTraceContext), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "capability": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "incarnation": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "terminal": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext), "agent": Schema.optionalKey(Schema.Never), "agents_publication_version": Schema.optionalKey(Schema.Never), "capability": Schema.optionalKey(Schema.Never), "conversation": Schema.optionalKey(Schema.Never), "incarnation": Schema.optionalKey(Schema.Never), "since_ms": Schema.optionalKey(Schema.Never), "subject": Schema.optionalKey(Schema.Never), "terminal": Schema.optionalKey(Schema.Never), "until_ms": Schema.optionalKey(Schema.Never) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
@@ -2498,6 +2499,44 @@ export const Device = /*#__PURE__*/ (() => Schema.Union([
 ], { mode: "oneOf" }).annotate({ identifier: "Device" }))()
 export type Device = typeof Device.Type
 export type DeviceEncoded = typeof Device.Encoded
+
+export const DeviceCommandState = /*#__PURE__*/ (() => Schema.Literals(["pending","delivered","completed","not-foreground","expired","refused","failed"]).annotate({ identifier: "DeviceCommandState" }))()
+export type DeviceCommandState = typeof DeviceCommandState.Type
+export type DeviceCommandStateEncoded = typeof DeviceCommandState.Encoded
+
+export const PhoneInspectArgs = /*#__PURE__*/ (() => Schema.Record(Schema.String, Schema.Never).annotate({ identifier: "PhoneInspectArgs" }))()
+export type PhoneInspectArgs = typeof PhoneInspectArgs.Type
+export type PhoneInspectArgsEncoded = typeof PhoneInspectArgs.Encoded
+
+export const PhoneMessageReadArgs = /*#__PURE__*/ (() => Schema.Struct({
+  "attention_id": Schema.String.check(Schema.isPattern(new RegExp("^attention/.+", "u"))).check(Schema.isMaxLength(4096))
+}).annotate({ identifier: "PhoneMessageReadArgs" }))()
+export type PhoneMessageReadArgs = typeof PhoneMessageReadArgs.Type
+export type PhoneMessageReadArgsEncoded = typeof PhoneMessageReadArgs.Encoded
+
+export const PhoneRouteString = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^[^\\u0000-\\u001f\\u007f]+$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(4096)).annotate({ identifier: "PhoneRouteString" }))()
+export type PhoneRouteString = typeof PhoneRouteString.Type
+export type PhoneRouteStringEncoded = typeof PhoneRouteString.Encoded
+
+/** Restricted phone navigation routes; parameters are specific to the selected screen. */
+export const PhoneNavigateArgs = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "screen": Schema.Literals(["NowRoot","Agents","Missions","Usage","History"]), "params": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "params": Schema.Struct({ "id": PhoneRouteString }), "screen": Schema.Literals(["Mission","Attention","Launch"]) }),
+  Schema.Struct({ "params": Schema.Struct({ "sessionId": optionalKey(PhoneRouteString), "target": PhoneRouteString }), "screen": Schema.Literal("Conversation") }),
+  Schema.Struct({ "params": Schema.Struct({ "terminalId": PhoneRouteString }), "screen": Schema.Literal("Terminal") }),
+  Schema.Struct({ "params": optionalKey(Schema.Struct({ "prefix": optionalKey(PhoneRouteString) })), "screen": Schema.Literal("Documents") }),
+  Schema.Struct({ "params": Schema.Struct({ "reference": PhoneRouteString, "trail": Schema.Array(PhoneRouteString).check(Schema.isMaxLength(32)) }), "screen": Schema.Literal("Document") })
+], { mode: "oneOf" }).annotate({ identifier: "PhoneNavigateArgs", description: "Restricted phone navigation routes; parameters are specific to the selected screen." }))()
+export type PhoneNavigateArgs = typeof PhoneNavigateArgs.Type
+export type PhoneNavigateArgsEncoded = typeof PhoneNavigateArgs.Encoded
+
+export const DeviceCommand = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "args": PhoneInspectArgs, "command_kind": Schema.Literal("phone.inspect"), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(128))), "expires_at": Timestamp, "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "result": optionalKey(Schema.Unknown), "revision": Revision, "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp }),
+  Schema.Struct({ "args": PhoneNavigateArgs, "command_kind": Schema.Literal("phone.navigate"), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(128))), "expires_at": Timestamp, "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "result": optionalKey(Schema.Unknown), "revision": Revision, "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp }),
+  Schema.Struct({ "args": PhoneMessageReadArgs, "command_kind": Schema.Literal("phone.message.read"), "device_id": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(128))), "expires_at": Timestamp, "id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))), "issued_at": Timestamp, "issued_by": Id, "kind": Schema.Literal("device-command"), "operational": optionalKey(Operational), "result": optionalKey(Schema.Unknown), "revision": Revision, "session_actor": Id, "state": DeviceCommandState, "updated_at": Timestamp })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("command_kind")).annotate({ identifier: "DeviceCommand" }))()
+export type DeviceCommand = typeof DeviceCommand.Type
+export type DeviceCommandEncoded = typeof DeviceCommand.Encoded
 
 export const GlassTab = /*#__PURE__*/ (() => Schema.Struct({
   "pane": Schema.String.check(Schema.isMinLength(1)),
@@ -3245,7 +3284,7 @@ export type SummaryEncoded = typeof Summary.Encoded
 
 export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
-  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
+  "kind": unknownCase(["attention","message","launch","launch-variant","launch-decision","launch-approval","mission","work","agent","runtime","observer","subscription","lane","machine","device","device-command","operation","history","session","glass","arrangement","owned-set","summary","connected-client","usage"]),
   "operational": optionalKey(Operational),
   "revision": Revision,
   "updated_at": Timestamp
@@ -3484,6 +3523,7 @@ export const Resource = /*#__PURE__*/ (() => Schema.Union([
   Lane,
   Machine,
   Device,
+  DeviceCommand,
   Operation,
   History,
   Session,
@@ -3508,6 +3548,7 @@ export const ResourceCollectionName = /*#__PURE__*/ (() => Schema.Literals([
   "usage",
   "machines",
   "devices",
+  "commands",
   "sessions",
   "terminals"
 ]).annotate({ identifier: "ResourceCollectionName", description: "Collections whose windows hold resources." }))()
@@ -4262,6 +4303,7 @@ export const CollectionName = /*#__PURE__*/ (() => Schema.Literals([
   "usage",
   "machines",
   "devices",
+  "commands",
   "sessions",
   "terminals"
 ]).annotate({ identifier: "CollectionName" }))()
@@ -4314,6 +4356,29 @@ export const ConversationSearch = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ConversationSearch" }))()
 export type ConversationSearch = typeof ConversationSearch.Type
 export type ConversationSearchEncoded = typeof ConversationSearch.Encoded
+
+export const DeviceCommandOutcome = /*#__PURE__*/ (() => Schema.Literals(["completed","not-foreground","expired","refused","failed"]).annotate({ identifier: "DeviceCommandOutcome" }))()
+export type DeviceCommandOutcome = typeof DeviceCommandOutcome.Type
+export type DeviceCommandOutcomeEncoded = typeof DeviceCommandOutcome.Encoded
+
+/** One expiring foreground command. Default TTL is 30000 ms, maximum 60000 ms; at most eight pending commands per device. */
+export const DeviceCommandRequest = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "args": PhoneInspectArgs, "device": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "kind": Schema.Literal("phone.inspect"), "ttl_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(60000))) }),
+  Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "args": PhoneNavigateArgs, "device": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "kind": Schema.Literal("phone.navigate"), "ttl_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(60000))) }),
+  Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "args": PhoneMessageReadArgs, "device": Schema.String.check(Schema.isPattern(new RegExp("^device/.+", "u"))), "kind": Schema.Literal("phone.message.read"), "ttl_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(60000))) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("kind")).annotate({ identifier: "DeviceCommandRequest", description: "One expiring foreground command. Default TTL is 30000 ms, maximum 60000 ms; at most eight pending commands per device." }))()
+export type DeviceCommandRequest = typeof DeviceCommandRequest.Type
+export type DeviceCommandRequestEncoded = typeof DeviceCommandRequest.Encoded
+
+/** Terminal phone report; authenticated pairing supplies the device identity. The daemon clock adjudicates expiry. */
+export const DeviceResult = /*#__PURE__*/ (() => Schema.Struct({
+  "command_id": Schema.String.check(Schema.isPattern(new RegExp("^device-command/.+", "u"))),
+  "error_code": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[A-Za-z0-9_.-]+$", "u"))).check(Schema.isMinLength(1)).check(Schema.isMaxLength(128))),
+  "outcome": DeviceCommandOutcome,
+  "result": optionalKey(Schema.Unknown)
+}).annotate({ identifier: "DeviceResult", description: "Terminal phone report; authenticated pairing supplies the device identity. The daemon clock adjudicates expiry." }))()
+export type DeviceResult = typeof DeviceResult.Type
+export type DeviceResultEncoded = typeof DeviceResult.Encoded
 
 /** A person's current advisory note. It never assigns work, grants authority or satisfies a gate. */
 export const DirectiveNote = /*#__PURE__*/ (() => Schema.Struct({
@@ -4964,6 +5029,7 @@ export const ResourceHeader = /*#__PURE__*/ (() => Schema.Struct({
   "lane",
   "machine",
   "device",
+  "device-command",
   "operation",
   "history",
   "session",

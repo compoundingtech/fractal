@@ -85,6 +85,11 @@ The collections socket's `CollectionCommand` and `CollectionFrame` definitions l
 schema as HTTP resources. The operation manifest's `streams` section names its route, protocol,
 command/frame definitions, and subscription bound; see [collections](collections.md).
 
+Typed, expiring foreground phone commands use the existing resource windows and server-side
+reactive waits; see [foreground phone commands](device-commands.md). Probe `phone-commands`
+before subscribing to `commands`; commands and terminal outcome correlation are member-local
+memory only, never a durable queue.
+
 ### Paired client diagnostics
 
 `POST /v1/client/diagnostics` requires `write.client-diagnostics` and a live paired
