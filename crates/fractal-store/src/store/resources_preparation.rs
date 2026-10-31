@@ -272,14 +272,22 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
              AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_pending WHERE claim_id=OLD.{identity}); END;"
         ))?;
     }
-    for (event, row) in [("UPDATE", "OLD"), ("DELETE", "OLD")] {
+    // A deleted claim moves a batch-mate's rank only where that rank falls back to the count
+    // of earlier claims in the batch: no position row and no raw record of its own. Marking
+    // every mate rebuilt each mate subject's whole history per deleted claim, which a local trim
+    // that drops one claim from each of thousands of kept batches cannot afford. An older
+    // binary may add the broader trigger back; it only marks more.
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3429516f21c9 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS preparation_claims_dirty_DELETE")?;
+    for (event, row, name) in [("UPDATE", "OLD", "UPDATE"), ("DELETE", "OLD", "delete_ranked")] {
         let rank_changed = if event == "UPDATE" {
             "(OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index)"
         } else {
-            "1"
+            "(claims.store_index>OLD.store_index
+             AND NOT EXISTS (SELECT 1 FROM claim_positions WHERE claim_id=claims.id)
+             AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id))"
         };
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h72f718a8af1e owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{event} AFTER {event} ON claims BEGIN
+            /* sqlite-large-value: allow-for-now lv-h3973d20971fd owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{name} AFTER {event} ON claims BEGIN
              INSERT INTO local_resource_preparation_dirty(subject) SELECT {row}.subject
              WHERE (substr({row}.subject,1,9)='resource/' OR {row}.kind='resource.observed'
                  OR EXISTS (SELECT 1 FROM local_resource_preparation WHERE subject={row}.subject))
