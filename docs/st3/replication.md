@@ -1233,8 +1233,9 @@ if it finds one. A claim accepted after the cut only moves its key.
 
 When a kind differs the member compares again two hours later. A difference that lasts two hours
 is narrowed:
-bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
-kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+bucket digests for each differing kind, then the keys of the differing buckets, eight buckets a
+read; while every key found moves on one member, the next eight are read, until a key differs or
+every differing bucket is read. Up to eight claim kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
 its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
 where those compare, is no difference. The member records
 one `operational.failure` on its own `daemon/NODE` subject with the condition
@@ -1256,6 +1257,11 @@ reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`)
 (`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
 `reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
 kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+A fold reader has no `before_cut`, so a member serving a kept summary first reads which counted
+subjects now have a claim at or after the cut, one index read each (0.1 s for 23,000 subjects on
+a store of 52 GB), marks them moving and counts the readers again without them. Two members that
+computed hours apart, such as either side of a restart onto a new build, then leave out the same
+seats: a seat whose held usage readings were flushed late moves on both.
 
 ### First sync
 
