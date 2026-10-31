@@ -1670,6 +1670,82 @@ version 2
 }
 
 #[test]
+fn a_pin_of_a_trimmed_observation_says_it_was_trimmed() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(
+        &store,
+        r#"
+version 2
+
+  resource "source" { kind "custom.st3.document-source" }
+  mission "pinned" state="ready" {
+    input "source" kind="resource"
+    concurrent-runs
+    goal "Use the pinned observation."
+  }
+
+"#,
+        "publish-pinned-mission",
+    );
+    let observe = |state: &str| {
+        store
+            .append_claim(&ClaimInput {
+                subject: "resource/source".into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::String(state.into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let first = observe("ready");
+    observe("changed");
+    // As a member that trims locally deletes it: retired with its rows.
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let tombstone = smallclaims::store::checkpoint::ClaimTombstone {
+            id: first.id.clone(),
+            writer: "node".into(),
+            sequence: 0,
+            envelope_hash: String::new(),
+            subject: "resource/source".into(),
+            kind: "resource.observed".into(),
+            actor: None,
+            predecessors: Vec::new(),
+            operation_id: None,
+            request_digest: None,
+            accepted_at_unix_ms: 0,
+        };
+        smallclaims::store::checkpoint::delete_dropped_rows_tx(&transaction, &[], &[tombstone]).unwrap();
+        transaction.commit().unwrap();
+    }
+    let run = |key: &str, source: String| {
+        store.create_mission_run(&MissionRunRequest {
+            mission: "pinned".into(),
+            revision: None,
+            workspace: ".".into(),
+            requester: Some("person/test".into()),
+            mode: None,
+            inputs: BTreeMap::from([("source".into(), source)]),
+            idempotency_key: key.into(),
+        })
+    };
+    let trimmed = run("pin-trimmed", format!("resource/source@{}", first.id)).unwrap_err();
+    assert_eq!(trimmed.code, "trimmed-resource-input-version");
+    assert!(trimmed.message.contains(&format!("resource/source@{} was trimmed on this member", first.id)), "{}", trimmed.message);
+    // A claim this member never had may still arrive.
+    let unarrived = run("pin-unarrived", format!("resource/source@{}", "a".repeat(64))).unwrap_err();
+    assert_eq!(unarrived.code, "missing-resource-input-version");
+    // The subject pins its newest observation.
+    assert!(run("pin-subject", "resource/source".into()).is_ok());
+}
+
+#[test]
 fn child_runs_accept_inputs_and_revisions_cannot_change_them() {
     let store = Store::open_memory("node").unwrap();
     let source = r#"

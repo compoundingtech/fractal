@@ -60,6 +60,7 @@
 "delivery.hold" = { class = "durable" }
 "doc.bound" = { class = "durable" }
 "eval.verdict" = { class = "durable" }
+"fault.dismissed" = { class = "durable" }
 "file.observed" = { class = "durable" }
 "fleet.invite-created" = { class = "durable" }
 "fleet.invite-redeemed" = { class = "durable" }

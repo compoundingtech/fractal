@@ -176,27 +176,8 @@ fn request_digest(kind: &str, request: &Value) -> Result<String, St3Error> {
 /// Check immutable request/effect binding before a replicated fact enters the projection.
 /// Missing declaration/predecessor evidence is intentionally left to the fail-closed reducer.
 pub fn validate_replicated(claim: &ClaimRecord) -> Result<(), St3Error> {
-    if !KINDS.contains(&claim.kind.as_str()) { return Ok(()); }
-    let invalid = || St3Error::new("invalid-replicated-claim", "naming claim request, operation or owner evidence disagrees");
-    let fields = &claim.body["fields"];
-    let request_value = &fields["request"];
-    let request: RenameRequest = RenameRequest::deserialize(request_value).map_err(|_| invalid())?;
-    let kind = if claim.kind == AGENT_RENAMED { IdentityKind::Agent } else { IdentityKind::Mission };
-    if IdentityKind::of(&claim.subject) != Some(kind)
-        || IdentityKind::of(&request.from) != Some(kind)
-        || IdentityKind::of(&request.to) != Some(kind)
-        || request.reason.trim().is_empty()
-        || fields["to"].as_str() != Some(request.to.as_str())
-        || fields["reason"].as_str() != Some(request.reason.as_str())
-        || fields["owner_host"].as_str() != Some(claim.origin.as_str())
-        || claim.actor.is_none()
-        || (!request.actor.starts_with("agent/") && claim.actor.as_deref() != Some(request.actor.as_str()))
-        || request.expected_declaration.as_deref().is_some_and(|expected| fields["declaration"].as_str() != Some(expected))
-        || request.expected_naming_revision.as_deref().is_some_and(|expected| fields["previous_revision"].as_str() != Some(expected))
-    { return Err(invalid()); }
-    let Some((operation,digest)) = operation_parts(&claim.body) else { return Err(invalid()); };
-    if operation != operation_id_for_key(&request.idempotency_key) || digest != request_digest(&claim.kind, request_value)? {
-        return Err(invalid());
+    if !smallclaims::naming::admits_replicated(claim).map_err(internal)? {
+        return Err(St3Error::new("invalid-replicated-claim", "naming claim request, operation or owner evidence disagrees"));
     }
     Ok(())
 }
