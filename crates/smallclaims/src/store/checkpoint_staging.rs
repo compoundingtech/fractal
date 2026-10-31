@@ -252,6 +252,20 @@ impl Store {
         self.checkpoint_staged_set_scoped(cut_unix_ms, through_rowid, dir, None)
     }
 
+    /// How many of the store's claims are of `kinds`, and how many it holds: a scoped capture's
+    /// share, which sizes its staging allowance. Both counts read only an index.
+    fn claim_share(&self, kinds: &[String]) -> Result<(u128, u128)> {
+        let connection = self.readers.get();
+        let mut scoped = 0_i64;
+        for kind in kinds {
+            scoped += connection
+                .prepare_cached("SELECT COUNT(*) FROM claims WHERE kind=?1")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-h7c73f57c6335 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ [kind], |row| row.get::<_, i64>(0))?;
+        }
+        let total: i64 = connection.query_row("SELECT COUNT(*) FROM claims", [], |row| row.get(0))?;
+        Ok((u128::try_from(scoped)?, u128::try_from(total)?))
+    }
+
     /// `checkpoint_staged_set`, staging with `scope` only the envelopes that hold a claim of
     /// those kinds and what the planner's guards read to judge them (`checkpoint_staging/scoped`).
     pub fn checkpoint_staged_set_scoped(
@@ -266,7 +280,10 @@ impl Store {
         let _span = crate::profile::span_with_io("checkpoint.capture");
         // Admit before lock_staging creates the scratch directory or lock file.
         let space = if self.shared_memory { None } else {
-            Some(super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?)
+            Some(match scope.as_deref() {
+                Some(kinds) => super::checkpoint_space::SpaceGuard::admit_scoped_capture(&self.path, dir, self.claim_share(kinds)?)?,
+                None => super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?,
+            })
         };
         // The startup checkpoint pass sweeps only proof scratch that has lost its owner lock.
         // A dry-run captures in `scratch/plan`, while the proof files live in `scratch`.

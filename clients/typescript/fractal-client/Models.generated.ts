@@ -334,6 +334,7 @@ export type AgentResumeParameters = {
 
 export type AgentRetireParameters = {
   agent: Id;
+  expect_revision?: string;
   reason: string;
   successor?: Id;
 };
@@ -1687,6 +1688,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "retire-revision-mismatch"
+  | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
   | "attention-migrated"
@@ -3108,11 +3111,14 @@ export type SloRow = {
   account?: string;
   current: string;
   explain: string;
+  forecast_basis_minutes?: number;
+  forecast_used_percent?: number;
   id: string;
   kind: "objective" | "budget";
   measured_at_unix_ms?: number;
   remaining_percent: number | null;
   resets_at_unix_ms?: number | null;
+  runs_out_at_unix_ms?: number;
   status: "met" | "missed" | "no-data" | "stale";
   target: string;
   window: string;
@@ -3422,6 +3428,7 @@ export type TimelineContentBody = {
   attachment_id?: Id;
   blocks?: Array<TimelineBlock>;
   media_type: string;
+  message_id?: string;
   text?: string;
 } & (unknown | unknown);
 

@@ -99,6 +99,8 @@ Use these documents for implementation details:
 - [Client v0 contract](client-v0/README.md) defines the shared TUI and mobile JSON, event, action,
   pairing, and terminal protocols.
 - [Device signing](device-signing.md) defines paired-client keys and signed requests.
+- [ChatGPT app](chatgpt-app.md) is the design for the ChatGPT app: composition boundaries, the
+  adapter's place beside the iOS app, and how any person installs it against their own daemon.
 - [Operational-state contract](operational-state/README.md) separates immutable history, current
   projection, and actor-specific actionable views and defines screen/CLI parity.
 

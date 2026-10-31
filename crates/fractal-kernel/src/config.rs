@@ -205,12 +205,16 @@ impl CheckpointConfig {
 /// other members until a person excuses this one. Off by default; nothing changes unless a
 /// member opts in. `notify` names the agent that receives a fault when the daily answers check
 /// finds this member and a peer answering differently; without it the fleet's fault agent does.
+/// `daily_claims` is the most claims a local trim deletes in a day (100,000 unless set): a cut
+/// that drops more goes on the next day where it stopped.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_claims: Option<u64>,
 }
 
 impl TrimConfig {
@@ -227,6 +231,7 @@ impl TrimConfig {
             }),
             "trim.notify names one agent/... subject"
         );
+        anyhow::ensure!(self.daily_claims != Some(0), "trim.daily_claims is at least 1");
         Ok(())
     }
 }
@@ -1586,6 +1591,9 @@ sekrets_profile = "nathan/daemon-gh"
         assert!(config.trim.local);
         assert!(toml::to_string(&config).unwrap().contains("[trim]"));
         assert!(toml::from_str::<Config>("[trim]\nlocal = true\nfamilies = []\n").is_err());
+        let config: Config = toml::from_str("[trim]\nlocal = true\ndaily_claims = 5000\n").unwrap();
+        assert_eq!(config.trim.daily_claims, Some(5000));
+        assert!(TrimConfig { daily_claims: Some(0), ..TrimConfig::default() }.validate().is_err());
     }
 
     #[test]

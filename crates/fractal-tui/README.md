@@ -40,11 +40,13 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
+Install the repo's `.#fractal` Nix package and run `FRACTAL_PERSON=person/<your-id> fractal` in a terminal
 with a running Fractal daemon. For source development, use
-`ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
+`FRACTAL_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `FRACTAL_ENDPOINT` can override the discovered Unix socket. When neither person environment variable is set,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Inbox and devices show the right data.
+`ST3_PERSON` and `ST3_ENDPOINT` remain accepted. The Fractal spelling is preferred;
+empty values are ignored. Setting both spellings to unequal non-empty values is an error.
 
 For a laptop without a daemon, run `fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
 single-use code, then run `fractal`. The paired member supplies the person identity. See
@@ -129,7 +131,7 @@ cargo test -p fractal-tui --locked --lib
 cargo test -p fractal --locked --test integration typed_keys
 cargo test -p fractal --locked --test integration client_only
 cargo build -p fractal --locked
-ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
+ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/fractal --ui
 ```
 
 After an intended mission-rendering change, regenerate its text, style and target golden with
@@ -197,8 +199,9 @@ An image is read, decoded and scaled to at most 1600 pixels on a worker; its ter
 encoding is built off the draw path, an image the edge of the pane cuts draws the rows still
 on screen, and its pixels leave memory once it is more than a screen away. An owner that
 cannot be reached says so on the image's line, with the way to try again. `open` shows the
-image in this machine's viewer, or saves it under its name to `ST3_DOWNLOADS`, else the XDG
-download directory, else `~/Downloads`.
+image in this machine's viewer, or saves it under its name to `FRACTAL_DOWNLOADS` (or
+`ST3_DOWNLOADS`), else the XDG download directory, else `~/Downloads`. The same
+non-empty alias conflict rule applies to the download directory.
 
 ## Resource sidebar
 
