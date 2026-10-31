@@ -31,7 +31,7 @@ fn pending_precedes_workspace_preparation_and_durable_start() {
         let workspace = root.path().join("not-created");
         apply_source(&store, &format!("version 2\n{kind} \"worker\" {{ workspace {:?}; command \"true\" }}", workspace.display().to_string()), "pending");
         let subject = store.desired_subjects().unwrap().remove(0);
-        for _ in 0..2 { reconciler.reconcile_once().unwrap(); }
+        for _ in 0..2 { reconciler.perform_start(&subject, subject.member.as_ref().unwrap(), "admission boundary").unwrap(); }
         assert!(!workspace.exists());
         assert!(store.runtime_start_for(&subject.subject).unwrap().is_none());
         assert!(store.claims_for(&subject.subject, Some("runtime.action.requested")).unwrap().is_empty());
@@ -156,6 +156,7 @@ fn controller_refresh_releases_missing_and_stale_envelopes_without_waiting() {
     let reconciler = reconciler.with_seat_admission(Some(config.clone()), status.clone());
     assert_eq!(status.state().decision.mode, "fail-open");
     assert!(status.admit("worker", None, None, false, now));
+    drop(reconciler);
     fs::remove_file(&file).unwrap();
     status.state().decision.queue = true;
     assert!(!status.admit("worker", None, None, false, now));
@@ -192,11 +193,15 @@ fn rollout_replacement_uses_liveness_when_operation_was_requested() {
         store.apply_owned_set(&intent, &options, "initial", "person/test").unwrap();
         let subject = store.desired_subjects().unwrap().remove(0);
         let mut member = subject.member.as_ref().unwrap().clone();
-        claim(&store, &subject.subject, "runtime.observed",
-            serde_json::to_value(member_fields(&member, observed, Some("old"), observed == "running")).unwrap(), vec![]);
-        claim(&store, &subject.subject, "harness.session-file",
-            json!({"harness":"omp", "session_id":"native-one", "incarnation_id":"old"}), vec![]);
         let token = store.selected_desired_token(&subject.subject).unwrap().unwrap();
+        claim(&store, &subject.subject, "runtime.observed",
+            serde_json::to_value(member_fields(&member, "running", Some("old"), true)).unwrap(), vec![]);
+        claim(&store, &subject.subject, "runtime.action.succeeded", json!({"action":"start","desired_token":token,"incarnation_id":"old"}), vec![]);
+        store.append_claim(&ClaimInput { subject: subject.subject.clone(), kind: "harness.session-file".into(), actor: Some(subject.subject.clone()),
+            fields: serde_json::from_value(json!({"harness":"omp","session_id":"native-one","incarnation_id":"old"})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None }).unwrap();
+        if observed == "stopped" { claim(&store, &subject.subject, "runtime.observed",
+            serde_json::to_value(member_fields(&member, "stopped", Some("old"), false)).unwrap(), vec![]); }
         let request = store.request_rollout(&subject.subject, &token, &member, "old", "person/test",
             &crate::rollout::Policy::when_idle(1_800_000, false), "operation").unwrap();
         claim(&store, &subject.subject, "runtime.observed",
