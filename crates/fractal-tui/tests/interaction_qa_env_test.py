@@ -11,11 +11,11 @@ with patch.dict(os.environ, {"PTY_BIN": "fixture-pty"}):
 class PersonAliases(unittest.TestCase):
     def test_accepted_aliases_keep_legacy_child_spelling(self):
         for preferred, legacy, expected in [
-            ("person/new", None, "person/new"),
-            (None, "person/old", "person/old"),
-            ("person/equal", "person/equal", "person/equal"),
-            ("", "person/old", "person/old"),
-            ("person/new", "", "person/new"),
+            ("person/one", None, "person/one"),
+            (None, "person/two", "person/two"),
+            ("person/fixture", "person/fixture", "person/fixture"),
+            ("", "person/two", "person/two"),
+            ("person/one", "", "person/one"),
             (None, None, "person/alex"),
         ]:
             environment = {}
@@ -31,14 +31,15 @@ class PersonAliases(unittest.TestCase):
 
     def test_conflict_fails_before_launch_without_exposing_values(self):
         with patch.dict(os.environ, {
-            "FRACTAL_PERSON": "person/preferred-secret",
-            "ST3_PERSON": "person/legacy-secret",
+            "FRACTAL_PERSON": "person/one",
+            "ST3_PERSON": "person/two",
         }, clear=True), patch.object(qa.subprocess, "run") as run:
             with self.assertRaises(ValueError) as caught:
                 qa.start("fixture-binary", "fixture")
             message = str(caught.exception)
             self.assertIn("FRACTAL_PERSON and ST3_PERSON", message)
-            self.assertNotIn("secret", message)
+            self.assertNotIn("person/one", message)
+            self.assertNotIn("person/two", message)
             run.assert_not_called()
 
 
