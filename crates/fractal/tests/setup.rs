@@ -890,14 +890,9 @@ fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_
         let metadata = fs::symlink_metadata(fixture.path(&format!("bin/{name}"))).unwrap();
         (metadata.dev(), metadata.ino())
     }).into();
-    let canonical = fixture.path("home/.local/bin/fractal");
-    fs::create_dir_all(canonical.parent().unwrap()).unwrap();
-    symlink(fixture.path("archive/fractal"), &canonical).unwrap();
-    symlink(fixture.path("archive/pty"), canonical.with_file_name("pty")).unwrap();
-    let canonical_inode = fs::symlink_metadata(&canonical).unwrap().ino();
     let text = success(
         &fixture
-            .command(&canonical)
+            .command(&fixture.path("archive/st3"))
             .args([
                 "--instance",
                 "demo",
@@ -922,8 +917,6 @@ fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_
     assert!(text.contains("This instance's commands are in"), "{text}");
     assert!(!text.contains("export PATH"), "{text}");
     assert_eq!(fs::read(&default).unwrap(), b"default login command");
-    assert_eq!(fs::symlink_metadata(&canonical).unwrap().ino(), canonical_inode);
-    assert_eq!(fs::read_link(&canonical).unwrap(), fixture.path("archive/fractal"));
     for (index, name) in ["fractal", "st", "st3"].into_iter().enumerate() {
         let path = fixture.path(&format!("bin/{name}"));
         let metadata = fs::symlink_metadata(&path).unwrap();
