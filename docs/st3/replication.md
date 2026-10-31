@@ -1205,8 +1205,9 @@ if it finds one. A claim accepted after the cut only moves its key.
 
 When a kind differs the member compares again two hours later. A difference that lasts two hours
 is narrowed:
-bucket digests for each differing kind, then the keys of the differing buckets. Up to eight claim
-kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
+bucket digests for each differing kind, then the keys of the differing buckets, eight buckets a
+read; while every key found moves on one member, the next eight are read, until a key differs or
+every differing bucket is read. Up to eight claim kinds are narrowed per check, each read anew on both members; every fold reader is narrowed, since
 its keys come with the summary. A kind whose differing keys all moved, with the same `claims`
 where those compare, is no difference. The member records
 one `operational.failure` on its own `daemon/NODE` subject with the condition
@@ -1228,6 +1229,11 @@ reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`)
 (`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
 `reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
 kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+A fold reader has no `before_cut`, so a member serving a kept summary first reads which counted
+subjects now have a claim at or after the cut, one index read each (0.1 s for 23,000 subjects on
+a store of 52 GB), marks them moving and counts the readers again without them. Two members that
+computed hours apart, such as either side of a restart onto a new build, then leave out the same
+seats: a seat whose held usage readings were flushed late moves on both.
 
 ### First sync
 
@@ -1371,7 +1377,14 @@ members until a person excuses it.
 
 Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
-checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
+what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
+same operation, the protections naming those claims, each writer's newest envelope, and the claims
+citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
+each cut first reads the claims that arrived since the last, in arrival order, committing each page
+with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
+sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
+drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
 and the trimmed log: today `observer.observed`. Everything else is kept, as a protected claim is,
 and envelopes still go whole, so an observer batch that also carries other kinds stays. Two audited

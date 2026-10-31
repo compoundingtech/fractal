@@ -15,7 +15,9 @@
 //! A key that gains a claim after the cut leaves the summary on each member when that claim
 //! arrives, so two members that compute at different times can differ only in such keys. The
 //! keys a narrowing lists therefore carry them too, marked `moving`, and a key moving on either
-//! member is no difference.
+//! member is no difference. A kept fold reader's answers learn of those claims as they are
+//! served: each subject with a claim at or after the cut by then moves, and the reader's digests
+//! are counted again without it, so two members that computed hours apart still agree.
 //!
 //! `keys` counts the keys a kind's digest covers and `claims` the kind's claims older than the
 //! cut. A member that trims holds fewer claims than one that does not, so callers compare
@@ -641,6 +643,24 @@ fn still_current(connection: &Connection, mark: i64, cut_unix_ms: u128) -> Resul
     Ok((!late).then_some(newest))
 }
 
+/// The subjects of `subjects` with a claim accepted at or after the cut by now. A fold reader's
+/// key moves when any claim of its subject does, so a reader kept since before such a claim
+/// arrived still counts the subject a member computing now leaves out. One index read a subject.
+fn moved_since(connection: &Connection, subjects: &BTreeSet<String>, cut_unix_ms: u128) -> Result<BTreeSet<String>> {
+    let mut newest = connection.prepare_cached(
+        "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_accepted_index WHERE subject=?1
+         ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+    )?;
+    let mut moved = BTreeSet::new();
+    for subject in subjects {
+        let accepted: Option<String> = newest.query([subject])?.next()?.map(|row| row.get(0)).transpose()?;
+        if accepted.is_some_and(|accepted| accepted.parse::<u128>().map_or(true, |accepted| accepted >= cut_unix_ms)) {
+            moved.insert(subject.clone());
+        }
+    }
+    Ok(moved)
+}
+
 /// Where `store` keeps its summary: beside its database, and nowhere for a store in memory.
 fn kept_path(store: &Store) -> Option<std::path::PathBuf> {
     let mut path = store.path.clone().into_os_string();
@@ -681,6 +701,35 @@ fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: 
     Ok(())
 }
 
+impl CacheState {
+    /// The subjects the kept fold readers still count.
+    fn counted_subjects(&self) -> BTreeSet<String> {
+        self.readers
+            .iter()
+            .flat_map(|every| every.keys.iter().filter(|key| !key.moving).map(|key| key.subject.clone()))
+            .collect()
+    }
+
+    /// Mark every key of a `moved` subject moving in the kept fold readers, and count each reader
+    /// that had one again, in the summary as in its buckets.
+    fn remark_moving(&mut self, moved: &BTreeSet<String>) {
+        let Some(summary) = self.summary.as_mut() else { return };
+        for every in &mut self.readers {
+            if !every.keys.iter().any(|key| !key.moving && moved.contains(&key.subject)) {
+                continue;
+            }
+            for key in every.keys.iter_mut().filter(|key| moved.contains(&key.subject)) {
+                key.moving = true;
+                key.claim.clear();
+            }
+            let name = every.kind.strip_prefix(READER_PREFIX).unwrap_or(&every.kind).to_owned();
+            let (kind, answers, buckets) = reader_answers(&name, every.cut_unix_ms, std::mem::take(&mut every.keys));
+            summary.kinds.insert(kind, answers);
+            *every = buckets;
+        }
+    }
+}
+
 impl AnswersCache {
     /// Cover these fold readers' answers in every summary from now on.
     pub fn set_readers(&self, readers: FoldReaders) {
@@ -697,10 +746,18 @@ impl AnswersCache {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
             let mark = state.summary_mark;
+            let counted = state.counted_subjects();
             drop(state);
             let store: &Store = (**store).borrow();
             let current = still_current(&store.readers.get(), mark, request.cut_unix_ms);
+            let moved = moved_since(&store.readers.get(), &counted, request.cut_unix_ms);
             state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
+                match moved {
+                    Ok(moved) => state.remark_moving(&moved),
+                    Err(error) => eprintln!("st3: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
+                }
+            }
             match current {
                 Ok(Some(newest)) => state.summary_mark = state.summary_mark.max(newest),
                 Ok(None) => {
