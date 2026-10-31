@@ -158,7 +158,7 @@ async fn a_member_records_the_freshness_a_host_pushes_for_its_own_seats_only() {
     let heard = |agent: &str, at: u64| SeatHeard { agent: agent.into(), incarnation_id: "one".into(), heard_at_unix_ms: at };
     let push = SeatFreshnessPush { seats: vec![heard(&ours, 1_000), heard(&theirs, 1_000)] };
     let ack = relay.push_seat_freshness(RECEIVER, &push, Duration::from_secs(10)).await.unwrap().unwrap();
-    assert_eq!(ack.recorded, [ours.clone()], "a member speaks only for the seats it hosts");
+    assert_eq!(ack.recorded, std::slice::from_ref(&ours), "a member speaks only for the seats it hosts");
     let relayed = receiver.extension::<RelayedFreshness>();
     assert_eq!(relayed.heard_at(&ours, "one"), Some(1_000));
     assert_eq!(relayed.heard_at(&theirs, "one"), None);
