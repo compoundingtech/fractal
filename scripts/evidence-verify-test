@@ -1513,15 +1513,14 @@ class CommittedPolicy(unittest.TestCase):
                 found.append(str(source.relative_to(ROOT)))
         self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
 
-    def test_the_host_level_is_admitted_for_exactly_the_locally_signable_checks_wrapper_kind_and_pull_requests_only(self):
+    def test_host_and_agent_levels_admit_pr_and_queue_events_for_the_locally_signable_wrapper_checks(self):
         policy = json.loads(root_config('evidence-skip-policy.json').read_text())
-        # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
-        # every other check keeps enforce false until its own flip PR.
+        # Event eligibility does not enable queue reuse: the BASE gate mode remains off until post-merge proof is deployed.
         self.assertEqual({check: entry.get('enforce', False) for check, entry in policy['checks'].items()},
                          {check: check in ENFORCED for check in policy['checks']})
         for check in ENFORCED:
-            self.assertEqual(policy['checks'][check].get('events'), ['pull_request'], check)
-            # Our pull requests skip CI entirely (Ada, 2026-10-26): no comparison sample; the merge queue's full run is the comparison.
+            self.assertEqual(policy['checks'][check].get('events'), ['pull_request', 'merge_group'], check)
+            # Sampling remains unchanged; queue reuse independently requires an exact signed tree.
             self.assertEqual(policy['checks'][check].get('sample_one_in', 1), 1, check)
         with_host = {}
         for check, entry in policy['checks'].items():
@@ -1546,7 +1545,7 @@ class CommittedPolicy(unittest.TestCase):
             agent = dict(rule['by_level']['agent'])
             self.assertIs(agent.pop('lane'), True, check)
             self.assertEqual(agent, override, check)
-            self.assertEqual(override['events'], ['pull_request'], check)
+            self.assertEqual(override['events'], ['pull_request', 'merge_group'], check)
             # The queue level (a merge-queue signer's key): the host's command and inputs, held to the lane, for the merge queue only.
             queue = dict(rule['by_level']['queue'])
             self.assertIs(queue.pop('lane'), True, check)
@@ -1555,7 +1554,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(override['bind_inputs'], {'flake_lock_sha256': 'flake.lock'}, check)
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
-            self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
+            self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request', 'merge_group'])
         # The commands are the ones scripts/fractal-test records, so a local note can match.
         script = ROOT / 'scripts/st-test'
         if script.exists():
@@ -1566,9 +1565,8 @@ class CommittedPolicy(unittest.TestCase):
             for (check, kind), rule in with_host.items():
                 self.assertEqual(rule['by_level']['host']['command'], st_test.LOCAL[check], check)
 
-    def test_a_queue_note_never_covers_a_pull_request_and_covers_nothing_until_its_check_admits_the_merge_queue(self):
-        # Inert by construction: the level is limited to merge_group, and every check is still limited to pull requests, so the
-        # narrowed list is empty. A check's own flip (its events gaining merge_group) is what lets a queue note skip, one check at a time.
+    def test_a_queue_note_never_covers_a_pull_request_and_requires_check_event_eligibility(self):
+        # Queue-level records stay merge-group-only, even though host and agent records also admit PR events.
         policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         with_queue = []
         for check, entry in policy['checks'].items():
@@ -1583,7 +1581,7 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertNotIn('pull_request', evidence_verify.narrowed_events(None, level['events']), check)
                 self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']),
                                  ['merge_group'] if 'merge_group' in (rules['events'] or []) else [], check)
-                self.assertEqual(evidence_verify.narrowed_events(rules['events'], level['events']), [], f'{check}: not flipped yet')
+                self.assertEqual(evidence_verify.narrowed_events(['pull_request'], level['events']), [], check)
         self.assertEqual(sorted(with_queue), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
 
     def test_every_required_check_has_a_valid_entry_that_accepts_only_the_fleet_signer(self):
