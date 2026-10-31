@@ -7,7 +7,7 @@ use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
-const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked"];
+const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
@@ -50,7 +50,7 @@ fn write() -> impl Strategy<Value = Write> {
         (0..3u8, 0..3u8).prop_map(|(resource, state)| Write::Resource { resource, state }),
         (0..3u8, 0..3u8, 0..3u8, 0..3u8)
             .prop_map(|(observer, status, resource, state)| Write::Poll { observer, status, resource, state }),
-        (0..2u8, 0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
+        (0..2u8, 0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
             |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
                 seat,
                 incarnation,
@@ -167,7 +167,8 @@ fn apply(store: &Store, write: &Write, n: usize) {
 /// Every answer the readers of these kinds give: the whole graph, each observer's and resource's
 /// newest observation (what resources and reconcile read), each resource's observations newest
 /// first (what a GitHub watch walks back to find when a pull request left the merge queue), each
-/// seat's current harness, and each seat's status history.
+/// seat's current harness, status history, newest turn or end, and newest `working` (when its last
+/// turn began, and whether it worked after a given time).
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
@@ -194,7 +195,18 @@ fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
         let history = seat_status::history_at(&connection, seat, now, i64::MAX as u64).unwrap();
-        seats.push(format!("{seat}: {harness:?} {history}"));
+        let turn = super::attention_snapshot::last_turn_or_end(&connection, seat).unwrap();
+        let worked: Option<(String, Option<i64>)> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.observed_since_ms') FROM claims
+                 WHERE subject=?1 AND kind='harness.observed' AND json_extract(body, '$.fields.state')='working'
+                 ORDER BY store_index DESC LIMIT 1",
+                [seat],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        seats.push(format!("{seat}: {harness:?} {history} {turn:?} {worked:?}"));
     }
     (graph_digest_of(store), seats)
 }
@@ -493,28 +505,65 @@ proptest! {
     }
 }
 
-/// The audited `harness.observed` rule drops a credential transition whose loss moves the
-/// `since` of a needs-login seat (ready without provider auth, then with, then without again),
-/// which no projection digest covers. Until a rule keeps it, local trim leaves the kind whole.
+/// A needs-login seat keeps its `since` through local trim: the rule keeps the credential report
+/// that ended the run before the current one (see #4237), while the transitions it supersedes go.
 #[test]
-fn local_trim_leaves_harness_observations_whole() {
+fn local_trim_keeps_where_a_needs_login_run_began() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
     let store = local_member("alder");
-    let history = [(1, false), (0, true), (1, false)];
+    // Ready without provider auth, then starting, working and idle with it, then working, and
+    // ready and idle without it again: the starting, working and idle in between go.
+    let history = [(0, None), (1, Some(false)), (0, Some(true)), (3, Some(true)), (2, Some(true)), (3, Some(true)), (1, Some(false)), (2, Some(false))];
     for (n, (state, provider_auth)) in history.into_iter().enumerate() {
-        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth: Some(provider_auth) };
+        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth };
         apply(&store, &write, n);
     }
-    for n in 3..20 {
+    for n in history.len()..20 {
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let harness = claims_of(&store, "harness.observed");
     let before = answers(&store, context.now_unix_ms);
+    assert!(before.1.iter().any(|answer| answer.contains("needs-login") || answer.contains("NeedsLogin")), "{:?}", before.1);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
-    assert_eq!(claims_of(&store, "harness.observed"), harness);
-    assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
+    assert_eq!(claims_of(&store, "harness.observed"), harness - 3, "the superseded transitions go");
+    assert_eq!(claims_of(&store, "observer.observed"), 1);
+}
+
+fn harness_write() -> impl Strategy<Value = Write> {
+    (0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(|(incarnation, state, restamp, provider_auth)| {
+        Write::Harness { seat: 0, incarnation, state, restamp, provider_auth }
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// For random histories of one seat's harness observations, over two incarnations, the
+    /// seat's current harness and status history answer the same before and after the local
+    /// trim, and the newest observation stays.
+    #[test]
+    fn a_seat_answers_the_same_from_its_full_and_trimmed_harness_observations(
+        writes in proptest::collection::vec(harness_write(), 1..40)
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let context = context(scratch.path(), 0);
+        let store = local_member("alder");
+        for (n, write) in writes.iter().enumerate() {
+            apply(&store, write, n);
+        }
+        let newest = store.latest_claim(SEATS[0], Some("harness.observed")).unwrap().map(|claim| claim.id);
+        let before = answers(&store, context.now_unix_ms);
+        let actions = kinds(&step(&store, &context));
+        prop_assert!(!actions.contains(&"graph-changed"), "{actions:?}");
+        prop_assert_eq!(answers(&store, context.now_unix_ms), before);
+        if let Some(id) = newest {
+            prop_assert!(store.claim_by_id(&id).unwrap().is_some(), "the newest observation {} stays", id);
+        }
+        let orphaned = orphans(&store);
+        prop_assert!(orphaned.iter().all(|(_, count)| *count == 0), "{:?}", orphaned);
+    }
 }
 
 /// A GitHub watch finds when a pull request left the merge queue by walking the request's
