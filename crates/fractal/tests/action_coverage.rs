@@ -7,6 +7,7 @@ use fractal_daemon::SeatsStore;
 use fractal_daemon::EvidenceStore;
 use fractal_daemon::OwnedSetsStore;
 use fractal_daemon::GitChangesStore;
+use fractal_daemon::RetirementsStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Output;
