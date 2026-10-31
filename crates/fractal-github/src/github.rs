@@ -2,7 +2,6 @@ use crate::model::{DesiredSubject, MissionInputKind, MissionRunView};
 use crate::store::Store;
 use crate::store::*;
 use anyhow::Result;
-use rusqlite::OptionalExtension as _;
 
 pub trait GithubStore {
     /// Repository candidates on one host, excluding members with neither a checkout nor any
@@ -18,12 +17,6 @@ pub trait GithubStore {
     /// Only subscription deliveries follow the current PR head. Authored missions keep their
     /// pinned inputs, including missions that opened or are changing a pull request themselves.
     fn stale_subscription_pull_request_run(&self, run: &MissionRunView) -> Result<Option<String>>;
-    /// The members whose readers need the full facts of the GitHub repository `locator` recorded
-    /// into `resource`: the host of each seat that watches it, each member that declared a
-    /// subscription on one of its observers, and each member running a mission run pinned to one
-    /// of its items. A poller keeps writing item snapshots until every one of them advertises
-    /// the GitHub plugin.
-    fn repository_dependents(&self, locator: &str, resource: &str) -> Result<std::collections::BTreeSet<String>>;
 }
 
 impl GithubStore for Store {
@@ -80,70 +73,5 @@ impl GithubStore for Store {
             }
         }
         Ok(None)
-    }
-
-    fn repository_dependents(&self, locator: &str, resource: &str) -> Result<std::collections::BTreeSet<String>> {
-        let observers = crate::WatchesStore::repository_observers(self)
-            .map_err(|error| anyhow::anyhow!(error.message))?
-            .into_iter()
-            .filter(|(_, spec)| spec.resource == resource || spec.locator.eq_ignore_ascii_case(locator))
-            .map(|(subject, _)| subject)
-            .collect::<std::collections::BTreeSet<_>>();
-        let connection = self.readers.get();
-        let mut members = std::collections::BTreeSet::new();
-        let origin = |subject: &str| -> Result<Option<String>> {
-            Ok(connection
-                .query_row(
-                    "SELECT claims.origin FROM desired JOIN claims ON claims.id=desired.claim_id WHERE desired.subject=?1",
-                    [subject],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?)
-        };
-        let rows = connection
-            .prepare_cached("SELECT subject, body FROM desired WHERE kind='subscription' ORDER BY subject")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (subject, body) in rows {
-            let Some(spec) = serde_json::from_str::<serde_json::Value>(&body).ok().as_ref().and_then(crate::graph::subscription_spec)
-            else {
-                continue;
-            };
-            if spec.stopped || !observers.contains(&spec.observer) {
-                continue;
-            }
-            members.extend(origin(&subject)?);
-            // A watch wakes its seat on the seat's host, which reads the item there.
-            if spec.watch.is_some() && spec.to.starts_with("agent/") {
-                let host = connection
-                    .query_row(
-                        "SELECT json_extract(member, '$.host') FROM desired WHERE subject=?1 AND kind='agent'",
-                        [&spec.to],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()?
-                    .flatten();
-                match host {
-                    Some(host) => {
-                        members.insert(host);
-                    }
-                    None => members.extend(origin(&spec.to)?),
-                }
-            }
-        }
-        // A run pinned to one of the repository's items reads that claim on the member it runs on.
-        let prefix = format!("{resource}/");
-        let pinned = connection
-            .prepare_cached(
-                "SELECT DISTINCT created.origin FROM mission_runs, json_each(mission_runs.inputs) AS input
-                 JOIN claims AS created ON created.subject='mission-run/' || mission_runs.id
-                     AND created.kind='mission-run.created'
-                 WHERE mission_runs.status NOT IN ('completed','failed','cancelled')
-                   AND substr(json_extract(input.value, '$.subject'), 1, length(?1))=?1",
-            )?
-            .query_map([&prefix], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        members.extend(pinned);
-        Ok(members)
     }
 }

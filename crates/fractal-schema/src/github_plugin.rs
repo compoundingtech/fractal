@@ -50,6 +50,27 @@ pub const COMPACT_FACTS: &[&str] = &[
     "required_checks",
 ];
 
+/// The facts outside the compact set that a wake or a delivery reads. A change to any of them
+/// is still recorded as a full snapshot in compact mode, so a poller without the mirror, as after
+/// a move, compares with exact knowledge and delivers nothing twice. `required_checks` counts
+/// through its `execution` only; its state is compact.
+pub const DELIVERY_FACTS: &[&str] = &["recent_comments", "comments", "last_comment", "mentions", "reactions", "reviews"];
+
+/// Whether `facts` differ from `prior` in a fact a wake or a delivery reads: one of
+/// [`DELIVERY_FACTS`], or `required_checks.execution`. A new item, with no prior, does.
+pub fn delivery_facts_changed(
+    prior: Option<&serde_json::Map<String, Value>>,
+    facts: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(prior) = prior else {
+        return true;
+    };
+    let execution = |facts: &serde_json::Map<String, Value>| {
+        facts.get("required_checks").and_then(|checks| checks.get("execution")).cloned()
+    };
+    DELIVERY_FACTS.iter().any(|name| prior.get(*name) != facts.get(*name)) || execution(prior) != execution(facts)
+}
+
 pub(crate) fn item_state_fields() -> &'static [(&'static str, FieldSpec)] {
     static FIELDS: OnceLock<Vec<(&'static str, FieldSpec)>> = OnceLock::new();
     FIELDS.get_or_init(|| {

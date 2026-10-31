@@ -7065,8 +7065,15 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)
                     };
+                    // A change to a fact a wake or a delivery reads keeps its full snapshot, so the
+                    // graph stays exact for every poller that compares with it.
+                    let delivery_changed = fractal_schema::github_plugin::delivery_facts_changed(
+                        recorded_items.get(&subject).cloned().flatten().as_ref()
+                            .and_then(|(prior, _)| prior.as_object()),
+                        item_facts.as_object().expect("item facts are an object"),
+                    );
                     let claim = match &compact_state {
-                        Some(state) if compact => {
+                        Some(state) if compact && !delivery_changed => {
                             match &newest_state {
                                 Some((id, _, _)) if !state_changed && !deliver => {
                                     claim_by_id_tx(transaction, id).map_err(internal)?

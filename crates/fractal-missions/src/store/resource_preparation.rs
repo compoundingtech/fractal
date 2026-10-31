@@ -142,23 +142,47 @@ pub fn read_inputs(
     let repository_changed_fields = changed_fields.iter().cloned().collect::<Vec<_>>();
     let mut recorded_items = HashMap::new();
     for (field, segment, _) in REPOSITORY_COLLECTIONS {
-        for number in current_object
+        for item in current_object
             .get(field)
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|item| item.get("number").and_then(Value::as_u64))
         {
+            let Some(number) = item.get("number").and_then(Value::as_u64) else {
+                continue;
+            };
             let subject = format!("{resource}/{segment}/{number}");
             let observation =
                 fractal_store::store::resources::preparation_observation(transaction, &subject)
                     .map_err(internal)?;
+            let graph = observation.actual.and_then(|actual| actual.get("facts").cloned());
             // A filled mirror holds what the poller last saw of the item, including what compact
-            // mode no longer records in the graph, such as its comments.
+            // mode no longer records in the graph.
             let recorded = match mirrored {
-                Some(mirrored) => mirrored.items.get(&subject).cloned()
-                    .or_else(|| observation.actual.and_then(|actual| actual.get("facts").cloned())),
-                None => observation.actual.and_then(|actual| actual.get("facts").cloned()),
+                Some(mirrored) => mirrored.items.get(&subject).cloned().or(graph),
+                // Without it, after compact-only changes, the graph is exact only for the compact
+                // and delivery facts. Compare those, and take the rest as this look found them, so
+                // the facts that drifted are a baseline and deliver nothing.
+                None if fractal_store::store::resources::compact_newer(transaction, &subject).map_err(internal)? => {
+                    graph.map(|graph| {
+                        let mut baseline = super::item_facts(resource, field, number, Some(&graph), item);
+                        let exact = fractal_schema::github_plugin::COMPACT_FACTS.iter()
+                            .chain(fractal_schema::github_plugin::DELIVERY_FACTS);
+                        for name in exact {
+                            match graph.get(*name) {
+                                Some(value) => baseline.insert((*name).into(), value.clone()),
+                                None => baseline.remove(*name),
+                            };
+                        }
+                        if let Some(execution) = graph.pointer("/required_checks/execution")
+                            && let Some(required) = baseline.get_mut("required_checks").and_then(Value::as_object_mut)
+                        {
+                            required.insert("execution".into(), execution.clone());
+                        }
+                        Value::Object(baseline)
+                    })
+                }
+                None => graph,
             };
             let observed_at = observation.observed_at;
             recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));

@@ -69,6 +69,8 @@ pub struct GithubPluginStore {
     absent: Mutex<HashSet<String>>,
     /// Each repository whose fill failed: when the next may start, and the wait after that.
     refills: Mutex<HashMap<String, (u128, u128)>>,
+    /// Whether each repository's last look was in compact mode, to log each switch once.
+    compact: Mutex<HashMap<String, bool>>,
 }
 
 /// The first wait after a failed fill, doubled after each further failure up to an hour.
@@ -83,7 +85,7 @@ impl GithubPluginStore {
     /// place.
     pub fn open(state_dir: &Path) -> Result<Self> {
         let connection = super::plugin_store::open(state_dir, MANIFEST.name, Self::migrate)?;
-        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default() })
+        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default(), compact: Mutex::default() })
     }
 
     /// The one handle this process keeps on the database beneath `state_dir`, opened on first
@@ -107,7 +109,7 @@ impl GithubPluginStore {
     pub fn memory() -> Self {
         let connection = Connection::open_in_memory().expect("an in-memory database opens");
         Self::migrate(&connection).expect("an in-memory database migrates");
-        Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default() }
+        Self { connection: Mutex::new(connection), absent: Mutex::default(), refills: Mutex::default(), compact: Mutex::default() }
     }
 
     fn migrate(connection: &Connection) -> Result<()> {
@@ -281,6 +283,13 @@ impl GithubPluginStore {
             )
             .optional()?
             .unwrap_or(false))
+    }
+
+    /// Record whether `repository`'s look is in compact mode, and whether that switched it: the
+    /// first look of a process logs its mode, and each later change logs again.
+    pub fn note_compact(&self, repository: &str, compact: bool) -> bool {
+        self.compact.lock().unwrap_or_else(PoisonError::into_inner)
+            .insert(repository.to_owned(), compact) != Some(compact)
     }
 
     /// Whether a fill of `repository` may start now: always, unless the last one failed and its

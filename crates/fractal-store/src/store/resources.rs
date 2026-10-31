@@ -304,6 +304,24 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     preparation::flush(transaction)
 }
 
+/// Whether `subject`'s newest record is a compact state newer than its newest snapshot: what
+/// the graph holds of its facts outside the compact and delivery sets may then be behind.
+pub fn compact_newer(connection: &Connection, subject: &str) -> Result<bool> {
+    let Some((_, _, state_at)) = newest_item_state(connection, subject)? else {
+        return Ok(false);
+    };
+    let snapshot_at: Option<String> = connection
+        .query_row(
+            "SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims WHERE subject=?1 AND kind='resource.observed'",
+            [subject],
+            |row| row.get::<_, Option<i64>>(0),
+        )?
+        .map(|at| at.to_string());
+    Ok(snapshot_at.is_none_or(|snapshot_at| {
+        state_at.parse::<u128>().unwrap_or_default() > snapshot_at.parse::<u128>().unwrap_or_default()
+    }))
+}
+
 /// A `vcs.item.state` claim: its ID, compact fields and accepted time.
 pub type ItemState = (String, serde_json::Map<String, Value>, String);
 
