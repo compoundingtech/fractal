@@ -7,3 +7,6 @@ record 9bdccdee6b0162c0c95e1f4b6718bd8cf0c4b2ae linux-tests-shard-2 0 fleet/ci 2
 record c7ac1c148d0b9cc17fe684704b2bbf029314e16f linux-gate 0 fleet/ci 2026-10-31T06:25:09Z
 record d9215ee60db6697df8edcf5b415e3a367300d154 fractal-web 0 fleet/ci 2026-10-31T06:20:41Z
 record dff21295eeffd56dc5fa477d47cea3e02fe162e5 ci-script-tests 0 fleet/ci 2026-10-31T06:14:23Z
+record 9605f9e2b11f9109260708c24c6fabb2815e5ada linux-gate 0 fleet/ci 2026-10-31T06:34:17Z
+record b2f6268822f95984d9fd56b49114e28b3bea38d2 typescript-client 0 fleet/ci 2026-10-31T06:33:01Z
+record fd63f837cf86b0a0945c71f1de2ba51a2958bf63 fractal-web 0 fleet/ci 2026-10-31T06:34:21Z
