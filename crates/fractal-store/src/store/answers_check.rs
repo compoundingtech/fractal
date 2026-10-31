@@ -38,6 +38,8 @@ const SLOT_READERS: [&str; 7] = [
 ];
 
 fn observation_slot(claim: &ClaimRecord) -> Vec<String> {
+    // Resource receipts and poller observations feed one subject-level projection and recorder.
+    if claim.kind == "resource.observed" { return vec![claim.subject.clone(), claim.kind.clone()]; }
     checkpoint_rules::slot_of(claim).map_or_else(
         || vec![claim.subject.clone(), claim.kind.clone(), claim.origin.clone()],
         |(_, slot)| slot,
@@ -102,9 +104,10 @@ fn slot_reader_answers(
                     // Read the production projection: its first opener, attribution-only rows
                     // and compact item-state overlays depend on observation acceptance times.
                     let row: Option<String> = connection.query_row(
-                        "SELECT json_object('kind',kind,'facts',json(facts),'observed_at',observed_at,
-                         'opened_by',opened_by,'opened_by_run',opened_by_run)
-                         FROM resource_observations WHERE subject=?1",
+                        "SELECT json_object('kind',r.kind,'facts',json(r.facts),'observed_at',r.observed_at,
+                         'opened_by',r.opened_by,'opened_by_run',r.opened_by_run,
+                         'observer',json_extract(c.body,'$.fields.observer'))
+                         FROM resource_observations r JOIN claims c ON c.id=r.claim_id WHERE r.subject=?1",
                         [&subject], |row| row.get(0),
                     ).optional()?;
                     row.map(|row| serde_json::from_str(&row)).transpose()?.unwrap_or(Value::Null)

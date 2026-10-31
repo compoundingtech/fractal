@@ -198,22 +198,14 @@ fn slot_readers_exclude_repaired_originals() {
 
 #[test]
 fn served_cache_moves_only_the_written_transport_slot() {
-    use smallclaims::answers::{AnswersCache, AnswersRequest};
+    use smallclaims::answers::AnswersCache;
     let store = Arc::new(Store::open_memory("alder").unwrap());
     observation(&store, "host/example", "transport.observed", "a", 100, json!({"status":"up"}));
     observation(&store, "host/example", "transport.observed", "b", 100, json!({"status":"up"}));
     let cache = Arc::new(AnswersCache::default());
     cache.set_readers(Arc::new(fold_reader_answers));
     cache.set_reader_movement(Arc::new(slot_reader_movement));
-    let request = AnswersRequest { cut_unix_ms:1_000, ..AnswersRequest::default() };
-    let answer = |cache: &Arc<AnswersCache>, store: &Arc<Store>| {
-        for _ in 0..500 {
-            let reply = cache.answer(store, &request);
-            if !reply.pending { return reply.summary.unwrap(); }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("cache did not answer");
-    };
+    let answer = served_summary;
     assert_eq!(answer(&cache, &store).kinds["reader/slots/transport.observed"].keys, 2);
     observation(&store, "host/example", "transport.observed", "b", 2_000, json!({"status":"down"}));
     assert_eq!(answer(&cache, &store).kinds["reader/slots/transport.observed"].keys, 1,
@@ -226,4 +218,56 @@ fn served_cache_moves_only_the_written_transport_slot() {
     late.set_reader_movement(Arc::new(slot_reader_movement));
     assert!(smallclaims::answers::differing_kinds(&answer(&cache, &store), &answer(&late, &other), true)
         .iter().any(|difference| difference.kind == "reader/slots/transport.observed"));
+}
+
+fn served_summary(
+    cache: &Arc<smallclaims::answers::AnswersCache>, store: &Arc<Store>,
+) -> smallclaims::answers::AnswersSummary {
+    let request = smallclaims::answers::AnswersRequest { cut_unix_ms:1_000, ..Default::default() };
+    for _ in 0..500 {
+        let reply = cache.answer(store, &request);
+        if !reply.pending { return reply.summary.unwrap(); }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("cache did not answer");
+}
+
+#[test]
+fn cached_resource_receipts_move_with_observations_and_compact_state() {
+    use smallclaims::answers::AnswersCache;
+    for (kind, fields) in [
+        ("resource.observed", json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"closed"}})),
+        ("vcs.item.state", json!({"item_kind":"vcs.issue","state":"closed"})),
+    ] {
+        let store = Arc::new(Store::open_memory("alder").unwrap());
+        let subject = "resource/example/issue/1502";
+        observation(&store, subject, "resource.observed", "receipt", 50,
+            json!({"kind":"vcs.issue","attribution_only":true,"opened_by":"agent/opener"}));
+        observation(&store, subject, "resource.observed", "poller", 100,
+            json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
+        let cache = || {
+            let cache = Arc::new(AnswersCache::default());
+            cache.set_readers(Arc::new(fold_reader_answers));
+            cache.set_reader_movement(Arc::new(slot_reader_movement));
+            cache
+        };
+        let early = cache();
+        assert_eq!(served_summary(&early, &store).kinds["reader/slots/resource.observed"].keys, 1);
+        observation(&store, subject, kind, "poller", 2_000, fields);
+        let earlier = served_summary(&early, &store);
+        let later = served_summary(&cache(), &store);
+        assert_eq!(earlier.kinds["reader/slots/resource.observed"], later.kinds["reader/slots/resource.observed"]);
+        assert_eq!(later.kinds["reader/slots/resource.observed"].keys, 0, "{kind}");
+    }
+}
+
+#[test]
+fn resource_reader_covers_the_winning_recorder() {
+    let answer = |observer| {
+        let store = Store::open_memory("alder").unwrap();
+        observation(&store, "resource/example/issue/1502", "resource.observed", "alder", 100,
+            json!({"kind":"vcs.issue","observer":observer,"facts":{"state":"open"}}));
+        slot_reader_answers(&store.readers.get(), 1_000).unwrap()
+    };
+    assert_ne!(answer("observer/a"), answer("observer/b"));
 }
