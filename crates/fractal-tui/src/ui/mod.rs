@@ -1513,8 +1513,8 @@ impl Ui {
     /// included, so a paste never sends anything by itself. A pasted path to an image, such as a
     /// file dropped on the terminal, attaches that image to a message to an agent.
     pub fn paste(&mut self, text: String) {
-        // The modal recent popup keeps a paste from everything behind it, attached programs too.
-        if self.recent_open() {
+        // The recent popup is modal over an attached program: a paste filters it instead.
+        if self.recent_paste(&text) {
             return;
         }
         if self.terminal_focused()
@@ -3802,10 +3802,17 @@ impl Ui {
                 ),
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
-                ("ctrl+^", "recent places when detached; Enter opens"),
+                (
+                    "ctrl+^",
+                    "recent places when detached; Enter opens, typing filters",
+                ),
                 (
                     "ctrl+\\ r",
                     "recent places, including over an attached program",
+                ),
+                (
+                    "ctrl+tab",
+                    "recent cycle (enhanced); release Ctrl if supported",
                 ),
                 ("q", "quit"),
             ],
@@ -4269,6 +4276,9 @@ impl Ui {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
+        if self.observe_recent_key(key) {
+            return;
+        }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
             if ctrl_t && key.kind != KeyEventKind::Press {
