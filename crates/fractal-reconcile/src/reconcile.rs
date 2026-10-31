@@ -18372,7 +18372,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .store
                 .claim_by_id(claim_id)?
                 .filter(|claim| claim.subject == name)
-                .map(|claim| claim.body));
+                // A gate on a compact item state reads its compact facts, as on an observation.
+                .map(|claim| fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body)));
         }
         self.store.latest_actual_value(subject)
     }

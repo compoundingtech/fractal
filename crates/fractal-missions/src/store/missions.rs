@@ -7539,13 +7539,17 @@ impl MissionsStore for Store {
                                     .unwrap_or_default()
                             };
                             for (delivery_resource, discovery) in discoveries {
-                                let discovery_body = transaction
-                                    .query_row("SELECT body FROM claims WHERE id=?1", [&discovery], |row| {
-                                        row.get::<_, String>(0)
+                                let (discovery_kind, discovery_subject, discovery_body) = transaction
+                                    .query_row("SELECT kind, subject, body FROM claims WHERE id=?1", [&discovery], |row| {
+                                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
                                     })
                                     .map_err(internal)?;
-                                let discovery_body: Value =
-                                    serde_json::from_str(&discovery_body).map_err(internal)?;
+                                // In compact mode the discovery is the item's compact state.
+                                let discovery_body = fractal_schema::github_plugin::observed_body(
+                                    &discovery_kind,
+                                    &discovery_subject,
+                                    &serde_json::from_str::<Value>(&discovery_body).map_err(internal)?,
+                                );
                                 let head = discovery_body
                                     .pointer("/fields/facts/head_sha")
                                     .and_then(Value::as_str);
@@ -7759,7 +7763,7 @@ impl MissionsStore for Store {
     }
 
     fn authoring_review_owner(&self, discovery: &str) -> Result<Option<String>> {
-        let Some(claim) = self.claim_by_id(discovery)? else {
+        let Some(claim) = self.claim_by_id(discovery)?.map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim }) else {
             return Ok(None);
         };
         let Some(facts) = claim.body.pointer("/fields/facts") else {

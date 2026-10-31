@@ -151,6 +151,41 @@ pub fn overlay_item_state(
     }
 }
 
+/// A claim body as readers of a pinned or discovered item observation read it: a
+/// `vcs.item.state` on `subject` becomes `{"fields": {"kind", "facts"}}`, its facts the compact
+/// fields that are set and the item's number, so a reader of `fields.kind` and `fields.facts`
+/// reads it like a `resource.observed`. Any other claim's body is returned as it is.
+pub fn observed_body(kind: &str, subject: &str, body: &Value) -> Value {
+    if kind != ITEM_STATE {
+        return body.clone();
+    }
+    let fields = body.get("fields").and_then(Value::as_object);
+    let mut facts = serde_json::Map::new();
+    if let Some(fields) = fields {
+        for (name, value) in item_state_updates(fields) {
+            if let Some(value) = value {
+                facts.insert(name.into(), value.clone());
+            }
+        }
+    }
+    if let Some(number) = subject.rsplit('/').next().and_then(|number| number.parse::<u64>().ok()) {
+        facts.insert("number".into(), number.into());
+    }
+    let mut observed = serde_json::Map::new();
+    observed.insert(
+        "fields".into(),
+        serde_json::json!({
+            "kind": fields.and_then(|fields| fields.get("item_kind")).cloned().unwrap_or(Value::Null),
+            "facts": facts,
+            "observer": fields.and_then(|fields| fields.get("observer")).cloned().unwrap_or(Value::Null),
+        }),
+    );
+    if let Some(evidence) = body.get("evidence") {
+        observed.insert("evidence".into(), evidence.clone());
+    }
+    Value::Object(observed)
+}
+
 /// The subject of one keyed event on one item. `item` is the item's resource subject,
 /// `RESOURCE/pull-request/N` or `RESOURCE/issue/N`, usually `resource/github/OWNER/REPO/...`;
 /// `key` names the event, such as `checks/SHA/fail` or `comment/123`.
