@@ -4278,6 +4278,14 @@ enum MessageCommand {
     /// `work progress` (it lands in the graph and wakes nobody), run events to report-to.
     /// People have no inbox: a send or reply to a person fails. To reach a person, print in
     /// the chat.
+    ///
+    /// Use single quotes for literal shell text, or a quoted heredoc for multiline bodies:
+    ///
+    ///   fractal conversations send agent/example --from agent/sender --body 'Run `cargo test`'
+    ///   fractal conversations send agent/example --from agent/sender --body - <<'EOF'
+    ///   Run `cargo test` and report $STATUS.
+    ///   EOF
+    #[command(verbatim_doc_comment)]
     Send(MessageSendArgs),
     /// List the current mailbox for one explicit identity.
     Ls(MessageListArgs),
@@ -4362,8 +4370,12 @@ enum MessageCommand {
 struct MessageSendArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
     to: String,
-    #[arg(short = 'm', long)]
-    body: String,
+    /// Message text, or - to read UTF-8 from stdin without trimming.
+    #[arg(short = 'm', long, required_unless_present = "body_file", conflicts_with = "body_file")]
+    body: Option<String>,
+    /// Read the exact UTF-8 message text from a file.
+    #[arg(long, value_name = "PATH")]
+    body_file: Option<PathBuf>,
     #[arg(long)]
     subject: Option<String>,
     #[arg(long)]
@@ -14703,6 +14715,7 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
+    let body = args.body.take().context("message body is required")?;
     if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
     }
@@ -14716,7 +14729,7 @@ async fn send_message(
         &id,
         &from,
         &to,
-        &args.body,
+        &body,
         args.subject.as_deref(),
         args.in_reply_to.as_deref(),
         &args.tags,
@@ -14729,7 +14742,7 @@ async fn send_message(
         idempotency_key: String::new(),
         from,
         to,
-        content: args.body,
+        content: body,
         title: args.subject,
         in_reply_to: args.in_reply_to,
         tags: args.tags,
