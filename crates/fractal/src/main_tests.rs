@@ -8714,9 +8714,9 @@ fn native_identity_rename_commands_preserve_full_ids_and_fences() {
             | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
             _ => panic!("expected identity rename"),
         };
-        assert_eq!(args.from, "agent/example-old");
-        assert_eq!(args.to, "agent/example-new");
-        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.from.as_deref(), Some("agent/example-old"));
+        assert_eq!(args.to.as_deref(), Some("agent/example-new"));
+        assert_eq!(args.actor.as_deref(), Some("person/robin"));
         assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
         assert_eq!(args.expected_declaration, None);
         assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
@@ -8747,6 +8747,80 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn rename_proof_commands_parse_without_mutation_arguments() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "export", "agent/example",
+            "--revision", "claim/exact-revision", "--out", "proof.json",
+            "--include-co-batched-claims",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        assert!(args.actor.is_none());
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Export { name, revision, out, include_co_batched_claims },
+        }) = args.command else { panic!("expected proof export") };
+        assert_eq!(name, "agent/example");
+        assert_eq!(revision.as_deref(), Some("claim/exact-revision"));
+        assert_eq!(out, Some(PathBuf::from("proof.json")));
+        assert!(include_co_batched_claims);
+
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+            "--fleet-anchor", "anchor-key", "--after-revision", "claim/prior",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Verify { file, fleet_anchor, after_revision },
+        }) = args.command else { panic!("expected proof verify") };
+        assert_eq!(file, PathBuf::from("proof.json"));
+        assert_eq!(fleet_anchor, "anchor-key");
+        assert_eq!(after_revision.as_deref(), Some("claim/prior"));
+        assert!(Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+        ]).is_err(), "caller trust anchor is mandatory");
+    }
+}
+
+#[test]
+fn rename_proof_verification_dispatches_before_instance_or_endpoint_resolution() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("malformed.json");
+    std::fs::write(&file, b"not a proof").unwrap();
+    for kind in ["agents", "missions"] {
+        let arguments: Vec<std::ffi::OsString> = [
+            "st", "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify",
+            file.to_str().unwrap(), "--fleet-anchor", "caller-anchor",
+        ].into_iter().map(Into::into).collect();
+        assert_eq!(offline_rename_proof_arguments(&arguments), Some(ExitCode::from(6)));
+    }
+    let (verdict, code) = rename_proof_verdict(&file, "caller-anchor", None);
+    assert_eq!(code, 6);
+    assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["error"]["code"], "malformed-bundle");
+    let missing = root.path().join("missing.json");
+    assert_eq!(rename_proof_verdict(&missing, "caller-anchor", None).1, 6);
+}
+
+#[test]
+fn fleet_anchor_show_parses_as_public_read() {
+    let cli = Cli::try_parse_from(["st", "fleet", "anchor", "show"]).unwrap();
+    assert!(matches!(cli.command, Command::Fleet {
+        command: FleetCommand::Anchor { command: FleetAnchorCommand::Show },
+    }));
 }
 
 #[test]

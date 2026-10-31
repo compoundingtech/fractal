@@ -313,25 +313,14 @@ impl Store {
         Ok(items)
     }
 
-    /// The fleet's fault agent: the first live agent, by subject, whose declaration carries
-    /// `handles-faults`. It takes each fault that no step assignee or agent requester owns.
+    /// The fleet's fault agent: the one live agent whose declaration carries `handles-faults`.
+    /// It takes each fault that no step assignee or agent requester owns. Publication refuses a
+    /// second holder; when two members each accepted one, neither is the fault agent until one
+    /// is stopped or drops the flag.
     pub fn fleet_fault_agent(&self) -> Result<Option<String>> {
         let connection = self.readers.get();
-        let mut query = connection.prepare(
-            "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
-                SELECT 1 FROM json_each(desired.body, '$.children')
-                WHERE json_extract(value, '$.name')='handles-faults'
-            ) ORDER BY subject",
-        )?;
-        let agents = query
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for agent in agents {
-            if person_work::declaration_live(&connection, &agent)? {
-                return Ok(Some(agent));
-            }
-        }
-        Ok(None)
+        let mut holders = fault_agent_holders(&connection)?;
+        Ok(if holders.len() == 1 { holders.pop() } else { None })
     }
 
     /// The agent that owns `fault`: the agent it names, as a broken gate names the agent that
@@ -1619,6 +1608,76 @@ pub fn person_attention_item(
         )],
         request,
     }))
+}
+
+/// The live agents whose declaration carries `handles-faults`, by subject.
+pub fn fault_agent_holders(connection: &Connection) -> Result<Vec<String>> {
+    let mut query = connection.prepare(
+        "SELECT subject FROM desired WHERE kind='agent' AND EXISTS (
+            SELECT 1 FROM json_each(desired.body, '$.children')
+            WHERE json_extract(value, '$.name')='handles-faults'
+        ) ORDER BY subject",
+    )?;
+    let agents = query
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut holders = Vec::new();
+    for agent in agents {
+        if person_work::declaration_live(connection, &agent)? {
+            holders.push(agent);
+        }
+    }
+    Ok(holders)
+}
+
+/// Whether `desired` declares a running agent that handles faults.
+fn declares_fault_agent(desired: &crate::model::DesiredSubject) -> bool {
+    let children = desired.desired["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+    desired.kind == "agent"
+        && !matches!(children, [only] if only["name"] == "stop")
+        && children.iter().any(|child| child["name"] == "handles-faults")
+}
+
+/// Refuses a publication that would leave two live agents declaring `handles-faults`. The fault
+/// agent owns every fault no one else owns and may dismiss faults on ended runs, so the flag
+/// moves only by stopping its holder or dropping it there, in this publication or an earlier one.
+/// A publication that declares no holder is never refused, whatever the graph holds.
+pub fn refuse_second_fault_agent(
+    connection: &Connection,
+    intent: &crate::model::NormalizedIntent,
+) -> Result<(), St3Error> {
+    let declared = intent
+        .subjects
+        .values()
+        .filter(|desired| declares_fault_agent(desired))
+        .map(|desired| desired.subject.clone())
+        .collect::<Vec<_>>();
+    match declared.as_slice() {
+        [] => return Ok(()),
+        [_] => {}
+        _ => {
+            return Err(St3Error::new(
+                "fault-agent-taken",
+                format!("{} each declare `handles-faults`; only one live agent may", declared.join(", ")),
+            ));
+        }
+    }
+    let holders = fault_agent_holders(connection)
+        .map_err(internal)?
+        .into_iter()
+        .filter(|holder| !intent.subjects.contains_key(holder))
+        .collect::<Vec<_>>();
+    if holders.is_empty() {
+        return Ok(());
+    }
+    Err(St3Error::new(
+        "fault-agent-taken",
+        format!(
+            "{} already handles faults; stop it or drop its `handles-faults` before {} declares it",
+            holders.join(", "),
+            declared[0]
+        ),
+    ))
 }
 
 /// `subject` when it names an agent: only an agent has a conversation an item can belong to.
