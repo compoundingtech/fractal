@@ -274,10 +274,10 @@ flashes `attention unavailable`. Neither state means `all clear` or advances the
 The recent-place switcher uses that same history across all spaces, de-duplicated by content.
 Rows show the content title and space name. On every terminal type, Ctrl+^
 (legacy Ctrl+6, 0x1E) opens the popup when detached, with the previous place selected.
-Ctrl+\ then r opens it even over an attached program. Enter opens the selected destination
-in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
+Ctrl+\ then r opens it even over an attached program. Up/Down selects a destination;
+Enter opens it in its recorded location and Escape cancels. Ctrl+^ then Enter
 flips between the last two places. Direct Ctrl+^ reaches attached programs unchanged.
-While the popup is open, pasted text filters its rows and mouse input never reaches the
+While the popup is open, mouse input and paste are swallowed rather than sent to the
 underlying terminal. The child loses input focus until the popup closes. The selected
 destination remains visible even at the minimum supported viewport.
 

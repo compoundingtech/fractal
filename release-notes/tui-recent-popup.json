@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "A recent-place popup navigates shared history across spaces, with filtering and previous-place selection.",
+  "summary": "A recent-place popup navigates shared history across spaces, with previous-place selection, Up/Down navigation, Enter to open and Escape to cancel.",
   "replay": {"status": "none", "detail": "No runtime replay change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rules change."},
