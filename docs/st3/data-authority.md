@@ -41,7 +41,13 @@ peer holds. Every node computes the same graph from the same admitted claims. Th
 the table at startup and hourly: rows older than `[observations] retention` (default `7d`, at
 least `1h`) and rows beyond `max_per_subject_kind` (default 20,000) go. The newest row of each
 subject and kind stays. An older build that still writes such a kind as a claim replicates it as
-before, and readers merge those claims with the local rows.
+before, and readers merge those claims with the local rows. `daemon.diagnostic` is local: no
+control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
+proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a
+collector is configured. `/v1/claims` and `st trace show` list only those older builds wrote.
+`harness.diagnostic` is split by code (`local_codes` in retention.toml): its observability codes
+are local in the same way, and the seat's conversation timeline on its own node still shows them.
+Its control codes stay claims.
 
 A kind of `system-local` retention is local when the system records it without an actor and a
 claim when a person or agent writes it as its actor. The reconciler's own `runtime.action.*`

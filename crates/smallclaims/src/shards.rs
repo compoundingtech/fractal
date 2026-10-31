@@ -398,6 +398,226 @@ mod tests {
         assert_eq!(source.index().unwrap(), before_index);
     }
 
+    /// A default store founded by `a`, whose anchor key `a` holds, with `a` admitted.
+    fn founded_graph(path: &Path, origin: &str, anchor: &Arc<crate::fleet::MemberKey>) -> Arc<Store> {
+        const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
+        let graph = Arc::new(Store::open(path, origin, Arc::new(Plain)).unwrap());
+        graph.bind_fleet(FLEET).unwrap();
+        graph.pin_fleet_anchor(anchor.public()).unwrap();
+        graph
+    }
+
+    fn note(subject: &str) -> ClaimInput {
+        ClaimInput {
+            subject: subject.into(),
+            kind: "example.note".into(),
+            actor: Some("person/ada".into()),
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }
+    }
+
+    fn messages_shard(root: &Path, origin: &str, graph: &Arc<Store>) -> Arc<Store> {
+        let id = ShardId::parse("messages").unwrap();
+        let stores = ShardStores::open(root, origin, |_| Box::new(Plain), [id.clone()]).unwrap();
+        let shard = stores.get(&id).unwrap().clone();
+        shard.bind_fleet_authority(graph.clone()).unwrap();
+        shard
+    }
+
+    /// After a writer's key rotates, a shard admits its envelopes only with a signature by the
+    /// new key: the old key's incarnation never ended, but a signature by it stays unsigned.
+    #[test]
+    fn a_shard_refuses_a_rotated_out_key() {
+        use crate::claim::ReplicaEnvelope;
+        use crate::fleet::{FleetClaim, Membership, membership::MEMBER_ADMITTED};
+        let admitted = |id: &str, name: &str, key: &str, sequence: u64, floor: u64| FleetClaim {
+            id: id.into(),
+            kind: MEMBER_ADMITTED.into(),
+            subject: format!("host/{name}"),
+            fields: serde_json::from_value(serde_json::json!({
+                "fleet_id": "fleet", "member_key": key, "via": if name == "a" { "anchor" } else { "invite" },
+                "mode": "listening", "writer_floor": floor
+            }))
+            .unwrap(),
+            writer: "a".into(),
+            sequence,
+            signers: BTreeSet::from(["ka".to_owned()]),
+        };
+        let membership = Membership::fold(
+            Some("ka"),
+            &[
+                admitted("1-a", "a", "ka", 1, 0),
+                admitted("2-b", "b", "kb-old", 2, 0),
+                admitted("3-b", "b", "kb-new", 3, 30),
+            ],
+        );
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE replica_envelope_signatures(
+                    writer TEXT, sequence INTEGER, envelope_hash TEXT, member_key TEXT)",
+            )
+            .unwrap();
+        let envelope = |sequence: u64, signer: &str| {
+            let envelope = ReplicaEnvelope {
+                writer: "b".into(),
+                sequence,
+                previous_hash: None,
+                hash: format!("{sequence:064x}"),
+                accepted_at_unix_ms: 0,
+                payload: Vec::new().into(),
+                member_key: None,
+                signature: None,
+            };
+            connection
+                .execute(
+                    "INSERT INTO replica_envelope_signatures VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![envelope.writer, sequence, envelope.hash, signer],
+                )
+                .unwrap();
+            envelope
+        };
+        let hold = |envelope: &ReplicaEnvelope| {
+            crate::store::shard_admission_hold(&connection, &membership, envelope).unwrap()
+        };
+        assert_eq!(hold(&envelope(1, "kb-old")), Some("unsigned"));
+        assert_eq!(hold(&envelope(2, "kb-new")), None);
+    }
+
+    /// A shard holds no fleet claims. It signs its envelopes for its authority's fleet in a
+    /// domain that names the shard, and admits a keyed member's envelopes only with a signature
+    /// in that domain by a key the authority knows: one made for the default store does not count.
+    #[test]
+    fn a_shard_takes_its_fleet_from_the_default_store_and_signs_in_its_own_domain() {
+        const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        let a_key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+        let a_graph = founded_graph(&a_root.path().join("claims.sqlite3"), "a", &a_key);
+        a_graph.set_member_key(Some(a_key.clone())).unwrap();
+        a_graph
+            .append_claim(&ClaimInput {
+                subject: "host/a".into(),
+                kind: "fleet.member-admitted".into(),
+                actor: None,
+                fields: serde_json::from_value(serde_json::json!({
+                    "fleet_id": FLEET, "member_key": a_key.public(), "via": "anchor",
+                    "mode": "listening"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        // b learns a's membership through the default store, as a member does.
+        let b_graph = founded_graph(&b_root.path().join("claims.sqlite3"), "b", &a_key);
+        let graph_exchange = a_graph
+            .export_replication_exchange(FLEET, &b_graph.replication_inventory().unwrap())
+            .unwrap();
+        b_graph
+            .receive_replication_exchange("a", FLEET, &graph_exchange)
+            .unwrap();
+        b_graph.validate_replication_backlog().unwrap();
+        b_graph.apply_replication_repairs().unwrap();
+        b_graph.project_replication_backlog().unwrap();
+        assert!(matches!(
+            b_graph.fleet_membership().unwrap().state("a"),
+            crate::fleet::MemberState::Current(_)
+        ));
+
+        let a_shard = messages_shard(a_root.path(), "a", &a_graph);
+        assert!(a_shard.bind_fleet_authority(a_graph.clone()).is_err(), "set once");
+        assert!(a_graph.bind_fleet_authority(a_shard.clone()).is_err(), "default stores take none");
+        a_shard.set_member_key(Some(a_key.clone())).unwrap();
+        a_shard.append_claim(&note("note/one")).unwrap();
+        let b_shard = messages_shard(b_root.path(), "b", &b_graph);
+        let exchange = a_shard
+            .export_replication_exchange(FLEET, &b_shard.replication_inventory().unwrap())
+            .unwrap();
+        assert_eq!(exchange.shard_id.as_deref(), Some("messages"));
+        let envelope = &exchange.envelopes[0];
+        let signature = envelope.signature.as_deref().expect("the shard signs for the fleet");
+        assert!(crate::fleet::verify_signature(
+            a_key.public(),
+            &crate::fleet::envelope_signature_message_in(
+                Some("messages"), FLEET, "a", envelope.sequence, &envelope.hash,
+            ),
+            signature,
+        ));
+        assert!(!crate::fleet::verify_signature(
+            a_key.public(),
+            &crate::fleet::envelope_signature_message(FLEET, "a", envelope.sequence, &envelope.hash),
+            signature,
+        ));
+
+        // The same envelope signed in the default store's domain is unsigned to the shard, and
+        // an unsigned envelope from a keyed member is held.
+        let mut graph_signed = exchange.clone();
+        for envelope in &mut graph_signed.envelopes {
+            envelope.signature = Some(a_key.sign(&crate::fleet::envelope_signature_message(
+                FLEET,
+                "a",
+                envelope.sequence,
+                &envelope.hash,
+            )));
+        }
+        b_shard
+            .receive_replication_exchange("a", FLEET, &graph_signed)
+            .unwrap();
+        b_shard.validate_replication_backlog().unwrap();
+        b_shard.project_replication_backlog().unwrap();
+        let held: i64 = b_shard
+            .readers
+            .get()
+            .query_row("SELECT COUNT(*) FROM replica_envelope_holds WHERE reason='unsigned'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(usize::try_from(held).unwrap(), exchange.envelopes.len());
+        assert!(b_shard.claims_for("note/one", None).unwrap().is_empty());
+
+        // Signed in the shard's domain, it is admitted on b's membership.
+        b_shard
+            .receive_replication_exchange("a", FLEET, &exchange)
+            .unwrap();
+        b_shard.validate_replication_backlog().unwrap();
+        b_shard.apply_replication_repairs().unwrap();
+        b_shard.project_replication_backlog().unwrap();
+        assert_eq!(b_shard.claims_for("note/one", None).unwrap().len(), 1);
+        assert!(b_shard.fleet_membership().unwrap().state("a") == b_graph.fleet_membership().unwrap().state("a"));
+
+    }
+
+    /// A fleet of configured peers has no membership. Its shards admit each other's envelopes
+    /// as its default stores do, or the shard would never replicate there.
+    #[test]
+    fn shards_of_a_fleet_without_membership_admit_their_peers() {
+        const FLEET: &str = "5b0c1d8e-6a44-4f0e-9d51-2f7f3c9a0b12";
+        let a_root = tempfile::tempdir().unwrap();
+        let b_root = tempfile::tempdir().unwrap();
+        let graph = |root: &Path, origin: &str| {
+            let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), origin, Arc::new(Plain)).unwrap());
+            graph.bind_fleet(FLEET).unwrap();
+            graph
+        };
+        let a_graph = graph(a_root.path(), "a");
+        let b_graph = graph(b_root.path(), "b");
+        let a_shard = messages_shard(a_root.path(), "a", &a_graph);
+        let b_shard = messages_shard(b_root.path(), "b", &b_graph);
+        a_shard.append_claim(&note("note/legacy")).unwrap();
+        let exchange = a_shard
+            .export_replication_exchange(FLEET, &b_shard.replication_inventory().unwrap())
+            .unwrap();
+        b_shard.receive_replication_exchange("a", FLEET, &exchange).unwrap();
+        b_shard.validate_replication_backlog().unwrap();
+        b_shard.apply_replication_repairs().unwrap();
+        b_shard.project_replication_backlog().unwrap();
+        assert_eq!(b_shard.claims_for("note/legacy", None).unwrap().len(), 1);
+        assert!(b_graph.claims_for("note/legacy", None).unwrap().is_empty());
+    }
+
     #[test]
     fn a_used_default_file_cannot_be_relabelled_as_a_shard() {
         use crate::store::EnvelopeTombstone;

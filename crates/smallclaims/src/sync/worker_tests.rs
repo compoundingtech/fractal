@@ -205,6 +205,122 @@ async fn signed_default_answer_cannot_draw_envelopes_from_a_named_shard() {
     server.abort();
 }
 
+/// A peer whose build has shards but not this one refuses the exchange before it stores
+/// anything. The dialer must treat that like an answer for the wrong store, so the route
+/// parks instead of retrying the same refusal.
+#[tokio::test]
+async fn a_peer_refusing_the_shard_is_a_shard_mismatch() {
+    let root = tempfile::tempdir().unwrap();
+    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
+    let shard = Arc::new(plain_open(&root.path().join("messages.sqlite3"), "birch").unwrap());
+    shard
+        .bind_shard(&crate::shards::ShardId::parse("messages").unwrap())
+        .unwrap();
+    shard.bind_fleet(auth.fleet_id()).unwrap();
+    let default = Arc::new(plain_open(&root.path().join("default.sqlite3"), "cedar").unwrap());
+    default.bind_fleet(auth.fleet_id()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let state = PeerState {
+        backend: Local(default.clone()),
+        node: "cedar".into(),
+        auth: auth.clone(),
+        fleet: FleetContext::legacy(BTreeSet::from(["birch".into()])),
+        outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
+    };
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer_router(state, Router::new()))
+            .await
+            .unwrap();
+    });
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    let error = exchange(
+        &replication_http_client(),
+        &Local(shard.clone()),
+        "birch",
+        &peer,
+        &auth,
+        &fleet,
+    )
+    .await
+    .unwrap_err();
+    let mismatch = error
+        .downcast_ref::<PeerShardMismatch>()
+        .unwrap_or_else(|| panic!("not a shard mismatch: {error:#}"));
+    assert_eq!(mismatch.refused.as_deref(), Some("shard-mismatch"));
+    assert!(default.replication_inventory().unwrap().envelopes.is_empty());
+    server.abort();
+}
+
+/// One listener answers the default store and the shards it holds. An exchange naming a held
+/// shard reaches that shard's store and nothing else; the default store's exchange to the
+/// same peer is a separate job.
+#[tokio::test]
+async fn one_listener_answers_each_held_shard_from_its_own_store() {
+    let root = tempfile::tempdir().unwrap();
+    let auth = FleetAuth::test("1f91ca65-7793-48cc-866e-ac15690130e1", &[7; 32]);
+    let messages = crate::shards::ShardId::parse("messages").unwrap();
+    let open_shard = |path: &str, origin: &str| {
+        let store = Arc::new(plain_open(&root.path().join(path), origin).unwrap());
+        store.bind_shard(&messages).unwrap();
+        store.bind_fleet(auth.fleet_id()).unwrap();
+        store
+    };
+    let source = open_shard("source-messages.sqlite3", "birch");
+    source
+        .append_claim(&ClaimInput {
+            subject: "note/stream".into(),
+            kind: "example.note".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let target_shard = open_shard("target-messages.sqlite3", "cedar");
+    let target_default = Arc::new(plain_open(&root.path().join("target.sqlite3"), "cedar").unwrap());
+    target_default.bind_fleet(auth.fleet_id()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig {
+        name: "cedar".into(),
+        url: format!("http://{}", listener.local_addr().unwrap()),
+    };
+    let state = PeerState::new(
+        Local(target_default.clone()),
+        "cedar".into(),
+        auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["birch".into()])),
+    )
+    .with_shards(BTreeMap::from([("messages".into(), Local(target_shard.clone()))]));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, peer_router(state, Router::new()))
+            .await
+            .unwrap();
+    });
+    let fleet = FleetContext::legacy(BTreeSet::from(["cedar".into()]));
+    exchange(
+        &replication_http_client(),
+        &Local(source.clone()),
+        "birch",
+        &peer,
+        &auth,
+        &fleet,
+    )
+    .await
+    .unwrap();
+    target_shard.validate_replication_backlog().unwrap();
+    target_shard.project_replication_backlog().unwrap();
+    assert_eq!(target_shard.claims_for("note/stream", None).unwrap().len(), 1);
+    assert!(target_default.replication_inventory().unwrap().envelopes.is_empty());
+    assert!(target_default.claims_for("note/stream", None).unwrap().is_empty());
+    server.abort();
+}
+
 #[tokio::test(start_paused = true)]
 async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
@@ -342,6 +458,7 @@ async fn checkpoint_tombstones_do_not_starve_later_live_ranges() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from([left.origin.clone()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let peer = PeerConfig {
@@ -642,6 +759,7 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
             auth: auth.clone(),
             fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
             outbound_notify: watch::channel(0_u64).0,
+            shards: Default::default(),
         }),
         auth.request_headers("source", &body).unwrap(),
         body,
@@ -671,6 +789,7 @@ async fn the_peer_route_accepts_an_exchange_above_axums_default_body_limit() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let exchange = ReplicationExchange {
         build: None,
@@ -783,6 +902,7 @@ async fn the_peer_route_deflates_only_for_a_requester_that_asks() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let exchange = ReplicationExchange {
         build: None,
@@ -888,6 +1008,7 @@ async fn signed_peer_exchange_moves_new_authority_in_both_directions() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let connection_ports = Arc::new(Mutex::new(BTreeSet::new()));
     let observed_ports = connection_ports.clone();
@@ -1038,6 +1159,7 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["source".into()])),
         outbound_notify,
+        shards: Default::default(),
     };
 
     let first = receive_exchange(
@@ -1504,6 +1626,7 @@ async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
         auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
         fleet: member_context(&store, &anchor, &[], &[], false),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let body = serde_json::json!({
         "request": session.request(), "node_id": node_id,
@@ -1578,6 +1701,7 @@ async fn members_exchange_with_signatures_and_a_removed_member_is_refused() {
         auth: FleetAuth::test(fleet, &secret).with_member_key(Some(anchor.clone())),
         fleet: a_fleet.clone(),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let server = tokio::spawn(async move {
         axum::serve(listener, peer_router(state, Router::new()))
@@ -3079,6 +3203,7 @@ mod retry_tests {
                     auth: auth.clone(),
                     fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                     outbound_notify: watch::channel(0).0,
+                    shards: Default::default(),
                 },
                 Router::new(),
             )
@@ -3261,6 +3386,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                 outbound_notify: watch::channel(0).0,
+                shards: Default::default(),
             },
             Router::new(),
         )
@@ -3398,6 +3524,7 @@ mod retry_tests {
                         auth: FleetAuth::test("invented-fleet", &[42; 32]),
                         fleet: fleet.clone(),
                         outbound_notify: watch::channel(0).0,
+                        shards: Default::default(),
                     },
                     Router::new(),
                 ),
@@ -3516,6 +3643,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: contexts[index].clone(),
                 outbound_notify: wakes[index].clone(),
+                shards: Default::default(),
             };
             tasks.push(tokio::spawn(async move {
                 axum::serve(listener, peer_router(state, Router::new()))
@@ -3881,6 +4009,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                 outbound_notify: watch::channel(0).0,
+                shards: Default::default(),
             },
             Router::new(),
         )
@@ -4196,6 +4325,7 @@ mod retry_tests {
                 auth: auth.clone(),
                 fleet: contexts[index].clone(),
                 outbound_notify: wakes[index].clone(),
+                shards: Default::default(),
             };
             let (shutdown, stopped) = tokio::sync::oneshot::channel();
             shutdowns.push(shutdown);
@@ -4414,6 +4544,7 @@ mod retry_tests {
             auth: auth.clone(),
             fleet: contexts[0].clone(),
             outbound_notify: wakes[0].clone(),
+            shards: Default::default(),
         };
         tasks.push(tokio::spawn(async move {
             axum::serve(listener, peer_router(state, Router::new()))
@@ -5760,6 +5891,7 @@ mod early_recovery {
                 auth: auth.clone(),
                 fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
                 outbound_notify: watch::channel(0).0,
+                shards: Default::default(),
             },
             Router::new(),
         )
@@ -6251,6 +6383,7 @@ async fn a_claim_walk_runs_over_the_signed_peer_route() {
         auth: auth.clone(),
         fleet: FleetContext::legacy(BTreeSet::from(["target".into()])),
         outbound_notify: watch::channel(0_u64).0,
+        shards: Default::default(),
     };
     let server = tokio::spawn(
         axum::serve(
