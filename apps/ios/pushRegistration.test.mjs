@@ -14,7 +14,7 @@ function harness({ enabled = false, environment = 'development', permission = tr
   const calls = [];
   const state = { saved: enabled, owners: [...owners], permission, token, changed: undefined, stops: 0 };
   const ports = {
-    bundleId: 'com.example.smalltalk', version: '1.0',
+    bundleId: 'com.example.fractal', version: '1.0',
     readEnabled: async () => state.saved,
     writeEnabled: async value => { calls.push(['setting', value]); state.saved = value; },
     environment: async () => environment,
@@ -42,12 +42,12 @@ test('decision matrix gates all native acquisition and paired writes', () => {
 });
 
 test('request uses only bounded native metadata and never reflects malformed tokens', () => {
-  assert.deepEqual(pushRequest(token, 'development', 'com.example.smalltalk', '1.0'), { token, environment: 'development', bundle_id: 'com.example.smalltalk', app_version: '1.0' });
-  for (const value of ['', 'a', 'abc', 'zz', 'ab'.repeat(257), { token }, 'secret-sentinel']) assert.equal(pushRequest(value, 'production', 'com.example.smalltalk', '1.0'), undefined);
+  assert.deepEqual(pushRequest(token, 'development', 'com.example.fractal', '1.0'), { token, environment: 'development', bundle_id: 'com.example.fractal', app_version: '1.0' });
+  for (const value of ['', 'a', 'abc', 'zz', 'ab'.repeat(257), { token }, 'secret-sentinel']) assert.equal(pushRequest(value, 'production', 'com.example.fractal', '1.0'), undefined);
   assert.ok(pushRequest('AB', 'production', 'a', 'v'));
   assert.ok(pushRequest('ab'.repeat(256), 'production', 'a'.repeat(255), 'v'.repeat(64)));
   for (const bundle of [null, '', 'a'.repeat(256), 'com.example/invalid', 'non-ascii-ä']) assert.equal(pushRequest(token, 'development', bundle, '1.0'), undefined);
-  for (const version of [null, '', 'v'.repeat(65), 'newline\n', 'non-ascii-ä']) assert.equal(pushRequest(token, 'development', 'com.example.smalltalk', version), undefined);
+  for (const version of [null, '', 'v'.repeat(65), 'newline\n', 'non-ascii-ä']) assert.equal(pushRequest(token, 'development', 'com.example.fractal', version), undefined);
 });
 
 test('default-off launch without cleanup owners never contacts a remote or requests native permission', async () => {

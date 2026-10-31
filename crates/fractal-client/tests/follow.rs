@@ -34,9 +34,13 @@ async fn accept(stream: tokio::net::UnixStream) -> Socket {
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
     tokio_tungstenite::accept_hdr_async(stream, |request: &Request, mut response: Response| {
         assert_eq!(request.uri().path(), "/v1/client/collections/stream");
+        assert_eq!(
+            request.headers()["sec-websocket-protocol"],
+            "fractal.client.collections.v0",
+        );
         response.headers_mut().insert(
             "sec-websocket-protocol",
-            "st3.client.collections.v0".parse().unwrap(),
+            "fractal.client.collections.v0".parse().unwrap(),
         );
         Ok(response)
     })

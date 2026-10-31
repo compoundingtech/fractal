@@ -21,10 +21,7 @@ pub(super) fn run_driver_hook() -> ExitCode {
             &mut std::io::stdin(),
             &mut |diagnostic| {
                 if let Err(error) = fractal_daemon::driver_hook::post_diagnostic(&env, &diagnostic) {
-                    eprintln!(
-                        "st: could not record the {} diagnostic: {error:#}",
-                        diagnostic.code
-                    );
+                    crate::stderr_message("st", format_args!("could not record the {} diagnostic: {error:#}", diagnostic.code));
                 }
             },
         )
@@ -96,7 +93,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             )
             .await;
         }
-        return fractal_drivers::claude_mcp::run_st3(&paths.driver_root, &paths.identity);
+        return fractal_drivers::claude_mcp::run_fractal(&paths.driver_root, &paths.identity);
     }
     if matches!(args.driver.as_str(), "pi-channel" | "omp-channel") {
         let identity = args
@@ -446,11 +443,15 @@ fn spawn_st3_provider(
             environment,
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
         ) => match driver.as_str() {
-            "claude" => fractal_drivers::claude_session::run_controlled_paths(
+            "claude" => fractal_drivers::claude_session::run_controlled_paths_with_primary_ownership(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
+                // The owning daemon read the same install Config (including --config/instance)
+                // and overrides this launch value even when off. Sample only for a fresh claim;
+                // ProviderStart::Adopt below never reads it or changes a generation's choice.
+                std::env::var(fractal_drivers::claude_process::ENFORCEMENT_ENV).as_deref() == Ok("1"),
             ),
             "pi" => fractal_drivers::pi_session::run_native(
                 &paths.resolved(),
@@ -537,7 +538,7 @@ fn spawn_st3_provider(
         },
         };
         #[cfg(feature = "test-support")]
-        if env!("CARGO_BIN_NAME") == "st3-fixture" {
+        if env!("CARGO_BIN_NAME") == "fractal-fixture" {
             fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
@@ -687,7 +688,7 @@ async fn drive_st2_native(
             completion_announced |= fixture_terminal_completion_barrier(
                 &mut observations, client, subject, driver, &mut loop_state.ready, &task,
             ).await?;
-            if completion_announced && env!("CARGO_BIN_NAME") == "st3-fixture"
+            if completion_announced && env!("CARGO_BIN_NAME") == "fractal-fixture"
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
             {
                 fs::write(PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
@@ -696,7 +697,7 @@ async fn drive_st2_native(
         tokio::select! {
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "st3-fixture"
+                if env!("CARGO_BIN_NAME") == "fractal-fixture"
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
@@ -800,6 +801,7 @@ async fn drive_st2_native(
             }
             settled = settle.control_tick(&mut control_retry, &mut interval), if !completion_announced => {
                 if driver == "claude" && mailbox.subscription.is_some() && settled
+                    && claude_attachment_check_due(&mailbox, &mut loop_state, current_unix_ms()? as u64)
                     && let Err(error) = check_claude_attachment(
                         client, subject, &incarnation, &mailbox, attach_started, &mut loop_state,
                     ).await
@@ -1026,7 +1028,7 @@ async fn drive_st2_native(
                                 &mut last_activity_fingerprint,
                             )
                             .await?;
-                            if observed.reason.as_deref() == Some("providerCapacity") {
+                            if let Some(cause) = provider_retry_cause(observed.state, observed.reason.as_deref()) {
                                 let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&(
                                     driver,
                                     observed.since_ms,
@@ -1037,6 +1039,7 @@ async fn drive_st2_native(
                                         client,
                                         subject,
                                         &incarnation,
+                                        cause,
                                         observed.since_ms,
                                         &fingerprint,
                                     )
@@ -1124,7 +1127,7 @@ async fn drive_st2_native(
 // The installed executable always enables the provider completion branch.
 fn fixture_completion_task_enabled() -> bool {
     #[cfg(feature = "test-support")]
-    if env!("CARGO_BIN_NAME") == "st3-fixture"
+    if env!("CARGO_BIN_NAME") == "fractal-fixture"
         && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from)
         && root.join("join-phase").exists()
         && !root.join("fence-received").exists()
@@ -1145,7 +1148,7 @@ async fn fixture_terminal_completion_barrier(
     ready: &mut bool,
     task: &tokio::task::JoinHandle<Result<()>>,
 ) -> Result<bool> {
-    if env!("CARGO_BIN_NAME") != "st3-fixture" || driver != "claude" {
+    if env!("CARGO_BIN_NAME") != "fractal-fixture" || driver != "claude" {
         return Ok(false);
     }
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
@@ -1560,13 +1563,18 @@ async fn run_pi_channel(
     if push_mailbox_enabled() && state.pending.fence.is_none() {
         state.pending.fence = Some(fractal_daemon::mailbox::Fence::new(subject, &incarnation, "delivery"));
     }
-    if let Some(fence) = &mut state.pending.fence { fence.bind(client).await?; }
-    let mut subscription = state.pending.fence.as_ref().map(|fence| {
-        let mut report: Value =
-            serde_json::from_str(&native_delivery_report(&transport, None)).unwrap_or_default();
-        report["ready"] = json!(state.first_idle_seen && state.failed_handoffs.is_empty());
-        fractal_daemon::mailbox::Subscription::start(client.clone(), fence.clone(), report)
-    });
+    // Bind a copy so cancellation for re-exec preserves the original ownership fence.
+    // No mailbox work starts until the admitted fence is returned.
+    let mut binding = state.pending.fence.is_some();
+    let mut fence = state.pending.fence.clone();
+    let initial_bind = async move {
+        if let Some(fence) = &mut fence {
+            fence.bind(client).await?;
+        }
+        anyhow::Ok(fence)
+    };
+    tokio::pin!(initial_bind);
+    let mut subscription = None::<fractal_daemon::mailbox::Subscription>;
     let mut pushed_messages: Vec<MessageView> = Vec::new();
     let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
     let spawn_reader = |sender: tokio::sync::mpsc::UnboundedSender<fractal_drivers::reexec::StdinChunk>| {
@@ -1576,6 +1584,8 @@ async fn run_pi_channel(
     let mut watch = fractal_drivers::reexec::ReplacementWatch::for_current_process();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut replacement_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    replacement_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_warning = None;
     let mut work_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     work_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1587,11 +1597,39 @@ async fn run_pi_channel(
         if cli_output::closed() {
             return Ok(());
         }
+        if !binding {
+            // Re-exec can carry complete frames from a still-unbound predecessor.
+            // They must run after admission even if stdin never produces another chunk.
+            let mut publish = false;
+            while let Some(line) = state.lines.next_line() {
+                publish |= accept_managed_channel_frame(
+                    &mut state, &mut observer, &line,
+                    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+                    subject,
+                    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
+                )?;
+            }
+            if publish
+                && let Err(error) = state.pending.publish(client, subject, driver, &incarnation, &session).await
+            {
+                warn_pi_channel(subject, &error, &mut last_warning);
+            }
+        }
         tokio::select! {
+            fence = &mut initial_bind, if binding => {
+                state.pending.fence = fence?;
+                binding = false;
+                subscription = state.pending.fence.as_ref().map(|fence| {
+                    let mut report: Value =
+                        serde_json::from_str(&native_delivery_report(&transport, None)).unwrap_or_default();
+                    report["ready"] = json!(state.first_idle_seen && state.failed_handoffs.is_empty());
+                    fractal_daemon::mailbox::Subscription::start(client.clone(), fence.clone(), report)
+                });
+            }
             wake = async { match todo_observations.as_mut() {
                 Some(observations) => observations.recv().await,
                 None => std::future::pending().await,
-            }} => {
+            }}, if !binding => {
                 if let Err(error) = wake {
                     warn_pi_channel(subject, &error, &mut last_warning);
                 } else if let Some(observations) = todo_observations.as_mut()
@@ -1636,7 +1674,7 @@ async fn run_pi_channel(
                     None => return Ok(()),
                 }
             }
-            chunk = input_rx.recv() => {
+            chunk = input_rx.recv(), if !binding => {
                 let mut publish = false;
                 match chunk {
                     Some(fractal_drivers::reexec::StdinChunk::Bytes(bytes)) => {
@@ -1693,7 +1731,7 @@ async fn run_pi_channel(
                     warn_pi_channel(subject, &error, &mut last_warning);
                 }
             }
-            _ = interval.tick() => {
+            _ = interval.tick(), if !binding => {
                 if let Some(observer) = observer.as_mut() {
                     if let Err(error) = observer.heartbeat() {
                         warn_pi_channel(subject, &error, &mut last_warning);
@@ -1834,13 +1872,15 @@ async fn run_pi_channel(
                         None => break,
                     }
                 }
+            }
+            _ = replacement_interval.tick() => {
                 let ready = match watch.as_mut() {
                     Some(watch) => tokio::task::block_in_place(|| watch.ready()),
                     None => None,
                 };
                 if let Some(binary) = ready {
-                    // Take every byte the reader already consumed and act on every complete
-                    // frame; only a partial frame crosses the exec.
+                    // Preserve every consumed byte. Before admission, even complete frames
+                    // cross exec untouched: accepting them can publish observations or PTY input.
                     if let Some(reader) = reader.take() {
                         tokio::task::block_in_place(|| reader.stop());
                     }
@@ -1854,15 +1894,17 @@ async fn run_pi_channel(
                             }
                         }
                     }
-                    while let Some(line) = state.lines.next_line() {
-                        publish |= accept_managed_channel_frame(
-                            &mut state, &mut observer, &line,
-                            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-                            subject,
-                            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-                        )?;
+                    if !binding {
+                        while let Some(line) = state.lines.next_line() {
+                            publish |= accept_managed_channel_frame(
+                                &mut state, &mut observer, &line,
+                                // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+                                subject,
+                                // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
+                            )?;
+                        }
                     }
-                    if publish {
+                    if publish && !binding {
                         let _ = state
                             .pending
                             .publish(client, subject, driver, &incarnation, &session)
@@ -1900,7 +1942,7 @@ async fn run_pi_channel(
                     reader = Some(spawn_reader(input_tx.clone()));
                 }
             }
-            _ = work_retry.tick(&mut work_interval) => {
+            _ = work_retry.tick(&mut work_interval), if !binding => {
                 let minute = unix_minute()?;
                 if checked_todo_minute != Some(minute) {
                     checked_todo_minute = Some(minute);
@@ -2178,11 +2220,46 @@ fn spawn_codex_provider(
             }
         };
         #[cfg(feature = "test-support")]
-        if env!("CARGO_BIN_NAME") == "st3-fixture" {
+        if env!("CARGO_BIN_NAME") == "fractal-fixture" {
             fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
     })
+}
+
+fn codex_launch_outcome(outcome: Result<()>, ready: bool) -> Result<()> {
+    match outcome {
+        Ok(()) if !ready => anyhow::bail!(
+            "Codex launch failed: the provider exited with exit status 0 before becoming ready"
+        ),
+        other => other,
+    }
+}
+
+fn codex_completion_ready(ready: bool, state_dir: &Path, prior: Option<&Vec<u8>>) -> bool {
+    ready || codex_bound_thread(state_dir, prior).is_some()
+}
+
+#[test]
+fn codex_bind_then_immediate_clean_exit_before_tick_is_not_launch_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("binding.json");
+    let prior = br#"{"threadId":"previous"}"#.to_vec();
+    fs::write(&path, &prior).unwrap();
+    assert!(!codex_completion_ready(false, root.path(), Some(&prior)));
+    // The binding lands and the provider returns before the timer can set ready.
+    fs::write(&path, br#"{"threadId":"current","runtimeIncarnation":"new"}"#).unwrap();
+    assert!(codex_launch_outcome(Ok(()),
+        codex_completion_ready(false, root.path(), Some(&prior))).is_ok());
+}
+
+#[test]
+fn codex_launch_clean_exit_before_ready_is_a_failure() {
+    let error = codex_launch_outcome(Ok(()), false).unwrap_err();
+    assert!(error.to_string().contains("exit status 0 before becoming ready"));
+    assert!(codex_launch_outcome(Ok(()), true).is_ok());
+    assert_eq!(codex_launch_outcome(Err(anyhow::anyhow!("schema incompatible")), false)
+        .unwrap_err().to_string(), "schema incompatible");
 }
 
 async fn drive_codex_native(
@@ -2287,7 +2364,7 @@ async fn drive_codex_native(
         tokio::select! {
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "st3-fixture"
+                if env!("CARGO_BIN_NAME") == "fractal-fixture"
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
@@ -2311,7 +2388,9 @@ async fn drive_codex_native(
                 #[cfg(feature = "test-support")]
                 if completion_announced { fixture_codex_completion_phase(&task).await?; }
             }
-            result = &mut task, if completion_announced || fixture_completion_task_enabled() => {
+            // Preflight can fail before creating any harness observation. Waiting for an
+            // ended event here would hide that error indefinitely.
+            result = &mut task => {
                 let outcome = result.context("joining the Codex driver")?;
                 if let Some(session) = detached_session(&outcome) {
                     loop_state.delivery_episode = delivery.episode;
@@ -2328,10 +2407,15 @@ async fn drive_codex_native(
                     completion_announced = false;
                     continue;
                 }
+                // A fast session can bind and exit between timer ticks. Its durable
+                // current-attempt binding proves readiness even if no tick published it.
+                loop_state.ready = codex_completion_ready(
+                    loop_state.ready, &state_dir, prior_binding.as_ref(),
+                );
                 // A resume that ended before its thread bound was refused by Codex itself, such
                 // as a thread with no rollout. The wrapper can end cleanly and leave the reason in
                 // its harness record. The refusal goes first, so nothing after it can delay it.
-                if reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
+                if !loop_state.ready && reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
                         Ok(()) => fractal_drivers::harness_state::read(&harness_state_path, None)
@@ -2343,7 +2427,7 @@ async fn drive_codex_native(
                         reason: reason.chars().take(2_000).collect(),
                     };
                     let _ = refuse_native_resume(client, subject, &incarnation, "codex", refusal).await;
-                } else if reported_session.is_none()
+                } else if !loop_state.ready && reported_session.is_none()
                     && let Some(thread) = &continued
                 {
                     // The next relaunch starts a new thread instead of trying this one again.
@@ -2362,6 +2446,8 @@ async fn drive_codex_native(
                 if let Err(error) = observations.drain(client, subject, "codex", &mut loop_state.ready).await {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
+                let exit_code = if outcome.is_ok() { 0 } else { 1 };
+                let outcome = codex_launch_outcome(outcome, loop_state.ready);
                 // The harness is gone, and its subagents with it.
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -2369,6 +2455,23 @@ async fn drive_codex_native(
                 )
                 .await;
                 if let Err(error) = &outcome {
+                    if !loop_state.ready {
+                        let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+                            subject: subject.into(),
+                            kind: "harness.observed".into(),
+                            actor: Some(subject.into()),
+                            fields: BTreeMap::from([
+                                ("state".into(), Value::String("ended".into())),
+                                ("driver".into(), Value::String("codex".into())),
+                                ("incarnation_id".into(), Value::String(incarnation.clone())),
+                                ("exit".into(), Value::String(format!("exit {exit_code}"))),
+                                ("reason".into(), Value::String(format!("{error:#}"))),
+                            ]),
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: Some(format!("codex-launch-failed:{subject}:{incarnation}")),
+                        }).await;
+                    }
                     let reason = format!("{error:#}").chars().take(2_000).collect::<String>();
                     let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
                         subject: subject.into(),
@@ -2377,13 +2480,27 @@ async fn drive_codex_native(
                         fields: BTreeMap::from([
                             ("severity".into(), Value::String("error".into())),
                             ("status".into(), Value::String("failed".into())),
-                            ("code".into(), Value::String("codex-driver-failed".into())),
+                            ("code".into(), Value::String(if loop_state.ready { "codex-driver-failed" } else { "codex-launch-failed" }.into())),
                             ("reason".into(), Value::String(reason)),
                             ("incarnation_id".into(), Value::String(incarnation.clone())),
                         ]),
                         evidence: Vec::new(),
                         expected_subject: None,
                         idempotency_key: Some(format!("codex-driver-failed:{subject}:{incarnation}")),
+                    }).await;
+                    let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+                        subject: subject.into(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.into()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("exited".into())),
+                            ("runtime_id".into(), Value::String(runtime_id.clone())),
+                            ("incarnation_id".into(), Value::String(incarnation.clone())),
+                            ("exit_code".into(), Value::from(exit_code)),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(native_exit_key(subject, &runtime_id, &incarnation)),
                     }).await;
                 }
                 return outcome;
@@ -2503,12 +2620,13 @@ async fn drive_codex_native(
                             observed.transition_sequence,
                             observed.reason.as_deref(),
                         ))?));
-                        if observed.reason.as_deref() == Some("providerCapacity") {
+                        if let Some(cause) = provider_retry_cause(observed.state, observed.reason.as_deref()) {
                             if last_capacity_fingerprint.as_deref() != Some(fingerprint.as_str()) {
                                 publish_provider_capacity_diagnostic(
                                     client,
                                     subject,
                                     &incarnation,
+                                    cause,
                                     observed.since_ms,
                                     &fingerprint,
                                 )
@@ -2611,7 +2729,7 @@ async fn drive_codex_native(
 /// This fixture controls JoinHandle ordering; it performs no drain, claim or fence itself.
 #[cfg(feature = "test-support")]
 async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()>>) -> Result<()> {
-    if env!("CARGO_BIN_NAME") != "st3-fixture" { return Ok(()); }
+    if env!("CARGO_BIN_NAME") != "fractal-fixture" { return Ok(()); }
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
         return Ok(());
     };

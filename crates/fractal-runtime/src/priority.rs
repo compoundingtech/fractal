@@ -6,7 +6,8 @@
 //! On Linux with a systemd user manager, `pty run` starts inside the transient scope st names for
 //! the session, and the PTY server forks the harness there. st then moves the server alone into a
 //! scope of its own at [`LIVE_WEIGHT`]. The harness and everything it starts stay behind at
-//! systemd's default weight of 100. The daemon's unit carries [`LIVE_WEIGHT`] too.
+//! systemd's default weight of 100 (unless overridden by host policy). The daemon's unit carries
+//! [`LIVE_WEIGHT`] too.
 //!
 //! macOS has no cgroups. There the harness, and each exec task such as a gate's tests, starts
 //! under `taskpolicy -b`, which throttles it and every child it starts, while the daemon and the PTY servers keep
@@ -244,7 +245,7 @@ fn move_command(unit: &str, pid: u32, slice: Option<&str>, runtime_id: &str) -> 
     ]);
     let weight = LIVE_WEIGHT.to_string();
     let memory_low = LIVE_MEMORY_LOW.to_string();
-    let description = format!("st PTY server for {runtime_id}");
+    let description = format!("Fractal PTY server for {runtime_id}");
     let pid = pid.to_string();
     let mut properties: Vec<[&str; 3]> = vec![
         ["Description", "s", &description],

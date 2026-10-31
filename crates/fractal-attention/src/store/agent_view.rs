@@ -1,4 +1,4 @@
-//! The part of `store::agent_view` that moved up from st3-seats.
+//! The part of `store::agent_view` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use serde::Deserialize;
@@ -172,6 +172,33 @@ mod tests {
                 "oracle mismatch {subject}"
             );
         }
+    }
+
+    #[test]
+    fn ordered_agent_background_jobs_match_canonical_for_current_incarnation_only() {
+        let f = Fixture::new();
+        let jobs = || read_harness(&f.store.readers.get(), &f.views, SEAT)
+            .unwrap().and_then(|view| view.background_jobs);
+        f.append(SEAT, "runtime.observed", json!({"status":"running","incarnation_id":"one"}));
+        assert_eq!(jobs(), None);
+        for count in [2, 0] {
+            f.append(SEAT, "harness.observed", json!({"state":"idle","incarnation_id":"one","background_jobs":count}));
+            f.check(SEAT);
+            assert_eq!(jobs(), Some(count));
+        }
+        f.append(SEAT, "harness.observed", json!({"state":"idle","incarnation_id":"one"}));
+        f.check(SEAT);
+        assert_eq!(jobs(), None, "a sparse report does not inherit the old count");
+        f.append(SEAT, "harness.observed", json!({"state":"working","incarnation_id":"one","background_jobs":3}));
+        f.append(SEAT, "runtime.observed", json!({"status":"running","incarnation_id":"two"}));
+        f.check(SEAT);
+        assert_eq!(jobs(), None);
+        f.append(SEAT, "harness.observed", json!({"state":"idle","incarnation_id":"two","background_jobs":1}));
+        f.check(SEAT);
+        assert_eq!(jobs(), Some(1));
+        f.append(SEAT, "harness.observed", json!({"state":"ended","incarnation_id":"two","background_jobs":1}));
+        f.check(SEAT);
+        assert_eq!(jobs(), None);
     }
 
     /// Deliver `envelopes` one at a time, capturing what each admitted, checking the oracle.

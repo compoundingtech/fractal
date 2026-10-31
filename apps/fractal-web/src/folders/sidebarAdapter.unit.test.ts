@@ -36,6 +36,7 @@ const apply = (doc: SidebarDocument, operations: readonly SidebarOperation[]): S
     position: { value: { parent: regs.position?.parent ?? null, key: regs.position?.key ?? '' }, revision: regs.position?.at[2] ?? 'claim/test' },
     tombstone: regs.deleted === undefined ? null : { value: true, revision: regs.deleted[2] },
   }]))
+  if (arrangement.body.version !== 1) throw new Error('the fixture is a version 1 layout')
   arrangement.body.placements = Object.fromEntries(Object.entries(doc.placements).map(([subject, value]) => [subject, { value: { folder: value.folder, key: value.key }, revision: value.at[2] }]))
   return { ...arrangementSidebarDoc(optimisticArrangement(arrangement, operations)), roster: doc.roster }
 }
@@ -251,7 +252,7 @@ describe('sidebar matrix operations', () => {
     expect(rowStatus({ phase: 'refused', refusal, retryReady: false, onRetry: retry }, targets).get('alpha.one')).toEqual({ _tag: 'Refused', reason: 'The folder layout changed elsewhere; refresh and try again.' })
     expect(rowStatus({ phase: 'refused', refusal, retryReady: true, onRetry: retry }, targets).get('beta.one')).toMatchObject({ onRetry: retry })
   })
-  it('Generated keys are st ArrangementKey values, rekeying legacy or colliding neighbours in the same edit', () => {
+  it('Generated keys are Fractal ArrangementKey values, rekeying legacy or colliding neighbours in the same edit', () => {
     expect(nativeInsertAt([], 0).key).toBe('a0')
     const legacy = nativeInsertAt(['V', 'W'], 1)
     expect(legacy.rekeyed.map(([index]) => index)).toEqual([0, 1])
@@ -280,7 +281,7 @@ describe('sidebar matrix operations', () => {
     expectCanonicalKey(`${prefix}1`)
     expect(nativeInsertAt(['a0', `${prefix}1`], 1)).toEqual({ key: 'a1', rekeyed: [[0, 'a0'], [1, 'a2']] })
   })
-  it('Repeated same-gap insertion rekeys the full partition before exceeding the st key bound', () => {
+  it('Repeated same-gap insertion rekeys the full partition before exceeding the Fractal key bound', () => {
     const siblings = [{ id: 0, key: 'a0' }, { id: 1, key: 'a1' }]
     let rekeyed = false
     let inserted = 0

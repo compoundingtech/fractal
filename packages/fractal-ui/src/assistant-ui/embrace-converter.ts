@@ -29,12 +29,12 @@ const completed: MessageStatus = { type: 'complete', reason: 'stop' }
 const running: MessageStatus = { type: 'running' }
 const cancelled: MessageStatus = { type: 'incomplete', reason: 'cancelled' }
 
+/** The thread's usage line shows tokens, context and model only: spend stays out of the conversation lane. */
 const usageSummary = (item: UsageItem): string => {
   const fields = [
     item.inputTokens === undefined ? undefined : `${item.inputTokens.toLocaleString('en-US')} input`,
     item.outputTokens === undefined ? undefined : `${item.outputTokens.toLocaleString('en-US')} output`,
     item.cachedTokens === undefined ? undefined : `${item.cachedTokens.toLocaleString('en-US')} cached`,
-    item.cost === undefined ? undefined : `${item.cost} ${item.currency ?? 'cost units'}`,
     item.contextUsedPercent === undefined ? undefined : `${item.contextUsedPercent}% context`,
     item.model,
   ].filter((field) => field !== undefined)
@@ -147,7 +147,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       return item.kind === 'error' ? {
         ...common, role: 'assistant',
         status: { type: 'incomplete', reason: 'error', error: { message: item.text } },
-        content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
+        content: [{ type: 'text', text: `${item.text}${item.detail ? `\n${item.detail}` : ''}${item.retryable === true ? '\nCan be retried' : ''}` }],
       } : {
         ...common, role: 'system',
         content: [{ type: 'text', text: `${item.kind} · ${item.text}${item.detail ? `\n${item.detail}` : ''}` }],
@@ -163,6 +163,12 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
         content: [{ type: 'text', text: `${item.title}\n${item.text}` }],
       }
     }
+    case 'Unsupported':
+      diagnostics.push('semantic-row-as-text')
+      return {
+        ...common, role: 'system',
+        content: [{ type: 'text', text: `Unsupported ${item.harness} record · ${item.recordKind}` }],
+      }
     case 'UnknownEvent':
       diagnostics.push('semantic-row-as-text')
       return {

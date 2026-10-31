@@ -86,7 +86,7 @@ class TartMachine:
         return result
 
     def send(self,data,path):
-        remote=shlex.join(['/bin/bash','-c','mkdir -p ~/smalltalk-install; cat > '+shlex.quote(path)])
+        remote=shlex.join(['/bin/bash','-c','mkdir -p ~/fractal-install; cat > '+shlex.quote(path)])
         r=subprocess.run(self.ssh()+[remote],input=data,capture_output=True,timeout=60)
         if r.returncode: raise RuntimeError('copy failed: '+r.stderr.decode(errors='replace'))
 
@@ -180,10 +180,10 @@ print(json.dumps({"app":str(app),"cli_realpath":str(st.resolve()),"executable":i
         if not self.check('fresh-mac',r['exit']==0 and 'Darwin arm64' in r['stdout'],'clean ada home on Apple Silicon macOS with an actual GUI launchd domain'): return
         r=self.execute('No providers or developer tools','for t in gh cargo rustc mold sccache nix claude codex opencode pi omp; do command -v "$t" || true; done')
         if not self.check('clean-tool-path',r['exit']==0 and not r['stdout'].strip(),'no gh, developer toolchain or provider initially installed'): return
-        self.m.send(self.archive.read_bytes(),'/Users/ada/smalltalk-install/candidate.tar.gz')
-        r=self.execute('Extract verified Mac archive','set -e\ncd ~/smalltalk-install\nshasum -a 256 candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat '+shlex.quote(self.metadata['package']+'/BUILD.json'))
+        self.m.send(self.archive.read_bytes(),'/Users/ada/fractal-install/candidate.tar.gz')
+        r=self.execute('Extract verified Mac archive','set -e\ncd ~/fractal-install\nshasum -a 256 candidate.tar.gz\ntar -xzf candidate.tar.gz\ncat '+shlex.quote(self.metadata['package']+'/BUILD.json'))
         if not self.check('archive-extracted',r['exit']==0 and r['stdout'].split()[0]==self.metadata['sha256'],'copied bytes match recorded archive and BUILD.json captured'): return
-        installer='/Users/ada/smalltalk-install/'+self.metadata['package']+'/install.sh'
+        installer='/Users/ada/fractal-install/'+self.metadata['package']+'/install.sh'
         env=['env',*[k+'='+v for k,v in self.signing.items()]]
         r=self.execute('Extracted Mac installer',shlex.join([*env,installer,'--bin-dir','/Users/ada/.local/bin']))
         if not self.check('guide-install',r['exit']==0,'archive installer completes without sudo or password entry'): return

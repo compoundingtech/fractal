@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Use preferred-first configuration readers in risk classification tests and neutralize a test comment attribution",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only changes; no replay or backfill."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Risk tests reuse the existing .fractal-first, .st-on-absence configuration readers; no classification or coordination rule changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No runtime or wire format changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployment or restart required."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual steps or configuration changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state or recovery behavior changes."
+  }
+}

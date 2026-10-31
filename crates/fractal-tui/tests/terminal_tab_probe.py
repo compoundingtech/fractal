@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Drive stui's actual terminal tab and a byte-logging program through two real PTYs.
+"""Drive Fractal TUI's actual terminal tab and a byte-logging program through two real PTYs.
 
-Requires Python 3, the packaged `pty` daemon (CI provides both), and the stui unit-test
+Requires Python 3, the packaged `pty` daemon (CI provides both), and the Fractal TUI unit-test
 executable. `--check` compares the byte matrix with the committed baseline. `--record FILE`
 records a new matrix for review. `--program NAME=PATH` additionally checks a real app against
 an invented local document; no downloads, display server, real graph, or user's config.
@@ -151,7 +151,7 @@ class Tab:
 
     def relay(self):
         # A transparent transport tap, not a substitute terminal/daemon: all packets go
-        # unchanged to the real session socket. It observes what stui sends to real apps.
+        # unchanged to the real session socket. It observes what Fractal TUI sends to real apps.
         try:
             client, _ = self.listener.accept()
             upstream = socket.socket(socket.AF_UNIX)
@@ -250,7 +250,7 @@ class Tab:
 
 def no_answer_client(tab):
     # A connected, unattached client cannot answer paste requests. Query the real
-    # daemon before starting stui's writable attachment; no transport is rewritten.
+    # daemon before starting Fractal TUI's writable attachment; no transport is rewritten.
     with socket.socket(socket.AF_UNIX) as client:
         client.connect(str(tab.registry / "copper.sock"))
         raw = b"\x1b[?5522$p"
@@ -572,7 +572,7 @@ def controls_and_images(worker):
             tab.emit(b"\x1b_Ga=d,d=I,i=24,q=2\x1b\\")
             wait_for(tab.status, lambda s: s and not s["image_cells"], "direct image delete")
             rows.append({"case": "images/direct-placement", "clipped": True, "delete": True})
-            # The palette stays stui's, and detach is available through its overlay.
+            # The palette stays Fractal TUI's, and detach is available through its overlay.
             tab.emit(RESET + b"\x1b[>27u")
             before = len(tab.input())
             tab.send(b"\x0b")
@@ -667,6 +667,8 @@ def main():
     parser.add_argument("--worker", required=True, type=Path)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--check-action-publication", action="store_true")
+    # One part of the recorded cases, so the parts can run as separate tests at the same time.
+    parser.add_argument("--part", choices=["matrix", "agent-guards", "controls"])
     parser.add_argument("--record", type=Path)
     parser.add_argument("--program", action="append", default=[], metavar="NAME=PATH")
     args = parser.parse_args()
@@ -675,25 +677,39 @@ def main():
     if args.check_action_publication:
         action_publication(args.worker.resolve())
         return
-    with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
-        command = [sys.executable, str(HERE / "copper_probe.py"), directory]
-        tab = Tab(args.worker.resolve(), command, directory)
-        try:
-            rows = []
-            tab.start(before_attach=lambda: rows.append(no_answer_client(tab)))
-            rows.extend(matrix(tab))
-        except Exception:
-            print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
-            print("relay error:", tab.relay_error, file=sys.stderr)
-            raise
-        finally:
-            tab.close()
-    if args.record:
-        args.record.write_text(json.dumps(rows, indent=2) + "\n")
-    rows.extend(agent_guards(args.worker.resolve()))
-    rows.extend(controls_and_images(args.worker.resolve()))
+    rows = []
+    if args.part in (None, "matrix"):
+        with tempfile.TemporaryDirectory(prefix="stui-probe-") as directory:
+            command = [sys.executable, str(HERE / "copper_probe.py"), directory]
+            tab = Tab(args.worker.resolve(), command, directory)
+            try:
+                tab.start(before_attach=lambda: rows.append(no_answer_client(tab)))
+                rows.extend(matrix(tab))
+            except Exception:
+                print("worker tail:", bytes(tab.output[-2000:]), file=sys.stderr)
+                print("relay error:", tab.relay_error, file=sys.stderr)
+                raise
+            finally:
+                tab.close()
+        if args.record:
+            args.record.write_text(json.dumps(rows, indent=2) + "\n")
+    if args.part in (None, "agent-guards"):
+        rows.extend(agent_guards(args.worker.resolve()))
+    if args.part in (None, "controls"):
+        rows.extend(controls_and_images(args.worker.resolve()))
     if args.check:
         expected = json.loads((HERE / "fixtures/terminal-tab-current.json").read_text())
+        if args.part is not None:
+            # The parts are contiguous runs of the recorded cases, in this order, and together they are
+            # all of them: fixtures/terminal-tab-parts.json names each part's length.
+            parts = json.loads((HERE / "fixtures/terminal-tab-parts.json").read_text())
+            order = ["matrix", "agent-guards", "controls"]
+            assert list(parts) == order, f"parts file names {list(parts)}"
+            assert sum(parts.values()) == len(expected), (
+                f"the parts cover {sum(parts.values())} of {len(expected)} recorded cases: update terminal-tab-parts.json")
+            start = sum(parts[name] for name in order[:order.index(args.part)])
+            assert len(rows) == parts[args.part], f"part {args.part} has {len(rows)} cases, recorded {parts[args.part]}"
+            expected = expected[start:start + len(rows)]
         assert len(rows) == len(expected), f"row count {len(rows)} != {len(expected)}"
         for row, old in zip(rows, expected):
             assert row == old, f"{row['case']}:\nexpected {old}\nreceived {row}"

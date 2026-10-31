@@ -1,8 +1,8 @@
 //! The daemon client, startup status, tile registry and the credential gateway (sekrets): the
-//! modules the store and everything above it use, which name no store code. st3-store re-exports
-//! them at its root, and st3-daemon at their old paths.
+//! modules the store and everything above it use, which name no store code. fractal-store re-exports
+//! them at its root, and fractal-daemon at their old paths.
 
-// Test helpers widened for st3-daemon's tests are unused when only the feature is on.
+// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.
 #![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]
 
 #[cfg(any(test, feature = "test-support"))]

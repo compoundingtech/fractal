@@ -131,4 +131,64 @@ mod tests {
         }
         assert!(!api_version("fractal.client.v1"));
     }
+
+    #[tokio::test]
+    async fn accepting_release_negotiates_old_and_new_clients_but_rejects_dual_offers() {
+        use axum::extract::{Path, WebSocketUpgrade};
+        use axum::response::{IntoResponse as _, Response};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+        async fn upgrade(
+            Path(surface): Path<String>,
+            websocket: WebSocketUpgrade,
+            headers: HeaderMap,
+        ) -> Response {
+            let old = match surface.as_str() {
+                "terminal" => "st3.client.terminal.v0",
+                "pty" => "st3.client.pty.v0",
+                "conversation" => "st3.client.conversation.v0",
+                "collections" => "st3.client.collections.v0",
+                _ => return axum::http::StatusCode::NOT_FOUND.into_response(),
+            };
+            let protocols = headers.get("sec-websocket-protocol").unwrap().to_str().unwrap()
+                .split(',').map(str::trim).collect::<Vec<_>>();
+            let selected = if matches!(surface.as_str(), "terminal" | "pty") {
+                terminal_protocol(&protocols, old, surface == "pty").map(|(selected, _)| selected)
+            } else {
+                selected_protocol(&protocols, old)
+            };
+            let Some(selected) = selected else {
+                return axum::http::StatusCode::BAD_REQUEST.into_response();
+            };
+            websocket.protocols([selected.to_owned()]).on_upgrade(|_| async {})
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().route("/{surface}", axum::routing::get(upgrade)))
+                .await.unwrap();
+        });
+        for surface in ["terminal", "pty", "conversation", "collections"] {
+            for family in ["st3", "fractal"] {
+                let protocol = format!("{family}.client.{surface}.v0");
+                let offered = if surface == "terminal" {
+                    format!("{protocol}, {family}.cap.secret")
+                } else { protocol.clone() };
+                let mut request = format!("ws://{address}/{surface}").into_client_request().unwrap();
+                request.headers_mut().insert("sec-websocket-protocol", offered.parse().unwrap());
+                // Real handshakes keep tungstenite's unoffered-protocol rejection intact.
+                let (_socket, response) = tokio_tungstenite::connect_async(request).await.unwrap();
+                assert_eq!(response.headers()["sec-websocket-protocol"].to_str().unwrap(), protocol);
+            }
+            let capability = if surface == "terminal" { ", fractal.cap.secret" } else { "" };
+            let mut request = format!("ws://{address}/{surface}").into_client_request().unwrap();
+            request.headers_mut().insert("sec-websocket-protocol",
+                format!("fractal.client.{surface}.v0, st3.client.{surface}.v0{capability}").parse().unwrap());
+            let error = tokio_tungstenite::connect_async(request).await.unwrap_err();
+            assert!(matches!(error, tokio_tungstenite::tungstenite::Error::Http(response)
+                if response.status() == axum::http::StatusCode::BAD_REQUEST));
+        }
+        server.abort();
+    }
 }

@@ -108,7 +108,7 @@ jq -cs --arg id "$UUID" --arg cwd "$PROJECT" '
     if .id == "result-12" then .message.content = [{type:"text",text:("E2E-REF-PAYLOAD:" + ("x" * 20000))}] else . end)
 ' "$FIXTURE" > "$PARENT"
 cp -- "$CHILD_FIXTURE" "${PARENT%.jsonl}/ParityChildConversationReview.jsonl"
-# A compact recent showcase puts bash and the child card together in stui's viewport.
+# A compact recent showcase puts bash and the child card together in the terminal UI's viewport.
 jq -cn '{type:"message",id:"e2e-showcase-call",timestamp:"2026-10-06T00:00:09Z",message:{role:"assistant",content:[
   {type:"toolCall",id:"e2e-showcase-bash",name:"bash",arguments:{command:"printf E2E-BASH-ROW",i:"Showing parity bash",cwd:"/synthetic/e2e",timeout:30,async:false}},
   {type:"toolCall",id:"e2e-showcase-task",name:"task",arguments:{context:"E2E-PARENT-CONTEXT\nContract: E2E-PARENT-CONTRACT",tasks:[{name:"ParityChildConversationReview",agent:"scout",task:"Inspect synthetic parity\nE2E-FULL-ASSIGNMENT"}]}}
@@ -323,7 +323,7 @@ done
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 export FRACTAL_ENDPOINT="$SOCKET" ST3_ENDPOINT="$SOCKET" FRACTAL_PERSON='person/tester' ST3_PERSON='person/tester'
 printf -v UI_COMMAND '%q ui --local' "$ST3"
-check 'start isolated stui terminal' tmux -f /dev/null -S "$TMUX_SOCKET" new-session -d -s omp-e2e -n stui -x 240 -y 100 "$UI_COMMAND"
+check 'start isolated Fractal terminal' tmux -f /dev/null -S "$TMUX_SOCKET" new-session -d -s omp-e2e -n stui -x 240 -y 100 "$UI_COMMAND"
 TMUX_STARTED=1
 printf 'INFO monitor: tmux -S %s attach -t omp-e2e\n' "$TMUX_SOCKET" | tee -a "$REPORT"
 wait_pane() {
@@ -335,27 +335,27 @@ wait_pane() {
   done
   return 1
 }
-check 'stui connected and palette ready' wait_pane 'ctrl\+k|ctrl.k|Ctrl.K' "$OUT/stui-start.txt"
+check 'terminal UI connected and palette ready' wait_pane 'ctrl\+k|ctrl.k|Ctrl.K' "$OUT/stui-start.txt"
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" C-k
-check 'stui palette opened' wait_pane 'start|agents|Open|open' "$OUT/stui-palette.txt"
+check 'terminal UI palette opened' wait_pane 'start|agents|Open|open' "$OUT/stui-palette.txt"
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" -l "$SESSION"
-check 'stui offers saved session in palette' wait_pane "${SESSION#session/}" "$OUT/stui-palette.txt"
+check 'terminal UI offers saved session in palette' wait_pane "${SESSION#session/}" "$OUT/stui-palette.txt"
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" Enter
-check 'stui opens saved parent content' wait_pane 'Synthetic assistant response|E2E-APPEND-VISIBLE|E2E-BASH-ROW' "$OUT/stui.txt"
+check 'terminal UI opens saved parent content' wait_pane 'Synthetic assistant response|E2E-APPEND-VISIBLE|E2E-BASH-ROW' "$OUT/stui.txt"
 # The header sits above the entries inside the scrolling document: Home shows it,
 # End returns to the newest rows. Both captures are the real terminal.
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" Home
-check 'stui compact conversation transcript header visible' wait_pane 'model synthetic/appended-model.* · transcript · ' "$OUT/stui-header.txt"
+check 'terminal UI compact conversation transcript header visible' wait_pane 'model synthetic/appended-model.* · transcript · ' "$OUT/stui-header.txt"
 # Shift+O toggles full density; o opens all tool outputs; End follows the showcase.
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" O o End
-check 'stui bash command row visible' wait_pane '\$ printf E2E-BASH-ROW' "$OUT/stui.txt"
-check 'stui subagent named open row visible' wait_pane 'open ParityChildConversationReview' "$OUT/stui.txt"
-check 'stui source agent name and type visible' contains_text 'ParityChildConversationReview · running · scout' "$OUT/stui.txt"
-check 'stui full assignment visible' contains_text 'E2E-FULL-ASSIGNMENT' "$OUT/stui.txt"
-check 'stui parent context visible' contains_text 'E2E-PARENT-CONTEXT' "$OUT/stui.txt"
-check 'stui parent contract visible' contains_text 'E2E-PARENT-CONTRACT' "$OUT/stui.txt"
-check 'stui bash cwd visible' contains_text 'cwd: /synthetic/e2e' "$OUT/stui.txt"
-check 'stui bash timeout visible' contains_text 'timeout: 30s' "$OUT/stui.txt"
+check 'terminal UI bash command row visible' wait_pane '\$ printf E2E-BASH-ROW' "$OUT/stui.txt"
+check 'terminal UI subagent named open row visible' wait_pane 'open ParityChildConversationReview' "$OUT/stui.txt"
+check 'terminal UI source agent name and type visible' contains_text 'ParityChildConversationReview · running · scout' "$OUT/stui.txt"
+check 'terminal UI full assignment visible' contains_text 'E2E-FULL-ASSIGNMENT' "$OUT/stui.txt"
+check 'terminal UI parent context visible' contains_text 'E2E-PARENT-CONTEXT' "$OUT/stui.txt"
+check 'terminal UI parent contract visible' contains_text 'E2E-PARENT-CONTRACT' "$OUT/stui.txt"
+check 'terminal UI bash cwd visible' contains_text 'cwd: /synthetic/e2e' "$OUT/stui.txt"
+check 'terminal UI bash timeout visible' contains_text 'timeout: 30s' "$OUT/stui.txt"
 # PaneIntent::Open is a left-button mouse hit. The document has no keyboard row
 # focus/Enter binding: use the real SGR terminal mouse event on the captured row.
 if contains_text "open ParityChildConversationReview" "$OUT/stui.txt"; then
@@ -369,12 +369,12 @@ JS
 )
 printf -v CLICK '\033[<0;%s;%sM\033[<0;%s;%sm' "$CLICK_X" "$CLICK_Y" "$CLICK_X" "$CLICK_Y"
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" -l "$CLICK"
-check 'stui card opens actual child content' wait_pane 'PARITY-CHILD-COMPLETE' "$OUT/stui-child.txt"
+check 'terminal UI card opens actual child content' wait_pane 'PARITY-CHILD-COMPLETE' "$OUT/stui-child.txt"
 tmux -S "$TMUX_SOCKET" send-keys -t "$TARGET" Home
-check 'stui child shows its own first assistant content' wait_pane 'PARITY-CHILD-START' "$OUT/stui-child.txt"
-check 'stui child excludes parent assistant content' bash -c '! grep -Fq "Synthetic assistant response" "$1"' _ "$OUT/stui-child.txt"
+check 'terminal UI child shows its own first assistant content' wait_pane 'PARITY-CHILD-START' "$OUT/stui-child.txt"
+check 'terminal UI child excludes parent assistant content' bash -c '! grep -Fq "Synthetic assistant response" "$1"' _ "$OUT/stui-child.txt"
 else
-  check 'stui card activation unavailable without visible child open row' false
+  check 'terminal UI card activation unavailable without visible child open row' false
 fi
 
 if [[ -n "$CORPUS" ]]; then

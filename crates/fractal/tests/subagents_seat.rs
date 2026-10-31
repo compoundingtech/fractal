@@ -1,4 +1,4 @@
-//! Subagent claims end to end. `scripts/st3-subagents-eval/run` starts an isolated daemon with
+//! Subagent claims end to end. `scripts/fractal-subagents-eval/run` starts an isolated daemon with
 //! Claude seats whose `claude` is a stand-in that reports subagents through the real hooks (no
 //! model, no login). It requires one appearance and one end per subagent on its parent seat, with
 //! type, description, session, held step and tokens; renewals only while one runs; and an end for
@@ -36,8 +36,8 @@ fn a_seats_subagents_appear_renew_and_end() {
             "ST3_SUBJECT",
             "python3",
         ])
-        .arg(repo.join("scripts/st3-subagents-eval/run"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(repo.join("scripts/fractal-subagents-eval/run"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .output()
         .expect("run the subagent seat eval");

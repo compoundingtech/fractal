@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::conversation_blocks` that moved up from st3-api.
+//! The part of `api::client_v0::conversation_blocks` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::external_sessions::{ExternalConversation, ExternalSession};
@@ -45,7 +45,7 @@ pub async fn chunk(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let (session_id, resolved) = resolve_conversation(&state, &id)?;
-    if let Some(owner) = conversation_owner_host(&state, &session, resolved.managed.as_ref())? {
+    if let Some(owner) = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())? {
         let value = state
             .client_relay
             .as_ref()
@@ -87,7 +87,7 @@ pub async fn chunk_local(
     require_scope(session, "read.projections")?;
     let locator = locator(wanted, session_id)?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     let request_state = state.clone();
     let request_session = session_id.to_owned();
     let (bytes, media) =
@@ -708,6 +708,7 @@ mod tests {
             crate::external_sessions::TimelineOrder::Sequence,
             None,
             10,
+            true,
         )
         .unwrap();
         let item = page
@@ -2128,9 +2129,18 @@ mod tests {
 
     #[test]
     fn concurrent_read_limit_has_no_waiting_backlog() {
-        let slots = tokio::sync::Semaphore::new(4);
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let slots = read_slots(&root.path().join("one.jsonl"));
         let held: Vec<_> = (0..4).map(|_| slots.try_acquire().unwrap()).collect();
         assert_eq!(read_slot(&slots).unwrap_err().code, "rate-limited");
+        let same_scope = read_slots(&root.path().join("two.jsonl"));
+        assert_eq!(read_slot(&same_scope).unwrap_err().code, "rate-limited");
+        let other_scope = read_slots(&other.path().join("one.jsonl"));
+        assert!(
+            read_slot(&other_scope).is_ok(),
+            "parallel test scopes must not consume each other's read budget"
+        );
         drop(held);
         assert!(read_slot(&slots).is_ok());
     }
@@ -2194,54 +2204,82 @@ mod tests {
         }
     }
 
-    #[test]
-    fn same_fold_viewers_wait_without_holding_global_read_slots() {
-        let root = tempfile::tempdir().unwrap();
-        let home = root.path().to_owned();
-        let shared = fold_fixture(&home, "shared").transcript;
-        crate::external_sessions::timeline_test_support::arm_refresh(&shared);
-        let identities = |items: &[Value]| {
-            items
-                .iter()
-                .map(|item| (item["id"].clone(), item["sequence"].clone()))
-                .collect::<Vec<_>>()
-        };
-        let viewer = |name: &'static str| {
-            let source = fold_fixture(&home, name);
-            let session = ClientSession::local(Some("person/example")).unwrap();
-            std::thread::spawn(move || {
-                read_slice(
-                    &source,
-                    &session,
-                    &source.id,
-                    crate::external_sessions::TimelineOrder::Sequence,
-                    None,
-                    10,
-                )
-            })
-        };
-        let first = viewer("shared");
-        crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
-        let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
-        // Every viewer of the shared transcript is queued on its fold, none on a read slot.
-        crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
-        let unrelated = viewer("other");
-        let unrelated = unrelated.join().unwrap().unwrap();
-        assert!(
-            serde_json::to_string(&unrelated.items)
-                .unwrap()
-                .contains("content of other"),
-            "another conversation is admitted while the shared fold is contended"
-        );
-        crate::external_sessions::timeline_test_support::release_refresh(&shared);
-        let first = first.join().unwrap().unwrap();
-        assert!(!first.items.is_empty());
-        for viewer in parked {
-            assert_eq!(
-                identities(&viewer.join().unwrap().unwrap().items),
-                identities(&first.items)
-            );
+    /// Run blocking coordination away from the runtime thread so its deadline can fire even
+    /// if a refresh gate, fold wait, or thread join never completes.
+    async fn coordination_deadline(name: &'static str, test: impl FnOnce() + Send + 'static) {
+        let (done, result) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(test)));
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .unwrap_or_else(|_| panic!("{name}: coordination did not finish within 30 seconds"))
+            .expect("coordination worker must report its outcome");
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
+    }
+
+    #[tokio::test]
+    async fn same_fold_viewers_wait_without_holding_global_read_slots() {
+        coordination_deadline(
+            "same_fold_viewers_wait_without_holding_global_read_slots",
+            || {
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().to_owned();
+                let shared = fold_fixture(&home, "shared").transcript;
+                // A parallel test can fill its own budget before this first viewer starts.
+                let other_test = tempfile::tempdir().unwrap();
+                let other_slots = read_slots(&other_test.path().join("busy.jsonl"));
+                let _other_reads: Vec<_> =
+                    (0..4).map(|_| other_slots.try_acquire().unwrap()).collect();
+                crate::external_sessions::timeline_test_support::arm_refresh(&shared);
+                let identities = |items: &[Value]| {
+                    items
+                        .iter()
+                        .map(|item| (item["id"].clone(), item["sequence"].clone()))
+                        .collect::<Vec<_>>()
+                };
+                let viewer = |name: &'static str| {
+                    let source = fold_fixture(&home, name);
+                    let session = ClientSession::local(Some("person/example")).unwrap();
+                    std::thread::spawn(move || {
+                        read_slice(
+                            &source,
+                            &session,
+                            &source.id,
+                            crate::external_sessions::TimelineOrder::Sequence,
+                            None,
+                            10,
+                            true,
+                        )
+                    })
+                };
+                let first = viewer("shared");
+                crate::external_sessions::timeline_test_support::wait_refresh_arrived(&shared);
+                let parked: Vec<_> = (0..4).map(|_| viewer("shared")).collect();
+                // Every shared viewer queues on its fold, not on a read slot.
+                crate::external_sessions::timeline_test_support::wait_fold_waiters(4);
+                let unrelated = viewer("other");
+                let unrelated = unrelated.join().unwrap().unwrap();
+                assert!(
+                    serde_json::to_string(&unrelated.items)
+                        .unwrap()
+                        .contains("content of other"),
+                    "another conversation is admitted while the shared fold is contended"
+                );
+                crate::external_sessions::timeline_test_support::release_refresh(&shared);
+                let first = first.join().unwrap().unwrap();
+                assert!(!first.items.is_empty());
+                for viewer in parked {
+                    assert_eq!(
+                        identities(&viewer.join().unwrap().unwrap().items),
+                        identities(&first.items)
+                    );
+                }
+            },
+        )
+        .await;
     }
 
     #[test]
@@ -2389,21 +2427,40 @@ mod tests {
         })];
         let mut session = ClientSession::local(Some("person/example")).unwrap();
         session.conversation_blocks = true;
-        let prepared = prepare(&parent, &session, &parent.id, items).unwrap();
+        let routing_parent = managed_session_id("agent/child-owner", "runtime:i1");
+        let prepared = prepare(&parent, &session, &routing_parent, items.clone()).unwrap();
         let agents = prepared[0]["body"]["blocks"][0]["view"]["agents"]
             .as_array()
             .unwrap();
         let linked = agents[0]["conversation"]["session_id"].as_str().unwrap();
         assert_eq!(
             linked,
-            crate::subagent_sessions::child_session_id(&parent, "sub-lived")
+            crate::subagent_sessions::child_session_id(&parent, "sub-lived", &routing_parent)
         );
         assert!(linked.starts_with("session/external-child-"));
         assert!(agents[1].get("conversation").is_none());
+        let parts = crate::subagent_sessions::child_parts(linked).unwrap();
+        assert_eq!(parts.external_parent_id, parent.id);
+        assert_eq!(parts.routing_parent_session_id, routing_parent);
+
+        let child = crate::subagent_sessions::resolve_child_of(&parent, linked, "sub-lived")
+            .unwrap()
+            .unwrap();
+        let descendants = child.transcript.with_extension("");
+        std::fs::create_dir_all(&descendants).unwrap();
+        std::fs::copy(&child.transcript, descendants.join("sub-lived.jsonl")).unwrap();
+        let prepared = prepare(&child, &session, linked, items).unwrap();
+        let descendant = prepared[0]["body"]["blocks"][0]["view"]["agents"][0]
+            ["conversation"]["session_id"]
+            .as_str()
+            .unwrap();
+        let parts = crate::subagent_sessions::child_parts(descendant).unwrap();
+        assert_eq!(parts.external_parent_id, child.id);
+        assert_eq!(parts.routing_parent_session_id, routing_parent);
     }
 
     #[tokio::test]
-    async fn child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
+    async fn managed_child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -2425,7 +2482,27 @@ mod tests {
         );
         std::fs::write(child_directory.join("sub-1.jsonl"), child).unwrap();
         let mut state = super::super::tests::test_state_named(root.path(), "child-owner-test");
-        state.native_session_home = Some(root.path().to_path_buf());
+        let owner = "agent/child-owner";
+        let incarnation = "child-runtime:i1";
+        let routing_parent = managed_session_id(owner, incarnation);
+        // Only the durable managed binding can find this parent: no native inventory home.
+        state.native_session_home = None;
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "runtime_id":"child-runtime", "incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"idle", "driver":"omp", "incarnation_id":incarnation})),
+            ("harness.session-file", json!({"harness":"omp", "agent":owner, "incarnation_id":incarnation,
+                "session_id":parent.native_id, "path":parent.transcript})),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
         let app = super::super::super::router(state.clone());
         let request = |uri: String, blocks: bool| {
             let app = app.clone();
@@ -2445,12 +2522,13 @@ mod tests {
                 (status, serde_json::from_slice::<Value>(&bytes).unwrap())
             }
         };
-        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1");
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1", &routing_parent);
         let leaf = child_id.trim_start_matches("session/");
         // Negotiated: the child's own window, with a header describing it.
         let (status, page) =
             request(format!("/v1/client/sessions/{leaf}/timeline?limit=5"), true).await;
         assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["value"]["session_id"], child_id);
         let items = page["value"]["items"].as_array().unwrap();
         assert!(items.iter().any(|item| {
             item["body"]["text"]
@@ -2477,6 +2555,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{older}");
         assert_eq!(older["value"]["header"], header);
+        assert_eq!(older["value"]["session_id"], child_id);
+        assert!(older["value"]["items"].as_array().unwrap().iter().all(|item| {
+            item["body"]["text"] != "parent only"
+        }));
         // Without negotiation: the same conversation, but no header and no blocks.
         let (status, legacy) = request(
             format!("/v1/client/sessions/{leaf}/timeline?limit=5"),
@@ -2484,6 +2566,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert_eq!(legacy["value"]["session_id"], child_id);
         assert!(legacy["value"].get("header").is_none());
         assert!(
             legacy["value"]["items"]
@@ -2493,7 +2576,7 @@ mod tests {
                 .all(|item| item["body"].get("blocks").is_none())
         );
         // A child id whose transcript never existed names no conversation.
-        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran");
+        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran", &routing_parent);
         let (status, absent) = request(
             format!(
                 "/v1/client/sessions/{}/timeline",
@@ -2503,5 +2586,17 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{absent}");
+
+        // A valid managed routing key does not authorize a different native parent.
+        let mut different_parent = parent.clone();
+        different_parent.id = "session/external-0123456789abcdef01234567".into();
+        let mismatched = crate::subagent_sessions::child_session_id(
+            &different_parent, "sub-1", &routing_parent,
+        );
+        let (status, refused) = request(
+            format!("/v1/client/sessions/{}/timeline", mismatched.trim_start_matches("session/")),
+            true,
+        ).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
     }
 }

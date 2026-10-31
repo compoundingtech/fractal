@@ -1,4 +1,4 @@
-//! Terminal projection date tests that run a reconciler; they live in st3-daemon because the reconciler does.
+//! Terminal projection date tests that run a reconciler; they live in fractal-daemon because the reconciler does.
 
 #![allow(unused_imports)]
 

@@ -1,6 +1,13 @@
+use crate::RetirementsStore;
 use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
+
+fn message_party_identity(store: &Store, party: &str) -> Result<String, ApiError> {
+    crate::store::identities::resolve_reference_conn(
+        &store.readers.get(), &normalize_message_party(party),
+    ).map_err(ApiError::bad)
+}
 
 pub async fn message_delivery(
     State(state): State<AppState>,
@@ -108,6 +115,39 @@ pub async fn decide_subscription_request(
     Ok(Json(response))
 }
 
+#[derive(Deserialize)]
+pub struct RecipientQuery {
+    to: String,
+}
+
+/// Native send preflight: O(1) indexed lookups for one identity, never a roster or queue fold.
+pub async fn recipient(
+    State(state): State<AppState>,
+    Query(query): Query<RecipientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    blocking_api(move || {
+        let requested = normalize_message_party(&query.to);
+        crate::model::refuse_person_recipient(&requested).map_err(ApiError::bad)?;
+        let (recipient, identity) = receipt_recipient(&state.store, &requested)?;
+        if requested.starts_with("agent/") {
+            // These are exact subject-key reads; runtime evidence may come from another host
+            // and remains proof of existence even when the seat is stopped or undeclared.
+            let declared = state.store.selected_desired_token(&identity).map_err(ApiError::internal)?;
+            let runtime = state.store.latest_claim(&identity, Some("runtime.observed"))
+                .map_err(ApiError::internal)?;
+            if declared.is_none() && runtime.is_none() {
+                return Err(ApiError::bad(St3Error::new(
+                    "unknown-recipient",
+                    format!(
+                        "recipient `{requested}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
+                    ),
+                ).with_detail("recipient", requested)));
+            }
+        }
+        Ok(Json(json!({"recipient": recipient, "recipient_identity": identity})))
+    }).await
+}
+
 pub async fn send_message(
     State(state): State<AppState>,
     Json(request): Json<MessageSendRequest>,
@@ -121,6 +161,7 @@ pub struct MessagesPageQuery {
     from: Option<String>,
     subject: Option<String>,
     subject_prefix: Option<String>,
+    acting_as: Option<String>,
     #[serde(default)]
     include_closed: bool,
     cursor: Option<String>,
@@ -158,6 +199,8 @@ struct MessagesPageCursor {
     subject: Option<String>,
     #[serde(default)]
     subject_prefix: Option<String>,
+    #[serde(default)]
+    acting_as: Option<String>,
     include_closed: bool,
     limit: usize,
 }
@@ -168,9 +211,11 @@ impl MessagesPageCursor {
         query: &MessagesPageQuery,
         to: Option<&str>,
         from: Option<&str>,
+        acting_as: Option<&str>,
         limit: usize,
     ) -> Result<(), ApiError> {
         let matches = self.to.as_deref() == to
+            && self.acting_as.as_deref() == acting_as
             && self.from.as_deref() == from
             && self.subject == query.subject
             && self.subject_prefix == query.subject_prefix
@@ -192,9 +237,33 @@ pub async fn list_messages_page(
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<MessagePage>, ApiError> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
-    let to = query.to.as_deref().map(normalize_message_party);
-    let from = query.from.as_deref().map(normalize_message_party);
+    let peer = peer.map(|Extension(mut peer)| {
+        peer.agent = message_party_identity(&state.store, &peer.agent)?;
+        Ok::<_, ApiError>(Extension(peer))
+    }).transpose()?;
+    let to = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let from = query.from.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let acting_as = query.acting_as.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
     query.validate_filters()?;
+    if acting_as.is_some() && to.is_none() {
+        return Err(ApiError::bad(St3Error::new(
+            "validation-failed", "acting_as needs one explicit mailbox",
+        )));
+    }
+    if let (Some(to), Some(actor)) = (to.as_deref(), acting_as.as_deref()) {
+        let retirement = if to.starts_with("agent/") {
+            state.store.agent_retirement(to).map_err(ApiError::bad)?
+        } else { None };
+        let permitted = if let Some(retirement) = retirement.as_ref() {
+            retirement.body["fields"]["successor"].as_str()
+                .map(|successor| message_party_identity(&state.store, successor)).transpose()?.as_deref() == Some(actor)
+        } else { to == actor };
+        if !permitted {
+            return Err(ApiError::bad(St3Error::new("wrong-message-recipient", format!(
+                "`{actor}` has no mail custody for `{to}`"
+            ))));
+        }
+    }
     if let (Some(to), Some(report)) = (to.as_deref(), query.delivery.as_deref()) {
         delivery_presence::record(to, report);
     } else {
@@ -216,7 +285,7 @@ pub async fn list_messages_page(
             let cursor: MessagesPageCursor = serde_json::from_slice(&bytes).map_err(|_| {
                 ApiError::bad(St3Error::new("validation-failed", "invalid message cursor"))
             })?;
-            cursor.validate(&query, to.as_deref(), from.as_deref(), limit)?;
+            cursor.validate(&query, to.as_deref(), from.as_deref(), acting_as.as_deref(), limit)?;
             Ok(cursor)
         })
         .transpose()?;
@@ -228,6 +297,9 @@ pub async fn list_messages_page(
     let subject = query.subject.clone();
     let subject_prefix = query.subject_prefix.clone();
     let store = state.store.clone();
+    let cursor_to = to.clone();
+    let cursor_from = from.clone();
+    let cursor_actor = acting_as.clone();
     let (items, next_after) = blocking_store(move || {
         let native = !query.include_closed
             && peer
@@ -261,10 +333,11 @@ pub async fn list_messages_page(
             let cursor = MessagesPageCursor {
                 after,
                 through,
-                to: query.to.as_deref().map(normalize_message_party),
-                from: query.from.as_deref().map(normalize_message_party),
+                to: cursor_to.clone(),
+                from: cursor_from.clone(),
                 subject: query.subject.clone(),
                 subject_prefix: query.subject_prefix.clone(),
+                acting_as: cursor_actor.clone(),
                 include_closed: query.include_closed,
                 limit,
             };
@@ -290,7 +363,11 @@ pub async fn list_messages(
     Query(query): Query<MessagesQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<Vec<MessageView>>, ApiError> {
-    let recipient = query.to.as_deref().map(normalize_message_party);
+    let recipient = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let peer = peer.map(|Extension(mut peer)| {
+        peer.agent = message_party_identity(&state.store, &peer.agent)?;
+        Ok::<_, ApiError>(Extension(peer))
+    }).transpose()?;
     record_legacy_poll(
         peer.as_ref().map(|Extension(peer)| peer),
         recipient.as_deref(),
@@ -379,8 +456,20 @@ pub async fn post_message_claim(
                 "message lifecycle transitions require the recipient actor",
             ))
         })?;
-        let actor = normalize_message_party(&actor);
-        if actor != message.to
+        let actor = message_party_identity(&store, &actor)?;
+        let recipient = message_party_identity(&store, &message.to)?;
+        let retirement = if recipient.starts_with("agent/") {
+            store.agent_retirement(&recipient).map_err(ApiError::bad)?
+        } else { None };
+        let successor = retirement.as_ref()
+            .and_then(|claim| claim.body["fields"]["successor"].as_str())
+            .map(|successor| message_party_identity(&store, successor)).transpose()?;
+        let acting_for = retirement.as_ref().and_then(|_| {
+            (matches!(kind, "message.read" | "message.closed")
+                && successor.as_deref() == Some(actor.as_str()))
+                .then(|| recipient.clone())
+        });
+        if acting_for.is_none() && (retirement.is_some() || actor != recipient)
             && !request
                 .delegation
                 .as_ref()
@@ -397,6 +486,10 @@ pub async fn post_message_claim(
         let mut fields =
             BTreeMap::from([("status".into(), Value::String(request.lifecycle.clone()))]);
         let mut evidence = request.evidence;
+        if let Some(acting_for) = acting_for {
+            fields.insert("acting_for".into(), Value::String(acting_for));
+            evidence.push(retirement.as_ref().unwrap().id.clone());
+        }
         if let Some(proof) = &request.delegation {
             crate::store::delegation::add_fields(&mut fields, proof);
             store.delegation_evidence(&mut evidence, proof).map_err(ApiError::bad)?;
@@ -453,7 +546,7 @@ mod page_cursor_tests {
             let query: MessagesPageQuery = serde_json::from_value(value).unwrap();
             let to = query.to.as_deref().map(normalize_message_party);
             let from = query.from.as_deref().map(normalize_message_party);
-            cursor.validate(&query, to.as_deref(), from.as_deref(), query.limit.unwrap())
+            cursor.validate(&query, to.as_deref(), from.as_deref(), None, query.limit.unwrap())
         };
         assert!(validate(binding.clone()).is_ok());
         for (field, value) in [
@@ -484,13 +577,13 @@ mod page_cursor_tests {
             "include_closed": true, "limit": 2
         }))
         .unwrap();
-        assert!(cursor.validate(&query, None, None, 2).is_ok());
+        assert!(cursor.validate(&query, None, None, None, 2).is_ok());
         query.subject_prefix = Some("literal_%".into());
-        assert!(cursor.validate(&query, None, None, 2).is_err());
+        assert!(cursor.validate(&query, None, None, None, 2).is_err());
         cursor.subject_prefix = query.subject_prefix.clone();
-        assert!(cursor.validate(&query, None, None, 2).is_ok());
+        assert!(cursor.validate(&query, None, None, None, 2).is_ok());
         query.subject_prefix = Some("literal".into());
-        assert!(cursor.validate(&query, None, None, 2).is_err());
+        assert!(cursor.validate(&query, None, None, None, 2).is_err());
     }
 }
 

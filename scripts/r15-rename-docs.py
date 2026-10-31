@@ -55,7 +55,7 @@ def rewrite(text):
             continue
         text = re.sub(r'(?P<flag>--bin[ =]+)' + re.escape(new) + r'(?![\w-])',
                       lambda match: match['flag'] + old, text)
-        text = re.sub(r'(?P<flake>(?:\.|github:compoundingtech/smalltalk/[^\s`]*)#)' +
+        text = re.sub(r'(?P<flake>(?:\.|github:compoundingtech/fractal/[^\s`]*)#)' +
                       re.escape(new) + r'(?![\w-])',
                       lambda match: match['flake'] + old, text)
     # Repair earlier output at reviewed runtime contexts, not Cargo selectors.
@@ -79,7 +79,7 @@ def rewrite(text):
     for stem in ('client', 'scenarios', 'views'):
         text = text.replace('clients/typescript/st3-' + stem, 'clients/typescript/fractal-' + stem)
     text = text.replace('clients/swift/St3Client', 'clients/swift/FractalClient')
-    text = text.replace('apps/fractal-web/packages/st3-sdk', 'apps/fractal-web/packages/fractal-sdk')
+    text = text.replace('apps/fractal-web/packages/st3-sdk', 'packages/fractal-sdk')
     for old, new in PACKAGES.items():
         text = text.replace(old, new)
     text = re.sub(r'\bSt3Client\b', 'FractalClient', text)
@@ -105,7 +105,9 @@ def main():
     names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     changed = 0
     for name in names:
-        if not name or not (name.endswith('.md') or name in ('.st/risky-classes.json', '.st/crate-cut.json')):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — both tracked layouts are migration inputs.
+        if not name or not (name.endswith('.md') or name in ('.st/risky-classes.json', '.st/crate-cut.json',
+                                                            '.fractal/risky-classes.json', '.fractal/crate-cut.json')):
             continue
         path = ROOT / name
         if not path.is_file():

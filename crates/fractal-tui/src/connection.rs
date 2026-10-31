@@ -31,6 +31,7 @@ mod tests {
                     device_key_chain: Vec::new(),
                     device_key_proofs: Vec::new(),
                     person_root_key_proof: None,
+                    fabric_grant: None,
                 },
             }],
         }

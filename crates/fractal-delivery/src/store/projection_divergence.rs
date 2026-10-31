@@ -1,4 +1,4 @@
-//! The part of `store::projection_divergence` that moved up from st3-store.
+//! The part of `store::projection_divergence` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::replication::ProjectionDivergence;
@@ -97,7 +97,7 @@ impl ProjectionDivergenceStore for Store {
             }
             check.recovered += 1;
         }
-        *self.smalltalk.open_divergences.lock().unwrap() =
+        *self.fractal.open_divergences.lock().unwrap() =
             Some((open.len() + check.opened - check.recovered) as u64);
         Ok(check)
     }

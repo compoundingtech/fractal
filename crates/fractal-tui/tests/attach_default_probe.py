@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open an agent in stui's real terminal tab and check what the person sees, through real PTYs.
+"""Open an agent in Fractal TUI's real terminal tab and check what the person sees, through real PTYs.
 
 stui (a production Ui, in the unit-test executable's worker) runs under one PTY, and the
 agent's program under the packaged `pty` daemon. Between them is a transparent relay that this
@@ -15,7 +15,7 @@ Cases, each one stui:
   no-terminal    an agent without a terminal opens its conversation, with no error
   alert          an alert arriving while attached shows on top of the terminal; typed keys
                  still reach the program; a click shows it, a click answers it, and its "open
-                 in Now" opens Home, which Ctrl+H closes onto the terminal
+                 in Inbox" opens a tab, which Ctrl+W closes onto the terminal
   reconnect      cutting the link shows "reconnecting" with its reason and the key to the
                  conversation; tries back off while the link is refused; the terminal comes
                  back by itself; Ctrl+\\ reaches the conversation while it is down
@@ -64,7 +64,7 @@ def screen(status):
 
 
 class Stui:
-    """One stui worker, its program, and the relay between them."""
+    """One Fractal TUI worker, its program, and the relay between them."""
 
     def __init__(self, worker, directory, prefs=None):
         self.root = Path(directory)
@@ -316,16 +316,11 @@ def case_alert(stui):
     wait_for(stui.status, lambda status: status["answered"] == ["ask/probe=Yes"], "answer sent")
     time.sleep(0.2)
     assert bytes(stui.wire_input[start:]) == b"", f"clicks reached the program: {bytes(stui.wire_input[start:])!r}"
-    # Opening it works while attached: "open in Now" opens Home over the space, where Ctrl+H
-    # closes it again onto the terminal. (While the terminal has the keys Ctrl+H is the
-    # program's, a backspace to many; Home is this click, or Ctrl+K, away.)
+    # The card is the whole alert: nothing over the terminal sends the person to Inbox for it.
     status = stui.status()
-    now = next(alert["rect"] for alert in status["alerts"] if alert["tap"] == "Open")
-    stui.click(now)
-    wait_for(stui.status, lambda status: status["home"] and not status["focused"], "Home opened")
-    stui.send(b"\x1b[104;5u")  # Ctrl+H as a kitty-keyboard terminal sends it
-    wait_for(stui.status, lambda status: not status["home"] and status["focused"], "back on the terminal")
-    print("alert: shown on top of the attached terminal; keys reach the program; clicks show, answer and open it in Now")
+    assert all(alert["tap"] != "Open" for alert in status["alerts"]), status["alerts"]
+    assert "open in Inbox" not in screen(status), "the band still offers open in Inbox"
+    print("alert: shown on top of the attached terminal; keys reach the program; clicks show and answer it")
 
 
 def case_reconnect(stui):

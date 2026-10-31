@@ -248,7 +248,8 @@ pub struct Meter {
     paths: BTreeMap<String, smallclaims::windows::Series>,
     /// Windows by target position in `slo/targets.toml`: served here, then from another machine.
     targets: Vec<[smallclaims::windows::Series; 2]>,
-    cpu: smallclaims::windows::Cpu,
+    /// The member's CPU by closed minute: the daemon's and its replication workers'.
+    cpu: smallclaims::windows::cpu_minutes::CpuMinutes,
     client_intervals: BTreeMap<(String, String, Option<String>), smallclaims::windows::IntervalSeries>,
 }
 
@@ -306,6 +307,11 @@ impl Meter {
         }
     }
 
+    /// The member's CPU by closed minute, which the minute task and the worker's reports feed.
+    pub fn cpu_minutes(&mut self) -> &mut smallclaims::windows::cpu_minutes::CpuMinutes {
+        &mut self.cpu
+    }
+
     /// Count one roster stage's duration.
     pub fn record_roster_stage(&mut self, stage: RosterStage, elapsed: Duration) {
         self.roster_stages.entry(stage).or_default().record(elapsed);
@@ -318,7 +324,6 @@ impl Meter {
 
     /// Count one sample in its path's windows and its target's.
     pub fn time(&mut self, now: Instant, timed: Timed, elapsed: Duration) {
-        self.cpu.note(now);
         let targets = crate::slo::targets();
         let Timed {
             key,
@@ -382,8 +387,8 @@ impl Meter {
                 row
             })
             .collect::<Vec<_>>();
-        rows.extend(crate::slo::store_report(self.cpu.snapshot(now)));
         let wall = crate::api::client_now_ms() as u64;
+        rows.extend(crate::slo::store_report(self.cpu.report(wall)));
         for latency in targets.latency.iter().filter(|t| t.paths.iter().any(|p| p.starts_with("client/ios/"))) {
             let windows = self.client_windows(wall, &latency.name, false);
             rows.push(json!({"name":latency.name,"about":latency.about,"p99_ms":latency.p99_ms,

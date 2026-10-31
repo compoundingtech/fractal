@@ -8,6 +8,6 @@ eval {
   }
   judges {
     judge "the hosted subject is healthy" { exec "grep -Fq 'all checks passed' $RUNS_DIR/host-and-probe.out" }
-    judge "Small Talk reaches the hosted subject" { exec "grep -Fq NETWORK-SMOKE-ROUNDTRIP $RUNS_DIR/host-and-probe.out" }
+    judge "Fractal reaches the hosted subject" { exec "grep -Fq NETWORK-SMOKE-ROUNDTRIP $RUNS_DIR/host-and-probe.out" }
   }
 }

@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::raw_terminal::lease` that moved up from st3-api.
+//! The part of `api::client_v0::raw_terminal::lease` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::MissionsStore;
 use super::*;
@@ -29,6 +29,9 @@ mod tests {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         claim(
             &state,

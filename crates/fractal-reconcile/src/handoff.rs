@@ -157,6 +157,32 @@ pub fn acknowledged_since(store: &Store, agent: &str, since_unix_ms: u128) -> Re
         }))
 }
 
+/// Whether the seat has a handoff that it wrote or marked ready since its last turn began, so
+/// the session after it can start from that handoff alone. A seat that has not taken a turn
+/// since its handoff was written counts: nothing happened that the handoff does not cover.
+pub fn ready_since_last_turn(store: &Store, agent: &str) -> Result<bool> {
+    let Some(name) = document_name(agent) else {
+        return Ok(false);
+    };
+    if latest_handoff(store, &name)?.is_none() {
+        return Ok(false);
+    }
+    let began = store
+        .observations_for(agent, "harness.observed")?
+        .into_iter()
+        .rev()
+        .find(|claim| claim.body.pointer("/fields/state").and_then(serde_json::Value::as_str) == Some("working"))
+        .map(|claim| {
+            claim
+                .body
+                .pointer("/fields/observed_since_ms")
+                .and_then(serde_json::Value::as_u64)
+                .map_or(claim.accepted_at_unix_ms, u128::from)
+        })
+        .unwrap_or(0);
+    acknowledged_since(store, agent, began)
+}
+
 /// The "prepare for restart" message: why, by when, and what to do.
 pub fn render_prepare(reason: &str, deadline_unix_ms: u128, now_unix_ms: u128) -> String {
     let seconds = deadline_unix_ms.saturating_sub(now_unix_ms).div_ceil(1000);

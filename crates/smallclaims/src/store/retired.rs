@@ -1,23 +1,30 @@
 //! Permanent deletion knowledge, kept apart from the checkpoint tables that record it today.
 //!
-//! `retired_claim_ids` and `retired_envelopes` are exact identity sets that only grow: every
-//! claim ID and envelope identity a checkpoint table has ever held, whatever later happens to
-//! that table's row. Adoption keeps only an adopted manifest's tombstones and deletes the rest
+//! `retired_claim_ids` and `retired_envelopes` are exact identity sets: every claim ID and
+//! envelope identity a checkpoint table has ever held, whatever later happens to that table's
+//! row. Adoption keeps only an adopted manifest's tombstones and deletes the rest
 //! (`keep_only_tombstones_tx`), so the checkpoint tables can forget a deletion; this ledger does
 //! not. Such a withdrawal is labeled in `retired_*_withdrawals` with the checkpoint that recorded
-//! it, because a withdrawn legacy recording is not by itself a committed deletion: whoever makes
-//! the ledger authoritative must first judge those rows under the old recorded-state rules.
+//! it, because a withdrawn legacy recording is not by itself a committed deletion.
 //!
-//! Admission and evidence still read the checkpoint tables. Until local-mode activation stops
-//! adoption from withdrawing tombstones, reading this ledger instead would refuse forever a claim
-//! that adoption deliberately let return.
+//! While a member trims locally (`[trim] local`) it adopts nothing, so nothing is withdrawn, and
+//! the ledger is its authority: admission refuses a retired identity, the inventory lists it as
+//! held without payload so no peer sends it, and it is served to no peer. Becoming the authority
+//! judges the ledger once (`judge_tx`): what adoption withdrew, or only an uncommitted checkpoint
+//! recorded, was never a deletion and leaves it. From then on the checkpoint tables no longer
+//! write it: each identity enters as it is deleted, in the deleting transaction, so a cut that is
+//! recorded but never trims teaches no peer to refuse what this member still holds. Otherwise the
+//! ledger only grows. An ordinary
+//! member's admission and every member's evidence still read the checkpoint tables.
 //!
 //! A SHA-256 identity, as 64 lowercase hex digits, is stored as its 32 bytes. Any other value is
 //! stored as the original TEXT: SQLite never equates a TEXT value with a BLOB, so the two forms
 //! cannot collide and membership stays exact. Never truncate, hash or filter these identities.
+use super::retired_facts::identity_text_sql;
 use super::*;
 
 const IMPORT_CURSOR: &str = "retired_identity_import_cursor";
+pub(super) const AUTHORITY: &str = "retired_identities_authoritative";
 const IMPORT_PAGE: i64 = 4096;
 
 /// The stored form of a claim ID or envelope hash: 32 bytes for a SHA-256 hex digest, otherwise
@@ -34,8 +41,9 @@ pub fn schema() -> String {
     let old_id = identity_sql("OLD.id");
     let new_hash = identity_sql("NEW.envelope_hash");
     let old_hash = identity_sql("OLD.envelope_hash");
+    let ordinary = format!("NOT EXISTS(SELECT 1 FROM meta WHERE key='{AUTHORITY}' AND value='1')");
     format!(
-        /* sqlite-large-value: allow-for-now lv-h80c8cc996711 owner=smallclaims::store::retired TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS retired_claim_ids (id BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID;
+        /* sqlite-large-value: allow-for-now lv-ha8e0f7b45414 owner=smallclaims::store::retired TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS retired_claim_ids (id BLOB NOT NULL PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS retired_envelopes (
     writer TEXT NOT NULL,
     sequence INTEGER NOT NULL,
@@ -54,30 +62,44 @@ CREATE TABLE IF NOT EXISTS retired_envelope_withdrawals (
     checkpoint TEXT NOT NULL,
     PRIMARY KEY(writer, sequence, envelope_hash, checkpoint)
 ) WITHOUT ROWID;
-CREATE TRIGGER IF NOT EXISTS retired_claim_recorded_v1 AFTER INSERT ON checkpoint_claims BEGIN
+-- An authoritative member writes its ledger as it deletes (`delete_dropped_rows_tx`), so a
+-- recorded cut that never commits teaches no peer anything.
+DROP TRIGGER IF EXISTS retired_claim_recorded_v1;
+DROP TRIGGER IF EXISTS retired_claim_rewritten_v1;
+DROP TRIGGER IF EXISTS retired_claim_withdrawn_v1;
+DROP TRIGGER IF EXISTS retired_envelope_recorded_v1;
+DROP TRIGGER IF EXISTS retired_envelope_rewritten_v1;
+DROP TRIGGER IF EXISTS retired_envelope_withdrawn_v1;
+CREATE TRIGGER IF NOT EXISTS retired_claim_recorded_v2 AFTER INSERT ON checkpoint_claims
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({new_id});
 END;
-CREATE TRIGGER IF NOT EXISTS retired_claim_rewritten_v1
-AFTER UPDATE OF id, checkpoint ON checkpoint_claims BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_claim_rewritten_v2
+AFTER UPDATE OF id, checkpoint ON checkpoint_claims
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({new_id}), ({old_id});
     INSERT OR IGNORE INTO retired_claim_withdrawals(id, checkpoint) VALUES ({old_id}, OLD.checkpoint);
 END;
-CREATE TRIGGER IF NOT EXISTS retired_claim_withdrawn_v1 BEFORE DELETE ON checkpoint_claims BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_claim_withdrawn_v2 BEFORE DELETE ON checkpoint_claims
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({old_id});
     INSERT OR IGNORE INTO retired_claim_withdrawals(id, checkpoint) VALUES ({old_id}, OLD.checkpoint);
 END;
-CREATE TRIGGER IF NOT EXISTS retired_envelope_recorded_v1 AFTER INSERT ON checkpoint_envelopes BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_envelope_recorded_v2 AFTER INSERT ON checkpoint_envelopes
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
     VALUES (NEW.writer, NEW.sequence, {new_hash});
 END;
-CREATE TRIGGER IF NOT EXISTS retired_envelope_rewritten_v1
-AFTER UPDATE OF writer, sequence, envelope_hash, checkpoint ON checkpoint_envelopes BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_envelope_rewritten_v2
+AFTER UPDATE OF writer, sequence, envelope_hash, checkpoint ON checkpoint_envelopes
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
     VALUES (NEW.writer, NEW.sequence, {new_hash}), (OLD.writer, OLD.sequence, {old_hash});
     INSERT OR IGNORE INTO retired_envelope_withdrawals(writer, sequence, envelope_hash, checkpoint)
     VALUES (OLD.writer, OLD.sequence, {old_hash}, OLD.checkpoint);
 END;
-CREATE TRIGGER IF NOT EXISTS retired_envelope_withdrawn_v1 BEFORE DELETE ON checkpoint_envelopes BEGIN
+CREATE TRIGGER IF NOT EXISTS retired_envelope_withdrawn_v2 BEFORE DELETE ON checkpoint_envelopes
+WHEN {ordinary} BEGIN
     INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
     VALUES (OLD.writer, OLD.sequence, {old_hash});
     INSERT OR IGNORE INTO retired_envelope_withdrawals(writer, sequence, envelope_hash, checkpoint)
@@ -116,6 +138,103 @@ pub fn envelope_retired(
     Ok(connection
         .prepare_cached(/* sqlite-large-value: allow-for-now lv-hc3201427404d owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ &QUERY)?
         .query_row(/* sqlite-large-value: allow-for-now lv-h3c86624acf5f owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ params![writer, sequence, envelope_hash], |row| row.get(0))?)
+}
+
+/// Whether this member reads the ledger as the authority for what it deleted: set while it trims
+/// locally (`[trim] local`), after `Store::trim_locally` judged the rows it held for adoption.
+pub fn authoritative(connection: &Connection) -> Result<bool> {
+    Ok(connection
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value='1')")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h86ec96290046 owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ [AUTHORITY], |row| row.get(0))?)
+}
+
+/// Whether admission refuses this claim here: a checkpoint dropped it, or, where the ledger is
+/// the authority, it was ever deleted here or on a member this one learned it from.
+pub fn claim_refused(connection: &Connection, id: &str) -> Result<bool> {
+    Ok(checkpoint::claim_tombstoned(connection, id)?
+        || (authoritative(connection)? && claim_retired(connection, id)?))
+}
+
+/// Whether admission refuses this envelope here, by the same rule as `claim_refused`.
+pub fn envelope_refused(
+    connection: &Connection,
+    writer: &str,
+    sequence: u64,
+    envelope_hash: &str,
+) -> Result<bool> {
+    Ok(checkpoint::envelope_tombstoned(connection, writer, sequence, envelope_hash)?
+        || (authoritative(connection)?
+            && envelope_retired(connection, writer, sequence, envelope_hash)?))
+}
+
+/// Record a claim ID as retired.
+pub fn retire_claim_tx(connection: &Connection, id: &str) -> Result<()> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(/* sqlite-large-value: allow-for-now lv-h6dce256b8fab owner=smallclaims::store::retired TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})", identity_sql("?1"))
+    });
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd45d8b1edb9e owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ &QUERY)?.execute(/* sqlite-large-value: allow-for-now lv-h366036687056 owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ [id])?;
+    Ok(())
+}
+
+/// Record an envelope identity as retired.
+pub fn retire_envelope_tx(
+    connection: &Connection,
+    writer: &str,
+    sequence: u64,
+    envelope_hash: &str,
+) -> Result<()> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            /* sqlite-large-value: allow-for-now lv-hca2b050ed4fb owner=smallclaims::store::retired TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
+             VALUES (?1, ?2, {})",
+            identity_sql("?3")
+        )
+    });
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h6734845d3e2d owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ &QUERY)?.execute(/* sqlite-large-value: allow-for-now lv-h254df5a61bd9 owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ params![writer, sequence, envelope_hash])?;
+    Ok(())
+}
+
+/// The checkpoint states whose tombstones are committed deletions. A checkpoint still
+/// `recording` (or sealed or verified) has deleted nothing.
+const COMMITTED: &str = "('trimming', 'trimmed')";
+
+/// Judge the ledger under the recorded-state rules before it becomes the authority. An identity
+/// is no deletion when adoption withdrew it, or when only a checkpoint that never committed
+/// recorded it, unless a committed checkpoint still holds it. Such identities leave the ledger
+/// and the withdrawal labels are spent; anything else stays, including identities with no
+/// checkpoint row at all. The candidates drive it, so it never walks the whole ledger, but it
+/// reads each checkpoint table once.
+fn judge_tx(transaction: &Transaction<'_>) -> Result<()> {
+    let recorded_id = identity_sql("recorded.id");
+    let recorded_hash = identity_sql("recorded.envelope_hash");
+    let claim = identity_text_sql("retired_claim_ids.id");
+    let hash = identity_text_sql("retired_envelopes.envelope_hash");
+    transaction.execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-h8b24ea680b56 owner=smallclaims::store::retired TODO=stage-generation-and-keyed-reclamation */ "DELETE FROM retired_claim_ids
+         WHERE id IN (SELECT id FROM retired_claim_withdrawals
+                      UNION SELECT {recorded_id} FROM checkpoint_claims AS recorded
+                      WHERE recorded.checkpoint IN (SELECT id FROM checkpoints
+                                                    WHERE state NOT IN {COMMITTED}))
+           AND NOT EXISTS(SELECT 1 FROM checkpoint_claims AS recorded
+                          JOIN checkpoints ON checkpoints.id=recorded.checkpoint
+                          WHERE recorded.id={claim} AND checkpoints.state IN {COMMITTED});
+         DELETE FROM retired_envelopes
+         WHERE (writer, sequence, envelope_hash) IN (
+                   SELECT writer, sequence, envelope_hash FROM retired_envelope_withdrawals
+                   UNION SELECT recorded.writer, recorded.sequence, {recorded_hash}
+                   FROM checkpoint_envelopes AS recorded
+                   WHERE recorded.checkpoint IN (SELECT id FROM checkpoints
+                                                 WHERE state NOT IN {COMMITTED}))
+           AND NOT EXISTS(SELECT 1 FROM checkpoint_envelopes AS recorded
+                          JOIN checkpoints ON checkpoints.id=recorded.checkpoint
+                          WHERE recorded.writer=retired_envelopes.writer
+                            AND recorded.sequence=retired_envelopes.sequence
+                            AND recorded.envelope_hash={hash}
+                            AND checkpoints.state IN {COMMITTED});
+         DELETE FROM retired_claim_withdrawals;
+         DELETE FROM retired_envelope_withdrawals;"
+    ))?;
+    Ok(())
 }
 
 /// One page of the union import.
@@ -252,7 +371,7 @@ impl Store {
         loop {
             let (page, held) = self.import_retired_identities()?;
             if page.done {
-                return Ok(());
+                return self.settle_retired_authority();
             }
             rest(import_rest(held));
         }
@@ -261,6 +380,36 @@ impl Store {
     /// Whether every checkpoint row that predates the ledger has been imported into it.
     pub fn retired_identity_import_done(&self) -> Result<bool> {
         Ok(ImportCursor::read(&self.readers.get())? == ImportCursor::Done)
+    }
+
+    /// Make the ledger the authority while this member trims locally, or stop reading it as one.
+    /// It becomes the authority once the import has finished, judged in the same transaction,
+    /// so a candidate the import has not reached yet cannot become a deletion after the judging;
+    /// until then admission reads the checkpoint tables as before. Either change rebuilds the
+    /// inventory, which lists the authority's identities.
+    pub(super) fn settle_retired_authority(&self) -> Result<()> {
+        let on = self.trims_locally();
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        let ready = on && ImportCursor::read(&transaction)? == ImportCursor::Done;
+        if ready == authoritative(&transaction)? {
+            return Ok(());
+        }
+        if ready {
+            judge_tx(&transaction)?;
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hb6bc8ed90d5b owner=smallclaims::store::retired TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key, value) VALUES(?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [AUTHORITY],
+            )?;
+        } else {
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h79820d05dcef owner=smallclaims::store::retired TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [AUTHORITY])?;
+        }
+        super::inventory_generation::bump(&transaction)?;
+        transaction.commit()?;
+        drop(connection);
+        self.replica_rows_changed();
+        Ok(())
     }
 }
 
@@ -538,3 +687,6 @@ mod tests {
         assert_eq!(import_page(&connection).unwrap(), RetiredImport { scanned: 0, done: true });
     }
 }
+
+#[cfg(test)]
+mod authority_tests;

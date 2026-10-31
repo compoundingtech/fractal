@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::assistant::reads` that moved up from st3-api.
+//! The part of `api::client_v0::assistant::reads` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::MissionsStore;
 use crate::SeatsStore;
@@ -18,8 +18,8 @@ pub mod conversation_reads;
 mod discovery;
 
 /// Assistant projections. The conversation discovery, timeline and search projections need the
-/// client-v0 search and conversation-block readers, which sit above st3-api, so they are served
-/// here; every other projection is st3-api's.
+/// client-v0 search and conversation-block readers, which sit above fractal-api-core, so they are served
+/// here; every other projection is fractal-api-core's.
 #[allow(clippy::too_many_arguments)]
 pub async fn project_with_context(
     state: &AppState,

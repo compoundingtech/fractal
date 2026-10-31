@@ -85,7 +85,7 @@ fn exact_served_proof_rejects_other_identity_mode_bounds_and_eviction() {
         );
         assert_eq!(smallclaims::touched::writes(), writes);
         let replacement = {
-            let mut cache = store.smalltalk.agent_resources_cache.lock().unwrap();
+            let mut cache = store.fractal.agent_resources_cache.lock().unwrap();
             let mut replacement = cache.back().unwrap().clone();
             replacement.items = Arc::new((*cards).clone());
             replacement.published_at_unix_ms += 1;
@@ -97,8 +97,7 @@ fn exact_served_proof_rejects_other_identity_mode_bounds_and_eviction() {
                 .served_agent_roster_unchanged_through(through, history, cut, published_at, &cards)
                 .unwrap()
         );
-        store
-            .smalltalk
+        store.fractal
             .agent_resources_cache
             .lock()
             .unwrap()
@@ -127,7 +126,7 @@ fn exact_served_proof_rejects_expiry_partial_coverage_and_pending_faults() {
                 .unwrap()
         );
         {
-            let mut cache = store.smalltalk.agent_resources_cache.lock().unwrap();
+            let mut cache = store.fractal.agent_resources_cache.lock().unwrap();
             cache.back_mut().unwrap().valid_until_unix_ms = Some(now_ms());
         }
         assert!(
@@ -141,7 +140,7 @@ fn exact_served_proof_rejects_expiry_partial_coverage_and_pending_faults() {
                 .unwrap()
         );
         {
-            let mut cache = store.smalltalk.agent_resources_cache.lock().unwrap();
+            let mut cache = store.fractal.agent_resources_cache.lock().unwrap();
             cache.back_mut().unwrap().valid_until_unix_ms = None;
             cache.back_mut().unwrap().covered = Some(BTreeSet::from([SUBJECT.into()]));
         }
@@ -150,16 +149,14 @@ fn exact_served_proof_rejects_expiry_partial_coverage_and_pending_faults() {
                 .served_agent_roster_unchanged_through(cut, history, cut, published_at, &cards)
                 .unwrap()
         );
-        store
-            .smalltalk
+        store.fractal
             .agent_resources_cache
             .lock()
             .unwrap()
             .back_mut()
             .unwrap()
             .covered = None;
-        store
-            .smalltalk
+        store.fractal
             .agent_roster_fault_retries
             .lock()
             .unwrap()

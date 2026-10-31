@@ -355,7 +355,15 @@ use super::*;
                 .unwrap()
         };
         let mut costs = Vec::new();
-        for (start, end) in [(0, 1_000), (1_000, 10_000)] {
+        // Pull requests grow a quarter of the history, still tenfold; the daily run
+        // (ST_TEST_SCALE=full, docs/ci.md) grows all of it. Equal VM-step costs at both sizes fail
+        // at either scale if the query scans expired history.
+        let (first, tenfold) = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+            (1_000, 10_000)
+        } else {
+            (250, 2_500)
+        };
+        for (start, end) in [(0, first), (first, tenfold)] {
             for number in start..end {
                 let id = format!("expired-{number}");
                 append("subagent.appeared", &id, 1);

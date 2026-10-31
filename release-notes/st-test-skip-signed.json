@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test no longer runs a check this tree already has a passing signature for: it prints 'already signed' (with --push it pushes that note as it is), so re-running on an unchanged tree is near instant; --rerun runs it anyway, and the megarepo members are fetched only once a check has to run.",
+  "replay": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "st-test only (a local pre-sign script); no protocol, schema, policy, workflow or note change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "st-test --rerun runs every selected check regardless of existing signatures."
+  }
+}

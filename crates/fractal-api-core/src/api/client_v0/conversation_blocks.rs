@@ -8,12 +8,23 @@ use ring::aead;
 use std::sync::LazyLock;
 
 // Bound expensive reads without a queued backlog or a second content cache.
+#[cfg(not(any(test, feature = "test-support")))]
 static READ_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 /// The read budget serving `transcript`: the process-wide one, or under test the budget of
 /// the test's own scope, so parallel tests never take each other's slots.
+#[cfg(not(any(test, feature = "test-support")))]
 pub fn read_slots(_transcript: &std::path::Path) -> &'static tokio::sync::Semaphore {
     &READ_SLOTS
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn read_slots(transcript: &std::path::Path) -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SCOPES: crate::external_sessions::timeline_test_support::Scopes<tokio::sync::Semaphore> =
+        LazyLock::new(std::sync::Mutex::default);
+    crate::external_sessions::timeline_test_support::scoped(&SCOPES, transcript, || {
+        tokio::sync::Semaphore::new(4)
+    })
 }
 
 static REF_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
@@ -40,6 +51,29 @@ pub fn invalidated() -> ApiError {
 pub fn source(
     state: &AppState, session_id: &str, managed: Option<&super::super::ManagedSessionOwner>,
 ) -> Result<ExternalSession, ApiError> {
+    if let Some(parts) = crate::subagent_sessions::child_parts(session_id) {
+        let index = state.store.index().map_err(ApiError::internal)?;
+        let routing_owner = super::super::managed_session_owner_at(
+            &state.store, index, &parts.routing_parent_session_id,
+        ).map_err(ApiError::internal)?;
+        let parent = if crate::subagent_sessions::child_parts(&parts.external_parent_id).is_some()
+            || parts.routing_parent_session_id.starts_with("session/external-")
+        {
+            source(state, &parts.external_parent_id, None)?
+        } else {
+            let owner = routing_owner.as_ref().ok_or_else(|| {
+                ApiError::not_found("the child routing parent does not exist")
+            })?;
+            let parent = source(state, &parts.routing_parent_session_id, Some(owner))?;
+            if parent.id != parts.external_parent_id {
+                return Err(ApiError::not_found("the child native parent does not match its owner binding"));
+            }
+            parent
+        };
+        return crate::subagent_sessions::resolve_child_of(&parent, session_id, &parts.task_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("the session does not exist"));
+    }
     if let Some((owner, incarnation, origin)) = managed {
         if origin
             .as_deref()
@@ -469,7 +503,7 @@ pub fn read(
     // The fold is held before the slot is taken: waiting viewers of this conversation hold
     // no global read slot, so they never crowd an unrelated conversation out of the budget.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     let before = basis(source)?;
     let items = held.read(source).map_err(ApiError::internal)?;
     if before != basis(source)? {
@@ -490,6 +524,8 @@ pub struct PreparedSlice {
     pub generation: u64,
 }
 
+/// Read a bounded source slice with optional display preparation. Replay extents only
+/// inspect identity, sequence and echo correlation; they must not expand display bodies.
 pub fn read_slice(
     source: &ExternalSession,
     session: &ClientSession,
@@ -497,13 +533,14 @@ pub fn read_slice(
     order: crate::external_sessions::TimelineOrder,
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
+    prepare_display: bool,
 ) -> Result<PreparedSlice, ApiError> {
     let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
     let mut held = timeline.hold();
     // Same ordering as `read`: park on the shared fold first, then take the global slot.
     let slots = read_slots(&source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     drop(queue);
     let basis = basis(source)?;
     let fold = crate::profile::span("conversation/native-fold");
@@ -511,9 +548,11 @@ pub fn read_slice(
         .slice(source, order, before, limit)
         .map_err(ApiError::internal)?;
     drop(fold);
-    let _preparation = crate::profile::span("conversation/native-display-preparation");
-    for item in &mut slice.items {
-        prepare_one(source, session, session_id, &basis, item)?;
+    if prepare_display {
+        let _preparation = crate::profile::span("conversation/native-display-preparation");
+        for item in &mut slice.items {
+            prepare_one(source, session, session_id, &basis, item)?;
+        }
     }
     if basis != self::basis(source)? {
         return Err(invalidated());
@@ -700,6 +739,7 @@ pub fn prepare_one(
                             json!({"session_id": crate::subagent_sessions::child_session_id(
                                 source,
                                 &task_id,
+                                session_id,
                             )}),
                         );
                     }
@@ -889,6 +929,16 @@ pub fn prepare_one(
 
 /// Keep negotiated data out of legacy relayed clients without changing their known enum.
 pub fn legacy(value: &mut Value, session: &ClientSession) {
+    if let Some(items) = value.get_mut("items").and_then(Value::as_array_mut) {
+        for item in items { conversation_participants::legacy_item(item, session); }
+    }
+    if !session.conversation_delivery_links
+        && let Some(items) = value.get_mut("items").and_then(Value::as_array_mut)
+    {
+        for item in items {
+            if let Some(item) = item.as_object_mut() { item.remove("delivers"); }
+        }
+    }
     if session.conversation_blocks {
         return;
     }
@@ -951,7 +1001,7 @@ pub fn assistant_text(
     let native: crate::external_sessions::NativeLocator =
         serde_json::from_value(locator.native.clone()).map_err(|_| invalidated())?;
     let slots = read_slots(&locator.source.transcript);
-    let _slot = read_slot(slots)?;
+    let _slot = read_slot(&slots)?;
     // Each read resolves the managed owner at the current frontier, as chunk_local does.
     let current_source = || {
         let index = state.store.index().map_err(ApiError::internal)?;

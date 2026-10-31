@@ -20,6 +20,9 @@ HISTORICAL = {'release_notes.py', 'profile-mailbox-wakes'}
 POLICY_PATHS = (
     '.st/evidence-skip-policy.json',
     '.st/required-lanes.json',
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — tracked path allowlist, not trust lookup.
+    '.fractal/evidence-skip-policy.json',
+    '.fractal/required-lanes.json',
 )
 
 
@@ -207,7 +210,7 @@ def rewrite(relative, source):
         ('clients/typescript/st3-scenarios', 'clients/typescript/fractal-scenarios'),
         ('clients/typescript/st3-views', 'clients/typescript/fractal-views'),
         ('clients/swift/St3Client', 'clients/swift/FractalClient'),
-        ('apps/fractal-web/packages/st3-sdk', 'apps/fractal-web/packages/fractal-sdk'),
+        ('apps/fractal-web/packages/st3-sdk', 'packages/fractal-sdk'),
         ('@smalltalk/st3-client', '@fractal/client'),
         ('@smalltalk/st3-scenarios', '@fractal/scenarios'),
         ('@smalltalk/st3-views', '@fractal/views'),

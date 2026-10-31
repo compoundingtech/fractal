@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use scripts/fractal-test as the canonical local proof runner while supporting legacy callers and older bases.",
+  "replay": { "status": "none", "detail": "No claim, replay or signature format changes." },
+  "schema": { "status": "none", "detail": "Existing ledger, report, evidence, host cache and configuration paths remain unchanged." },
+  "rules": { "status": "changed", "detail": "The review-risk policy adds scripts/fractal-test to the same medium skip-and-signing-machinery risk floor as scripts/st-test. The legacy entry remains while the shim exists. Signed lane argv and lane-definition digests are unchanged." },
+  "compatibility": { "status": "changed", "detail": "scripts/fractal-test is the human-facing Python exec shim marked arn:lmig:smalltalk:2026-10-27-st-test-shim. scripts/st-test remains the full self-contained implementation, so old and new copy-only base readers keep working without adjacent files. Base readers always select scripts/st-test. The suite is scripts/fractal-test-test. Human instructions and diagnostic prefixes use fractal-test. Existing ST_* environment reads and all durable paths are preserved. Once every supported base contains this bridge, move the implementation to fractal-test, switch base readers with an st-test fallback, and later delete st-test." },
+  "downtime": { "status": "none", "detail": "No daemon restart or downtime required." },
+  "manual": { "status": "changed", "detail": "Use scripts/fractal-test for human instructions. Direct and python3 invocations of both runner paths work. Automation that copies only a base runner must continue selecting the self-contained scripts/st-test until contraction." },
+  "recovery": { "status": "none", "detail": "Revert the runner rename without any persisted-state migration." }
+}

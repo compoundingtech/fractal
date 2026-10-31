@@ -441,6 +441,9 @@ impl Node {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         let socket = root.path().join("st3.sock");
         let router = fractal_daemon::api::router(state);

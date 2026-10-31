@@ -1,4 +1,4 @@
-//! The part of `store::publication` that moved up from st3-store.
+//! The part of `store::publication` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::PublicationFactsStore;
 use super::*;
@@ -20,8 +20,7 @@ pub trait PublicationStore {
 impl PublicationStore for Store {
 
     fn publication_cache_epoch(&self) -> Option<(i64, bool)> {
-        *self
-            .smalltalk
+        *self.fractal
             .publication_cache_epoch
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

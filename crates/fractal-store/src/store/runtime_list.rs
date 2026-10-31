@@ -10,6 +10,6 @@ pub struct RuntimeRows {
 
 impl Store {
     pub fn published_runtime_list(&self) -> &published_list::PublishedList<RuntimeRows> {
-        &self.smalltalk.published_runtimes
+        &self.fractal.published_runtimes
     }
 }

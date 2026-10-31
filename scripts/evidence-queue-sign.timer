@@ -1,0 +1,10 @@
+[Unit]
+Description=Shadow merge-queue signer, sign, every minute (one tree per tick; a tick still running skips the next)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

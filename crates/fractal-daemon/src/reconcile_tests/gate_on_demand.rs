@@ -1,4 +1,4 @@
-//! Gate-on-demand test that serves the API; it lives in st3-daemon because the API does.
+//! Gate-on-demand test that serves the API; it lives in fractal-daemon because the API does.
 
 #![allow(unused_imports, dead_code)]
 
@@ -248,6 +248,9 @@ let state = crate::api::AppState {
     client_relay: None,
     native_session_home: None,
     planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
 };
 let response = crate::api::router(state)
     .oneshot(

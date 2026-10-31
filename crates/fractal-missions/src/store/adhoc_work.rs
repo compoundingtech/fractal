@@ -1,4 +1,4 @@
-//! The part of `store::adhoc_work` that moved up from st3-store.
+//! The part of `store::adhoc_work` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{WorkAcknowledgeRequest, WorkHandoffRequest, WorkStartRequest};
@@ -108,6 +108,35 @@ pub fn transfer_tx(
         "from": input.actor, "to": input.to, "content": content, "status": "sent", "title": format!("Work handoff: {}", current.title.as_deref().unwrap_or(&current.step)),
         "in_reply_to": null, "tags": [format!("st3-work-handoff:{}", current.subject), format!("mission-run:{}", current.run)]
     }, "evidence": input.evidence}), &input.evidence, None).map_err(claim_append_error)?;
+    Ok(())
+}
+
+pub(super) fn clear_eta_tx(
+    tx: &Transaction<'_>,
+    origin: &str,
+    current: &StepRunView,
+    input: &WorkHandoffRequest,
+) -> Result<(), St3Error> {
+    let Some(summary) = current
+        .progress_summary
+        .as_deref()
+        .and_then(fractal_store::work_eta::without_eta)
+    else {
+        return Ok(());
+    };
+    // Keep this summary-only progress after the release in the same transaction:
+    // replay clears only the advisory note, without changing ownership or the clock.
+    append_claim_tx(
+        tx,
+        origin,
+        &current.subject,
+        "work.progress",
+        Some(&input.actor),
+        &json!({"fields": {"attempt": current.attempt, "summary": summary}}),
+        &[],
+        None,
+    )
+    .map_err(claim_append_error)?;
     Ok(())
 }
 

@@ -212,6 +212,17 @@ pub fn otlp_logs(node: &str, batch: &[ClaimRecord]) -> Value {
                     _ => ("INFO", 9),
                 };
                 (Some((occurred * 1_000_000).to_string()), severity, number)
+            } else if matches!(observation.kind.as_str(), "daemon.diagnostic" | "harness.diagnostic") {
+                // A diagnostic says how bad it is and which code it is: a collector filters on both.
+                if let Some(code) = fields["code"].as_str() {
+                    attributes.push(attribute("st3.code", json!({ "stringValue": code })));
+                }
+                let (severity, number) = match fields["severity"].as_str() {
+                    Some("warning") => ("WARN", 13),
+                    Some("error") => ("ERROR", 17),
+                    _ => ("INFO", 9),
+                };
+                (None, severity, number)
             } else {
                 (None, "INFO", 9)
             };

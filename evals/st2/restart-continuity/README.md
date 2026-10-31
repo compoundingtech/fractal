@@ -6,6 +6,6 @@ It also absorbs the duplicate-delivery check from `inbox-hygiene` at the same re
 
 Two native Claude Sonnet seats process one ordered ledger batch. A mechanical injector repeats the worker assignment and cold-restarts the worker after item 2.
 
-The judges require all four items, one durable result per stable item ID, a clean restart boundary, correct ownership, and the full Small Talk loop.
+The judges require all four items, one durable result per stable item ID, a clean restart boundary, correct ownership, and the full Fractal loop.
 
 This migrated form has not had a paid run. Review `eval.kdl`, the personas, the injector, and all judges before the first run.

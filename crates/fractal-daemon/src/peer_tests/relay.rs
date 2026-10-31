@@ -1,4 +1,4 @@
-//! Peer relay tests that run the API on a socket; they live in st3-daemon because the API does.
+//! Peer relay tests that run the API on a socket; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports)]
 
@@ -102,6 +102,9 @@ fn raw_app(root: &Path, node: &str) -> crate::api::AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 
@@ -231,7 +234,7 @@ async fn membership_only_gateway_holds_raw_writers_and_fences_capabilities() {
         .unwrap();
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "raw-owner".into(), FleetAuth::test(fleet, &[7; 32]).with_member_key(Some(owner_key.clone())), member_context(&owner.store, &owner_key, &[], &[], false));
     let peer_task = tokio::spawn(async move {
-        axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await.unwrap();
+        axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await.unwrap();
     });
     tokio::time::timeout(Duration::from_secs(5), async {
         while tokio::net::UnixStream::connect(&owner_socket)
@@ -471,6 +474,9 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         }
     });
     states[0]
@@ -577,7 +583,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             context,
         );
         servers.push(tokio::spawn(async move {
-            axum::serve(listener, peer_router(state, smalltalk_routes(crate::api::raw_terminal_owner_splice)))
+            axum::serve(listener, peer_router(state, fractal_routes(crate::api::raw_terminal_owner_splice)))
                 .await
                 .unwrap()
         }));
@@ -949,7 +955,7 @@ async fn lease_pair() -> LeasePair {
         smallclaims::sync::FleetContext::legacy(BTreeSet::from(["lease-gateway".into()])),
     );
     let peer_task = tokio::spawn(async move {
-        axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice)))
+        axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice)))
             .await
             .unwrap();
     });
@@ -1323,6 +1329,9 @@ async fn a_gateway_streams_a_remote_terminal_through_owner_long_polls() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1390,7 +1399,7 @@ async fn a_gateway_streams_a_remote_terminal_through_owner_long_polls() {
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
 
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
@@ -1493,6 +1502,9 @@ async fn a_cli_attach_from_another_host_paints_screens_and_delivers_input() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1598,7 +1610,7 @@ async fn a_cli_attach_from_another_host_paints_screens_and_delivers_input() {
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1706,6 +1718,9 @@ async fn the_owning_host_names_a_new_agents_default_workspace() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1716,7 +1731,7 @@ async fn the_owning_host_names_a_new_agents_default_workspace() {
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1799,6 +1814,9 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1811,7 +1829,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1983,6 +2001,9 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1995,7 +2016,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "owner-node".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["gateway-node".into()])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
@@ -2221,6 +2242,9 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let mut gateway = make_state(roots[0].path(), "chain-gateway");
     let mut relay = make_state(roots[1].path(), "chain-relay");
@@ -2346,7 +2370,7 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
         async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+            tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
             address
         }
     };
@@ -2470,6 +2494,9 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let mut gateway = make_state(roots[0].path(), "lag-gateway");
     let owner = make_state(roots[1].path(), "lag-owner");
@@ -2536,7 +2563,7 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let worker = tokio::spawn(async move {
-        axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await
+        axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await
     });
     gateway.client_relay = ClientRelay::from_config(&Config {
         node: "lag-gateway".into(),
@@ -2653,6 +2680,9 @@ async fn a_relaying_worker_refuses_a_forged_path_and_a_spent_hop_limit() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let secret = root.path().join("fleet-secret");
     fs::write(&secret, [5_u8; 32]).unwrap();
@@ -2700,7 +2730,7 @@ async fn a_relaying_worker_refuses_a_forged_path_and_a_spent_hop_limit() {
         *request.headers_mut() = auth
             .request_headers_for(CLIENT_READ_PATH, "near", &body)
             .unwrap();
-        let router = peer_router(peer.clone(), smalltalk_routes(crate::api::raw_terminal_owner_splice));
+        let router = peer_router(peer.clone(), fractal_routes(crate::api::raw_terminal_owner_splice));
         async move {
             let response = router.oneshot(request).await.unwrap();
             let status = response.status();
@@ -2766,6 +2796,9 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = make_state(owner_root.path(), "conversation-owner");
     let mut gateway = make_state(gateway_root.path(), "conversation-gateway");
@@ -2845,7 +2878,7 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
         .unwrap()
         .unwrap()
         .unwrap();
-    let fractal_client::CollectionEvent::Resync { id, code, message } = event else {
+    let fractal_client::CollectionEvent::Resync { id, code, message, .. } = event else {
         panic!("expected a resync, got {event:?}");
     };
     assert_eq!(id, "conversation");
@@ -2874,6 +2907,9 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let mut owner = make_state(owner_root.path(), "conversation-owner");
     let mut gateway = make_state(gateway_root.path(), "conversation-gateway");
@@ -2961,7 +2997,7 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
@@ -3064,6 +3100,9 @@ async fn a_gateway_receives_remote_conversation_changes_without_idle_data() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = make_state(owner_root.path(), "conversation-owner");
     let mut gateway = make_state(gateway_root.path(), "conversation-gateway");
@@ -3109,7 +3148,7 @@ async fn a_gateway_receives_remote_conversation_changes_without_idle_data() {
     let peer = PeerState::new(MainBackend::new(owner_socket.to_path_buf()), "conversation-owner".into(), FleetAuth::test("fleet-test", &[7; 32]), FleetContext::legacy(BTreeSet::from(["conversation-gateway".into()])));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let secret = gateway_root.path().join("fleet-secret");
     fs::write(&secret, [7_u8; 32]).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
@@ -3279,6 +3318,9 @@ async fn signed_client_read_returns_an_owner_local_native_timeline() {
         client_relay: None,
         native_session_home: Some(home),
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -3323,7 +3365,7 @@ async fn signed_client_read_returns_an_owner_local_native_timeline() {
     let response = relay_trace::test_peer_selector(
         FleetAuth::body_digest(&body),
         "source".into(),
-        peer_router(peer.clone(), smalltalk_routes(crate::api::raw_terminal_owner_splice)).oneshot(request),
+        peer_router(peer.clone(), fractal_routes(crate::api::raw_terminal_owner_splice)).oneshot(request),
     )
     .with_subscriber(diagnostic.dispatch())
     .await
@@ -3385,7 +3427,7 @@ async fn signed_client_read_returns_an_owner_local_native_timeline() {
     let response = relay_trace::test_peer_selector(
         FleetAuth::body_digest(&body),
         "unconfigured".into(),
-        peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice)).oneshot(rejected),
+        peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice)).oneshot(rejected),
     )
     .with_subscriber(refusal.dispatch())
     .await
@@ -3419,6 +3461,9 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     });
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -3565,6 +3610,9 @@ async fn inbound_only_peer_syncs_both_ways_between_isolated_daemons() {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         });
         let served = socket.clone();
         servers.push(tokio::spawn(async move {
@@ -3604,7 +3652,7 @@ async fn inbound_only_peer_syncs_both_ways_between_isolated_daemons() {
     );
     let state = PeerState::new(MainBackend::new(sockets[1].to_path_buf()), "target".into(), auth.clone(), FleetContext::legacy(BTreeSet::from(["source".into()])));
     let peer_server =
-        tokio::spawn(async move { axum::serve(listener, peer_router(state, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await });
+        tokio::spawn(async move { axum::serve(listener, peer_router(state, fractal_routes(crate::api::raw_terminal_owner_splice))).await });
     let peer = PeerConfig {
         name: "target".into(),
         url: format!("http://{address}"),
@@ -3685,13 +3733,12 @@ async fn signed_inventory_read_preserves_owner_unavailable_http_status() {
     fs::create_dir_all(&observations).unwrap();
     fs::write(observations.join(fractal_drivers::harness_events::DATABASE), "invalid native spool").unwrap();
     let socket = root.path().join("st3.sock");
-    let main = crate::api::AppState {
-    owning_person: None,
+    let main = crate::api::AppState { owning_person: None,
         store, notify: Arc::new(tokio::sync::Notify::new()), event_notify: watch::channel(0_u64).0,
         node: "owner".into(), state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
         fleet_id: None, configured_peers: vec!["source".into()], client_relay: None,
-        native_session_home: None, planner_default: crate::model::PlannerSpec::default(),
+        native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: crate::model::PlannerSpec::default(),
     };
     let serving = socket.clone();
     let server = tokio::spawn(async move {
@@ -3718,7 +3765,7 @@ async fn signed_inventory_read_preserves_owner_unavailable_http_status() {
     let mut request = Request::builder().method("POST").uri(CLIENT_READ_PATH)
         .body(Body::from(body.clone())).unwrap();
     *request.headers_mut() = auth.request_headers_for(CLIENT_READ_PATH, "source", &body).unwrap();
-    let response = peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice)).oneshot(request).await.unwrap();
+    let response = peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice)).oneshot(request).await.unwrap();
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), MAX_CLIENT_READ_BYTES).await.unwrap();

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The phone says why a message was not sent in its own words, by Fractal's refusal code, and keeps the text in the box",
+  "replay": {"status": "none", "detail": "Phone-only wording; no replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Reads the existing error codes; an unknown code falls back to the SDK's plain words, as before."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert this change or install the previous phone build."}
+}

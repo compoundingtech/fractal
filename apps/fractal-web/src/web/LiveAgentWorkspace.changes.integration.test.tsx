@@ -293,8 +293,9 @@ describe('live captured Changes dock', () => {
     await key('End')
     const split = separator().parentElement!
     expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
-    expect(panelWidth()).toBe(330)
-    expect(separator().getAttribute('aria-valuemax')).toBe('330')
+    // 900px minus the sidebar's 240px floor, 360px thread and two 1px tracks.
+    expect(panelWidth()).toBe(298)
+    expect(separator().getAttribute('aria-valuemax')).toBe('298')
   })
 
   it('bounds a restored 720px preference at 900px without replacing the preference', async () => {

@@ -44,6 +44,9 @@ fn state(root: &Path, name: &str) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 
@@ -454,7 +457,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         device_name: "Raw terminal device".into(),
         person_id: "person/avery".into(),
         full_control: Some(true),
-        scopes: None,
+        scopes: None, fabric_gateway: None,
     }).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -466,6 +469,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         code: challenge.value.code,
         device_public_key: "raw-terminal-public-key-000000000000000000000".into(),
         key_storage: None,
+        fabric_node_id: None,
     },).await.unwrap();
     let gateway_socket = state.state_dir.join("raw-client-gateway.sock");
     let server_socket = gateway_socket.clone();
@@ -691,7 +695,7 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
         .unwrap();
     let first = loop {
         match next_collection_event(&mut stream, "the first screen").await {
-            CollectionEvent::Screen { id, screen } if id == "screen" => break screen,
+            CollectionEvent::Screen { id, screen, .. } if id == "screen" => break screen,
             // The attach and the observation behind it may still move the agents window.
             CollectionEvent::Changes { id, .. } if id == "agents" => {}
             other => panic!("expected the first screen, got {other:?}"),
@@ -728,7 +732,7 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
 
     pty.write(b"\x1b[1;32mecho\x1b[0m hi");
     let changed = match next_collection_event(&mut stream, "the changed screen").await {
-        CollectionEvent::Screen { id, screen } if id == "screen" => screen,
+        CollectionEvent::Screen { id, screen, .. } if id == "screen" => screen,
         other => panic!("expected the changed screen, got {other:?}"),
     };
     assert_eq!(changed.value.lines[1].text, "$ echo hi");
@@ -761,7 +765,7 @@ async fn a_terminal_rides_the_collection_socket_and_its_end_leaves_the_rest() {
 }
 
 #[tokio::test]
-async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk() {
+async fn an_agents_conversation_rides_the_collection_socket_with_its_fractal_messages() {
     let (_root, state, _pty, client, server) =
         serve_terminal_state("client-collection-conversation", 24, 80).await;
     let mut stream = client.collection_stream().await.unwrap();
@@ -781,7 +785,7 @@ async fn an_agents_conversation_rides_the_collection_socket_with_its_small_talk(
     };
     assert!(session_id.starts_with("session/"), "{session_id}");
 
-    // Small Talk to the agent that names no session is part of its conversation: st joins it.
+    // Fractal to the agent that names no session is part of its conversation: st joins it.
     state
         .store
         .append_claim(&ClaimInput {
@@ -1160,6 +1164,8 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: person.into(),
                 title: "Choose a date".into(),
@@ -1193,7 +1199,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
                 device_name: "Unattributed device".into(),
                 person_id: "person/ada".into(),
                 full_control: None,
-                scopes: None,
+                scopes: None, fabric_gateway: None,
             })
             .await
             .is_err(),
@@ -1567,7 +1573,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     device_name: "Conformance phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap();
 
@@ -1582,6 +1588,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         code: challenge.value.code,
         device_public_key: "conformance-public-key-000000000000000000000000".into(),
         key_storage: None,
+        fabric_node_id: None,
     },)
         .await
         .unwrap();
@@ -1607,7 +1614,13 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     assert_eq!(advertisement, serde_json::json!({
         "api_version": fractal_client::API_VERSION,
         "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-    }));
+    }), "a client that did not ask sees exactly the one capability older clients validate");
+    let asked = unix_response(&gateway_socket, "/v1/client/capabilities?accepts=fabric-gateway-grant", None).await;
+    let asked: Value = serde_json::from_slice(&asked.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(asked["capabilities"], serde_json::json!([
+        {"id":"device-key-proofs", "version":1, "state":"granted"},
+        {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
+    ]));
     assert_eq!(
         unix_status(&gateway_socket, "/v1/client/agents", None).await,
         StatusCode::FORBIDDEN,
@@ -1702,7 +1715,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         .unwrap();
     loop {
         match next_collection_event(&mut collections, "the paired terminal screen").await {
-            CollectionEvent::Screen { id, screen } if id == "screen" => {
+            CollectionEvent::Screen { id, screen, .. } if id == "screen" => {
                 assert_eq!(
                     screen.value.runtime_incarnation,
                     "terminal-demo-runtime:fabric-i1"

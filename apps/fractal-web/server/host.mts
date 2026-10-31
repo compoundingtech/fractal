@@ -5,14 +5,14 @@ import { Tracer } from 'effect'
 import { createFractalWebServer, type FractalWebServer } from './core.mts'
 
 /**
- * A runnable host for one person's web app on a tailnet: a loopback listener that `tailscale serve`
+ * An opt-in host for one person's web app on a tailnet: a loopback listener that `tailscale serve`
  * publishes over HTTPS. The paired bearer is injected for every admitted request, so admission is
  * the whole authorization: the tailnet login `tailscale serve` attaches must be one of the allowed
  * logins, and any browser Origin must be exactly the published origin. Never publish it with Funnel,
  * which carries no tailnet identity.
  */
 export interface TailnetAdmissionOptions {
-  /** The exact published origin, such as `https://atlas.example.ts.net:8443`. */
+  /** The exact published HTTPS origin. */
   readonly origin: string
   /** Tailnet login names allowed to act as the paired person. */
   readonly logins: readonly string[]
@@ -40,6 +40,35 @@ export const tailnetAdmission = ({ origin, logins, listener }: TailnetAdmissionO
         (site === undefined || site === 'same-origin' || site === 'none')
     }
     return requestOrigin === origin
+  }
+}
+
+export interface EdgeOrTailnetAdmissionOptions {
+  readonly origin: string | undefined
+  readonly logins: readonly string[]
+  /** The deployment's unchanged Devnet edge and direct-loopback admission. */
+  readonly edge: (request: IncomingMessage) => boolean
+}
+
+/**
+ * Adds a canonical tailnet origin without weakening an existing Devnet edge policy.
+ *
+ * Serve's HTTP proxy preserves Host and overwrites X-Forwarded-Host with that same Host, including
+ * for tagged nodes without identity headers. Devnet instead sends the listener Host and a distinct
+ * external X-Forwarded-Host. Do not let Serve traffic fall through to the login-free edge policy.
+ * The listener must remain loopback-only: local processes can forge either proxy's headers.
+ */
+export const edgeOrTailnetAdmission = ({ origin, logins, edge }: EdgeOrTailnetAdmissionOptions) => {
+  if (origin === undefined) return edge
+  // Validate eagerly, including the nonempty allowlist, before opening the listener.
+  const tailnet = tailnetAdmission({ origin, logins, listener: () => undefined })
+  const host = new URL(origin).host
+  return (request: IncomingMessage): boolean => {
+    if (request.headers.host === host) return tailnet(request)
+    if (request.headers['x-forwarded-host'] !== undefined &&
+      request.headers['x-forwarded-host'] === request.headers.host) return false
+    if (Object.keys(request.headers).some((name) => name.startsWith('tailscale-'))) return false
+    return edge(request)
   }
 }
 

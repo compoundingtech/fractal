@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Version the Fractal Web immutable build helpers with same-filesystem snapshots and counted cross-device dependency fallback.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of application data." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes. Deployment build receipts retain dependencyFiles linked/copied counts." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only build scripts. Deployment owners provide explicit build and snapshot roots; snapshots must share the source clone filesystem. The sibling dependency helper is resolved beside the build script." },
+  "downtime": { "status": "none", "detail": "No running service is activated by this PR." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners can adopt the versioned helpers by supplying their roots and private build entry point." },
+  "recovery": { "status": "none", "detail": "Application data is unchanged. The integrator owns current-plus-one rollback retention after confirmed edge activation; the build helper does not prune before publication." }
+}

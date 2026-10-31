@@ -1,4 +1,4 @@
-//! Shared safe text layout with stui's caller-owned palette.
+//! Shared safe text layout with Fractal TUI's caller-owned palette.
 
 use ratatui::style::Style;
 use ratatui::text::Line;
@@ -13,4 +13,10 @@ pub fn inline(text: &str, base: Style) -> Vec<Run> {
 
 pub fn markdown(input: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     fractal_conversation_ui::text::markdown(input, width, base, &super::theme::conversation())
+}
+
+pub use fractal_conversation_ui::text::DrawnLink;
+
+pub fn markdown_with_links(input: &str, width: usize, base: Style, references: &[String]) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
+    fractal_conversation_ui::text::markdown_with_links(input, width, base, &super::theme::conversation(), references)
 }

@@ -1,6 +1,6 @@
-# Demos: a scripted st in the terminal interface
+# Demos: a scripted fractal in the terminal interface
 
-`st demo play FILE` plays a demo of st in the terminal interface. A demo is one file: what the
+`st demo play FILE` plays a demo of fractal in the terminal interface. A demo is one file: what the
 fleet holds when it starts (agents, missions and runs, conversations, messages, documents) and a
 list of beats. Each beat does one visible thing, such as an agent's message arriving, a pane
 opening, a mission step moving or an alert appearing. It fires after a delay or when you press
@@ -23,7 +23,9 @@ nothing.
 A demo erases only an instance a demo made. The first play marks the instance with a
 `.st-demo` file in `~/.st-instance/NAME`. If the instance already holds a graph, an interface
 cache or a config without that mark, the play lists them and stops without touching anything.
-Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's:
+Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's.
+The mark stays, so every later play erases the instance without asking: keep a marked instance
+for demos only.
 
 ```sh
 st --instance demo demo play --reset examples/demos/release-day.kdl
@@ -38,9 +40,9 @@ Two examples are in [`examples/demos`](../../examples/demos):
 
 `st demo check FILE` reads a demo without playing it and lists its beats with their lines.
 
-Run it from your own terminal. Inside an agent seat, st binds every command to that seat, and
+Run it from your own terminal. Inside a managed agent, fractal binds every command to that agent, and
 the demo cannot act as its own agents and person. The demo's agents start through your login
-shell, like any seat, so that shell must find `pty` on its `PATH`; `st --instance demo doctor`
+shell, like any agent, so that shell must find `pty` on its `PATH`; `st --instance demo doctor`
 names anything missing.
 
 ## While it plays
@@ -50,7 +52,7 @@ names anything missing.
 - Everything else in the interface works as usual: you can click an alert to answer it, open
   panes and scroll. The advance key never reaches the interface itself.
 - **Ctrl+Q** ends the demo. The demo's daemon and its agents stop with the interface.
-- When a beat fails, the demo keeps going. After you quit, st lists the failed beats, and
+- When a beat fails, the demo keeps going. After you quit, fractal lists the failed beats, and
   `~/.st-instance/NAME/state/st3-demo/play.log` records every command the beats ran.
 
 ## The file
@@ -83,8 +85,8 @@ beats {
 ```
 
 The `seed` holds `agent`, `mission` and `person` declarations, written as for
-[`st apply`](kdl-lifecycle.md), plus actions that run before the interface opens. An agent's
-name has a slash (`copperwren/builder` is `agent/copperwren/builder`). st gives each agent a
+[`st apply`](https://github.com/compoundingtech/fractal/blob/main/docs/site/reference/configuration.md), plus actions that run before the interface opens. An agent's
+name has a slash (`copperwren/builder` is `agent/copperwren/builder`). fractal gives each agent a
 process that does nothing, in place of a harness, and a folder in the instance's work root.
 
 A declaration holds only names and the shape of a mission, and nothing that runs:
@@ -107,7 +109,7 @@ Agents' text is Markdown, as in a real conversation.
 
 ## Actions
 
-Each action is the `st` command a real seat would run, run as the agent it names.
+Each action is the `st` command a real agent would run, run as the agent it names.
 
 | Action | What it shows | Written as |
 | --- | --- | --- |
@@ -115,11 +117,11 @@ Each action is the `st` command a real seat would run, run as the agent it names
 | `focus` | The same as `open`. For a pane that is already open, it moves the focus there. | `focus "agent/NAME"` |
 | `say` | The agent's message in its conversation. A beat streams it in at `speed` words a second (default `9/s`). In the seed, `ago="20m"` dates it in the past. | `say "agent/NAME" "text"` |
 | `tool` | A tool call in the agent's conversation that finishes after `takes` (default 1.5s), with `input`, `output` and `failed=#true`. | `tool "agent/NAME" "Bash" input="make test" output="ok"` |
-| `send` | An st message from an agent, or from the person, to an agent. It appears as a message card in the conversations of both agents. `subject` and `attach="image.png"` are optional. | `send from="agent/A" to="agent/B" "text"` |
+| `send` | An fractal message from an agent, or from the person, to an agent. It appears as a message card in the conversations of both agents. `subject` and `attach="image.png"` are optional. | `send from="agent/A" to="agent/B" "text"` |
 | `run` | Starts a run of a seeded mission, as the person. | `run "MISSION" id="MISSION/RUN"` |
 | `claim`, `progress`, `complete`, `fail` | A mission step moves, done by the agent it is assigned to. The optional text is the summary. | `progress "agent/NAME" run="MISSION/RUN" step="build" "text"` |
 | `ask` | An alert above the person's message input, with two to four answers. With `run` and `step`, the agent asks from the step it has claimed. | see below |
-| `document` | Stores a file as the st document `doc/NAME`, which an `open` beat then shows as Markdown. | `document "release-notes" file="notes.md"` |
+| `document` | Stores a file as the fractal document `doc/NAME`, which an `open` beat then shows as Markdown. | `document "release-notes" file="notes.md"` |
 | `type` | Types into the focused agent's message input at `speed` characters a second (default `14/s`). `send=#true` then sends it to the agent as the person. Beats only. | `type "Ship it." send=#true` |
 | `pause` | Nothing; it only waits. Beats only. | `pause after="3s"` |
 

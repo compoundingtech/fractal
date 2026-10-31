@@ -1,4 +1,4 @@
-# Sourced helper. Aggregate the team review from Small Talk into REVIEW and RL.
+# Sourced helper. Aggregate the team review from Fractal into REVIEW and RL.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # The review is delivered by message: reviewer(prx.rev)->sup(prx.sup) report + sup->requester verdict.
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read

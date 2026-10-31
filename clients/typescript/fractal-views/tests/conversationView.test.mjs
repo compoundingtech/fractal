@@ -22,7 +22,7 @@ const timeline = [
   e('error', 'system', { code: 'native-delivery-degraded', message: paused, retryable: true, details: { severity: 'warning' } }, 9),
   e('error', 'system', { code: 'native-delivery-recovered', message: recovered, retryable: true, details: { severity: 'warning' } }, 10),
   e('error', 'system', { code: 'boom', message: 'the harness exited', retryable: false, details: { severity: 'error' } }, 11),
-  e('brand-new-kind', 'system', { text: 'something st added later' }, 12),
+  e('brand-new-kind', 'system', { text: 'something Fractal added later' }, 12),
 ];
 const describe = entry => entry.body.kind === 'event' ? `event(${entry.body.tone}): ${entry.body.text}`
   : entry.body.kind === 'tool' ? `tool(${entry.body.state}): ${entry.body.title} [${entry.body.output.join('|')}]`
@@ -34,9 +34,9 @@ assert.deepEqual(entries.map(describe), [
   'assistant: **On it.**',
   'tool(ok): $ cargo test [ok 1|ok 2]',
   'mail: example/cos/standing/cos → Stui · Hello · Body text',
-  'event(quiet): message delivery paused 2 times while st restarted · recovered',
+  'event(quiet): message delivery paused 2 times while Fractal restarted · recovered',
   'event(fault): error: the harness exited',
-  'event(quiet): something st added later',
+  'event(quiet): something Fractal added later',
 ]);
 assert.equal(entries[0].at.length, 5);
 
@@ -64,7 +64,7 @@ const tool = { kind: 'tool', title: 't', state: 'ok', output: Array.from({ lengt
 assert.equal(shownToolLines(tool, false).hidden, 14);
 assert.equal(shownToolLines(tool, false).lines.at(-1), 'line 19');
 assert.equal(shownToolLines(tool, true).lines.length, 20);
-assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'failed calls fold too, as in stui');
+assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'failed calls fold too, as in the Fractal terminal UI');
 
 // Timeline previews name the lines beyond the shared 400-line budget; full output stays intact.
 {
@@ -81,7 +81,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.deepEqual(conversationEntries([withinBudget], names)[0].body.output, lines.slice(0, 400));
 }
 
-// Half a conversation is not shown: st's notice that it could not read the transcript becomes
+// Half a conversation is not shown: Fractal's notice that it could not read the transcript becomes
 // one reason, with the transcript's path.
 {
   const notice = details => ({ id: 'n', role: 'system', timestamp: '2026-10-01T10:00:01Z', type: 'error', body: { code: 'transcript-not-bound', message: 'transcript not bound: the transcript could not be read: line 12: expected value', retryable: true, details } });
@@ -91,7 +91,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(unreadableTranscript([mail, notice({ driver: 'omp' })]), 'This conversation could not be loaded: the transcript could not be read: line 12: expected value');
 }
 
-// A seat that has said nothing since it started shows its Small Talk and one quiet line.
+// A seat that has said nothing since it started shows its Fractal and one quiet line.
 {
   const notYet = { id: 'n', role: 'system', timestamp: '2026-10-01T10:00:01Z', type: 'error', body: { code: 'transcript-not-bound', message: 'transcript not bound: Claude session 0190 has no transcript file yet', retryable: true, details: { driver: 'claude', not_yet: true } } };
   assert.equal(unreadableTranscript([notYet]), null);
@@ -110,7 +110,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.deepEqual(delivered.map(entry => [entry.body.kind, entry.body.delivered]), [['mail', true]]);
 }
 
-// A message spoken and transcribed carries st's `dictated` tag; the app marks it.
+// A message spoken and transcribed carries Fractal's `dictated` tag; the app marks it.
 {
   const spoken = (tags) => conversationEntries([
     { id: 'm', sequence: 1, revision: 1, timestamp: '2026-10-01T10:00:00Z', role: 'user', type: 'message', final: true, body: { message_id: 'message/one', from: 'person/avery', to: 'agent/example/harbor/keeper', ...(tags ? { tags } : {}) } },
@@ -159,7 +159,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(entryMatches(tool, '  '), true, 'an empty query keeps everything');
 }
 
-// "Older entries are not shown" heads the conversation, though st stamps it with the time it was
+// "Older entries are not shown" heads the conversation, though Fractal stamps it with the time it was
 // read, later than every entry it shows.
 {
   const at = (seconds) => `2026-10-02T09:00:${String(seconds).padStart(2, '0')}Z`;
@@ -180,7 +180,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.match(conversationEntries([notice], names)[0].body.text, /not fetchable/);
 }
 
-// A conversation st is refusing says why, how old what is shown is, and that the phone retries.
+// A conversation Fractal is refusing says why, how old what is shown is, and that the phone retries.
 {
   const { staleLine } = await import('@fractal/views/conversationView');
   assert.equal(staleLine('the list changed while it was being read', false, null, 0), 'Not loaded yet: the list changed while it was being read. Trying again.');
@@ -188,7 +188,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.equal(staleLine('st asked to slow down for a moment', true, 10_000, 22_000), 'st asked to slow down for a moment · shown as of 12s ago · trying again');
 }
 
-// A conversation st refused for good never claims to be loading or retrying: it says why and offers a retry.
+// A conversation Fractal refused for good never claims to be loading or retrying: it says why and offers a retry.
 {
   const { staleLine } = await import('@fractal/views/conversationView');
   for (const loaded of [false, true]) {
@@ -208,7 +208,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.ok(!summary.body.output.some(line => line.includes('<artifact')));
 }
 
-// A channel delivery carrying st's envelope is that mail: marked delivered when the stream shows
+// A channel delivery carrying Fractal's envelope is that mail: marked delivered when the stream shows
 // it, the mail itself when not, never "delivered to the agent: The person reads replies…"
 // (Nathan, 2026-10-03).
 {
@@ -221,7 +221,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.deepEqual([mail.kind, mail.from, mail.text], ['mail', 'person/example', 'how is it <going>?']);
 }
 
-// A Codex seat's turn carries st's envelope and its delivery notes: the mail, never raw XML or
+// A Codex seat's turn carries Fractal's envelope and its delivery notes: the mail, never raw XML or
 // words the person typed (Nathan, 2026-10-03).
 {
   const turn = "(dictated by voice; it may contain transcription mistakes)\n<smalltalk-message id=\"e5\" from=\"person/example\" to=\"agent/example/quay\" subject=\"(no subject)\" sha256=\"00\" graph=\"message/e5\">\nis this a watcher?\n</smalltalk-message>\nThe person reads replies in st, not in the agent's session.";
@@ -232,7 +232,7 @@ assert.equal(shownToolLines({ ...tool, state: 'failed' }, false).hidden, 14, 'fa
   assert.deepEqual(bodies.map(body => [body.kind, body.text]), [['mail', 'is this a watcher?']]);
 }
 
-// Both the earlier delivery sentence and the current one are st's own notes, not words the person typed.
+// Both the earlier delivery sentence and the current one are Fractal's own notes, not words the person typed.
 for (const note of ["The person reads replies in st, not in the agent's session.", 'Answer the person in this conversation; people have no inbox, so do not reply with st.']) {
   const turn = `<smalltalk-message id="e6" from="person/example" to="agent/example/quay" subject="(no subject)" sha256="00" graph="message/e6">\nis this a watcher?\n</smalltalk-message>\n${note}`;
   assert.deepEqual(fromHarness(true, turn).map(body => [body.kind, body.text]), [['mail', 'is this a watcher?']]);
@@ -256,7 +256,7 @@ assert.deepEqual(rawEntry, original);
 assert.equal(cleanMessageText(rawText, SHOW_EVERYTHING), rawText);
 
 // Blocks that expose native data (#1574) are data: the markup cleanup must not eat reasoning
-// text or raw JSON, while plain prose without them is still cleaned, as stui does.
+// text or raw JSON, while plain prose without them is still cleaned, as the Fractal terminal UI does.
 {
   const base = { id: 'r', timestamp: '2026-10-06T12:00:00Z', role: 'assistant', type: 'content', final: true, sequence: 1 };
   const reasoning = conversationEntries([{ ...base, body: { media_type: 'text/plain', text: '<thinking>the plan: check the fixtures</thinking>', blocks: [{ id: 'b', kind: 'reasoning', source_type: 'synthetic', payload: { text: 'the plan: check the fixtures' } }] } }], new Map());
@@ -354,6 +354,36 @@ assert.equal(cleanMessageText(rawText, SHOW_EVERYTHING), rawText);
   assert.deepEqual(freshnessLine({ ...base, now: 7_300_000 }), { text: '● live · updated 2h ago', tone: 'live' });
   assert.deepEqual(freshnessLine({ ...base, refreshing: true }), { text: '↻ refreshing… · updated 1m ago', tone: 'refreshing' });
   assert.deepEqual(freshnessLine({ ...base, loaded: false, lastFrame: null }), { text: '↻ loading…', tone: 'refreshing' });
-  assert.deepEqual(freshnessLine({ ...base, lastFrame: null }), { text: '● live · waiting for st', tone: 'live' });
+  assert.deepEqual(freshnessLine({ ...base, lastFrame: null }), { text: '● live · waiting for Fractal', tone: 'live' });
   assert.deepEqual(freshnessLine({ ...base, issue: 'unreachable' }), { text: '⚠ retrying · updated 1m ago', tone: 'warn' });
+}
+
+// Generated labels name Fractal. Raw server text and quoted prose stay as stored.
+{
+  assert.equal(timeline[8].body.message, paused, 'the stored delivery reason is not rewritten');
+  const pausedOnlyText = foldDeliveryFlaps(conversationEntries([timeline[8]], names));
+  assert.equal(pausedOnlyText[0].body.text, 'message delivery is paused; Fractal will retry');
+  const mailed = conversationEntries([
+    e('message', 'user', { message_id: 'message/to-daemon', from: 'person/alex', to: 'daemon/runtime', title: 'Hi' }, 20),
+    e('content', 'user', { text: 'please use st' }, 20),
+  ], names);
+  assert.equal(mailed[0].body.kind, 'mail');
+  assert.equal(mailed[0].body.to, 'Fractal');
+  assert.equal(mailed[0].body.text, 'please use st');
+  const bare = conversationEntries([e('error', 'system', { retryable: false })], names);
+  assert.equal(bare[0].body.text, 'error: Fractal reported a problem');
+  const quoted = conversationEntries([e('error', 'system', { message: 'please use st', retryable: true, details: { severity: 'warning' } })], names);
+  assert.equal(quoted[0].body.text, 'please use st');
+}
+{
+  const asOf = '2026-10-06T12:00:00Z';
+  const header = {
+    model: { value: 'older st', source: 'older st', as_of: asOf },
+    ask: { value: { questions: [{ question: 'please use st' }] }, source: 'st', as_of: asOf },
+  };
+  assert.equal(headerLine(header, asOf), 'model older st · ask please use st [Fractal · 0s ago] · older Fractal · 0s ago');
+  assert.equal(header.model.source, 'older st');
+  assert.equal(header.model.value, 'older st');
+  assert.equal(header.ask.source, 'st');
+  assert.equal(header.ask.value.questions[0].question, 'please use st');
 }

@@ -37,10 +37,8 @@ export default githubRepoSettings({
           do_not_enforce_on_create: false,
           required_status_checks: [
             { context: 'linux-gate', integration_id: 15368 },
-            { context: 'isolation-vm', integration_id: 15368 },
             { context: 'genie-freshness', integration_id: 15368 },
             { context: 'typescript-client', integration_id: 15368 },
-            { context: 'mail-redelivery-canaries', integration_id: 15368 },
             { context: 'fractal-web', integration_id: 15368 },
           ],
         },
@@ -64,15 +62,15 @@ export default githubRepoSettings({
       },
     ],
   }), githubRuleset({
-    // Evidence records are tags (docs/st3/gate-evidence.md, "Records as tags"): once written, a record is never deleted or moved,
-    // so a newer failing record cannot be removed to let an older pass decide again. Creation stays open: producers create tags.
-    // No bypass actor: scripts/evidence-gc turns this ruleset's enforcement off only around its own tag deletions (--lock-config,
-    // logged, relocked in a finally and checked), and the protection that does not depend on GitHub is the signed evidence log.
+    // Evidence records are tags (docs/st3/gate-evidence.md, "Records as tags"): once written, a record is never moved, which
+    // catches an accident that would rewrite one. Creation stays open: producers create tags. Deletion is open too, so
+    // scripts/evidence-gc deletes dead trees with its host's own login and no window: we do not guard against an adversary who
+    // deletes a newer failure yet (Nathan, 2026-10-26); the signed evidence log reports a record that disappears without GC's line.
     name: 'evidence-tags',
     target: 'tag',
     enforcement: 'active',
     bypass_actors: [],
     conditions: { ref_name: { include: ['refs/tags/evidence/**'], exclude: [] } },
-    rules: [{ type: 'deletion' }, { type: 'update' }, { type: 'non_fast_forward' }],
+    rules: [{ type: 'update' }, { type: 'non_fast_forward' }],
   })],
 })

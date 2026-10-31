@@ -1,17 +1,243 @@
-//! Glasses: stui as named workspaces of splits, each with its own tabs, and a palette, an experiment
-//! beside the sidebar layout (`stui --glasses`, mission fleet/stui/glass, design
-//! doc/fleet/stui/glass). Plain stui never reaches this module.
-//!
-//! The focused pane points stui's own tab and selection at its subject, so every key and action
-//! the sidebar layout has works the same inside a glass.
+//! Spaces (called glasses in the code): named workspaces of splits, each with its own tabs.
+//! Inbox is a list-and-detail tab; Usage floats above the workspace.
+//! What the keys act on is read off the screen (`Ui::tab`, `Ui::selected_id`), so focus
+//! cannot drift from what is drawn.
 
 use super::glass_store::{self, Stored, StoredGlass, StoredView};
-use super::layout::{Group, Layout, Side, Tab};
+use super::layout::{Group, Layout, Side, Tab, TabKind};
 use super::*;
 use ratatui::style::Color;
 use fractal_client::{GlassBody, GlassLayout, GlassSplit, GlassTab};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::path::PathBuf;
+
+mod navigation;
+
+/// Live tab chrome. Never stored with the workspace: observations can change between frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TabBadge {
+    activity: &'static str,
+    alerts: Option<usize>,
+    ask: bool,
+    needs_person: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SubjectBadge {
+    alerts: usize,
+    ask: bool,
+    activity: &'static str,
+    needs_person: bool,
+}
+
+impl SubjectBadge {
+    fn observe(&mut self, ask: bool) {
+        self.alerts += 1;
+        self.ask |= ask;
+    }
+}
+
+/// Membership indexes rebuilt when observations change, never while drawing each tab.
+#[derive(Default)]
+pub(super) struct TabStatuses {
+    loaded: bool,
+    agents: BTreeMap<String, SubjectBadge>,
+    missions: BTreeMap<String, SubjectBadge>,
+    items: BTreeMap<String, SubjectBadge>,
+    inbox: SubjectBadge,
+}
+
+impl TabStatuses {
+    pub(super) fn new(world: &World, closed: &HashSet<String>, snoozed: &HashSet<String>) -> Self {
+        let mut status = Self { loaded: world.attention.ready().is_some(), ..Self::default() };
+        let agent_missions: BTreeMap<_, _> = world.agents.items().iter()
+            .filter_map(|agent| agent.mission.as_deref().map(|mission| (agent.id.as_str(), mission)))
+            .collect();
+        for agent in world.agents.items() {
+            let activity = match agent.state {
+                AgentState::Working | AgentState::Compacting => "●",
+                AgentState::Idle | AgentState::NeedsYou | AgentState::NeedsLogin => "○",
+                AgentState::Down | AgentState::Stopped | AgentState::Retired => "×",
+                AgentState::Fault => "!",
+                AgentState::Starting | AgentState::Unknown => "~",
+            };
+            status.agents.insert(
+                agent.id.clone(),
+                SubjectBadge {
+                    activity,
+                    needs_person: matches!(
+                        agent.state,
+                        AgentState::NeedsYou | AgentState::NeedsLogin
+                    ),
+                    ..SubjectBadge::default()
+                },
+            );
+        }
+        for mission in world.missions.items() {
+            if mission.decision.is_some() {
+                status.missions.entry(mission.id.clone()).or_default().needs_person = true;
+            }
+        }
+        for item in world.attention.items().iter().filter(|item| {
+            item.is_alert() && !closed.contains(&item.id) && !snoozed.contains(&item.id)
+        }) {
+            // Question identity outlives answer eligibility (for example, an expired client
+            // submission window). Only live attention establishes that the prompt is open.
+            let question_seat = match (&world.link, &item.kind) {
+                // A call st serves beside the prompt identifies a question only when the prompt
+                // names it exactly; its presence alone never establishes activity.
+                (Link::Live, AttentionKind::Prompt { seat_id, question, call, calls, .. })
+                    if *question || call.as_deref().is_some_and(|call| {
+                        calls.as_ref().is_ok_and(|calls| calls.iter().any(|pending| {
+                            pending.id == call
+                                && matches!(pending.tool.as_str(), "AskUserQuestion" | "request_user_input")
+                        }))
+                    }) => Some(seat_id.as_str()),
+                _ => None,
+            };
+            let ask = question_seat.is_some();
+            status.inbox.observe(ask);
+            status.items.entry(item.id.clone()).or_default().observe(ask);
+            if item.conversations.is_empty() {
+                if let Some(agent) = &item.agent {
+                    status.agents.entry(agent.clone()).or_default().observe(ask);
+                }
+            } else {
+                for (index, agent) in item.conversations.iter().enumerate() {
+                    if !item.conversations[..index].contains(agent) {
+                        status.agents.entry(agent.clone()).or_default().observe(ask);
+                    }
+                }
+            }
+            if let Some(mission) = &item.mission {
+                status.missions.entry(mission.clone()).or_default().observe(ask);
+            }
+            if let Some(seat) = question_seat {
+                status.agents.entry(seat.to_owned()).or_default().ask = true;
+                if let Some(mission) = agent_missions.get(seat) {
+                    status.missions.entry((*mission).to_owned()).or_default().ask = true;
+                }
+            }
+        }
+        status
+    }
+}
+
+impl TabBadge {
+    fn attention(self) -> &'static str {
+        if self.ask {
+            "?"
+        } else if self.needs_person {
+            "◆"
+        } else {
+            ""
+        }
+    }
+
+    /// Match the shared truncator without allocating a temporary title for width queries.
+    fn title(title: &str) -> (&str, bool) {
+        use unicode_width::UnicodeWidthChar as _;
+        if text::width(title) <= 26 {
+            return (title, false);
+        }
+        let mut used = 0;
+        for (end, character) in title.char_indices() {
+            used += character.width().unwrap_or(0);
+            if used > 25 {
+                return (&title[..end], true);
+            }
+        }
+        (title, false)
+    }
+
+    fn width(self, title: &str, counts: bool) -> usize {
+        let attention = self.attention();
+        let count = if counts && !attention.is_empty() {
+            self.alerts
+                .filter(|count| *count > 1)
+                .map_or(0, |count| count.ilog10() as usize + 1)
+        } else {
+            0
+        };
+        let (title, truncated) = Self::title(title);
+        // Preserve the existing 26-cell title budget independently of status chrome.
+        2 + text::width(self.activity)
+            + text::width(title)
+            + usize::from(truncated)
+            + if attention.is_empty() { 0 } else { 2 + count }
+    }
+
+    fn label(self, title: &str, width: usize, counts: bool) -> String {
+        if width == 0 {
+            return String::new();
+        }
+        let activity_width = text::width(self.activity);
+        if !self.activity.is_empty() && width <= activity_width {
+            return text::truncate(self.activity, width);
+        }
+        let (title, truncated) = Self::title(title);
+        let attention = self.attention();
+        let digits = if counts && !attention.is_empty() {
+            self.alerts
+                .filter(|count| *count > 1)
+                .map_or(0, |count| count.ilog10() as usize + 1)
+        } else {
+            0
+        };
+        let capacity = 2
+            + self.activity.len()
+            + title.len()
+            + if truncated { "…".len() } else { 0 }
+            + if attention.is_empty() {
+                0
+            } else {
+                1 + attention.len() + digits
+            };
+        let mut label = String::with_capacity(capacity);
+        label.push(' ');
+        label.push_str(self.activity);
+        label.push_str(title);
+        if truncated {
+            label.push('…');
+        }
+        if !attention.is_empty() {
+            label.push(' ');
+            label.push_str(attention);
+            if counts && let Some(count) = self.alerts.filter(|count| *count > 1) {
+                let _ = write!(label, "{count}");
+            }
+        }
+        label.push(' ');
+        if text::width(&label) > width {
+            use unicode_width::UnicodeWidthChar as _;
+            // Padding may disappear, but truncation never consumes the activity glyph.
+            let (prefix_bytes, prefix_width) = if self.activity.is_empty() {
+                (0, 0)
+            } else {
+                (1 + self.activity.len(), 1 + activity_width)
+            };
+            let room = width - prefix_width;
+            let mut end = prefix_bytes;
+            if room > 0 {
+                let mut used = 0;
+                for (at, character) in label[prefix_bytes..].char_indices() {
+                    let cells = character.width().unwrap_or(0);
+                    if used + cells >= room {
+                        break;
+                    }
+                    used += cells;
+                    end = prefix_bytes + at + character.len_utf8();
+                }
+            }
+            label.truncate(end);
+            if room > 0 {
+                label.push('…');
+            }
+        }
+        label
+    }
+}
 
 /// The palette's sections, in order; a digit key opens the palette at one.
 const SECTIONS: [&str; 8] = [
@@ -49,11 +275,11 @@ pub(crate) struct Glasses {
     /// The focused split fills the glass for now (Ctrl+O), as tmux zooms a pane; this window
     /// only, never stored.
     zoomed: bool,
-    /// Now (or Usage) is open over the glass, from the top bar's need-you count or `$ usage`.
+    /// Usage is open over the glass, from the top bar's `$ usage` slot.
     home: bool,
-    /// What floats over the glass is Usage rather than Now (Nathan, 2026-10-04).
+    /// The floating Usage surface; retained separately from its visibility.
     usage: bool,
-    /// The Ctrl+S sidebar: the old stui list beside the splits, to browse and open from.
+    /// The Ctrl+S sidebar: the old Fractal TUI list beside the splits, to browse and open from.
     pub(crate) sidebar: Sidebar,
     /// A tab being dragged with the mouse, from its press until the button is let go.
     drag: Option<TabDrag>,
@@ -63,6 +289,35 @@ pub(crate) struct Glasses {
     /// is still empty when st first sends the person's glasses, st's glass of that name is
     /// shown instead of keeping both.
     placeholder: Option<String>,
+    history: Vec<glass_store::StoredPlace>,
+    history_cursor: usize,
+    restoring: bool,
+    /// Where each split's tab strip starts, for the glass last drawn: this window only, never
+    /// stored. Drawing keeps it, so it is shared state behind a `RefCell`.
+    strips: RefCell<TabStrips>,
+}
+
+/// The tab strips of the glass last drawn, by split.
+#[derive(Debug, Default)]
+struct TabStrips {
+    glass: String,
+    views: Vec<StripView>,
+}
+
+/// Where one split's tab strip starts. It follows the tab in front until the wheel moves it,
+/// and again once another tab comes to the front.
+#[derive(Clone, Debug, Default)]
+struct StripView {
+    /// The first tab shown.
+    first: usize,
+    /// The tab in front when the strip was last drawn, by place and pane: another pane at the
+    /// same place (the front tab closed, its neighbor taking its place) is a new front tab.
+    /// None before its first draw.
+    current: Option<(usize, String)>,
+    /// Moved by the wheel since the tab in front last changed: kept where it is.
+    manual: bool,
+    /// The furthest the strip may start and still show its last tab whole, as last drawn.
+    most: usize,
 }
 
 /// A tab pressed with the mouse: it becomes a drag once the pointer moves with the button held;
@@ -143,8 +398,8 @@ pub(crate) struct ContextMenu {
     pub(super) selected: usize,
 }
 
-/// The old stui's Usage tab, which now floats over the glass as Now does.
-const USAGE_TAB: usize = 4;
+/// Usage's section: it floats over the glass as Now does.
+pub(crate) const USAGE_TAB: usize = 4;
 /// The sidebar's sections, by the tab whose list each shows. Now and Usage are not ones: they
 /// open from the top bar, over the glass.
 pub(crate) const SIDEBAR_SECTIONS: [(usize, &str); 3] =
@@ -214,8 +469,7 @@ impl GlassWrite {
     }
 }
 
-/// A named workspace: splits, each with its own tabs. Home is always the first tab of the
-/// first group and cannot be closed.
+/// A named workspace: splits, each with its own closable tabs.
 #[derive(Clone)]
 struct Glass {
     /// Stable across renames; the graph will keep the glass under it.
@@ -228,8 +482,7 @@ struct Glass {
     focus: usize,
 }
 
-/// Where a group's tabs start among what its strip shows. Home is no longer a tab (it opens
-/// over the glass from the top bar), so every strip starts with its own first tab.
+/// Every strip starts with its group's first tab.
 fn offset(_group: usize) -> usize {
     0
 }
@@ -245,29 +498,65 @@ impl Glass {
 
     /// Take st's structure, keeping which group and tabs this window shows where they still are.
     fn take(&mut self, body: GlassBody, revision: Option<String>) {
-        let current = self
-            .layout
-            .groups()
-            .iter()
-            .map(|group| group.current)
-            .collect::<Vec<_>>();
+        let previous = self.layout.groups();
+        let focused_id = previous.get(self.focus).map(|group| group.id.as_str());
         self.name = body.name;
         let mut layout = from_wire(body.layout);
-        // Borders dragged here stay where the shape is still the same.
         layout.carry_ratios(&self.layout);
-        self.layout = layout;
-        let count = self.layout.groups().len();
+        let count = layout.groups().len();
+        let mut carried = vec![false; previous.len()];
         for index in 0..count {
-            let shown = self.count(index);
-            if let Some(group) = self.layout.group_mut(index) {
-                group.current = current
-                    .get(index)
-                    .copied()
-                    .unwrap_or(0)
-                    .min(shown.saturating_sub(1));
+            let group = layout.group_mut(index).unwrap();
+            // The wire carries content, not device identities. Only a surviving member
+            // establishes group continuity; unrelated replacement groups get fresh ids.
+            let found = previous
+                .iter()
+                .enumerate()
+                .filter(|(old, _)| !carried[*old])
+                .map(|(old, prior)| {
+                    (
+                        old,
+                        prior
+                            .tabs
+                            .iter()
+                            .filter(|tab| group.tabs.iter().any(|next| next.pane == tab.pane))
+                            .count(),
+                    )
+                })
+                .filter(|(_, shared)| *shared > 0)
+                .max_by_key(|(_, shared)| *shared)
+                .map(|(old, _)| old)
+                .or_else(|| {
+                    previous
+                        .get(index)
+                        .filter(|old| {
+                            !carried[index] && old.tabs.is_empty() && group.tabs.is_empty()
+                        })
+                        .map(|_| index)
+                });
+            let Some(old) = found else { continue };
+            carried[old] = true;
+            let prior = previous[old];
+            group.id.clone_from(&prior.id);
+            for tab in &mut group.tabs {
+                if let Some(previous) = prior.tabs.iter().find(|previous| previous.pane == tab.pane)
+                {
+                    tab.id.clone_from(&previous.id);
+                }
             }
+            let current_id = prior.tabs.get(prior.current).map(|tab| &tab.id);
+            group.current = group
+                .tabs
+                .iter()
+                .position(|tab| Some(&tab.id) == current_id)
+                .unwrap_or_else(|| prior.current.min(group.tabs.len().saturating_sub(1)));
         }
-        self.focus = self.focus.min(count - 1);
+        self.focus = layout
+            .groups()
+            .iter()
+            .position(|group| Some(group.id.as_str()) == focused_id)
+            .unwrap_or_else(|| self.focus.min(count.saturating_sub(1)));
+        self.layout = layout;
         self.revision = revision;
     }
 
@@ -406,7 +695,7 @@ impl Glasses {
             .any(|tab| {
                 matches!(
                     Pane::parse(&tab.pane),
-                    Some(Pane::List(2) | Pane::Mission(_) | Pane::Declaration(_) | Pane::Home(_))
+                    Some(Pane::List(0 | 2) | Pane::Mission(_) | Pane::Declaration(_) | Pane::Home(_))
                 )
             })
     }
@@ -451,6 +740,61 @@ impl Glasses {
                 .viewed(glass.view)
             })
             .collect::<Vec<_>>();
+        let mut history = Vec::new();
+        let mut history_cursor: usize = 0;
+        for (index, mut place) in stored.history.into_iter().enumerate() {
+            if Pane::parse(&place.pane).is_none() {
+                continue;
+            }
+            let Some(glass) = all.iter().find(|glass| glass.id == place.space) else {
+                continue;
+            };
+            let groups = glass.layout.groups();
+            if place.group_id.is_empty() {
+                let Some(group) = groups.get(place.group) else {
+                    continue;
+                };
+                place.group_id.clone_from(&group.id);
+                place.tab_id = group.tabs.get(place.tab).map(|tab| tab.id.clone());
+            }
+            match &place.tab_id {
+                Some(id) => {
+                    // A stable tab can move out of its recorded group, even removing that group.
+                    let Some((group_index, group, tab_index)) =
+                        groups.iter().enumerate().find_map(|(index, group)| {
+                            group
+                                .tabs
+                                .iter()
+                                .position(|tab| &tab.id == id)
+                                .map(|tab| (index, *group, tab))
+                        })
+                    else {
+                        continue;
+                    };
+                    place.group = group_index;
+                    place.group_id.clone_from(&group.id);
+                    place.tab = tab_index;
+                }
+                None => {
+                    let Some(group_index) =
+                        groups.iter().position(|group| group.id == place.group_id)
+                    else {
+                        continue;
+                    };
+                    if place.pane != Pane::List(0).key() {
+                        continue;
+                    }
+                    place.group = group_index;
+                }
+            }
+            if index <= stored.history_cursor {
+                history_cursor = history.len();
+            }
+            history.push(place);
+        }
+        let excess = history.len().saturating_sub(50);
+        history.drain(..excess);
+        history_cursor = history_cursor.saturating_sub(excess);
         let name = wanted.or(stored.last).unwrap_or_else(|| "main".to_owned());
         let mut placeholder = None;
         let shown = match all.iter().position(|glass| glass.name == name) {
@@ -476,6 +820,10 @@ impl Glasses {
             last_border: None,
             pending: BTreeMap::new(),
             placeholder,
+            history,
+            history_cursor,
+            restoring: false,
+            strips: RefCell::default(),
         }
     }
 
@@ -510,6 +858,8 @@ impl Glasses {
         let stored = Stored {
             version: 0,
             sidebar: self.sidebar.configured.then_some(self.sidebar.shown),
+            history: self.history.clone(),
+            history_cursor: self.history_cursor,
             last: Some(self.glass().name.clone()),
             glasses: self
                 .all
@@ -592,6 +942,8 @@ enum Action {
     CloseGlass,
     /// Home, over the glass.
     Home,
+    /// Usage, over the glass.
+    Usage,
     /// A plain shell in a new tab.
     NewTerminal,
     /// The new mission form, in a new tab.
@@ -692,24 +1044,34 @@ fn fuzzy(query: &str, text: &str) -> Option<i64> {
 impl Ui {
     /// Whether a glass is showing its Home tab in the focused group.
     pub(crate) fn on_home(&self) -> bool {
-        self.glasses
-            .as_ref()
-            .is_some_and(|glasses| glasses.home || glasses.glass().on_home())
+        self.glasses.home || self.glasses.glass().on_home()
     }
 
     /// Whether the glass is split into more than one group.
     pub(crate) fn split_shown(&self) -> bool {
-        self.glasses
-            .as_ref()
-            .is_some_and(|glasses| glasses.glass().layout.groups().len() > 1)
+        self.glasses.glass().layout.groups().len() > 1
     }
 
     /// The query st's conversation search should answer while the palette is open: three
     /// letters or more.
     pub(crate) fn said_wanted(&self) -> Option<String> {
-        let palette = self.glasses.as_ref()?.palette.as_ref()?;
+        let palette = self.glasses.palette.as_ref()?;
         let query = palette.query.trim();
         (palette.naming.is_none() && query.chars().count() >= 3).then(|| query.to_owned())
+    }
+
+    /// The split with the focus, as `GLASS/GROUP`: what a document trail is kept under.
+    pub(crate) fn focused_split(&self) -> Option<String> {
+        let glass = self.glasses.glass();
+        Some(format!("{}/{}", glass.id, glass.focus))
+    }
+
+    /// Whether Ctrl+K is being asked for a document, so the documents list is read for its rows.
+    pub(crate) fn palette_asks_documents(&self) -> bool {
+        self.glasses
+            .palette
+            .as_ref()
+            .is_some_and(|palette| palette.naming.is_none() && palette.query.trim_start().starts_with("doc"))
     }
 
     /// st's search results for `query` as palette rows, including saved native sessions.
@@ -816,7 +1178,7 @@ impl Ui {
     }
     pub(super) fn open_sidebar_palette(&mut self, mode: resource_sidebar::PaletteMode) {
         self.open_palette(None, Open::Tab);
-        if let Some(palette) = self.glasses.as_mut().and_then(|g| g.palette.as_mut()) {
+        if let Some(palette) = self.glasses.palette.as_mut() {
             palette.query = match &mode { resource_sidebar::PaletteMode::Rename { id } => self.resource_sidebar.folders().into_iter().find(|(folder, _)| folder == id).map(|(_, name)| name).unwrap_or_default(), _ => String::new() };
             palette.sidebar = Some(mode);
         }
@@ -826,8 +1188,8 @@ impl Ui {
         match action {
             Action::SidebarMode(mode) => self.open_sidebar_palette(mode.clone()),
             Action::SidebarNew { name, subject: Some(subject) } => self.open_sidebar_palette(resource_sidebar::PaletteMode::ConfirmCreate { subject: subject.clone(), name: name.clone() }),
-            Action::SidebarNew { name, subject: None } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_create_folder(name, None); }
-            Action::SidebarRename { id, name } => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![fractal_client::ArrangementOperation::FolderRename { id: id.clone(), name: name.trim().to_string() }]); }
+            Action::SidebarNew { name, subject: None } => { self.glasses.palette = None; self.sidebar_create_folder(name, None); }
+            Action::SidebarRename { id, name } => { self.glasses.palette = None; self.sidebar_edit(vec![fractal_client::ArrangementOperation::FolderRename { id: id.clone(), name: name.trim().to_string() }]); }
             Action::SidebarPreview => {},
             _ => return false,
         }
@@ -903,6 +1265,16 @@ impl Ui {
         for row in &self.resource_sidebar.observations {
             open(1, ("◇", theme::OVERLAY1), super::observed_resources::title(row), super::observed_resources::kind(row).into(), Pane::Resource(row.id.clone()));
         }
+        if let Some(reference) = super::documents::openable(id) {
+            open(1, ("▤", theme::OVERLAY1), reference.to_owned(), "open this document".into(), Pane::Document(reference.to_owned()));
+        }
+        open(1, ("▤", theme::OVERLAY1), "Documents".into(), "every document, by name".into(), Pane::Documents(None));
+        if id.starts_with("doc/") && id.ends_with('/') {
+            open(1, ("▤", theme::OVERLAY1), format!("Documents under {id}"), "the list under this prefix".into(), Pane::Documents(Some(id.to_owned())));
+        }
+        for row in self.documents.listed_rows() {
+            open(1, ("▤", theme::OVERLAY1), row.name.clone(), format!("document · {}", row.short_version), Pane::Document(row.name.clone()));
+        }
         if id.starts_with("resource/") && !self.resource_sidebar.observations.iter().any(|row| row.id == id) {
             open(1, ("◇", theme::OVERLAY1), id.into(), "graph resource".into(), Pane::Resource(id.into()));
         }
@@ -915,6 +1287,15 @@ impl Ui {
                 Pane::Mission(Some(mission.id.clone())),
             );
         }
+        // The whole fleet as a list in a tab: every machine, its clients and devices.
+        let fleet = Choice {
+            section: 3,
+            glyph: ("▦", theme::ACCENT),
+            label: "Fleet".into(),
+            detail: "every machine, its clients and this person's devices".into(),
+            search: "fleet machines clients devices".into(),
+            action: Action::Open(Pane::List(3)),
+        };
         for machine in self.world.machines.items() {
             open(
                 3,
@@ -924,16 +1305,31 @@ impl Ui {
                 Pane::Machine(Some(format!("machine/{}", machine.name))),
             );
         }
+        // Fleet leads its section, above the machines.
+        let at = choices.iter().position(|choice| choice.section == 3).unwrap_or(choices.len());
+        choices.insert(at, fleet);
         // Now (what `st now` shows), over the glass.
         choices.insert(
             0,
             Choice {
                 section: 0,
                 glyph: ("◆", theme::PERSON),
-                label: "Now".into(),
+                label: "Inbox".into(),
                 detail: "alerts and updates".into(),
-                search: "now home".into(),
+                search: "inbox home".into(),
                 action: Action::Home,
+            },
+        );
+        // Usage, over the glass as Now is.
+        choices.insert(
+            1,
+            Choice {
+                section: 0,
+                glyph: ("◔", theme::ACCENT),
+                label: "Usage".into(),
+                detail: "spend by agent, mission, step, model, account or host".into(),
+                search: "usage spend tokens cost".into(),
+                action: Action::Usage,
             },
         );
         // Starting things: an agent from the query, or the empty form.
@@ -964,7 +1360,7 @@ impl Ui {
             } else {
                 "Simplified conversations".into()
             },
-            "shift+o · tool calls to a line each, runs of them to one",
+            "ctrl+p · tool calls to a line each, runs of them to one",
             "simplified simple full conversations tools compact".into(),
             Action::ToggleSimple,
         ));
@@ -989,9 +1385,7 @@ impl Ui {
             Action::ToggleTerminalFallback,
         ));
         choices.extend(self.said_choices(name));
-        let Some(glasses) = &self.glasses else {
-            return choices;
-        };
+        let glasses = &self.glasses;
         let glass =
             |glyph: &'static str, label: String, detail: &str, search: String, action| Choice {
                 section: GLASSES,
@@ -1076,9 +1470,9 @@ impl Ui {
     fn matches(&self, palette: &Palette) -> Vec<Choice> {
         if let Some(mode) = &palette.sidebar { return self.sidebar_choices(mode, &palette.query); }
         // Asking for a name: the one thing Enter will do with it.
-        if let (Some(naming), Some(glasses)) = (palette.naming, &self.glasses) {
+        if let Some(naming) = palette.naming {
             let name = palette.query.trim().to_owned();
-            let current = glasses.glass().name.clone();
+            let current = self.glasses.glass().name.clone();
             let (glyph, label, action) = match naming {
                 Naming::Rename => (
                     "✎",
@@ -1136,9 +1530,16 @@ impl Ui {
             // A command typed as it begins ("new mission") is first. Among what can be opened,
             // agents come first, then missions, whatever a mission's title starts with
             // (Nathan, 2026-10-06); within a section, what begins as typed comes first.
+            // Now, Usage and the Fleet list are commands too: "fleet" opens the list before a
+            // mission whose id has fleet in it.
             scored.sort_by_key(|(choice, score)| {
                 let named = choice.label.to_lowercase().starts_with(&typed);
-                let command = named && choice.section > 3;
+                let command = named
+                    && (choice.section > 3
+                        || matches!(
+                            choice.action,
+                            Action::Home | Action::Usage | Action::Open(Pane::List(_))
+                        ));
                 (!command, RANK[choice.section], !named, -score)
             });
         }
@@ -1146,7 +1547,7 @@ impl Ui {
     }
 
     pub(crate) fn render_glass(&self, buf: &mut Buffer, area: Rect) {
-        let Some(glasses) = &self.glasses else { return };
+        let glasses = &self.glasses;
         let glass = glasses.glass();
         self.status_line(buf, Rect { height: 1, ..area }, glass);
         self.top_bar_border(buf, area);
@@ -1204,7 +1605,7 @@ impl Ui {
             })
             .collect::<Vec<_>>();
         self.frame.borrow_mut().glass_leaves = contents.clone();
-        // The focused group draws first, through stui's own tab and selection, so it is the
+        // The focused group draws first, through Fractal TUI's own tab and selection, so it is the
         // pane scrolling keys reach; the others draw from their keys.
         let order = std::iter::once(glass.focus)
             .chain((0..rects.len()).filter(|index| *index != glass.focus));
@@ -1317,9 +1718,7 @@ impl Ui {
         {
             return false;
         }
-        let Some(glasses) = self.glasses.as_mut() else {
-            return false;
-        };
+        let glasses = &mut self.glasses;
         let point = (mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1381,9 +1780,7 @@ impl Ui {
                         let section = glasses.sidebar.section;
                         glasses.sidebar.selected[section] = index;
                         let id = self.listing_for(section, 40).ids.get(index).cloned();
-                        if let Some(glasses) = self.glasses.as_mut() {
-                            glasses.drag = id.map(|id| start(DragFrom::Subject(id)));
-                        }
+                        self.glasses.drag = id.map(|id| start(DragFrom::Subject(id)));
                         true
                     }
                     _ => {
@@ -1419,9 +1816,7 @@ impl Ui {
                 };
                 if let DragFrom::Border(_) = drag.from {
                     // Kept on this device: the graph's glass does not carry sizes yet.
-                    if let Some(glasses) = self.glasses.as_mut() {
-                        glasses.save();
-                    }
+                    self.glasses.save();
                     return true;
                 }
                 if !drag.moving {
@@ -1464,7 +1859,7 @@ impl Ui {
         }
         let subject = match from {
             DragFrom::Subject(id) => Some(id.clone()),
-            DragFrom::Tab(group, tab) => self.glasses.as_ref().and_then(|g| g.glass().layout.groups().get(*group).and_then(|group| group.tabs.get(*tab)).and_then(|tab| Pane::parse(&tab.pane))).and_then(|pane| self.sidebar_subject(&pane)),
+            DragFrom::Tab(group, tab) => self.glasses.glass().layout.groups().get(*group).and_then(|group| group.tabs.get(*tab)).and_then(|tab| Pane::parse(&tab.pane)).and_then(|pane| self.sidebar_subject(&pane)),
             _ => None,
         };
         if let Some(subject) = subject {
@@ -1475,9 +1870,7 @@ impl Ui {
 
     /// Whether a tab is being dragged; Esc lets it go where it was.
     pub(crate) fn cancel_drag(&mut self) -> bool {
-        self.glasses
-            .as_mut()
-            .and_then(|glasses| glasses.drag.take())
+        self.glasses.drag.take()
             .is_some_and(|drag| drag.moving)
     }
 
@@ -1527,16 +1920,11 @@ impl Ui {
                 }
                 let index = self
                     .glasses
-                    .as_ref()
-                    .and_then(|glasses| {
-                        glasses
-                            .glass()
-                            .layout
-                            .groups()
-                            .get(group)
-                            .map(|group| group.tabs.len())
-                    })
-                    .unwrap_or(0);
+                    .glass()
+                    .layout
+                    .groups()
+                    .get(group)
+                    .map_or(0, |group| group.tabs.len());
                 return Some(Drop::Strip { group, index });
             }
         }
@@ -1545,9 +1933,8 @@ impl Ui {
 
     /// Move the tab at `from` to `target`, keep the glass, and show it there.
     fn drop_tab(&mut self, from: (usize, usize), target: Drop) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let before = self.current_place();
+        let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let (from_group, from_tab) = from;
         let sources = glass
@@ -1624,38 +2011,33 @@ impl Ui {
         let id = glasses.glass().id.clone();
         self.glass_changed(&id);
         self.show_focused();
+        self.record_place_change(before);
     }
 
     /// Open `id` where a drag from the sidebar let go: as a tab in a strip, or in a new split.
     fn drop_subject(&mut self, id: &str, target: Drop) {
-        let section = self.glasses.as_ref().map(|glasses| glasses.sidebar.section);
+        let before = self.current_place();
+        let section = self.glasses.sidebar.section;
         let terminal = self.resource_sidebar.terminals.iter().find(|row| row.id == id).map(|row| row.open.clone());
         let pane = if let Some(terminal) = terminal {
             Some(Pane::Terminal(terminal))
-        } else if section == Some(4) {
+        } else if section == 4 {
             Some(Pane::Usage(Some(id.to_owned())))
         } else {
             pane_for(id).or_else(|| {
-                (section == Some(3)).then(|| Pane::Machine(Some(format!("machine/{id}"))))
+                (section == 3).then(|| Pane::Machine(Some(format!("machine/{id}"))))
             })
         };
         let Some(pane) = pane else { return };
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.sidebar.focused = false;
-        }
+        self.glasses.sidebar.focused = false;
         self.resource_sidebar.focused = false;
         // Already open somewhere: move that tab there instead of opening it twice.
-        let open = self
-            .glasses
-            .as_ref()
-            .and_then(|glasses| glasses.glass().layout.find(&pane.key()));
+        let open = self.glasses.glass().layout.find(&pane.key());
         if let Some(from) = open {
             self.drop_tab(from, target);
             return;
         }
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         glasses.home = false;
         let glass = glasses.glass_mut();
         let tab = Tab::pane(pane.key());
@@ -1685,14 +2067,12 @@ impl Ui {
         let id = glasses.glass().id.clone();
         self.glass_changed(&id);
         self.show_focused();
+        self.record_place_change(before);
     }
 
     /// While a tab is dragged: where it would land, and its name by the pointer.
     fn draw_drag(&self, buf: &mut Buffer) {
-        let Some(drag) = self
-            .glasses
-            .as_ref()
-            .and_then(|glasses| glasses.drag.clone())
+        let Some(drag) = self.glasses.drag.clone()
         else {
             return;
         };
@@ -1742,16 +2122,12 @@ impl Ui {
         let name = match &drag.from {
             DragFrom::Tab(group, tab) => self
                 .glasses
-                .as_ref()
-                .and_then(|glasses| {
-                    glasses
-                        .glass()
-                        .layout
-                        .groups()
-                        .get(*group)
-                        .and_then(|at| at.tabs.get(tab.saturating_sub(offset(*group))))
-                        .cloned()
-                })
+                .glass()
+                .layout
+                .groups()
+                .get(*group)
+                .and_then(|at| at.tabs.get(tab.saturating_sub(offset(*group))))
+                .cloned()
                 .map(|tab| {
                     tab.title.unwrap_or_else(|| {
                         Pane::parse(&tab.pane)
@@ -1781,32 +2157,25 @@ impl Ui {
         }
     }
 
-    /// Show the sidebar with the keys, or hide it when it has them (Ctrl+S).
-    /// The top bar's usage slot: the sidebar at Usage, or hidden when Usage already shows.
     /// The top bar's usage slot: Usage over the glass, or closed when it already shows.
     pub(crate) fn toggle_usage(&mut self) {
         if self.usage_open() {
             self.close_home();
             return;
         }
-        self.open_home();
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.usage = true;
-        }
-        self.tab = USAGE_TAB;
+        self.glasses.home = true;
+        self.glasses.palette = None;
+        self.glasses.usage = true;
+        self.note_focus();
     }
 
     /// Whether Usage floats over the glass.
     pub(crate) fn usage_open(&self) -> bool {
-        self.glasses
-            .as_ref()
-            .is_some_and(|glasses| glasses.home && glasses.usage)
+        self.glasses.home && self.glasses.usage
     }
 
     pub(crate) fn toggle_sidebar(&mut self) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         // Ctrl+S shows and hides it, nothing else: shown, it has the keys; hidden, the splits do.
         let sidebar = &mut glasses.sidebar;
         sidebar.configured = true;
@@ -1818,9 +2187,7 @@ impl Ui {
 
     /// Open the sidebar's selection as a new tab in the focused split; the keys go back to it.
     pub(crate) fn open_from_sidebar(&mut self) {
-        let Some(sidebar) = self.glasses.as_ref().map(|glasses| glasses.sidebar.clone()) else {
-            return;
-        };
+        let sidebar = self.glasses.sidebar.clone();
         if sidebar.section != 4 {
             self.open_resource_row(self.resource_sidebar.selected);
             return;
@@ -1829,9 +2196,7 @@ impl Ui {
         let Some(id) = ids.get(sidebar.selected[sidebar.section]).cloned() else {
             return;
         };
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.sidebar.focused = false;
-        }
+        self.glasses.sidebar.focused = false;
         if sidebar.section == 0 {
             // An alert opens where it is answered: Home, at that item.
             self.open_home();
@@ -1849,14 +2214,10 @@ impl Ui {
     /// The sidebar's keys while it has them; `false` for a key it leaves to the glass.
     fn sidebar_key(&mut self, key: KeyEvent) -> bool {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(section) = self.glasses.as_ref().map(|glasses| glasses.sidebar.section) else {
-            return false;
-        };
+        let section = self.glasses.sidebar.section;
         if section != 4 && self.resource_sidebar_key(key) { return true; }
         let count = self.listing_for(section, 40).ids.len();
-        let Some(sidebar) = self.glasses.as_mut().map(|glasses| &mut glasses.sidebar) else {
-            return false;
-        };
+        let sidebar = &mut self.glasses.sidebar;
         let selected = &mut sidebar.selected[section];
         match key.code {
             KeyCode::Char('s') if control => {
@@ -1930,11 +2291,7 @@ impl Ui {
         buf.set_stringn(
             rect.x + 2,
             rect.y,
-            if self.usage_open() {
-                " Usage · b groups · p period · esc closes "
-            } else {
-                " Now · esc closes "
-            },
+            " Usage · b groups · p period · esc closes ",
             rect.width.saturating_sub(4) as usize,
             theme::strong(theme::ACCENT).bg(theme::BASE),
         );
@@ -1993,11 +2350,18 @@ impl Ui {
         };
         let key = &tab.pane;
         match Pane::parse(key) {
+            Some(Pane::List(0)) => {
+                if focused && !self.home_open() {
+                    self.draw_body(buf, content);
+                } else {
+                    self.draw_home(buf, content);
+                }
+            }
             None => {
                 buf.set_stringn(
                     content.x + 1,
                     content.y + 1,
-                    format!("This stui does not know {key}. Ctrl+W closes it."),
+                    format!("This Fractal TUI does not know {key}. Ctrl+W closes it."),
                     content.width.saturating_sub(2) as usize,
                     theme::dim(),
                 );
@@ -2011,21 +2375,23 @@ impl Ui {
                     theme::dim(),
                 );
             }
-            // A usage tab names its group whatever the list groups by, so it draws from its key;
-            // a document has no list at all.
-            Some(pane @ (Pane::Usage(_) | Pane::Document(_))) => self.draw_pane(buf, content, &pane),
+            // A usage tab names its group whatever the list groups by, so it draws from its key.
+            Some(pane @ (Pane::Usage(_) | Pane::Documents(_))) => self.draw_pane(buf, content, &pane),
+            Some(Pane::Document(reference)) => {
+                self.draw_document(buf, content, &reference, &format!("{}/{index}", glass.id))
+            }
             // A session has no sidebar agent selection: render the tab's subject directly.
             Some(Pane::Agent(Some(id))) if id.starts_with("session/") => {
                 self.draw_pane(buf, content, &Pane::Agent(Some(id)))
             }
             // A terminal tab that is not the attached one says so, rather than drawing whatever
-            // stui's own tab has selected.
+            // Fractal TUI's own tab has selected.
             Some(Pane::Terminal(id))
                 if self.terminal.as_ref().is_none_or(|view| view.agent != id) =>
             {
                 self.draw_pane(buf, content, &Pane::Terminal(id))
             }
-            // While Home floats over the glass, stui's own tab is Home: the focused group draws
+            // While Home floats over the glass, Fractal TUI's own tab is Home: the focused group draws
             // its pane like the others, not Home's selection (Nathan, 2026-10-02).
             Some(_) if focused && !self.home_open() => self.draw_main(buf, content),
             Some(pane) => self.draw_pane(buf, content, &pane),
@@ -2060,8 +2426,8 @@ impl Ui {
 
     /// Home while another group has the focus: its list and card, from Home's own selection.
     fn draw_home(&self, buf: &mut Buffer, area: Rect) {
-        let selected = self.listing_for(0, 40).ids.get(self.selected[0]).cloned();
-        let side = if self.sidebar && area.width >= 70 {
+        let selected = self.list_selection(0);
+        let side = if area.width >= 70 {
             (area.width * 3 / 10).clamp(30, 46)
         } else {
             0
@@ -2125,11 +2491,13 @@ impl Ui {
         // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
         let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
         let (glyph, word, color) = match &self.world.link {
-            Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged", theme::RED),
-            Link::Live if !self.world.stale.is_empty() => ("◐", "stale", theme::YELLOW),
-            Link::Live => ("●", "live", theme::GREEN),
-            Link::Connecting => (self.spinner(), "connecting", theme::YELLOW),
-            Link::Offline(_) => ("○", "offline", theme::RED),
+            Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
+            // Stale says which list: the word alone sent the person hunting for why.
+            Link::Live if !self.world.stale.is_empty() => ("◐", stale_word(&self.world.stale), theme::YELLOW),
+            Link::Live if !self.world.behind.is_empty() => ("◐", "behind".to_owned(), theme::YELLOW),
+            Link::Live => ("●", "live".to_owned(), theme::GREEN),
+            Link::Connecting => (self.spinner(), "connecting".to_owned(), theme::YELLOW),
+            Link::Offline(_) => ("○", "offline".to_owned(), theme::RED),
         };
         let link_text = format!("{glyph} {word}");
         // The connection opens what is known of it: this machine, or why it is not reached.
@@ -2290,6 +2658,9 @@ impl Ui {
 
     /// A group's tabs, Home first in group 0; a tab whose subject needs the person shows `◆`.
     fn tab_strip(&self, buf: &mut Buffer, area: Rect, glass: &Glass, index: usize) {
+        if area.width == 0 {
+            return;
+        }
         let group = glass.layout.groups()[index];
         let focused = index == glass.focus;
         // With more than one split, the focused one's strip is lit and marked, so it is plain
@@ -2304,36 +2675,138 @@ impl Ui {
         if split && focused {
             buf.set_stringn(area.x, area.y, "▌", 1, theme::fg(theme::ACCENT).bg(strip));
         }
-        let mut x = area.x + 1;
-        let tabs = group.tabs.iter().map(|tab| {
+        let mut x = area.x + u16::from(area.width > 1);
+        let tabs: Vec<_> = group.tabs.iter().map(|tab| {
             let pane = Pane::parse(&tab.pane);
             let title = tab.title.clone().unwrap_or_else(|| {
                 pane.as_ref()
                     .map(|pane| self.pane_title(pane))
                     .unwrap_or_else(|| tab.pane.clone())
             });
-            let needs = pane.is_some_and(|pane| self.pane_needs_person(&pane));
-            (title, needs)
-        });
-        let labels: Vec<(String, bool)> = tabs
-            .map(|(title, needs)| {
-                let label = format!(" {}{title} ", if needs { "◆ " } else { "" });
-                (text::truncate(&label, 28), needs)
-            })
+            (title, self.tab_badge(tab, pane.as_ref()))
+        }).collect();
+        self.frame.borrow_mut().glass_strips.push((area, index));
+        // `+` and the narrowest tab worth showing beside it.
+        const ADD: u16 = 3;
+        const NARROWEST: u16 = 4;
+        // A hidden-tab marker takes its count, its arrow, a space and the gap after it.
+        let marker = if tabs.len() > 1 {
+            tabs.len().ilog10() as u16 + 4
+        } else {
+            0
+        };
+        // `+` keeps its place at the end while the tab in front and both markers still have room.
+        let strip_room = area.width.saturating_sub(x - area.x);
+        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
+            ADD
+        } else {
+            0
+        };
+        let available = strip_room - plus;
+        let counts = tabs.iter().map(|(title, badge)| badge.width(title, true) + 1)
+            .sum::<usize>() <= usize::from(available);
+        // Reserve both overflow markers and a tab gap before shortening any label. A selected
+        // tab must never consume the space needed to reach its hidden neighbors.
+        let label_width = if counts {
+            usize::from(available)
+        } else {
+            usize::from(available.saturating_sub(2 * marker + 1))
+        };
+        // One cell belongs to the tab, even when chrome consumes the nominal budget.
+        // Fewer whole tabs are preferable to erasing their activity glyphs.
+        let label_width = label_width.max(usize::from(available > 0));
+        let mut labels: Vec<_> = tabs
+            .iter()
+            .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
             .collect();
-        let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
-        let (first, last) = visible_tabs(&widths, group.current, area.width.saturating_sub(x - area.x));
-        // Tabs that do not fit are not lost: the strip scrolls to keep the one in front on
-        // screen, and a marker at each end counts the hidden ones and shows the nearest.
-        if first > 0 {
+        let mut widths: Vec<u16> = labels
+            .iter()
+            .map(|(label, _)| text::width(label) as u16)
+            .collect();
+        // Tabs that do not fit are not lost: a marker at each end counts the hidden ones and
+        // shows the nearest. The strip keeps its place, following the tab in front onto the
+        // screen, until the wheel moves it; then it stays put until another tab comes in front.
+        let (mut first, mut last) = {
+            let mut strips = self.glasses.strips.borrow_mut();
+            if strips.glass != glass.id {
+                strips.glass.clone_from(&glass.id);
+                strips.views.clear();
+            }
+            if strips.views.len() <= index {
+                strips.views.resize(index + 1, StripView::default());
+            }
+            let view = &mut strips.views[index];
+            let pane = group
+                .tabs
+                .get(group.current)
+                .map_or("", |tab| tab.pane.as_str());
+            let same = view
+                .current
+                .as_ref()
+                .is_some_and(|(at, shown)| *at == group.current && shown == pane);
+            if !same {
+                view.current = Some((group.current, pane.to_owned()));
+                view.manual = false;
+            }
+            let window = visible_tabs(
+                &widths,
+                group.current,
+                view.first,
+                !view.manual,
+                marker,
+                available,
+            );
+            view.first = window.first;
+            view.most = window.most;
+            (window.first, window.last)
+        };
+        // Reserve only the cells actually painted after the final tab, including its gap.
+        let hidden_after = labels.len().saturating_sub(last + 1);
+        let mut tail = if hidden_after > 0 {
+            hidden_after.ilog10() as u16 + 4 + plus + u16::from(plus > 0)
+        } else if plus > 0 {
+            1 + plus
+        } else {
+            0
+        };
+        let before = if first > 0 {
+            first.ilog10() as u16 + 3
+        } else {
+            0
+        };
+        let tab_cells = widths
+            .iter()
+            .take(last + 1)
+            .skip(first)
+            .map(|width| u32::from(*width))
+            .sum::<u32>()
+            + (last - first) as u32;
+        let bare = !labels.is_empty()
+            && u32::from(before) + tab_cells + u32::from(tail) > u32::from(strip_room);
+        if bare {
+            // Chrome yields before a tab does. Following keeps the active tab; manual
+            // browsing keeps its visible tab, without selecting or revealing another one.
+            if (first..=last).contains(&group.current) {
+                first = group.current;
+            }
+            last = first;
+            tail = 0;
+            labels[first].0 = tabs[first]
+                .1
+                .label(&tabs[first].0, usize::from(strip_room), counts);
+            widths[first] = text::width(&labels[first].0) as u16;
+            self.glasses.strips.borrow_mut().views[index].first = first;
+        }
+        if first > 0 && !bare {
             let marker = format!("‹{} ", first);
             let width = text::width(&marker) as u16;
             buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
             x += width;
         }
-        for (shown, (label, needs)) in labels.iter().enumerate().take(last + 1).skip(first) {
-            let needs = *needs;
+        let stop = (area.x + area.width).saturating_sub(tail);
+        for (shown, (label, badge)) in labels.iter().enumerate().take(last + 1).skip(first) {
+            let needs = badge.needs_person;
             let style = match (shown == group.current, focused) {
                 (true, true) => Style::default()
                     .fg(theme::CRUST)
@@ -2345,19 +2818,32 @@ impl Ui {
                 _ => theme::fg(theme::OVERLAY0).bg(strip),
             };
             // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
-            let width = widths[shown].min((area.x + area.width).saturating_sub(x));
+            let width = widths[shown].min(stop.saturating_sub(x));
             buf.set_stringn(x, area.y, label, width as usize, style);
+            // What waits on the person keeps its colour on every tab, the one in front too.
+            if let Some(at) = attention_at(label, badge.attention()) {
+                let offset = text::width(&label[..at]) as u16;
+                if offset < width {
+                    buf.set_stringn(
+                        x + offset,
+                        area.y,
+                        &label[at..],
+                        usize::from(width - offset),
+                        style.fg(theme::PERSON),
+                    );
+                }
+            }
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
             x += width + 1;
         }
-        if last + 1 < labels.len() {
+        if last + 1 < labels.len() && !bare {
             let marker = format!(" {}›", labels.len() - 1 - last);
             let width = text::width(&marker) as u16;
             buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
-        if x + 3 <= area.x + area.width {
+        if !bare && x + 3 <= area.x + area.width {
             buf.set_stringn(x, area.y, " + ", 3, theme::dim().bg(strip));
             self.hit(
                 Rect {
@@ -2368,7 +2854,7 @@ impl Ui {
                 Hit::GlassAdd(index),
             );
         }
-        let zoomed = self.glasses.as_ref().is_some_and(|glasses| glasses.zoomed);
+        let zoomed = self.glasses.zoomed;
         if zoomed && focused {
             let label = " ⤢ zoomed · ctrl+o ";
             let width = text::width(label) as u16;
@@ -2384,10 +2870,54 @@ impl Ui {
         }
     }
 
+    /// The split whose tab strip is under the pointer and on top there: nothing drawn over it
+    /// (Home, a popover, the palette or another hit) takes the wheel first.
+    pub(super) fn tab_strip_at(&self, column: u16, row: u16) -> Option<usize> {
+        if self.home_open() || self.palette_open() || self.popover.is_some() {
+            return None;
+        }
+        let info = self.frame.borrow();
+        let group = info
+            .glass_strips
+            .iter()
+            .rev()
+            .find(|(rect, _)| contains(*rect, column, row))?
+            .1;
+        match info
+            .hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| contains(*rect, column, row))
+        {
+            None | Some((_, Hit::GlassTab(..) | Hit::GlassTabMore(..) | Hit::GlassAdd(_))) => {
+                Some(group)
+            }
+            Some(_) => None,
+        }
+    }
+
+    /// The wheel over a tab strip moves it one whole tab, as far as showing the last tab whole;
+    /// the tab in front stays as it is, even if it scrolls out of sight.
+    pub(super) fn scroll_tab_strip(&self, group: usize, forward: bool) {
+        let mut strips = self.glasses.strips.borrow_mut();
+        if strips.glass != self.glasses.glass().id {
+            return;
+        }
+        if let Some(view) = strips.views.get_mut(group) {
+            view.first = if forward {
+                (view.first + 1).min(view.most)
+            } else {
+                view.first.saturating_sub(1).min(view.most)
+            };
+            view.manual = true;
+        }
+    }
+
     /// A pane's title: the name of what it shows.
     fn pane_title(&self, pane: &Pane) -> String {
         let find = |id: &Option<String>| id.clone().unwrap_or_default();
         match pane {
+            Pane::List(0) => "Inbox".into(),
             // A shell is named by the title its program gives, as a terminal's tab is.
             Pane::Terminal(id) if id.starts_with("terminal/") => self
                 .terminal
@@ -2417,33 +2947,42 @@ impl Ui {
             Pane::Machine(id) => find(id).trim_start_matches("machine/").to_owned(),
             Pane::Resource(id) => self.resource_sidebar.observations.iter().find(|row| &row.id == id).map(super::observed_resources::title).unwrap_or_else(|| id.clone()),
             Pane::Document(name) => document_title(name),
+            Pane::Documents(None) => "Documents".into(),
+            Pane::Documents(Some(prefix)) => format!("Documents · {}", prefix.trim_start_matches("doc/")),
             Pane::Usage(None) => "Usage".into(),
             Pane::Usage(Some(id)) => format!("Usage · {}", super::usage::label(&self.world, id)),
             other => other.key(),
         }
     }
 
-    fn pane_needs_person(&self, pane: &Pane) -> bool {
-        match pane {
-            Pane::Agent(Some(id)) => self
-                .world
-                .agents
-                .items()
-                .iter()
-                .any(|agent| {
-                    &agent.id == id
-                        && matches!(agent.state, AgentState::NeedsYou | AgentState::NeedsLogin)
-                }),
-            Pane::Mission(Some(id)) => self.mission_decision(id).is_some(),
-            _ => false,
+    fn tab_badge(&self, tab: &Tab, pane: Option<&Pane>) -> TabBadge {
+        if tab.kind() == TabKind::Other {
+            return TabBadge::default();
+        }
+        let statuses = &self.tab_statuses;
+        let subject = match pane {
+            Some(Pane::Agent(Some(id)) | Pane::Terminal(id)) => statuses.agents.get(id),
+            Some(Pane::Mission(Some(id)) | Pane::Declaration(Some(id))) => statuses.missions.get(id),
+            Some(Pane::Home(Some(id))) => statuses.items.get(id),
+            Some(Pane::List(0)) => Some(&statuses.inbox),
+            _ => None,
+        }.copied().unwrap_or_default();
+        TabBadge {
+            activity: if tab.kind() == TabKind::Agent && subject.activity.is_empty() { "~" } else { subject.activity },
+            alerts: statuses.loaded.then_some(subject.alerts),
+            ask: subject.ask,
+            needs_person: subject.needs_person || subject.alerts > 0 || subject.ask,
         }
     }
 
+    pub(super) fn refresh_tab_statuses(&mut self) {
+        self.tab_statuses = TabStatuses::new(&self.world, &self.closed, &self.snoozed);
+    }
+
+
     /// Where Enter will open the choice, said on the palette's edge.
     fn palette_target(&self, enter: Open) -> String {
-        let Some(glass) = self.glasses.as_ref().map(Glasses::glass) else {
-            return " open ".to_owned();
-        };
+        let glass = self.glasses.glass();
         let shown = glass.shown(glass.focus).map(|tab| {
             tab.title.clone().unwrap_or_else(|| {
                 Pane::parse(&tab.pane)
@@ -2498,13 +3037,13 @@ impl Ui {
         let title = if let Some(mode) = &palette.sidebar {
             use resource_sidebar::PaletteMode as Mode;
             match mode { Mode::New { .. } => " New folder: type a name ".into(), Mode::Rename { .. } => " Rename folder: type a name ".into(), Mode::Move { .. } => " Move to: choose a folder ".into(), Mode::Add { .. } => " Add to folder: find a resource ".into(), Mode::Manage { .. } => " Folder actions ".into(), Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } => " m: move resource · Esc: cancel ".into(), Mode::Delete { .. } => " y: delete folder · Esc: cancel ".into() }
-        } else { match (palette.naming, &self.glasses) {
-            (Some(Naming::Rename), Some(glasses)) => {
-                format!(" rename “{}”: type its new name ", glasses.glass().name)
+        } else { match palette.naming {
+            Some(Naming::Rename) => {
+                format!(" rename “{}”: type its new name ", self.glasses.glass().name)
             }
-            (Some(Naming::New), _) => " a new space: type its name ".to_owned(),
-            (Some(Naming::Duplicate), Some(glasses)) => {
-                format!(" a copy of “{}”: type its name ", glasses.glass().name)
+            Some(Naming::New) => " a new space: type its name ".to_owned(),
+            Some(Naming::Duplicate) => {
+                format!(" a copy of “{}”: type its name ", self.glasses.glass().name)
             }
             _ => self.palette_target(palette.enter),
         }};
@@ -2638,20 +3177,18 @@ impl Ui {
         }
         let terminal_focused = self.terminal_focused();
         let mission_form = self.mission_form_focused();
-        if let Some(mode) = self.glasses.as_ref().and_then(|g| g.palette.as_ref()).and_then(|p| p.sidebar.clone()) {
+        if let Some(mode) = self.glasses.palette.as_ref().and_then(|p| p.sidebar.clone()) {
             use resource_sidebar::PaletteMode as Mode;
             let explicit = key.modifiers.is_empty();
             match mode {
-                Mode::ConfirmPlace { subject, folder } if explicit && key.code == KeyCode::Char('m') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_place(&subject, folder.as_deref(), None); return true; }
-                Mode::ConfirmCreate { subject, name } if explicit && key.code == KeyCode::Char('m') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_create_folder(&name, Some(&subject)); return true; }
-                Mode::Delete { id } if explicit && key.code == KeyCode::Char('y') => { self.glasses.as_mut().unwrap().palette = None; self.sidebar_edit(vec![fractal_client::ArrangementOperation::FolderDelete { id }]); return true; }
+                Mode::ConfirmPlace { subject, folder } if explicit && key.code == KeyCode::Char('m') => { self.glasses.palette = None; self.sidebar_place(&subject, folder.as_deref(), None); return true; }
+                Mode::ConfirmCreate { subject, name } if explicit && key.code == KeyCode::Char('m') => { self.glasses.palette = None; self.sidebar_create_folder(&name, Some(&subject)); return true; }
+                Mode::Delete { id } if explicit && key.code == KeyCode::Char('y') => { self.glasses.palette = None; self.sidebar_edit(vec![fractal_client::ArrangementOperation::FolderDelete { id }]); return true; }
                 Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. } if key.code != KeyCode::Esc => return true,
                 _ => {}
             }
         }
-        let Some(glasses) = self.glasses.as_mut() else {
-            return false;
-        };
+        let glasses = &mut self.glasses;
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let command = key.modifiers.contains(KeyModifiers::SUPER);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -2709,11 +3246,21 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
-        let Some(glasses) = self.glasses.as_mut() else {
-            return false;
-        };
-        // Home over the glass takes the keys, as Home does; Esc closes it and Ctrl+K still opens
-        // the palette.
+        // A document page or the documents list has no box to type in: its plain letters act.
+        if !sidebar_keys
+            && !self.home_open()
+            && !self.editing
+            && self.find.is_none()
+            && !mission_form
+            && self.chat.as_ref().is_none_or(|chat| !chat.editing)
+            && self.confirm.is_none()
+            && self.popover.is_none()
+            && self.document_key(key)
+        {
+            return true;
+        }
+        let glasses = &mut self.glasses;
+        // Usage floats over the space: Esc closes it; Ctrl+H opens or focuses Inbox.
         if glasses.home
             && !self.editing
             && self.confirm.is_none()
@@ -2721,7 +3268,7 @@ impl Ui {
         {
             match key.code {
                 KeyCode::Esc => self.close_home(),
-                KeyCode::Char('h') if control => self.close_home(),
+                KeyCode::Char('h') if control => self.open_home(),
                 KeyCode::Char('k') if control || command => self.open_palette(None, Open::Here),
                 _ => return false,
             }
@@ -2748,7 +3295,7 @@ impl Ui {
         let glass = glasses.glass();
         let tabs = glass.count(glass.focus).max(1);
         let current = glass.layout.groups()[glass.focus].current;
-        let subject = glass.focused().is_some();
+        let subject = glass.focused().is_some_and(|key| key != "list:home");
         let quiet = !self.editing && self.new_mission.is_none() && self.chat.is_none();
         // Letters type, chords command (Nathan, 2026-10-03): in a conversation tab a plain
         // printable key opens its message box and types itself, the first key included. Keys
@@ -2778,7 +3325,7 @@ impl Ui {
         match key.code {
             KeyCode::Char('q') if control => self.quit = true,
             // The agent's actions: restart, retire, suspend and the rest (Nathan, 2026-10-04).
-            KeyCode::Char('a') if control && conversation.is_some() => {
+            KeyCode::Char(screens::ACTIONS_CHORD) if control && conversation.is_some() => {
                 if let Some(agent) = &conversation {
                     self.popover = Some(format!("actions:{agent}"));
                 }
@@ -2826,14 +3373,9 @@ impl Ui {
             // Ctrl+T opens a tab; Ctrl+V / Ctrl+X opens a right / below split.
             KeyCode::Char('k') if control || command => self.open_palette(None, Open::Here),
             KeyCode::Char('s') if control => self.toggle_sidebar(),
-            // Home over the glass, and away again; in a text box Ctrl+H stays backspace.
-            KeyCode::Char('h') if control => {
-                if self.home_open() {
-                    self.close_home();
-                } else {
-                    self.open_home();
-                }
-            }
+            // Inbox is a regular tab: this shortcut opens or focuses it.
+            // In a text box Ctrl+H stays backspace.
+            KeyCode::Char('h') if control => self.open_home(),
             KeyCode::Char('t') if control => self.open_palette(None, Open::Tab),
             KeyCode::Char('v') if control => self.split_group(Side::Right),
             KeyCode::Char('x') if control => self.split_group(Side::Below),
@@ -2866,7 +3408,7 @@ impl Ui {
                 self.open_palette(Some(digit as usize - '1' as usize), Open::Here)
             }
             // A mission's k shows its whole declaration, as its card says; Up still scrolls.
-            KeyCode::Char('k') if quiet && subject && self.tab == 2 && key.modifiers.is_empty() => {
+            KeyCode::Char('k') if quiet && subject && self.tab() == 2 && key.modifiers.is_empty() => {
                 self.action_key('k')
             }
             // A subject's tab has no list to move through: these scroll its pane.
@@ -2883,11 +3425,7 @@ impl Ui {
 
     /// Pasted text goes into an open palette's query.
     pub(crate) fn paste_into_palette(&mut self, text: &str) -> bool {
-        let Some(palette) = self
-            .glasses
-            .as_mut()
-            .and_then(|glasses| glasses.palette.as_mut())
-        else {
+        let Some(palette) = self.glasses.palette.as_mut() else {
             return false;
         };
         palette.query.push_str(text);
@@ -2899,116 +3437,92 @@ impl Ui {
     /// Ctrl+G: the palette's glasses section, the next glass chosen, so Ctrl+G Enter switches.
     fn open_glasses_palette(&mut self) {
         self.open_palette(Some(GLASSES), Open::Here);
-        let next = self.glasses.as_ref().map_or(0, |glasses| {
-            if glasses.all.len() > 1 {
-                (glasses.shown + 1) % glasses.all.len()
-            } else {
-                glasses.shown
-            }
-        });
-        if let Some(palette) = self
-            .glasses
-            .as_mut()
-            .and_then(|glasses| glasses.palette.as_mut())
-        {
+        let next = if self.glasses.all.len() > 1 {
+            (self.glasses.shown + 1) % self.glasses.all.len()
+        } else {
+            self.glasses.shown
+        };
+        if let Some(palette) = self.glasses.palette.as_mut() {
             palette.selected = next;
         }
     }
 
-    /// Open Home over the glass: stui's own tab moves to Home, so its keys act there.
+    /// Open or focus the Inbox tab in this space.
     pub(crate) fn open_home(&mut self) {
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.home = true;
-            glasses.usage = false;
-            glasses.palette = None;
-        }
-        // Home opens over the glass: an attached terminal stays attached under it, and has the
-        // keys again when Home closes.
-        self.tab = 0;
-        self.kdl = false;
+        self.glasses.palette = None;
+        self.open_in_glass(Pane::List(0), Open::Tab);
     }
 
-    /// Close Home; stui's own tab follows the focused split again.
+    /// Close Usage; the keys go back to the focused split.
     pub(crate) fn close_home(&mut self) {
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.home = false;
-            glasses.usage = false;
-        }
+        self.glasses.home = false;
+        self.glasses.usage = false;
         self.show_focused();
     }
 
     /// Whether `pane` is already open in a tab of the glass in front.
     pub(crate) fn shows_in_glass(&self, pane: &Pane) -> bool {
-        self.glasses
-            .as_ref()
-            .is_some_and(|glasses| glasses.glass().find(&pane.key()).is_some())
+        self.glasses.glass().find(&pane.key()).is_some()
     }
 
     pub(crate) fn home_open(&self) -> bool {
-        self.glasses.as_ref().is_some_and(|glasses| glasses.home)
+        self.glasses.home
     }
 
     /// Whether the missions window must be followed now: a mission list or card is on screen.
-    /// Without glasses (the classic layout) it always is, as before.
     pub(crate) fn missions_wanted(&self) -> bool {
-        self.glasses.as_ref().is_none_or(|glasses| glasses.shows_missions())
+        self.glasses.shows_missions()
     }
 
     pub(crate) fn palette_open(&self) -> bool {
-        self.glasses
-            .as_ref()
-            .is_some_and(|glasses| glasses.palette.is_some())
+        self.glasses.palette.is_some()
+    }
+
+    /// Confirmation-like states never accept a held key as a fresh press.
+    pub(super) fn confirmation_open(&self) -> bool {
+        use resource_sidebar::PaletteMode as Mode;
+
+        self.confirm.is_some()
+            || self.answering.is_some()
+            || match self.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()) {
+                Some(Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. }) => true,
+                // Deliberately exhaustive: every new mode must choose its repeat policy.
+                None | Some(Mode::New { .. } | Mode::Rename { .. } | Mode::Manage { .. }
+                    | Mode::Move { .. } | Mode::Add { .. }) => false,
+            }
     }
 
     /// The wheel scrolls the palette's list as content, three rows a step; the selection
     /// stays where it is until a key moves it.
     pub(crate) fn scroll_palette(&mut self, up: bool) {
         let shown = self.frame.borrow().palette_top;
-        if let Some(palette) = self
-            .glasses
-            .as_mut()
-            .and_then(|glasses| glasses.palette.as_mut())
-        {
+        if let Some(palette) = self.glasses.palette.as_mut() {
             let top = palette.top.unwrap_or(shown);
             palette.top = Some(if up { top.saturating_sub(3) } else { top + 3 });
         }
     }
 
     pub(crate) fn open_palette(&mut self, section: Option<usize>, enter: Open) {
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.palette = Some(Palette {
-                section,
-                enter,
-                ..Palette::default()
-            });
-        }
+        self.glasses.palette = Some(Palette {
+            section,
+            enter,
+            ..Palette::default()
+        });
     }
 
     fn clamp_palette(&mut self) {
-        let count = match self
-            .glasses
-            .as_ref()
-            .and_then(|glasses| glasses.palette.as_ref())
-        {
+        let count = match self.glasses.palette.as_ref() {
             Some(palette) => self.matches(palette).len(),
             None => return,
         };
-        if let Some(palette) = self
-            .glasses
-            .as_mut()
-            .and_then(|glasses| glasses.palette.as_mut())
-        {
+        if let Some(palette) = self.glasses.palette.as_mut() {
             palette.selected = palette.selected.min(count.saturating_sub(1));
         }
     }
 
     /// Act on the chosen row (or `index`).
     pub(crate) fn open_choice(&mut self, index: Option<usize>, how: Open) {
-        let Some(palette) = self
-            .glasses
-            .as_ref()
-            .and_then(|glasses| glasses.palette.as_ref())
-        else {
+        let Some(palette) = self.glasses.palette.as_ref() else {
             return;
         };
         let index = index.unwrap_or(palette.selected);
@@ -3016,9 +3530,7 @@ impl Ui {
             return;
         };
         if self.sidebar_palette_action(&choice.action) { return; }
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         glasses.palette = None;
         match choice.action {
             // Choosing an agent's terminal is asking to attach it.
@@ -3039,6 +3551,11 @@ impl Ui {
                 self.find_in(&agent, &query);
             }
             Action::Home => self.open_home(),
+            Action::Usage => {
+                if !self.usage_open() {
+                    self.toggle_usage();
+                }
+            }
             Action::Name(naming) => {
                 let query = match naming {
                     Naming::Rename => glasses.glass().name.clone(),
@@ -3110,7 +3627,7 @@ impl Ui {
                 self.world.machines.items().iter().any(|m| m.name == name)
             }
             // A document is read when its pane opens; one st does not have says so there.
-            Pane::Document(_) => true,
+            Pane::Document(_) | Pane::Documents(_) => true,
             _ => false,
         }
     }
@@ -3132,22 +3649,11 @@ impl Ui {
             requests::Place::Right => Open::Right,
             requests::Place::Below => Open::Below,
         };
-        if self.glasses.is_none() {
-            // The classic layout has no tabs or splits: the list selects it, which moves focus.
-            match &pane {
-                Pane::Agent(Some(id)) | Pane::Mission(Some(id)) | Pane::Machine(Some(id))
-                    if !keep =>
-                {
-                    let id = id.clone();
-                    self.open(&id);
-                }
-                _ => return requests::Answer::NotShown,
-            }
-        } else if !keep {
+        if !keep {
             self.open_in_glass(pane, how);
-        } else if let Some(glasses) = self.glasses.as_mut() {
+        } else {
             let key = pane.key();
-            let glass = glasses.glass_mut();
+            let glass = self.glasses.glass_mut();
             if glass.find(&key).is_none() {
                 let focus = glass.focus;
                 match how {
@@ -3186,6 +3692,7 @@ impl Ui {
     /// Show `pane` in this glass: where it already shows, else as `how` says. Home stays Home,
     /// so what opens from Home gets its own tab, and a Home item opens on Home itself.
     pub(crate) fn open_in_glass(&mut self, pane: Pane, how: Open) {
+        let before = self.current_place();
         self.open_in_glass_inner(pane.clone(), how);
         // Opening an agent attaches its terminal once its tab has stayed in front a moment,
         // unless this device chose its conversation. Only opening does: moving the focus to a
@@ -3197,16 +3704,13 @@ impl Ui {
         {
             self.attach_when = Some((id.clone(), Instant::now()));
         }
+        self.record_place_change(before);
     }
 
     fn open_in_glass_inner(&mut self, pane: Pane, how: Open) {
-        if let Some(glasses) = self.glasses.as_mut() {
-            glasses.home = false;
-        }
+        self.glasses.home = false;
         let title = self.pane_title(&pane);
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         // Home floats over the glass: an item opened "here" opens Home with it selected. Asked
         // for in a tab or a split, the item's card opens there like any pane (Nathan,
         // 2026-10-02: Ctrl+T on a "needs you" item made no tab).
@@ -3280,9 +3784,7 @@ impl Ui {
     }
 
     fn split_group(&mut self, side: Side) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         glasses.zoomed = false;
         let glass = glasses.glass_mut();
         let group = glass.layout.split(glass.focus, side, Group::default());
@@ -3294,9 +3796,7 @@ impl Ui {
 
     /// Keep a changed glass: on this device, and in st when st keeps glasses.
     fn glass_changed(&mut self, id: &str) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         glasses.save();
         if let Some(write) = glasses.write(id) {
             self.effects.push(Effect::SaveGlass(write));
@@ -3307,9 +3807,7 @@ impl Ui {
     /// glass made elsewhere appears, and one deleted elsewhere goes, except while a change of
     /// ours is on its way. The first time, glasses kept only on this device move into st.
     pub(crate) fn glasses_from_graph(&mut self, remote: Vec<fractal_client::Glass>) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         let first = !glasses.graph;
         glasses.graph = true;
         // A glass made only because this device had none by that name gives way to st's.
@@ -3394,9 +3892,7 @@ impl Ui {
                 self.effects.push(Effect::SaveGlass(write));
             }
         }
-        if let Some(glasses) = self.glasses.as_ref() {
-            glasses.save();
-        }
+        self.glasses.save();
         if gone > 0 {
             self.flash(match gone {
                 1 => "A space was closed elsewhere".to_owned(),
@@ -3414,9 +3910,7 @@ impl Ui {
         key: &str,
         outcome: Result<Option<String>, String>,
     ) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         let current = glasses
             .pending
             .get(id)
@@ -3434,7 +3928,7 @@ impl Ui {
                 glasses.save();
             }
             Err(error) if current => self.flash(format!(
-                "st did not keep a space yet ({error}); stui will try again"
+                "Fractal did not keep a space yet ({error}); the Fractal terminal UI will try again"
             )),
             Err(_) => {}
         }
@@ -3442,28 +3936,27 @@ impl Ui {
 
     /// Writes st has not confirmed, to send again once it is reachable.
     pub(crate) fn unsent_glass_writes(&self) -> Vec<GlassWrite> {
-        self.glasses
-            .as_ref()
-            .map(|glasses| glasses.pending.values().cloned().collect())
-            .unwrap_or_default()
+        self.glasses.pending.values().cloned().collect()
     }
 
     /// Show tab `index` of the focused group.
     pub(crate) fn show_tab(&mut self, index: usize) {
-        let focus = self
-            .glasses
-            .as_ref()
-            .map(|glasses| glasses.glass().focus)
-            .unwrap_or_default();
+        let focus = self.glasses.glass().focus;
         self.show_in(focus, index);
     }
 
     /// Focus group `group` and show its tab `tab` (as its strip counts them). A tab it does
     /// not have leaves the group showing what it showed.
     pub(crate) fn show_in(&mut self, group: usize, tab: usize) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let before = self.current_place();
+        let changed = self
+            .glasses
+            .glass()
+            .layout
+            .groups()
+            .get(group)
+            .is_some_and(|shown| tab < shown.tabs.len() && shown.current != tab);
+        let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let count = glass.count(group);
         let Some(shown) = glass.layout.group_mut(group) else {
@@ -3476,48 +3969,22 @@ impl Ui {
         // Where the person is, remembered on this device for the next start.
         glasses.save();
         self.show_focused();
+        if changed {
+            self.record_place_change(before);
+        }
     }
 
     pub(crate) fn focus_group(&mut self, group: usize) {
         self.show_in(group, usize::MAX);
     }
 
-    /// Bring stui's own tab and selection back to the focused pane's subject when they drifted:
-    /// at start, before the lists arrive, the subject cannot be selected yet.
-    pub(crate) fn resync_focus(&mut self) {
-        // Home over the glass owns stui's tab until it closes; a graph update must not turn it
-        // back into the focused split's subject.
-        if self.home_open() {
-            return;
-        }
-        let Some(pane) = self
-            .glasses
-            .as_ref()
-            .and_then(|glasses| glasses.glass().focused())
-            .and_then(Pane::parse)
-        else {
-            return;
-        };
-        let Some((tab, subject)) = pane_subject(&pane) else {
-            return;
-        };
-        if self.tab != tab || subject.is_some_and(|subject| self.selected_id() != Some(subject)) {
-            self.focus_pane(&pane);
-        }
-    }
-
-    /// Point stui's own tab and selection at what the focused group shows.
+    /// The focused split changed what it shows: its subject is selected in its list.
     pub(crate) fn show_focused(&mut self) {
-        let Some(glasses) = self.glasses.as_ref() else {
-            return;
-        };
-        let glass = glasses.glass();
-        let focused = glass.focused().and_then(Pane::parse);
-        match focused {
+        match self.focused_pane() {
             Some(pane) => self.focus_pane(&pane),
             None => {
-                self.tab = 0;
                 self.kdl = false;
+                self.note_focus();
             }
         }
     }
@@ -3525,15 +3992,11 @@ impl Ui {
     /// Focus the group nearest in the arrow's direction, on screen; a zoomed split comes back
     /// to its place first.
     fn move_focus(&mut self, direction: KeyCode) {
-        if let Some(glasses) = self.glasses.as_mut()
-            && glasses.zoomed
-        {
-            glasses.zoomed = false;
+        if self.glasses.zoomed {
+            self.glasses.zoomed = false;
             return;
         }
-        let Some(focus) = self.glasses.as_ref().map(|glasses| glasses.glass().focus) else {
-            return;
-        };
+        let focus = self.glasses.glass().focus;
         let rects = self.frame.borrow().glass_leaves.clone();
         let Some(from) = rects.get(focus) else { return };
         let center = |rect: &Rect| {
@@ -3561,12 +4024,9 @@ impl Ui {
             .map(|(index, _)| index);
         if let Some(index) = best {
             self.focus_group(index);
-        } else if direction == KeyCode::Left
-            && let Some(glasses) = self.glasses.as_mut()
-            && glasses.sidebar.shown
-        {
+        } else if direction == KeyCode::Left && self.glasses.sidebar.shown {
             // Left of the leftmost split is the sidebar, when it shows.
-            glasses.sidebar.focused = true;
+            self.glasses.sidebar.focused = true;
         }
     }
 
@@ -3586,11 +4046,8 @@ impl Ui {
                 && row >= area.y
                 && row < area.y + area.height
         };
-        if let Some(glasses) = self.glasses.as_mut()
-            && glasses.sidebar.shown
-            && !in_sidebar
-        {
-            glasses.sidebar.focused = false;
+        if self.glasses.sidebar.shown && !in_sidebar {
+            self.glasses.sidebar.focused = false;
         }
         // Home over the glass takes clicks inside it; a click outside closes it, except on the
         // top bar, whose ⌂ toggles it.
@@ -3610,14 +4067,12 @@ impl Ui {
             let on_palette = self.frame.borrow().hits.iter().any(|(rect, hit)| {
                 matches!(hit, Hit::PaletteChoice(_)) && contains(*rect, column, row)
             });
-            if !on_palette && let Some(glasses) = self.glasses.as_mut() {
-                glasses.palette = None;
+            if !on_palette {
+                self.glasses.palette = None;
             }
             return !on_palette;
         }
-        let Some(focus) = self.glasses.as_ref().map(|glasses| glasses.glass().focus) else {
-            return false;
-        };
+        let focus = self.glasses.glass().focus;
         let group = self
             .frame
             .borrow()
@@ -3638,22 +4093,22 @@ impl Ui {
     }
 
     pub(super) fn click_focuses_split(&self, column: u16, row: u16) -> bool {
-        self.glasses.as_ref().is_some_and(|glasses| {
+        {
             self.frame
                 .borrow()
                 .glass_leaves
                 .iter()
                 .position(|rect| contains(*rect, column, row))
-                .is_some_and(|group| group != glasses.glass().focus)
-        })
+                .is_some_and(|group| group != self.glasses.glass().focus)
+        }
     }
 
     /// Close the focused tab when it is a form that was just finished or cancelled.
     pub(crate) fn close_form_tab(&mut self) {
         let form = self
             .glasses
-            .as_ref()
-            .and_then(|glasses| glasses.glass().focused())
+            .glass()
+            .focused()
             .is_some_and(|key| key == Pane::NewMission.key());
         if form {
             self.close_tab();
@@ -3665,9 +4120,7 @@ impl Ui {
     /// Open the right-click menu for what is under the pointer: a tab, or a split's strip or
     /// non-terminal body (a terminal body keeps the click for its program).
     pub(super) fn open_glass_context_menu(&mut self, column: u16, row: u16) {
-        let Some(glasses) = self.glasses.as_ref() else {
-            return;
-        };
+        let glasses = &self.glasses;
         if glasses.palette.is_some() {
             return;
         }
@@ -3911,10 +4364,7 @@ impl Ui {
                 },
             ),
             MenuAction::MoveTab { group, tab, to } => {
-                let end = self
-                    .glasses
-                    .as_ref()
-                    .and_then(|glasses| glasses.glass().layout.groups().get(to).map(|group| group.tabs.len()))
+                let end = self.glasses.glass().layout.groups().get(to).map(|group| group.tabs.len())
                     .unwrap_or(0);
                 self.drop_tab((group, tab), Drop::Strip { group: to, index: end });
             }
@@ -3938,9 +4388,7 @@ impl Ui {
     }
 
     pub(crate) fn close_tab(&mut self) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         if glass.on_home() && glass.layout.groups().len() == 1 {
             self.flash("Nothing open to close");
@@ -3964,7 +4412,8 @@ impl Ui {
             }
             _ => {}
         }
-        if group.tabs.is_empty() && count > 1 {
+        let removed_group = group.tabs.is_empty() && count > 1;
+        if removed_group {
             let layout = std::mem::take(&mut glass.layout);
             glass.layout = layout.remove(focus).unwrap_or_default();
             glass.focus = focus.saturating_sub(1);
@@ -3979,23 +4428,26 @@ impl Ui {
         }
         self.glass_changed(&id);
         self.show_focused();
+        self.prune_place_history();
+        self.record_place_change(None);
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
-    const LEADER_KEYS: [(&'static str, &'static str); 14] = [
+    const LEADER_KEYS: [(&'static str, &'static str); 15] = [
         ("\\", "close this tab"),
         ("c", "the conversation (leave the terminal)"),
         ("t", "a new tab"),
+        ("l", "previous item needing you"),
         ("v", "split right"),
         ("x", "split below"),
-        ("[ ]", "previous, next tab"),
+        ("[ ]", "back, forward in place history"),
         ("o", "zoom the split, and back"),
         ("s", "show or hide the sidebar"),
         ("g", "another space, or a new one"),
         ("h", "Home"),
         ("k", "the palette"),
         ("?", "help"),
-        ("q", "quit stui"),
+        ("q", "quit Fractal TUI"),
         ("esc", "put this away"),
     ];
 
@@ -4022,41 +4474,24 @@ impl Ui {
                     self.flash("Already showing the conversation");
                 }
             }
-            KeyCode::Char(letter) if self.glasses.is_some() => match letter {
+            KeyCode::Char(letter) => match letter {
                 't' => self.open_palette(None, Open::Tab),
                 'v' => self.split_group(Side::Right),
                 'x' => self.split_group(Side::Below),
                 'k' => self.open_palette(None, Open::Here),
                 's' => self.toggle_sidebar(),
                 'g' => self.open_glasses_palette(),
-                'h' => {
-                    if self.home_open() {
-                        self.close_home();
-                    } else {
-                        self.open_home();
-                    }
-                }
+                'h' => self.open_home(),
                 'o' => {
-                    if let Some(glasses) = self.glasses.as_mut() {
-                        glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
-                    }
+                    let glasses = &mut self.glasses;
+                    glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
                 }
-                '[' | ']' => self.step_tab(letter == ']'),
+                '[' | ']' => self.navigate_history(letter == ']'),
+                'l' => self.triage_next(false),
                 _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
         }
-    }
-
-    /// The next or previous tab in the focused split.
-    fn step_tab(&mut self, forward: bool) {
-        let Some(glasses) = self.glasses.as_ref() else {
-            return;
-        };
-        let glass = glasses.glass();
-        let tabs = glass.count(glass.focus).max(1);
-        let current = glass.layout.groups()[glass.focus].current;
-        self.show_tab(if forward { (current + 1) % tabs } else { (current + tabs - 1) % tabs });
     }
 
     /// The leader's list, over the bottom of the screen: what to press next.
@@ -4110,15 +4545,18 @@ impl Ui {
     }
 
     fn show_glass(&mut self, index: usize) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let before = self.current_place();
+        let changed = self.glasses.shown != index;
+        let glasses = &mut self.glasses;
         if index >= glasses.all.len() {
             return;
         }
         glasses.shown = index;
         glasses.save();
         self.show_focused();
+        if changed {
+            self.record_place_change(before);
+        }
     }
 
     /// Whether keys go to the attached terminal: in glasses only while its tab has focus.
@@ -4126,27 +4564,42 @@ impl Ui {
         let Some(view) = self.terminal.as_ref() else {
             return false;
         };
-        if self.glasses.is_some() {
-            !self.home_open() && self.focused_pane() == Some(Pane::Terminal(view.agent.clone()))
-        } else {
-            self.tab == 1
-        }
+        !self.home_open() && self.focused_pane() == Some(Pane::Terminal(view.agent.clone()))
     }
 
     /// Show `pane` in the focused tab in place of what it shows: an agent's conversation and
-    /// its terminal are one tab, switched by Ctrl+] and Ctrl+\.
+    /// its terminal are one tab, switched by Enter and Ctrl+\.
     pub(crate) fn swap_focused_pane(&mut self, pane: Pane) {
-        let Some(focus) = self.glasses.as_ref().map(|glasses| glasses.glass().focus) else {
-            return;
-        };
+        let focus = self.glasses.glass().focus;
         self.swap_shown_pane(focus, pane);
+    }
+
+    /// Triage replaces only this split's content, even when another split shows the target.
+    pub(super) fn replace_focused_pane(&mut self, pane: Pane) {
+        let before = self.current_place();
+        self.glasses.home = false;
+        self.glasses.palette = None;
+        self.glasses.sidebar.focused = false;
+        let glass = self.glasses.glass_mut();
+        let group = glass.layout.group_mut(glass.focus).unwrap();
+        if group.tabs.is_empty() {
+            group.tabs.push(Tab::pane(pane.key()));
+            group.current = 0;
+        } else {
+            let tab = &mut group.tabs[group.current];
+            tab.pane = pane.key();
+            tab.title = None;
+        }
+        let id = glass.id.clone();
+        self.glass_changed(&id);
+        self.show_focused();
+        self.record_place_change(before);
     }
 
     /// Show `pane` in place of what the split `group` shows.
     pub(crate) fn swap_shown_pane(&mut self, group: usize, pane: Pane) {
-        let Some(glasses) = self.glasses.as_mut() else {
-            return;
-        };
+        let before = self.current_place();
+        let glasses = &mut self.glasses;
         let glass = glasses.glass_mut();
         let Some(split) = glass.layout.group_mut(group) else {
             return;
@@ -4161,13 +4614,12 @@ impl Ui {
         tab.pane = pane.key();
         let id = glass.id.clone();
         self.glass_changed(&id);
+        self.record_place_change(before);
     }
 
     /// The pane each split of the glass in front shows, with the split's index.
     pub(crate) fn shown_panes(&self) -> Vec<(usize, Pane)> {
-        let Some(glasses) = self.glasses.as_ref() else {
-            return Vec::new();
-        };
+        let glasses = &self.glasses;
         let glass = glasses.glass();
         (0..glass.layout.groups().len())
             .filter_map(|group| {
@@ -4179,64 +4631,60 @@ impl Ui {
             .collect()
     }
 
-    /// Whether the new mission form takes the keys: in a glass only while its tab has focus.
+    /// Whether the new mission form takes the keys: only while its tab has focus.
     pub(crate) fn mission_form_focused(&self) -> bool {
-        self.new_mission.is_some()
-            && (self.glasses.is_none() || self.focused_pane() == Some(Pane::NewMission))
+        self.new_mission.is_some() && self.focused_pane() == Some(Pane::NewMission)
     }
 
-    /// The pane in the focused split's current tab, in glasses.
+    /// The pane in the focused split's current tab.
     pub(crate) fn focused_pane(&self) -> Option<Pane> {
-        self.glasses
-            .as_ref()
-            .and_then(|glasses| glasses.glass().focused().and_then(Pane::parse))
+        self.glasses.glass().focused().and_then(Pane::parse)
     }
 
-    /// Point stui's own tab and selection at a pane's subject, so its keys act on it.
+    /// Select a pane's subject in its own list, so that list shows it when it opens.
     fn focus_pane(&mut self, pane: &Pane) {
-        let before = (self.tab, self.selected_id());
-        self.focus_pane_inner(pane);
-        // A message box belongs to the pane it was opened in: once another pane or tab has the
-        // focus, typing must not go on into a draft nobody can see (Nathan, 2026-10-07).
-        if before != (self.tab, self.selected_id()) {
-            self.editing = false;
-            self.chat = None;
-            self.answering = None;
-            self.confirm = None;
-        }
-    }
-
-    fn focus_pane_inner(&mut self, pane: &Pane) {
-        let Some((tab, subject)) = pane_subject(pane) else {
-            return;
-        };
-        self.tab = tab;
         // Focus only moves focus: an attached terminal stays attached until Ctrl+\\ or its tab
         // closes, and takes keys only while its tab has focus.
         self.kdl = matches!(pane, Pane::Declaration(_));
-        let Some(subject) = subject else { return };
-        let mut position = self
-            .listing_for(tab, 40)
-            .ids
-            .iter()
-            .position(|id| *id == subject);
-        if position.is_none() && tab == 2 {
-            // st's own missions are listed only while shown.
-            self.system = true;
-            position = self
+        if let Some((tab, Some(subject))) = pane_subject(pane) {
+            let mut position = self
                 .listing_for(tab, 40)
                 .ids
                 .iter()
                 .position(|id| *id == subject);
+            if position.is_none() && tab == 2 {
+                // st's own missions are listed only while shown.
+                self.system = true;
+                position = self
+                    .listing_for(tab, 40)
+                    .ids
+                    .iter()
+                    .position(|id| *id == subject);
+            }
+            if let Some(position) = position {
+                self.selected[tab] = position;
+            }
         }
-        if let Some(position) = position {
-            self.selected[tab] = position;
+        self.note_focus();
+    }
+
+    /// A message box belongs to the pane it was opened in: once another pane, or Now, has the
+    /// focus, typing must not go on into a draft nobody can see (Nathan, 2026-10-07).
+    pub(crate) fn note_focus(&mut self) {
+        let now = self.focus();
+        if now == self.focus_seen {
+            return;
         }
+        self.focus_seen = now;
+        self.editing = false;
+        self.chat = None;
+        self.answering = None;
+        self.confirm = None;
     }
 }
 
-/// The sidebar tab and the selected id a pane's subject is, where it has one.
-fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
+/// The section and the selected id a pane's subject is, where it has one.
+pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
     Some(match pane {
         Pane::Home(id) => (0, id.clone()),
         Pane::Agent(id) => (1, id.clone()),
@@ -4254,9 +4702,9 @@ fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
 
 /// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
 /// ratio; an older st is never sent one.
-static GLASSES_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub fn set_glasses_version(version: u32) {
+pub fn set_glasses_version(version: u64) {
     GLASSES_VERSION.store(version, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -4264,7 +4712,7 @@ fn ratios_on_the_wire() -> bool {
     GLASSES_VERSION.load(std::sync::atomic::Ordering::Relaxed) >= 2
 }
 
-/// A layout as st's client types spell it. stui splits two at a time; a longer split nests, and
+/// A layout as st's client types spell it. Fractal TUI splits two at a time; a longer split nests, and
 /// only a two-way split's own ratio travels.
 fn to_wire(layout: &Layout) -> GlassLayout {
     match layout {
@@ -4309,9 +4757,11 @@ fn to_wire(layout: &Layout) -> GlassLayout {
 fn from_wire(layout: GlassLayout) -> Layout {
     match layout {
         GlassLayout::Group { tabs } => Layout::Group(Group {
+            id: new_id(),
             tabs: tabs
                 .into_iter()
                 .map(|tab| Tab {
+                    id: new_id(),
                     title: tab.title,
                     pane: tab.pane,
                 })
@@ -4380,32 +4830,82 @@ fn home_popover_rect(body: Rect) -> Rect {
     }
 }
 
-/// The first and last tab that fit in `room` cells, the one in front always among them: the
-/// strip stays where it is until the tab in front passes its end, then moves just enough. Each
-/// tab takes its width and a gap; the markers for hidden tabs are reserved from `room`.
-fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
-    const MARKER: u16 = 4;
+/// The tabs a strip shows whole in `room` cells, `first` to `last`, and `most`: the furthest it
+/// may start and still show its last tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TabWindow {
+    first: usize,
+    last: usize,
+    most: usize,
+}
+
+/// Where a strip shows its tabs, starting from `start`. Following, the tab in front comes on
+/// screen: the strip stays where it is until that tab passes an end, then moves just enough.
+/// Each tab takes its width and a gap; a `marker` for hidden tabs is reserved at each end.
+fn visible_tabs(
+    widths: &[u16],
+    current: usize,
+    start: usize,
+    follow: bool,
+    marker: u16,
+    room: u16,
+) -> TabWindow {
     let count = widths.len();
     if count == 0 {
-        return (0, 0);
+        return TabWindow {
+            first: 0,
+            last: 0,
+            most: 0,
+        };
     }
     let current = current.min(count - 1);
     let fits = |first: usize, last: usize| {
         let tabs: u16 = widths[first..=last].iter().map(|width| width + 1).sum();
-        let before = if first > 0 { MARKER } else { 0 };
-        let after = if last + 1 < count { MARKER } else { 0 };
+        let before = if first > 0 { marker } else { 0 };
+        let after = if last + 1 < count { marker } else { 0 };
         tabs + before + after <= room
     };
-    let mut first = 0;
-    // Move the start on until the front tab fits (it always shows, even alone and cut short).
-    while first < current && !fits(first, current) {
-        first += 1;
+    let mut most = count - 1;
+    while most > 0 && fits(most - 1, count - 1) {
+        most -= 1;
     }
-    let mut last = current;
-    while last + 1 < count && fits(first, last + 1) {
-        last += 1;
+    let mut first = start.min(most);
+    if follow {
+        // The front tab always shows, even alone and cut short.
+        first = first.min(current);
+        while first < current && !fits(first, current) {
+            first += 1;
+        }
     }
-    (first, last)
+    let last = (first..count)
+        .rev()
+        .find(|last| fits(first, *last))
+        .unwrap_or(first);
+    TabWindow { first, last, most }
+}
+
+/// Where the attention suffix (` ?2`, ` ◆`) starts in a tab's label, if the label still has it.
+fn attention_at(label: &str, attention: &str) -> Option<usize> {
+    if attention.is_empty() {
+        return None;
+    }
+    let body = label
+        .trim_end_matches(' ')
+        .trim_end_matches(|c: char| c.is_ascii_digit());
+    body.strip_suffix(attention)
+        .filter(|before| before.ends_with(' '))
+        .map(str::len)
+}
+
+/// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
+/// or `stale · Agents +1` for more. Each reason is `List: why`; clicking the word says the why.
+fn stale_word(stale: &[String]) -> String {
+    let first = stale.first().map_or("", |why| why.split(':').next().unwrap_or(why));
+    match stale.len() {
+        0 => "stale".to_owned(),
+        1 => format!("stale · {first}"),
+        count => format!("stale · {first} +{}", count - 1),
+    }
 }
 
 #[cfg(test)]
@@ -4469,7 +4969,7 @@ mod tests {
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).expect("drag files the tab's subject");
         assert!(matches!(&write.operations[..], [fractal_client::ArrangementOperation::SubjectPlace { subject, folder: Some(folder), .. }] if subject == &agent && folder == &first));
         assert_eq!(tabs(&ui), tabs_before, "filing does not close a space tab");
-        assert!(ui.resource_sidebar.arrangement().unwrap().body.placements.is_empty(), "only the stream updates the arrangement projection");
+        assert!({ use super::resource_sidebar::ArrangementV1 as _; ui.resource_sidebar.arrangement().unwrap().v1().placements.is_empty() }, "only the stream updates the arrangement projection");
         ui.resource_sidebar.saved(&write, true); ui.effects.clear(); screen(&ui);
         // A resource row can be dragged back into the sidebar as well as out to a tab.
         let rows = ui.resource_sidebar.rows();
@@ -4506,7 +5006,7 @@ mod tests {
         let mut ui = glass();
         ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, &"é".repeat(129));
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(ui.effects.is_empty() && ui.glasses.as_ref().unwrap().palette.is_some(), "invalid name stays editable");
+        assert!(ui.effects.is_empty() && ui.glasses.palette.is_some(), "invalid name stays editable");
         ui.open_sidebar_palette(Mode::New { subject: None }); typed(&mut ui, "Builds");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         let write = ui.effects.iter().find_map(|effect| if let Effect::EditArrangement(write) = effect { Some(write.clone()) } else { None }).unwrap();
@@ -4518,7 +5018,7 @@ mod tests {
         assert!(matches!(&ui.effects[..], [Effect::EditArrangement(write)] if !write.creating && matches!(&write.operations[..], [fractal_client::ArrangementOperation::FolderRename { id, name }] if id == &folder && name == "Renamed")));
         ui.resource_sidebar.writing = false; ui.effects.clear();
         ui.open_sidebar_palette(Mode::Add { folder: folder.clone() });
-        let choices = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
+        let choices = ui.matches(ui.glasses.palette.as_ref().unwrap());
         assert!(choices.iter().any(|choice| matches!(&choice.action, Action::SidebarMode(Mode::ConfirmPlace { folder: Some(id), .. }) if id == &folder)));
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.effects.is_empty(), "finder selection only previews filing");
@@ -4558,9 +5058,8 @@ mod tests {
     }
 
     fn glass() -> Ui {
-        let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(Glasses::open(None, None));
-        ui.glasses.as_mut().unwrap().sidebar.shown = false;
+        let mut ui = Ui::new(demo::test_world());
+        ui.glasses.sidebar.shown = false;
         ui
     }
 
@@ -4592,9 +5091,424 @@ mod tests {
             .join("\n")
     }
 
+    fn tab_badge_strip(ui: &Ui, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+        (0..width).map(|x| buffer[(x, 0)].symbol()).collect::<String>()
+            .split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn tab_badge_world() -> Ui {
+        let mut ui = glass();
+        ui.world.link = Link::Live;
+        let template = ui.world.agents.items()[0].clone();
+        let mut agents = Vec::new();
+        for (id, state) in [("agent/a", AgentState::Working), ("agent/b", AgentState::Idle), ("agent/c", AgentState::Stopped)] {
+            let mut agent = template.clone();
+            agent.id = id.into();
+            agent.state = state;
+            agent.mission = (id == "agent/a").then(|| "mission/m".into());
+            agents.push(agent);
+        }
+        ui.world.agents = Load::Ready(agents);
+        let mut alert = ui.world.attention.items()[0].clone();
+        alert.id = "attention/a".into();
+        alert.agent = Some("agent/a".into());
+        alert.conversations = vec!["agent/a".into()];
+        alert.mission = Some("mission/m".into());
+        alert.kind = AttentionKind::Prompt {
+            seat: "Atlas".into(), seat_id: "agent/a".into(), text: "Choose".into(),
+            question: true,
+            answers: vec!["answer".into()], episode: "episode/question".into(),
+            call: Some("call/question".into()),
+            calls: Ok(vec![PendingCall {
+                id: "call/question".into(), tool: "AskUserQuestion".into(), input: serde_json::json!({}),
+                complete: true,
+            }]),
+            allow: true,
+        };
+        let mut second = alert.clone();
+        second.id = "attention/b".into();
+        let mut update = alert.clone();
+        update.id = "attention/update".into();
+        update.kind = AttentionKind::Message { from: "agent/a".into(), body: "informational".into() };
+        ui.world.attention = Load::Ready(vec![alert, second, update]);
+        ui.glasses.glass_mut().layout = Layout::Group(Group {
+            id: new_id(),
+            tabs: [
+                ("agent:agent/a", "Atlas"), ("agent:agent/b", "Idle"),
+                ("agent:agent/c", "Stopped"), ("mission:mission/m", "Mission"),
+                ("list:home", "Inbox"),
+            ]
+            .into_iter()
+            .map(|(pane, title)| Tab {
+                id: new_id(),
+                pane: pane.into(),
+                title: Some(title.into()),
+            })
+            .collect(),
+            current: 0,
+        });
+        ui.refresh_tab_statuses();
+        ui
+    }
+
+    #[test]
+    fn tab_badge_live_questions_with_empty_answers_keep_the_question_marker() {
+        for native_kind in [true, false] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            if let Load::Ready(items) = &mut next.attention {
+                for item in items {
+                    if let AttentionKind::Prompt { question, answers, call, calls, .. } = &mut item.kind {
+                        *question = native_kind;
+                        answers.clear();
+                        if native_kind {
+                            *call = None;
+                            *calls = Ok(vec![]);
+                        }
+                    }
+                }
+            }
+            ui.set_world(next);
+            for key in ["agent:agent/a", "mission:mission/m", "list:home"] {
+                let tab = Tab::pane(key);
+                assert!(ui.tab_badge(&tab, Pane::parse(key).as_ref()).ask, "{native_kind}: {key}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_loading_demo_refreshes_indexes_through_startup_stage_three() {
+        let mut ui = Ui::new(demo::loading());
+        ui.demo = Some(Demo {
+            started: Instant::now(), loaded: false,
+            world: demo::world(),
+        });
+        let tab = Tab::pane("agent:agent/example/atlas/builder");
+        let pane = Pane::parse(&tab.pane);
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).alerts, None);
+        for stage in 1..=3 {
+            ui.demo.as_mut().unwrap().started = Instant::now()
+                - Duration::from_millis(stage * 350 + 10);
+            ui.step_demo();
+            let badge = ui.tab_badge(&tab, pane.as_ref());
+            assert!(badge.alerts.is_some(), "stage {stage}");
+            if stage >= 2 {
+                assert!(ui.world.agents.ready().is_some(), "stage {stage}");
+            }
+        }
+        assert!(ui.demo.as_ref().unwrap().loaded);
+        let complete = Ui::new(demo::world());
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()), complete.tab_badge(&tab, pane.as_ref()));
+    }
+
+    #[test]
+    fn tab_badge_agent_activity_states_keep_attention_on_the_right() {
+        for (state, glyph, attention) in [
+            (AgentState::Working, "●", false),
+            (AgentState::Compacting, "●", false),
+            (AgentState::Idle, "○", false),
+            (AgentState::Down, "×", false),
+            (AgentState::Stopped, "×", false),
+            (AgentState::Retired, "×", false),
+            (AgentState::Fault, "!", false),
+            (AgentState::Starting, "~", false),
+            (AgentState::Unknown, "~", false),
+            (AgentState::NeedsYou, "○", true),
+            (AgentState::NeedsLogin, "○", true),
+        ] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            next.attention = Load::Ready(Vec::new());
+            if let Load::Ready(agents) = &mut next.agents {
+                agents[0].state = state;
+            }
+            ui.set_world(next);
+            let tab = Tab::pane("agent:agent/a");
+            let badge = ui.tab_badge(&tab, Pane::parse(&tab.pane).as_ref());
+            assert_eq!(badge.activity, glyph, "{state:?}");
+            assert_eq!(
+                badge.label("Atlas", 80, true),
+                format!(" {glyph}Atlas{} ", if attention { " ◆" } else { "" }),
+                "{state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_badge_attention_count_rules_and_display_widths() {
+        for (alerts, ask, needs_person, suffix) in [
+            (None, false, false, ""),
+            (Some(0), false, false, ""),
+            (Some(0), false, true, " ◆"),
+            (Some(1), false, true, " ◆"),
+            (Some(3), false, true, " ◆3"),
+            (Some(1), true, true, " ?"),
+            (Some(2), true, true, " ?2"),
+            (Some(12), true, true, " ?12"),
+        ] {
+            for activity in ["", "●", "○", "×", "!", "~"] {
+                let badge = TabBadge {
+                    activity,
+                    alerts,
+                    ask,
+                    needs_person,
+                };
+                assert_eq!(
+                    badge.label("Atlas", 80, true),
+                    format!(" {activity}Atlas{suffix} ")
+                );
+                for title in [
+                    "Atlas",
+                    "短い名前",
+                    "e\u{301}",
+                    "界".repeat(20).as_str(),
+                    "a".repeat(25).as_str(),
+                    "a".repeat(26).as_str(),
+                    "a".repeat(27).as_str(),
+                ] {
+                    for counts in [false, true] {
+                        let label = badge.label(title, usize::MAX, counts);
+                        assert_eq!(badge.width(title, counts), text::width(&label), "{label}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_truncation_protects_activity_before_padding_and_ellipsis() {
+        for activity in ["●", "○", "×", "!", "~"] {
+            let badge = TabBadge {
+                activity,
+                ..TabBadge::default()
+            };
+            for (width, expected) in [
+                (0, String::new()),
+                (1, activity.to_owned()),
+                (2, format!(" {activity}")),
+                (3, format!(" {activity}…")),
+                (4, format!(" {activity}A…")),
+            ] {
+                let label = badge.label("Atlas", width, false);
+                assert_eq!(label, expected);
+                assert_eq!(text::width(&label), width);
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_narrow_strips_keep_each_painted_agent_activity() {
+        for overflow in [false, true] {
+            for width in [12, 14, 18] {
+                let mut ui = tab_badge_world();
+                let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+                let agent = group.tabs[0].clone();
+                if overflow {
+                    // Cover a two-digit tab count and the smallest label budgets.
+                    group.tabs.resize(12, agent);
+                } else {
+                    group.tabs = vec![agent];
+                }
+                let area = Rect::new(0, 0, width, 1);
+                let mut buffer = Buffer::empty(area);
+                ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+                for (rect, hit) in &ui.frame.borrow().hits {
+                    if let Hit::GlassTab(0, index) = hit {
+                        let tab = &ui.glasses.glass().layout.groups()[0].tabs[*index];
+                        let badge = ui.tab_badge(tab, Pane::parse(&tab.pane).as_ref());
+                        if !badge.activity.is_empty() {
+                            let painted = (rect.x..rect.right())
+                                .map(|x| buffer[(x, 0)].symbol())
+                                .collect::<String>();
+                            assert!(
+                                painted.contains(badge.activity),
+                                "{width} cells, overflow={overflow}, tab {index}: |{painted}|"
+                            );
+                        }
+                    }
+                }
+                assert!(
+                    ui.frame
+                        .borrow()
+                        .hits
+                        .iter()
+                        .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_strip_snapshot_shows_compact_activity_and_attention_suffixes() {
+        let ui = tab_badge_world();
+        assert_eq!(
+            tab_badge_strip(&ui, 120),
+            "●Atlas ?2 ○Idle ×Stopped Mission ?2 Inbox ?2 +"
+        );
+    }
+
+    #[test]
+    fn tab_badge_merges_projected_attention_and_questions_into_one_suffix() {
+        for state in [AgentState::NeedsYou, AgentState::NeedsLogin] {
+            let mut ui = tab_badge_world();
+            let mut next = ui.world.clone();
+            if let Load::Ready(agents) = &mut next.agents {
+                agents[0].state = state;
+            }
+            if let Load::Ready(missions) = &mut next.missions {
+                missions[0].id = "mission/m".into();
+                missions[0].decision = Some("attention/a".into());
+            }
+            ui.set_world(next);
+            for (key, title) in [("agent:agent/a", "Atlas"), ("mission:mission/m", "Mission")] {
+                let tab = Tab::pane(key);
+                let badge = ui.tab_badge(&tab, Pane::parse(key).as_ref());
+                let wide = badge.label(title, 80, true);
+                assert_eq!(wide.matches('?').count(), 1, "{wide}");
+                assert!(wide.contains(&format!("{title} ?2")), "{wide}");
+                assert!(!wide.contains('◆'), "{wide}");
+                let compact = badge.label(title, 80, false);
+                assert!(compact.contains(&format!("{title} ? ")), "{compact}");
+                assert!(!compact.contains('2'), "{compact}");
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_narrow_strip_preserves_activity_after_dropping_attention_chrome() {
+        let ui = tab_badge_world();
+        let shown = tab_badge_strip(&ui, 18);
+        assert!(shown.starts_with('●'), "{shown}");
+        assert!(!shown.contains("?2"), "{shown}");
+        assert!(shown.contains('›'), "hidden tabs remain reachable: {shown}");
+    }
+
+    #[test]
+    fn tab_badge_live_updates_clear_questions_and_preserve_unknown_counts() {
+        let mut ui = tab_badge_world();
+        let mut next = ui.world.clone();
+        next.attention = Load::Ready(Vec::new());
+        ui.set_world(next);
+        let tab = Tab::pane("agent:agent/a");
+        let pane = Pane::parse(&tab.pane);
+        let badge = ui.tab_badge(&tab, pane.as_ref());
+        assert_eq!(badge.alerts, Some(0));
+        assert!(!badge.ask);
+        assert_eq!(badge.label("Atlas", 28, true), " ●Atlas ");
+        let mut next = ui.world.clone();
+        next.attention = Load::Loading;
+        ui.set_world(next);
+        assert_eq!(
+            ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true),
+            " ●Atlas "
+        );
+    }
+
+    #[test]
+    fn tab_badge_tracks_optimistic_answer_hiding_stale_frames_and_rollback() {
+        let mut ui = tab_badge_world();
+        let mut world = ui.world.clone();
+        if let Load::Ready(items) = &mut world.attention {
+            items[0].kind = AttentionKind::Request {
+                from: "Asker".into(), from_id: "agent/a".into(), question: "Choose".into(),
+                structured: None, images: Vec::new(),
+            };
+        }
+        ui.set_world(world.clone());
+        let tab = Tab::pane("list:home");
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(2));
+        ui.note_acted(&Effect::Attention {
+            id: "attention/a".into(), action: "work.done".into(),
+            reason: Some("Yes".into()), answer: None,
+        });
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(1));
+        ui.set_world(world);
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(1));
+        ui.finish_answer("attention/a", false);
+        assert_eq!(ui.tab_badge(&tab, Some(&Pane::List(0))).alerts, Some(2));
+    }
+
+    #[test]
+    fn tab_badge_excludes_retained_closed_cards_after_set_world() {
+        let mut ui = tab_badge_world();
+        ui.world.link = Link::Live;
+        let mut next = ui.world.clone();
+        next.attention = Load::Ready(Vec::new());
+        ui.set_world(next);
+        assert!(ui.closed.contains("attention/a"));
+        assert!(ui.world.attention.items().iter().any(|item| item.id == "attention/a"));
+        for key in ["agent:agent/a", "mission:mission/m", "list:home", "home:attention/a"] {
+            let tab = Tab::pane(key);
+            assert_eq!(ui.tab_badge(&tab, Pane::parse(key).as_ref()).alerts, Some(0), "{key}");
+        }
+    }
+
+    #[test]
+    fn tab_badge_clears_cached_questions_when_answered_after_switching_tabs() {
+        let mut ui = tab_badge_world();
+        ui.world.link = Link::Live;
+        ui.show_tab(1);
+        let mut next = ui.world.clone();
+        next.attention = Load::Ready(Vec::new());
+        ui.set_world(next);
+        for key in ["agent:agent/a", "mission:mission/m", "list:home"] {
+            let tab = Tab::pane(key);
+            assert!(!ui.tab_badge(&tab, Pane::parse(key).as_ref()).ask, "{key}");
+        }
+    }
+
+    #[test]
+    fn tab_badge_does_not_claim_cached_offline_attention_is_a_live_question() {
+        let mut ui = tab_badge_world();
+        let mut next = ui.world.clone();
+        next.link = Link::Offline("disconnected".into());
+        ui.set_world(next);
+        let tab = Tab::pane("list:home");
+        assert!(!ui.tab_badge(&tab, Some(&Pane::List(0))).ask);
+    }
+
+    #[test]
+    fn tab_badge_small_strips_keep_both_overflow_targets_inside_the_strip() {
+        let mut ui = tab_badge_world();
+        for current in [0, 2, 4] {
+            ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
+            for width in [12, 14, 18] {
+                ui.frame.borrow_mut().hits.clear();
+                let shown = tab_badge_strip(&ui, width);
+                assert!(!shown.contains("?2"), "{width}: {shown}");
+                if current > 0 { assert!(shown.contains('‹'), "{width}: {shown}"); }
+                if current < 4 { assert!(shown.contains('›'), "{width}: {shown}"); }
+                for (rect, hit) in &ui.frame.borrow().hits {
+                    if matches!(hit, Hit::GlassTabMore(..) | Hit::GlassTab(..)) {
+                        assert!(rect.right() <= width, "{width}: {hit:?} {rect:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_uses_update_indexes_instead_of_scanning_world_on_draw() {
+        let mut ui = tab_badge_world();
+        let tab = Tab::pane("agent:agent/a");
+        let pane = Pane::parse(&tab.pane);
+        let before = ui.tab_badge(&tab, pane.as_ref());
+        if let Load::Ready(agents) = &mut ui.world.agents {
+            agents[0].state = AgentState::Stopped;
+        }
+        for _ in 0..100 {
+            assert_eq!(ui.tab_badge(&tab, pane.as_ref()), before);
+        }
+        ui.set_world(ui.world.clone());
+        assert_eq!(ui.tab_badge(&tab, pane.as_ref()).activity, "×");
+    }
+
     /// The focused group, the tab it shows (Home is group 0's 0), and every group's pane keys.
     fn tabs(ui: &Ui) -> (usize, usize, Vec<Vec<String>>) {
-        let glass = ui.glasses.as_ref().unwrap().glass();
+        let glass = ui.glasses.glass();
         (
             glass.focus,
             glass.layout.groups()[glass.focus].current,
@@ -4607,7 +5521,124 @@ mod tests {
         )
     }
 
+    /// The pane keys and places the last frame drew, Now's included.
+    fn drawn(ui: &Ui) -> Vec<(String, Rect)> {
+        ui.frame
+            .borrow()
+            .panes
+            .iter()
+            .map(|pane| (pane.key.clone(), pane.rect))
+            .collect()
+    }
+
+    /// What Now shows, drawn inside its rect: the subject of each list row, and each pane's key.
+    fn in_now(ui: &Ui) -> (Vec<String>, Vec<String>) {
+        let frame = ui.frame.borrow();
+        let now = frame.glass_leaves[ui.glasses.glass().focus];
+        let inside = |rect: &Rect| now.intersection(*rect) == *rect;
+        let rows = frame
+            .context_rows
+            .iter()
+            .filter(|(rect, _, _)| inside(rect))
+            .map(|(_, subject, _)| subject.clone())
+            .collect();
+        let panes = frame
+            .panes
+            .iter()
+            .filter(|pane| inside(&pane.rect))
+            .map(|pane| pane.key.clone())
+            .collect();
+        (rows, panes)
+    }
+
+    /// Whether Now shows its own list and an alert's card, and nothing from another list.
+    fn shows_only_now(ui: &Ui) -> Result<(), String> {
+        let alerts = ui.listing_for(0, 80).ids;
+        let (rows, panes) = in_now(ui);
+        if rows.is_empty() || rows.iter().any(|row| !alerts.contains(row)) {
+            return Err(format!("rows that are not in Now's list: {rows:?}"));
+        }
+        if panes.is_empty() || panes.iter().any(|pane| !pane.starts_with("home:")) {
+            return Err(format!("panes that are not an alert's card: {panes:?}"));
+        }
+        Ok(())
+    }
+
+    /// Now floats over a conversation on one alert, and st delivers a reading with a new alert,
+    /// as the live loop does (`set_world`). Now stays open on the same alert, drawn the same
+    /// way: the same list beside the same card, never another section's list or card.
+    #[test]
+    fn a_new_alert_arriving_keeps_now_as_it_was() {
+        let alerts = demo::test_world()
+            .attention
+            .items()
+            .iter()
+            .filter(|item| item.is_alert())
+            .cloned()
+            .collect::<Vec<_>>();
+        let reading = |items: Vec<Attention>| {
+            let mut world = demo::test_world();
+            world.link = Link::Live;
+            world.attention = Load::Ready(items);
+            world
+        };
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some(ATLAS_ID.into())), Open::Tab);
+        ui.set_world(reading(vec![alerts[0].clone()]));
+        ui.open_home();
+        let before = screen(&ui);
+        let shown = drawn(&ui);
+        shows_only_now(&ui).unwrap_or_else(|why| panic!("{why}:\n{before}"));
+        let selected = ui.selected_id();
+        assert_eq!(selected.as_deref(), Some(alerts[0].id.as_str()));
+        // The newer alert lists first, so the selected one moves down a row.
+        ui.set_world(reading(vec![alerts[1].clone(), alerts[0].clone()]));
+        let after = screen(&ui);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "Inbox stays open:\n{after}");
+        assert_eq!(ui.tab(), 0, "{after}");
+        assert_eq!(ui.selected_id(), selected, "the same alert stays selected");
+        assert_eq!(drawn(&ui), shown, "the same panes in the same places:\n{before}\n{after}");
+        shows_only_now(&ui).unwrap_or_else(|why| panic!("{why}:\n{after}"));
+        let card = shown
+            .iter()
+            .find(|(key, _)| key.starts_with("home:"))
+            .map(|(_, rect)| *rect)
+            .expect("Now shows the selected alert's card");
+        let region = |screen: &str| {
+            screen
+                .lines()
+                .skip(card.y as usize)
+                .take(card.height as usize)
+                .map(|line| {
+                    line.chars()
+                        .skip(card.x as usize)
+                        .take(card.width as usize)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(region(&after), region(&before), "the card reads the same");
+        // Closing the tab returns to the conversation.
+        ctrl(&mut ui, 'w');
+        assert_eq!(ui.focus(), (1, Some(ATLAS_ID.to_owned())));
+    }
+
+    /// Inbox participates in the same tab cycling as conversations.
+    #[test]
+    fn tab_and_shift_tab_cycle_between_inbox_and_conversation() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some(ATLAS_ID.into())), Open::Tab);
+        ui.open_home();
+        press(&mut ui, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::Agent(Some(ATLAS_ID.into()))));
+        press(&mut ui, KeyCode::BackTab, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        let shown = screen(&ui);
+        shows_only_now(&ui).unwrap_or_else(|why| panic!("{why}:\n{shown}"));
+    }
+
     const ATLAS: &str = "agent:agent/example/atlas/builder";
+    const ATLAS_ID: &str = "agent/example/atlas/builder";
     const WEEKLY: &str = "mission:mission/fleet/release/weekly";
 
     #[test]
@@ -4628,7 +5659,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glass_opens_on_home_with_the_status_line_and_plain_stui_has_neither() {
+    fn a_glass_opens_on_home_with_the_status_line_and_plain_tui_has_neither() {
         let ui = glass();
         let shown = screen(&ui);
         let first = shown.lines().next().unwrap();
@@ -4640,12 +5671,12 @@ mod tests {
         // A glass with nothing open shows Home, under a bar for starting things.
         assert!(shown.contains("New terminal") && !shown.contains("New agent"), "{shown}");
         assert!(shown.contains("ctrl+k open"));
-        let plain = screen(&Ui::new(demo::world()));
-        assert!(!plain.contains("ctrl+k") && !plain.lines().next().unwrap().contains("alert"));
     }
 
     fn alert_prompt(id: &str, agent: &str) -> Attention {
         Attention {
+            deadline: None,
+            requested_at: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: format!("{agent} is waiting for a permission"),
@@ -4657,9 +5688,12 @@ mod tests {
                 seat: "builder".into(),
                 seat_id: agent.into(),
                 text: "Claude asks to use Bash".into(),
+                question: false,
                 answers: vec!["allow".into(), "deny".into()],
                 episode: "episode-1".into(),
                 call: None,
+                calls: Ok(vec![]),
+                allow: false,
             },
             actions: vec!["prompt.respond".into()],
             related: vec![],
@@ -4717,19 +5751,109 @@ mod tests {
         // Expanded on a click: the cards fill the room the conversation gives up.
         ui.click(Hit::Alert("agent/example/atlas/builder".into(), AlertTap::Toggle));
         let shown = screen(&ui);
-        assert!(shown.contains("1 alert") && shown.contains("deny") && shown.contains("open in Now"), "{shown}");
+        assert!(shown.contains("1 alert") && shown.contains("1. No") && !shown.contains("open in Inbox"), "{shown}");
         let lines: Vec<&str> = shown.lines().collect();
         let line = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
-        assert!(line("open in Now") < line("Message Atlas Builder"), "{shown}");
+        assert!(line("1. No") < line("Message Atlas Builder"), "{shown}");
         assert!(line("Message Atlas Builder") + 3 >= lines.len(), "{shown}");
         // Another agent's conversation shows none of it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/docs/writer".into())), Open::Tab);
         let other = screen(&ui);
-        assert!(!other.contains("open in Now"), "{other}");
+        assert!(!other.contains("1. No"), "{other}");
         // It clears itself when st stops listing it.
         ui.open_in_glass(Pane::Agent(Some("agent/example/atlas/builder".into())), Open::Tab);
         ui.world.attention = Load::Ready(vec![]);
-        assert!(!screen(&ui).contains("open in Now"));
+        assert!(!screen(&ui).contains("1. No"));
+    }
+
+    #[test]
+    fn open_in_inbox_selects_the_alert_and_reuses_the_tab() {
+        let mut ui = glass();
+        let agent = Pane::Agent(Some(ATLAS_ID.into()));
+        ui.open_in_glass(agent.clone(), Open::Tab);
+        ui.open_home();
+        let opened = open_panes(&ui);
+        ui.open_in_glass(agent, Open::Tab);
+        let id = ui.world.attention.items()[1].id.clone();
+        ui.click(Hit::Alert(id.clone(), AlertTap::Open));
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(ui.attention_focus(), Some(id));
+        assert_eq!(open_panes(&ui), opened);
+        assert!(ui.frame.borrow().home.is_none());
+    }
+
+    #[test]
+    fn ctrl_h_from_usage_opens_inbox_and_refocuses_it_across_splits() {
+        let mut ui = glass();
+        ui.open_in_glass(Pane::Agent(Some(ATLAS_ID.into())), Open::Tab);
+        ui.toggle_usage();
+        assert!(ui.usage_open());
+        ctrl(&mut ui, 'h');
+        assert!(!ui.usage_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        let tab = ui.glasses.glass().layout.groups()[0].current;
+        ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
+        screen(&ui);
+        press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
+        assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
+        let opened = open_panes(&ui);
+        ui.toggle_usage();
+        assert!(ui.usage_open());
+        ctrl(&mut ui, 'h');
+        assert!(!ui.usage_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(open_panes(&ui), opened);
+    }
+
+    #[test]
+    fn long_recommendation_reasons_leave_the_chips_visible_in_the_final_viewport() {
+        let agent = "agent/example/atlas/builder";
+        let reason = "Canary stayed healthy; the rollback flag remains available. ".repeat(10);
+        let mut ui = glass();
+        let request: fractal_client::StructuredRequest =
+            serde_json::from_value(serde_json::json!({
+                "version": 1,
+                "type": "choice",
+                "question": "How far does the release go?",
+                "why_person": "You own the rollout.",
+                "recommendation": {"answer": "all", "reason": reason},
+                "answers": [
+                    {"id": "stage", "label": "Staging only", "consequence": "Staging."},
+                    {"id": "canary", "label": "Canary", "consequence": "One host."},
+                    {"id": "hold", "label": "Hold", "consequence": "Wait."},
+                    {"id": "all", "label": "Ship to all", "consequence": "Everyone."}
+                ]
+            }))
+            .unwrap();
+        ui.world.attention = Load::Ready(
+            ["attention/one", "attention/two"]
+                .into_iter()
+                .map(|id| {
+                    let mut item = alert_prompt(id, agent);
+                    item.title = "Release scope".into();
+                    item.kind = AttentionKind::Request {
+                        from: "Atlas".into(),
+                        from_id: agent.into(),
+                        question: request.question.clone(),
+                        structured: Some(Box::new(request.clone())),
+                        images: Vec::new(),
+                    };
+                    item
+                })
+                .collect(),
+        );
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
+        // This renders the clipped 120x32 viewport, not the unbounded band rows.
+        let shown = screen(&ui);
+        println!("{shown}");
+        assert_eq!(shown.matches("★ Ship to all").count(), 2, "{shown}");
+        assert_eq!(shown.matches("Staging only").count(), 2, "{shown}");
+        assert!(!shown.contains("open in Inbox"), "{shown}");
+        assert!(shown.contains("Message Atlas Builder"), "{shown}");
+        let reasons: Vec<_> = shown.lines().filter(|line| line.contains("★ recommended:")).collect();
+        assert_eq!(reasons.len(), 2, "{shown}");
+        assert!(reasons.iter().all(|line| line.contains('…')), "{shown}");
     }
 
     #[test]
@@ -4778,9 +5902,9 @@ mod tests {
         typed(&mut ui, "atlas builder");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(tabs(&ui), (0, 0, vec![vec![ATLAS.to_owned()]]));
-        // The tab points stui's own selection at the agent, so its keys act on it.
+        // The tab points Fractal TUI's own selection at the agent, so its keys act on it.
         assert_eq!(
-            (ui.tab, ui.selected_id().as_deref()),
+            (ui.tab(), ui.selected_id().as_deref()),
             (1, Some("agent/example/atlas/builder"))
         );
         assert!(
@@ -4788,7 +5912,7 @@ mod tests {
                 .lines()
                 .nth(2)
                 .unwrap()
-                .contains("◆ Atlas Builder"),
+                .contains("Atlas Builder ◆"),
             "it needs the person"
         );
         // Up and Down scroll the agent's pane; they never move to another agent.
@@ -4813,7 +5937,7 @@ mod tests {
         ctrl(&mut ui, 'k');
         typed(&mut ui, "harbor");
         let harbor = ui
-            .matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap())
+            .matches(ui.glasses.palette.as_ref().unwrap())
             .iter()
             .position(|choice| choice.section == 3)
             .unwrap();
@@ -4821,13 +5945,13 @@ mod tests {
         assert_eq!(tabs(&ui).2[0], [ATLAS, WEEKLY, "machine:machine/harbor"]);
         ctrl(&mut ui, 'w');
 
-        // Now opens over the glass from "alerts", with its keys; Esc puts the tab back in charge.
+        // Inbox opens as a tab; closing it returns to the mission.
         ui.open_home();
-        assert!(screen(&ui).contains("Now · esc closes"));
-        assert_eq!(ui.tab, 0);
-        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(screen(&ui).contains("Inbox"));
+        assert_eq!(ui.tab(), 0);
+        ctrl(&mut ui, 'w');
         assert!(!ui.home_open());
-        assert_eq!(ui.tab, 2, "back on the weekly release mission");
+        assert_eq!(ui.tab(), 2, "back on the weekly release mission");
 
         ui.show_tab(0);
         assert_eq!(tabs(&ui).1, 0);
@@ -4857,7 +5981,7 @@ mod tests {
             Open::Tab,
         );
         ui.show_tab(0);
-        assert_eq!(ui.tab, 1, "the agent's tab has the focus");
+        assert_eq!(ui.tab(), 1, "the agent's tab has the focus");
         press(&mut ui, KeyCode::Char('h'), KeyModifiers::NONE);
         assert!(ui.editing, "a plain key opens the message box and types");
         let draft_before = ui
@@ -4973,6 +6097,31 @@ mod tests {
     }
 
     #[test]
+    fn tab_badge_overflow_keeps_selected_and_neighbor_title_suffixes_visible() {
+        let mut ui = glass();
+        ui.glasses.glass_mut().layout = Layout::Group(Group {
+            id: new_id(),
+            tabs: (0..14).map(|n| Tab::pane(format!("mission:mission/fleet/example/m{n:02}"))).collect(),
+            current: 0,
+        });
+        tab_badge_strip(&ui, 120);
+        let more = ui.frame.borrow().hits.iter().find_map(|(_, hit)| match hit {
+            Hit::GlassTabMore(0, tab) => Some(*tab),
+            _ => None,
+        }).expect("the first hidden tab is reachable");
+        ui.click(Hit::GlassTabMore(0, more));
+        ui.frame.borrow_mut().hits.clear();
+        let shown = tab_badge_strip(&ui, 120);
+        assert!(shown.contains(&format!("example/m{more:02}")), "selected title: {shown}");
+        assert!(shown.contains(&format!("example/m{:02}", more - 1)), "neighbor title: {shown}");
+        for (rect, hit) in &ui.frame.borrow().hits {
+            if matches!(hit, Hit::GlassTab(..) | Hit::GlassTabMore(..)) {
+                assert!(rect.right() <= 120, "{hit:?}: {rect:?}");
+            }
+        }
+    }
+
+    #[test]
     fn tabs_that_do_not_fit_scroll_into_view_and_a_marker_reaches_the_hidden_ones() {
         // Nathan, 2026-10-14: with too many tabs to show, the others could never be reached.
         let mut ui = glass();
@@ -5013,17 +6162,517 @@ mod tests {
     #[test]
     fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
         let widths = [10u16; 8];
+        let window = |current, start, follow, room| {
+            let window = visible_tabs(&widths, current, start, follow, 4, room);
+            (window.first, window.last)
+        };
         // Room for three tabs and a marker: 3 × 11 + 4 = 37. In the middle both ends need a
         // marker (8 cells), so only two tabs fit.
-        assert_eq!(visible_tabs(&widths, 0, 37), (0, 2));
-        assert_eq!(visible_tabs(&widths, 2, 37), (0, 2));
-        assert_eq!(visible_tabs(&widths, 3, 37), (2, 3));
-        assert_eq!(visible_tabs(&widths, 7, 37), (5, 7));
+        assert_eq!(window(0, 0, true, 37), (0, 2));
+        assert_eq!(window(2, 0, true, 37), (0, 2));
+        assert_eq!(window(3, 0, true, 37), (2, 3));
+        assert_eq!(window(7, 0, true, 37), (5, 7));
+        // Following from where it stands: still while the front tab shows, just enough past it.
+        assert_eq!(window(3, 2, true, 37), (2, 3));
+        assert_eq!(window(3, 4, true, 37), (3, 4));
+        // Moved by hand, it stays even with the front tab out of sight, but never past the
+        // place that shows the last tab whole.
+        assert_eq!(window(7, 1, false, 37), (1, 2));
+        assert_eq!(window(0, 7, false, 37), (5, 7));
+        assert_eq!(visible_tabs(&widths, 0, 0, false, 4, 37).most, 5);
         // Everything fits: no scrolling.
-        assert_eq!(visible_tabs(&widths, 7, 200), (0, 7));
+        assert_eq!(window(7, 0, true, 200), (0, 7));
+        assert_eq!(window(0, 3, false, 200), (0, 7));
         // A strip too small for even one tab still shows the front one.
-        assert_eq!(visible_tabs(&widths, 5, 5), (5, 5));
-        assert_eq!(visible_tabs(&[], 0, 50), (0, 0));
+        assert_eq!(window(5, 0, true, 5), (5, 5));
+        assert_eq!(
+            visible_tabs(&[], 0, 0, true, 4, 50),
+            TabWindow {
+                first: 0,
+                last: 0,
+                most: 0,
+            }
+        );
+    }
+
+    /// The badge strip's row as drawn, trimmed only at its end so the spacing shows.
+    fn tab_strip_row(ui: &Ui, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buffer = Buffer::empty(area);
+        ui.frame.borrow_mut().hits.clear();
+        ui.frame.borrow_mut().glass_strips.clear();
+        ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+        (0..width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    /// The tabs the hidden-tab markers show, before and after the drawn tabs.
+    fn strip_markers(ui: &Ui) -> (Option<usize>, Option<usize>) {
+        let info = ui.frame.borrow();
+        let shown: Vec<usize> = info
+            .hits
+            .iter()
+            .filter_map(|(_, hit)| match hit {
+                Hit::GlassTab(0, tab) => Some(*tab),
+                _ => None,
+            })
+            .collect();
+        let more: Vec<usize> = info
+            .hits
+            .iter()
+            .filter_map(|(_, hit)| match hit {
+                Hit::GlassTabMore(0, tab) => Some(*tab),
+                _ => None,
+            })
+            .collect();
+        let first = shown.iter().min().copied().unwrap_or(0);
+        let last = shown.iter().max().copied().unwrap_or(0);
+        (
+            more.iter().find(|tab| **tab < first).copied(),
+            more.iter().find(|tab| **tab > last).copied(),
+        )
+    }
+
+    /// Each marker counts exactly the tabs hidden on its side.
+    fn assert_marker_counts(ui: &Ui, row: &str, all: usize) {
+        let (before, after) = strip_markers(ui);
+        if let Some(target) = before {
+            assert!(row.starts_with(&format!(" ‹{} ", target + 1)), "|{row}|");
+        }
+        if let Some(next) = after {
+            assert!(row.contains(&format!(" {}›", all - next)), "|{row}|");
+        }
+    }
+
+    fn wheel(ui: &mut Ui, kind: MouseEventKind, column: u16) {
+        wheel_at(ui, kind, column, 0);
+    }
+
+    fn wheel_at(ui: &mut Ui, kind: MouseEventKind, column: u16, row: u16) {
+        ui.mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn narrow_strip_reservations_keep_activity_with_and_without_overflow() {
+        for count in [1, 5, 12, 50] {
+            for width in [12, 14, 18] {
+                for current in [0, count / 2, count - 1] {
+                    let mut ui = tab_badge_world();
+                    let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+                    let agent = group.tabs[0].clone();
+                    group.tabs = vec![agent; count];
+                    group.current = current;
+                    let row = tab_strip_row(&ui, width);
+                    let info = ui.frame.borrow();
+                    let mut active_shown = false;
+                    for (rect, hit) in &info.hits {
+                        if let Hit::GlassTab(0, index) = hit {
+                            let start = usize::from(rect.x);
+                            let painted = row
+                                .chars()
+                                .skip(start)
+                                .take(usize::from(rect.width))
+                                .collect::<String>();
+                            assert!(rect.width > 0 && rect.right() <= width);
+                            assert!(
+                                painted.contains('●'),
+                                "{count} tabs, {width} cells, current={current}, tab {index}: |{row}|"
+                            );
+                            active_shown |= *index == current;
+                        }
+                    }
+                    assert!(active_shown, "{count} tabs, {width} cells: |{row}|");
+                    drop(info);
+                    assert_marker_counts(&ui, &row, count);
+                    if count == 1 {
+                        assert_eq!(strip_markers(&ui), (None, None));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_strip_add_button_uses_spare_space_after_two_short_tabs() {
+        let mut ui = tab_badge_world();
+        ui.world.attention = Load::Ready(Vec::new());
+        ui.refresh_tab_statuses();
+        let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+        group.tabs.truncate(2);
+        group.tabs[0].title = Some("A".into());
+        group.tabs[1].title = Some("B".into());
+        let row = tab_strip_row(&ui, 14);
+        assert_eq!(row, "  ●A   ○B   +");
+        assert_eq!(strip_markers(&ui), (None, None));
+        assert!(ui.frame.borrow().hits.iter().any(|(rect, hit)| {
+            matches!(hit, Hit::GlassAdd(0)) && rect.width == 3 && rect.right() <= 14
+        }));
+        println!("SPARE 14: |{row}|");
+    }
+
+    #[test]
+    fn every_narrow_strip_window_keeps_its_visible_activity() {
+        for count in 1..=60 {
+            let mut ui = tab_badge_world();
+            let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+            group.tabs = vec![group.tabs[0].clone(); count];
+            // Establish the transient view once; each case supplies its own initial offset.
+            tab_strip_row(&ui, 20);
+            for width in 1..=20 {
+                for current in 0..count {
+                    ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
+                    for first in 0..count {
+                        for manual in [false, true] {
+                            {
+                                let mut strips = ui.glasses.strips.borrow_mut();
+                                let view = &mut strips.views[0];
+                                view.first = first;
+                                view.manual = manual;
+                                view.current = Some((current, "agent:agent/a".into()));
+                            }
+                            let row = tab_strip_row(&ui, width);
+                            if count == 50 && width == 11 && first == 25 && current == 25 && !manual
+                            {
+                                println!("NARROW 11: |{row}|");
+                            }
+                            let info = ui.frame.borrow();
+                            let mut active_shown = false;
+                            let mut shown = 0;
+                            for (rect, hit) in &info.hits {
+                                if let Hit::GlassTab(0, tab) = hit {
+                                    assert!(rect.width > 0 && rect.right() <= width);
+                                    assert!(
+                                        row.chars()
+                                            .skip(usize::from(rect.x))
+                                            .take(usize::from(rect.width))
+                                            .any(|c| c == '●'),
+                                        "{count} tabs, {width} cells, first={first}, current={current}, manual={manual}: |{row}|"
+                                    );
+                                    active_shown |= *tab == current;
+                                    shown += 1;
+                                }
+                            }
+                            assert!(shown > 0);
+                            assert!(manual || active_shown, "|{row}|");
+                            assert_eq!(ui.glasses.glass().layout.groups()[0].current, current);
+                            drop(info);
+                            assert_marker_counts(&ui, &row, count);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_badge_strip_render_widths() {
+        for width in [120u16, 60, 40] {
+            let mut ui = tab_badge_world();
+            let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+            let row = tab_strip_row(&ui, width);
+            println!("AFTER {width}: |{row}|");
+            assert!(
+                row.ends_with('+'),
+                "`+` stays reachable at {width}: |{row}|"
+            );
+            let (before, after) = strip_markers(&ui);
+            assert_eq!(before, None, "the first tab is in front: |{row}|");
+            assert_marker_counts(&ui, &row, all);
+            // The wheel moves a whole tab at a time; the tab in front stays as it is.
+            for _ in 0..all {
+                wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+                tab_strip_row(&ui, width);
+            }
+            let row = tab_strip_row(&ui, width);
+            println!("SCROLLED {width}: |{row}|");
+            assert_eq!(tabs(&ui).1, 0, "the wheel never changes the tab in front");
+            assert!(row.ends_with('+'), "|{row}|");
+            assert_marker_counts(&ui, &row, all);
+            let (scrolled_before, scrolled_after) = strip_markers(&ui);
+            assert_eq!(
+                scrolled_after, None,
+                "scrolled to the end, the last tab shows: |{row}|"
+            );
+            if after.is_some() {
+                assert!(
+                    scrolled_before.is_some(),
+                    "tabs scrolled past are counted: |{row}|"
+                );
+            } else {
+                assert_eq!(
+                    scrolled_before, None,
+                    "everything fits, nothing scrolls: |{row}|"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_wheel_moves_the_strip_a_whole_tab_and_clamps_at_both_ends() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+        let row = |ui: &Ui| tab_strip_row(ui, width);
+        row(&ui);
+        let after = strip_markers(&ui)
+            .1
+            .expect("at 40 cells some tabs are hidden");
+        // Right (or down) moves one tab; the first tab drops behind the left marker.
+        wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+        let shown = row(&ui);
+        assert_eq!(
+            strip_markers(&ui).0,
+            Some(0),
+            "one tab hidden before: |{shown}|"
+        );
+        assert!(shown.starts_with(" ‹1 "), "|{shown}|");
+        assert_marker_counts(&ui, &shown, all);
+        wheel(&mut ui, MouseEventKind::ScrollDown, 2);
+        let shown = row(&ui);
+        assert_eq!(strip_markers(&ui).0, Some(1), "down moves on as right does");
+        assert_marker_counts(&ui, &shown, all);
+        // Past the end it stops with the last tab whole.
+        for _ in 0..all * 2 {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            row(&ui);
+        }
+        let end = row(&ui);
+        assert_eq!(strip_markers(&ui).1, None, "the last tab shows: |{end}|");
+        assert_marker_counts(&ui, &end, all);
+        let hits = ui.frame.borrow().hits.clone();
+        let last = hits
+            .iter()
+            .find_map(|(rect, hit)| match hit {
+                Hit::GlassTab(0, tab) if *tab == all - 1 => Some(*rect),
+                _ => None,
+            })
+            .expect("the last tab is drawn");
+        let add = hits
+            .iter()
+            .find_map(|(rect, hit)| match hit {
+                Hit::GlassAdd(0) => Some(*rect),
+                _ => None,
+            })
+            .expect("`+` is drawn");
+        assert!(
+            last.right() < add.x && add.right() <= width,
+            "whole, not cut: |{end}|"
+        );
+        // Left (or up) comes back a tab at a time, and stops at the first tab.
+        let at_end = strip_markers(&ui).0.expect("tabs hidden before the end");
+        wheel(&mut ui, MouseEventKind::ScrollLeft, 2);
+        row(&ui);
+        assert_eq!(strip_markers(&ui).0, at_end.checked_sub(1));
+        for _ in 0..all * 2 {
+            wheel(&mut ui, MouseEventKind::ScrollUp, 2);
+            row(&ui);
+        }
+        let start = row(&ui);
+        assert_eq!(
+            strip_markers(&ui),
+            (None, Some(after)),
+            "back where it began: |{start}|"
+        );
+        assert_eq!(tabs(&ui).1, 0, "the tab in front never changed");
+    }
+
+    #[test]
+    fn the_strip_snaps_to_a_new_front_tab_only_when_it_is_out_of_sight() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+        tab_strip_row(&ui, width);
+        // Scrolled to the end, the tab in front (the first) is out of sight and stays so.
+        for _ in 0..all {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            tab_strip_row(&ui, width);
+        }
+        let end = tab_strip_row(&ui, width);
+        let target = strip_markers(&ui).0.expect("tabs hidden before");
+        let shows_first = ui
+            .frame
+            .borrow()
+            .hits
+            .iter()
+            .any(|(_, hit)| *hit == Hit::GlassTab(0, 0));
+        assert!(!shows_first, "|{end}|");
+        // A tab already in sight comes to the front without moving the strip.
+        ui.show_tab(all - 1);
+        let same = tab_strip_row(&ui, width);
+        assert_eq!(same, end, "still where the wheel left it");
+        assert_eq!(strip_markers(&ui).0, Some(target));
+        // A hidden one, from its marker, brings the strip just far enough to show it.
+        ui.click(Hit::GlassTabMore(0, target));
+        let shown = tab_strip_row(&ui, width);
+        assert_eq!(tabs(&ui).1, target);
+        assert_eq!(strip_markers(&ui).0, target.checked_sub(1), "|{shown}|");
+        assert!(
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::GlassTab(0, target))
+        );
+        // So does a hidden one chosen by key (the keys show tabs through `show_tab`).
+        for _ in 0..all {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            tab_strip_row(&ui, width);
+        }
+        ui.show_tab(0);
+        let shown = tab_strip_row(&ui, width);
+        assert_eq!(
+            strip_markers(&ui).0,
+            None,
+            "the first tab is back in sight: |{shown}|"
+        );
+        assert!(
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+        );
+    }
+
+    #[test]
+    fn the_wheel_elsewhere_still_scrolls_what_is_under_it() {
+        let mut ui = tab_badge_world();
+        screen(&ui);
+        let strip = ui.frame.borrow().glass_strips[0].0;
+        let first = ui.glasses.strips.borrow().views[0].first;
+        assert_eq!(ui.tab_strip_at(strip.x + 2, strip.y), Some(0));
+        assert_eq!(
+            ui.tab_strip_at(strip.x + 2, strip.y + 2),
+            None,
+            "only the strip's own row"
+        );
+        for kind in [MouseEventKind::ScrollRight, MouseEventKind::ScrollDown] {
+            ui.mouse(MouseEvent {
+                kind,
+                column: strip.x + 2,
+                row: strip.y + 2,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        let view = ui.glasses.strips.borrow().views[0].clone();
+        assert_eq!(
+            (view.first, view.manual),
+            (first, false),
+            "the wheel below the strip leaves it"
+        );
+    }
+
+    #[test]
+    fn the_strip_snaps_when_another_pane_takes_the_front_tabs_place() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let all = ui.glasses.glass().layout.groups()[0].tabs.len();
+        tab_strip_row(&ui, width);
+        for _ in 0..all {
+            wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+            tab_strip_row(&ui, width);
+        }
+        let end = tab_strip_row(&ui, width);
+        assert!(
+            strip_markers(&ui).0.is_some(),
+            "the front tab is scrolled away: |{end}|"
+        );
+        // The front tab's place now holds another pane, as when it closes and its neighbor
+        // moves up: the index is the same, but the tab in front is new.
+        ui.glasses.glass_mut().layout.group_mut(0).unwrap().tabs[0] = Tab {
+            id: new_id(),
+            pane: "agent:agent/b".into(),
+            title: Some("Other".into()),
+        };
+        assert_eq!(ui.glasses.glass().layout.groups()[0].tabs.len(), all);
+        let shown = tab_strip_row(&ui, width);
+        assert_eq!(tabs(&ui).1, 0);
+        assert_eq!(
+            strip_markers(&ui).0,
+            None,
+            "the new front tab is in sight: |{shown}|"
+        );
+        assert!(
+            ui.frame
+                .borrow()
+                .hits
+                .iter()
+                .any(|(_, hit)| *hit == Hit::GlassTab(0, 0))
+        );
+    }
+
+    #[test]
+    fn each_split_scrolls_its_own_tab_strip() {
+        let mut ui = tab_badge_world();
+        let width = 40;
+        let group = ui.glasses.glass().layout.groups()[0].clone();
+        ui.glasses.glass_mut().layout = Layout::Split {
+            split: Side::Below,
+            children: vec![Layout::Group(group.clone()), Layout::Group(group)],
+            ratio: None,
+        };
+        // Both strips drawn, one above the other, as a frame draws them.
+        let draw = |ui: &Ui| {
+            let area = Rect::new(0, 0, width, 2);
+            let mut buffer = Buffer::empty(area);
+            ui.frame.borrow_mut().hits.clear();
+            ui.frame.borrow_mut().glass_strips.clear();
+            for index in 0..2 {
+                let strip = Rect::new(0, index as u16, width, 1);
+                ui.tab_strip(&mut buffer, strip, ui.glasses.glass(), index);
+            }
+        };
+        // The tab a strip's left marker shows: the one just before its first drawn tab.
+        let hidden_before = |ui: &Ui, group: usize| {
+            let info = ui.frame.borrow();
+            let first = info
+                .hits
+                .iter()
+                .filter_map(|(_, hit)| match hit {
+                    Hit::GlassTab(at, tab) if *at == group => Some(*tab),
+                    _ => None,
+                })
+                .min()?;
+            info.hits.iter().find_map(|(_, hit)| match hit {
+                Hit::GlassTabMore(at, tab) if *at == group && *tab < first => Some(*tab),
+                _ => None,
+            })
+        };
+        draw(&ui);
+        assert_eq!((hidden_before(&ui, 0), hidden_before(&ui, 1)), (None, None));
+        // The wheel over the lower strip moves only that one.
+        wheel_at(&mut ui, MouseEventKind::ScrollRight, 2, 1);
+        draw(&ui);
+        assert_eq!(
+            (hidden_before(&ui, 0), hidden_before(&ui, 1)),
+            (None, Some(0))
+        );
+        // And over the upper one, only that one, by its own amount.
+        for _ in 0..2 {
+            wheel_at(&mut ui, MouseEventKind::ScrollRight, 2, 0);
+            draw(&ui);
+        }
+        assert_eq!(
+            (hidden_before(&ui, 0), hidden_before(&ui, 1)),
+            (Some(1), Some(0))
+        );
+        let fronts: Vec<usize> = ui
+            .glasses
+            .glass()
+            .layout
+            .groups()
+            .iter()
+            .map(|group| group.current)
+            .collect();
+        assert_eq!(fronts, [0, 0], "neither split's tab in front changed");
     }
 
     #[test]
@@ -5032,8 +6681,6 @@ mod tests {
         // showed none of them.
         let shown = |ui: &Ui, group: usize| {
             ui.glasses
-                .as_ref()
-                .unwrap()
                 .glass()
                 .shown(group)
                 .map(|tab| tab.pane.clone())
@@ -5071,8 +6718,6 @@ mod tests {
         let mut ui = glass();
         three(&mut ui);
         ui.glasses
-            .as_mut()
-            .unwrap()
             .glass_mut()
             .layout
             .group_mut(0)
@@ -5128,7 +6773,7 @@ mod tests {
             Open::Tab,
         );
         ctrl(&mut ui, 's');
-        assert!(ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert!(ui.glasses.sidebar.focused);
         // Nathan, 2026-10-03: b in the Usage sidebar typed "b" into the agent's tab.
         typed(&mut ui, "b");
         assert!(!ui.editing);
@@ -5198,7 +6843,7 @@ mod tests {
             tabs(&ui),
             (1, 0, vec![vec![ATLAS.to_owned()], vec![WEEKLY.to_owned()]])
         );
-        assert_eq!(ui.tab, 2, "the new split has the focus");
+        assert_eq!(ui.tab(), 2, "the new split has the focus");
         let shown = screen(&ui);
         let strip = shown.lines().nth(2).unwrap();
         assert!(
@@ -5214,7 +6859,7 @@ mod tests {
         assert!(screen(&ui).contains("open in a new tab beside “Weekly release” · focused split"));
         typed(&mut ui, "harbor");
         let harbor = ui
-            .matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap())
+            .matches(ui.glasses.palette.as_ref().unwrap())
             .iter()
             .position(|choice| choice.section == 3)
             .unwrap();
@@ -5237,13 +6882,13 @@ mod tests {
             Some("agent/example/atlas/builder")
         );
         press(&mut ui, KeyCode::Right, KeyModifiers::ALT);
-        assert_eq!((tabs(&ui).0, ui.tab), (1, 3));
+        assert_eq!((tabs(&ui).0, ui.tab()), (1, 3));
 
         // Ctrl+X splits below right away: an empty split, focused, with the palette open.
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         ctrl(&mut ui, 'x');
         assert_eq!(tabs(&ui).0, 2);
-        assert!(ui.glasses.as_ref().unwrap().palette.is_some());
+        assert!(ui.glasses.palette.is_some());
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(screen(&ui).contains("Empty. Ctrl+K opens something here"));
         press(&mut ui, KeyCode::Up, KeyModifiers::ALT);
@@ -5263,7 +6908,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_bracket_turns_an_agents_tab_into_its_terminal_and_ctrl_backslash_turns_it_back() {
+    fn attach_turns_an_agents_tab_into_its_terminal_and_ctrl_backslash_turns_it_back() {
         let mut ui = glass();
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".into())),
@@ -5277,8 +6922,8 @@ mod tests {
         ui.move_focus(KeyCode::Left);
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert!(ui.terminal.is_none(), "Enter alone never attaches");
-        // Crossterm reports 0x1d as Ctrl+5. The same tab shows the terminal: no second tab.
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        // The Attach button opens the terminal in this tab, never a second tab.
+        ui.click(Hit::Attach);
         let terminal = "terminal:agent/example/atlas/builder";
         assert_eq!(tabs(&ui).2[0], vec![terminal.to_owned()]);
         assert_eq!(
@@ -5315,7 +6960,7 @@ mod tests {
                 .any(|effect| matches!(effect, Effect::CloseTerminal))
         );
         // Middle-closing an attached terminal's tab uses the same detach action.
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.effects.clear();
         screen(&ui);
         let tab = ui.frame.borrow().hits.iter()
@@ -5342,6 +6987,96 @@ mod tests {
         assert!(ui.terminal_focused());
     }
 
+    /// The conversation draws no Attach control, so its guidance names keys. Follow the keys the
+    /// rendered hint says, as the outer terminal delivers them, and the terminal must attach.
+    #[test]
+    fn the_conversations_terminal_hint_names_keys_that_attach_it() {
+        use crossterm::event::{Event, KeyEvent, MouseEvent};
+        let wide = |ui: &Ui| {
+            let mut terminal = Terminal::new(TestBackend::new(240, 40)).unwrap();
+            terminal.draw(|frame| ui.render(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let key = |ui: &mut Ui, code: KeyCode, modifiers: KeyModifiers| {
+            ui.input_event(Event::Key(KeyEvent::new(code, modifiers)));
+        };
+        let agent = "agent/example/atlas/builder";
+        let mut ui = glass();
+        ui.world.attention = Load::Ready(vec![alert_prompt("attention/one", agent)]);
+        ui.open_in_glass(Pane::Agent(Some(agent.into())), Open::Tab);
+        // Enter in a conversation keeps its meaning: it never attaches.
+        key(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            ui.terminal.is_none() && !ui.editing,
+            "Enter alone never attaches"
+        );
+        // Expand the band with a click on its drawn toggle.
+        let shown = wide(&ui);
+        let hits = ui.frame.borrow().hits.clone();
+        assert!(
+            !hits.iter().any(|(_, hit)| matches!(hit, Hit::Attach)),
+            "the conversation draws no Attach control: {shown}"
+        );
+        let toggle = hits
+            .iter()
+            .find(|(_, hit)| matches!(hit, Hit::Alert(_, AlertTap::Toggle)))
+            .map(|(rect, _)| *rect)
+            .expect("the band draws its toggle");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            ui.input_event(Event::Mouse(MouseEvent {
+                kind,
+                column: toggle.x,
+                row: toggle.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        let shown = wide(&ui);
+        let route = shown
+            .lines()
+            .find_map(|line| {
+                line.split_once("answer it in the terminal (")
+                    .map(|(_, rest)| rest.to_owned())
+            })
+            .unwrap_or_else(|| panic!("the band says how to reach the terminal: {shown}"));
+        let route = route.split(')').next().unwrap();
+        assert_eq!(route, screens::terminal_route(), "{shown}");
+        // Read the keys back from what is drawn, not from the code that drew them.
+        let (chord, rest) = route
+            .strip_prefix("Ctrl+")
+            .and_then(|route| route.split_once(" then "))
+            .unwrap_or_else(|| panic!("a chord then a key: {route}"));
+        let chord = chord.to_ascii_lowercase().chars().next().unwrap();
+        let action = rest.chars().next().unwrap();
+        key(&mut ui, KeyCode::Char(chord), KeyModifiers::CONTROL);
+        let menu = wide(&ui);
+        assert!(
+            menu.lines()
+                .any(|line| line.contains(&format!(" {action}  Terminal"))),
+            "the actions menu draws the hinted Terminal row: {menu}"
+        );
+        assert!(ui.terminal.is_none(), "opening the menu attaches nothing");
+        key(&mut ui, KeyCode::Char(action), KeyModifiers::NONE);
+        // The conversation's tab turns into its attached terminal, focused and drawn.
+        assert_eq!(tabs(&ui).2[0], vec![format!("terminal:{agent}")]);
+        assert_eq!(
+            ui.terminal.as_ref().map(|view| view.agent.as_str()),
+            Some(agent)
+        );
+        assert!(ui.terminal_focused());
+        assert!(screen(&ui).contains("demo terminal"));
+    }
+
     #[test]
     fn the_leader_lists_what_to_press_and_the_terminal_never_sees_those_keys() {
         let mut ui = glass();
@@ -5349,14 +7084,14 @@ mod tests {
             Pane::Agent(Some("agent/example/atlas/builder".into())),
             Open::Tab,
         );
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        ui.click(Hit::Attach);
         assert!(ui.terminal_focused());
         ui.effects.clear();
         // Ctrl+\ opens the list; nothing is sent to the program and nothing is left.
         ctrl(&mut ui, '\\');
         assert!(ui.leader);
         let shown = screen(&ui);
-        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit stui"] {
+        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit Fractal TUI"] {
             assert!(shown.contains(wanted), "{wanted}: {shown}");
         }
         assert!(ui.terminal_focused());
@@ -5379,7 +7114,7 @@ mod tests {
         // t opens the new-tab palette, q quits.
         ctrl(&mut ui, '\\');
         press(&mut ui, KeyCode::Char('t'), KeyModifiers::NONE);
-        assert!(ui.glasses.as_ref().is_some_and(|glasses| glasses.palette_open()));
+        assert!(ui.glasses.palette_open());
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         ctrl(&mut ui, '\\');
         press(&mut ui, KeyCode::Char('q'), KeyModifiers::NONE);
@@ -5393,7 +7128,7 @@ mod tests {
             Pane::Agent(Some("agent/example/atlas/builder".into())),
             Open::Tab,
         );
-        press(&mut ui, KeyCode::Char('5'), KeyModifiers::CONTROL);
+        ui.click(Hit::Attach);
         assert!(ui.terminal_focused());
         ui.effects.clear();
         ctrl(&mut ui, '\\');
@@ -5417,7 +7152,6 @@ mod tests {
     fn a_shell_opens_in_a_tab_detaches_in_place_and_attaches_itself_not_the_selected_agent() {
         let mut ui = glass();
         // The agents list has a selection of its own, which a shell's keys must never reach.
-        ui.tab = 1;
         ui.selected[1] = 2;
         ctrl(&mut ui, 'k');
         typed(&mut ui, "new terminal");
@@ -5434,8 +7168,8 @@ mod tests {
         press(&mut ui, KeyCode::Char('c'), KeyModifiers::NONE);
         ui.terminal = None;
         assert_eq!(tabs(&ui).2, vec![vec![format!("terminal:{shell}")]]);
-        // Ctrl+] attaches this shell again, not whichever agent the list has selected.
-        ctrl(&mut ui, ']');
+        // Enter attaches this shell again, not whichever agent the list has selected.
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
             ui.terminal.as_ref().map(|view| view.agent.as_str()),
             Some(shell)
@@ -5460,9 +7194,9 @@ mod tests {
             panic!("the demo has two agents with terminals");
         };
         ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         assert_eq!(ui.terminal.as_ref().map(|view| view.agent.as_str()), Some(second.as_str()));
         assert_eq!(ui.parked.len(), 1, "the first is still attached");
         let shown = screen(&ui);
@@ -5522,9 +7256,9 @@ mod tests {
             panic!("two demo terminals")
         };
         ui.open_in_glass(Pane::Agent(Some(first.clone())), Open::Tab);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         ui.open_in_glass(Pane::Agent(Some(second.clone())), Open::Right);
-        ctrl(&mut ui, ']');
+        ui.click(Hit::Attach);
         let mut peers = Vec::new();
         for agent in &ids {
             let (client, mut peer) = UnixStream::pair().unwrap();
@@ -5707,15 +7441,16 @@ mod tests {
         assert_eq!(hit, Some(Hit::Usage));
         // Usage floats over the glass as Now does, with its own keys.
         ui.click(Hit::Usage);
-        assert!(ui.usage_open() && ui.glasses.as_ref().unwrap().shows_usage());
+        assert!(ui.usage_open() && ui.glasses.shows_usage());
         assert!(screen(&ui).contains("Usage · b groups · p period · esc closes"));
         let by = ui.usage_by;
         press(&mut ui, KeyCode::Char('b'), KeyModifiers::NONE);
         assert_ne!(ui.usage_by, by, "b changes the grouping");
-        // The need-you count switches it to Now; the usage slot again closes it.
+        // The need-you count opens Inbox as a tab; Usage remains a popover.
         ui.click(Hit::Home);
-        assert!(ui.home_open() && !ui.usage_open());
-        assert!(screen(&ui).contains("Now · esc closes"));
+        assert!(!ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(screen(&ui).contains("Inbox"));
         ui.click(Hit::Usage);
         assert!(ui.usage_open());
         ui.click(Hit::Usage);
@@ -5764,6 +7499,72 @@ mod tests {
     }
 
     #[test]
+    fn usage_forecasts_each_budget_in_the_list_and_explains_it_on_selection() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        let shown = screen(&ui);
+        // The weekly budget runs out first (yellow, not red: it is not spent yet); the others end
+        // the period inside their allowance.
+        for text in ["94% used · out in 20h", "41% used · 72% by reset", "6% used · 18% by reset"] {
+            assert!(shown.contains(text), "the Usage list forecasts {text}:\n{shown}");
+        }
+        for _ in 0..40 {
+            if ui.selected_id().as_deref() == Some("slo/anthropic-weekly") {
+                break;
+            }
+            press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
+        }
+        assert_eq!(ui.selected_id().as_deref(), Some("slo/anthropic-weekly"));
+        let detail = screen(&ui);
+        assert!(detail.contains("runs out in 20h, before it resets"), "{detail}");
+        assert!(detail.contains("(from the last 1d)"), "{detail}");
+        if std::env::var_os("SLO_PANE_SCREEN").is_some() {
+            println!("{detail}");
+        }
+    }
+
+    #[test]
+    fn an_unread_objectives_list_never_reads_as_no_spend_all_clear() {
+        let mut ui = glass();
+        ui.world.usage = Load::Ready(Vec::new());
+        ui.world.usage_limits.clear();
+        ui.world.agent_messages = None;
+        ui.click(Hit::Usage);
+        // Nothing is spent and the objectives are not yet known: say so, not "no spend".
+        ui.world.slo = Load::Loading;
+        let shown = screen(&ui);
+        assert!(shown.contains("Loading objectives"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+        // An old daemon's answer reaches the person instead of a green all clear.
+        ui.world.slo = Load::Failed(
+            "This st does not serve objectives and budgets yet: its daemon needs an update.".into(),
+        );
+        let shown = screen(&ui);
+        assert!(shown.contains("daemon needs"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+        // Only a read that came back empty is an all clear.
+        ui.world.slo = Load::Ready(Vec::new());
+        let shown = screen(&ui);
+        assert!(shown.contains("No spend recorded in this"), "{shown}");
+        // An empty reading that could not be read again is the last reading, not an all clear.
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
+    }
+
+    #[test]
+    fn a_failed_refresh_marks_the_objectives_shown_as_the_last_reading() {
+        let mut ui = glass();
+        ui.click(Hit::Usage);
+        assert!(!screen(&ui).contains("Last reading"));
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading") && shown.contains("read again (timed out)"), "{shown}");
+        assert!(shown.contains("anthropic-weekl"), "the rows stay:\n{shown}");
+    }
+
+    #[test]
     fn inventory_demand_tracks_the_shown_sidebar_and_usage_overlay() {
         let mut ui = glass();
         let initial = ui.inventories_wanted();
@@ -5776,7 +7577,7 @@ mod tests {
         ui.usage_period_next();
         assert_eq!(ui.inventories_wanted().usage_hours, Some(168));
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(!ui.glasses.as_ref().unwrap().sidebar.focused);
+        assert!(!ui.glasses.sidebar.focused);
         assert_eq!(ui.inventories_wanted().usage_hours, Some(168), "changing focus keeps the visible usage overlay followed");
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(ui.inventories_wanted().usage_hours, None);
@@ -5786,9 +7587,9 @@ mod tests {
     fn usage_floats_over_the_glass_and_a_row_shows_its_spend_whatever_the_list_groups_by() {
         let mut ui = glass();
         ui.world.slo = Load::Ready(Vec::new());
-        assert_eq!(ui.usage_wanted(), None, "nothing shows usage yet");
+        assert_eq!(ui.inventories_wanted().usage_hours, None, "nothing shows usage yet");
         ui.click(Hit::Usage);
-        assert_eq!(ui.usage_wanted(), Some(24));
+        assert_eq!(ui.inventories_wanted().usage_hours, Some(24));
         press(&mut ui, KeyCode::Char('b'), KeyModifiers::NONE);
         // Past the two accounts to the first mission: its spend shows beside the list.
         press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
@@ -5798,14 +7599,14 @@ mod tests {
         // Closed, nothing shows usage, so nothing reads it.
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
         assert!(!ui.home_open());
-        assert_eq!(ui.usage_wanted(), None);
+        assert_eq!(ui.inventories_wanted().usage_hours, None);
     }
 
     #[test]
     fn ctrl_s_shows_the_sidebar_to_browse_and_open_tabs_from() {
         let mut ui = glass();
         ctrl(&mut ui, 's');
-        let sidebar = |ui: &Ui| ui.glasses.as_ref().unwrap().sidebar.clone();
+        let sidebar = |ui: &Ui| ui.glasses.sidebar.clone();
         assert!(sidebar(&ui).shown && sidebar(&ui).focused);
         let shown = screen(&ui);
         for section in ["Everything else", "Agents", "Missions", "Machines", "Filter:"] {
@@ -6308,7 +8109,7 @@ mod tests {
                 },
             });
         }
-        assert!(screen(&ui).contains("unconfirmed, st did not answer"));
+        assert!(screen(&ui).contains("unconfirmed, Fractal did not answer"));
         // Letters type in a conversation: Ctrl+R sends it again, and Backspace takes it back
         // into the box to change or delete there.
         ctrl(&mut ui, 'r');
@@ -6351,7 +8152,7 @@ mod tests {
             "agent/example/atlas/builder".into(),
             Load::Failed("access refused".into()),
         );
-        let sidebar = &mut ui.glasses.as_mut().unwrap().sidebar;
+        let sidebar = &mut ui.glasses.sidebar;
         sidebar.shown = true;
         sidebar.focused = true;
         ctrl(&mut ui, 'r');
@@ -6377,8 +8178,6 @@ mod tests {
         press(&mut ui, KeyCode::Char('3'), KeyModifiers::CONTROL);
         let section = |ui: &Ui| {
             ui.glasses
-                .as_ref()
-                .unwrap()
                 .palette
                 .as_ref()
                 .unwrap()
@@ -6410,23 +8209,25 @@ mod tests {
         };
         let need = hit_at(&ui, Hit::Home);
         click(&mut ui, need);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
     }
 
     #[test]
-    fn home_stays_home_when_the_world_updates() {
+    fn inbox_stays_selected_when_the_world_updates_and_esc_does_not_close_it() {
         let mut ui = glass();
         ui.open_in_glass(
             Pane::Agent(Some("agent/example/atlas/builder".into())),
             Open::Tab,
         );
         ui.open_home();
-        assert_eq!(ui.tab, 0);
-        ui.set_world(demo::world());
-        assert!(ui.home_open());
-        assert_eq!(ui.tab, 0, "a world update kept Home");
+        assert_eq!(ui.tab(), 0);
+        ui.set_world(demo::test_world());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(ui.tab(), 0, "a world update kept Inbox");
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(ui.tab, 1, "closing Home shows the focused agent again");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        ctrl(&mut ui, 'w');
+        assert_eq!(ui.tab(), 1, "closing Inbox shows the agent again");
     }
 
     #[test]
@@ -6498,7 +8299,7 @@ mod tests {
         // A move between splits brings a zoomed one back first.
         ctrl(&mut ui, 'o');
         press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
-        assert!(!ui.glasses.as_ref().unwrap().zoomed);
+        assert!(!ui.glasses.zoomed);
         assert_eq!(tabs(&ui).0, 1);
     }
 
@@ -6655,7 +8456,7 @@ mod tests {
     fn rename_is_always_in_the_palette_and_asks_for_the_name() {
         let mut ui = glass();
         ctrl(&mut ui, 'k');
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         let rename = ui
             .matches(palette)
             .iter()
@@ -6667,7 +8468,7 @@ mod tests {
         ctrl(&mut ui, 'w');
         typed(&mut ui, "work");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(ui.glasses.as_ref().unwrap().glass().name, "work");
+        assert_eq!(ui.glasses.glass().name, "work");
     }
 
     #[test]
@@ -6738,7 +8539,7 @@ mod tests {
                 .map(|state| (state.top, state.follow))
         };
         let before = state(&ui, &behind);
-        let home = ui.frame.borrow().home.unwrap();
+        assert!(ui.frame.borrow().home.is_none(), "Inbox is not a popover");
         // Up: a conversation that follows its newest message would leave it to read back.
         let at = |column: u16, row: u16| MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -6756,7 +8557,6 @@ mod tests {
             .map(|pane| pane.rect)
             .unwrap();
         ui.mouse(at(over.x + 2, over.y + over.height / 2));
-        ui.mouse(at(home.x.saturating_sub(1), home.y + home.height / 2));
         assert_eq!(
             state(&ui, &behind),
             before,
@@ -6779,7 +8579,7 @@ mod tests {
         let before = screen(&ui);
         wheel(&mut ui, MouseEventKind::ScrollDown);
         wheel(&mut ui, MouseEventKind::ScrollDown);
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         assert_eq!(
             (palette.selected, palette.top),
             (0, Some(6)),
@@ -6787,13 +8587,115 @@ mod tests {
         );
         assert_ne!(screen(&ui), before);
         wheel(&mut ui, MouseEventKind::ScrollUp);
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         assert_eq!(palette.top, Some(3));
         assert_eq!(ui.list_top.borrow()[0], 0, "the list behind did not scroll");
         // A key brings the selection back into view.
         press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         assert_eq!((palette.selected, palette.top), (1, None));
+    }
+
+    #[test]
+    fn held_down_moves_every_row_in_the_palette_and_sidebar_over_an_attached_terminal() {
+        use crossterm::event::{Event, KeyEventKind};
+
+        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            let mut ui = glass();
+            ui.live = true;
+            let shell = "terminal/example-shell".to_owned();
+            ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
+            ui.terminal = Some(crate::ui::TerminalView {
+                agent: shell.clone(),
+                title: "shell".into(),
+                name: "shell".into(),
+                lines: Vec::new(),
+                cursor: None,
+                stale: None,
+                ended: None,
+                native: None,
+            });
+            ctrl(&mut ui, 'k');
+            assert!(ui.terminal_focused(), "the terminal stays focused under the palette");
+            let count = ui.matches(ui.glasses.palette.as_ref().unwrap()).len();
+            assert!(count > 6);
+            ui.effects.clear();
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.glasses.palette.as_ref().unwrap().selected,
+                    n.min(count - 1),
+                    "{kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            let release = KeyEvent::new_with_kind(
+                KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Release,
+            );
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.glasses.palette.as_ref().unwrap().selected, count - 1);
+            let enter = KeyEvent::new_with_kind(
+                KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat,
+            );
+            ui.input_event(Event::Key(enter));
+            assert!(ui.palette_open(), "held Enter must not open the selection");
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell.clone())));
+            assert!(ui.effects.is_empty(), "navigation must not request daemon work");
+
+            // Every confirmation mode needs a fresh press, even over a terminal.
+            use resource_sidebar::PaletteMode as Mode;
+            ui.resource_sidebar.writable = true;
+            for (mode, commit) in [
+                (Mode::ConfirmPlace {
+                    subject: "agent/example/atlas/builder".into(), folder: None,
+                }, 'm'),
+                (Mode::ConfirmCreate {
+                    subject: "agent/example/atlas/builder".into(), name: "Review".into(),
+                }, 'm'),
+                (Mode::Delete { id: "folder-demo".into() }, 'y'),
+            ] {
+                ui.open_sidebar_palette(mode.clone());
+                assert!(ui.confirmation_open());
+                for code in [KeyCode::Char('m'), KeyCode::Char('y'), KeyCode::Enter, KeyCode::Down] {
+                    for event_kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                        let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, event_kind);
+                        ui.input_event(Event::Key(key));
+                        assert_eq!(
+                            ui.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()),
+                            Some(&mode),
+                            "{event_kind:?} {code:?} must leave the confirmation open"
+                        );
+                        assert!(ui.effects.is_empty(), "{event_kind:?} must never commit {mode:?}");
+                    }
+                }
+                press(&mut ui, KeyCode::Char(commit), KeyModifiers::NONE);
+                assert!(!ui.palette_open(), "a fresh press commits {mode:?}");
+                assert!(matches!(&ui.effects[..], [Effect::EditArrangement(_)]));
+                ui.effects.clear();
+                ui.resource_sidebar.writing = false;
+            }
+
+            // Normal sidebar navigation must own repeats just as it owns presses.
+            ui.glasses.palette = None;
+            ui.toggle_sidebar();
+            ui.resource_sidebar.observe(&ui.world);
+            ui.resource_sidebar.filter = "agent".into();
+            let count = ui.resource_sidebar.rows().len();
+            assert!(count > 1, "the fixture has multiple ordinary list rows");
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.resource_sidebar.selected,
+                    n.min(count - 1),
+                    "sidebar {kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.resource_sidebar.selected, count - 1);
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell)));
+            assert!(ui.effects.is_empty(), "sidebar navigation must stay local");
+        }
     }
 
     #[test]
@@ -6815,7 +8717,7 @@ mod tests {
             row: left.y + 2,
             modifiers: KeyModifiers::NONE,
         });
-        assert_eq!((tabs(&ui).0, ui.tab), (0, 1));
+        assert_eq!((tabs(&ui).0, ui.tab()), (0, 1));
     }
 
     fn mouse(ui: &mut Ui, kind: MouseEventKind, column: u16, row: u16) {
@@ -6956,7 +8858,7 @@ mod tests {
             Pane::Terminal("agent/example/atlas/builder".into()),
             Open::Right,
         );
-        // Opening a terminal tab never attaches it; Ctrl+] does.
+        // Opening a terminal tab never attaches it; Enter does.
         assert!(ui.terminal.is_none());
         ui.attach_terminal("agent/example/atlas/builder");
         ui.terminal = Some(crate::ui::TerminalView {
@@ -7062,6 +8964,7 @@ mod tests {
                     has_more: false,
                     next_cursor: None,
                     cursor_expires_at: None,
+                    omitted_items: None,
                 },
                 indexed_at: "2026-10-02T21:41:00Z".into(),
                 host_id: "host/example".into(),
@@ -7075,13 +8978,11 @@ mod tests {
         assert!(shown.contains("still indexing"), "{shown}");
         // Choosing it opens the conversation, found at what was said.
         let said = ui
-            .matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap())
+            .matches(ui.glasses.palette.as_ref().unwrap())
             .into_iter()
             .position(|choice| matches!(choice.action, Action::Said { .. }))
             .unwrap();
         ui.glasses
-            .as_mut()
-            .unwrap()
             .palette
             .as_mut()
             .unwrap()
@@ -7108,7 +9009,7 @@ mod tests {
             found.items[0].agent_id = None;
         }
         let said = ui
-            .matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap())
+            .matches(ui.glasses.palette.as_ref().unwrap())
             .into_iter()
             .position(|choice| matches!(choice.action, Action::Said { .. }))
             .unwrap();
@@ -7134,7 +9035,7 @@ mod tests {
         }
         ctrl(&mut ui, 'k');
         typed(&mut ui, &title.to_lowercase());
-        let found = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
+        let found = ui.matches(ui.glasses.palette.as_ref().unwrap());
         let first_mission = found.iter().position(|choice| choice.section == 2);
         let first_agent = found.iter().position(|choice| choice.section == 1);
         assert!(first_agent < first_mission, "agents lead: {first_agent:?} {first_mission:?}");
@@ -7145,7 +9046,7 @@ mod tests {
         ctrl(&mut ui, 'k');
         ctrl(&mut ui, 'k');
         typed(&mut ui, &words);
-        let found = ui.matches(ui.glasses.as_ref().unwrap().palette.as_ref().unwrap());
+        let found = ui.matches(ui.glasses.palette.as_ref().unwrap());
         assert!(
             found
                 .iter()
@@ -7171,7 +9072,7 @@ mod tests {
         // Here, it opens Home with the item selected.
         let other = ui.world.attention.items()[1].id.clone();
         ui.open_in_glass(Pane::Home(Some(other.clone())), Open::Here);
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
         assert_eq!(ui.attention_focus().as_deref(), Some(other.as_str()));
     }
 
@@ -7189,13 +9090,10 @@ mod tests {
         let mission = ui.world.missions.items()[0].id.clone();
         ui.open_in_glass(Pane::Mission(Some(mission)), Open::Tab);
         assert!(ui.missions_wanted(), "a mission card is on screen");
-        // The classic layout always follows, as before.
-        let classic = Ui::new(demo::world());
-        assert!(classic.missions_wanted());
     }
 
     #[test]
-    fn opened_alerts_read_as_a_pane_with_a_title_bar_a_bar_per_alert_and_a_rule_between() {
+    fn opened_alerts_read_as_a_pane_with_a_title_bar_and_each_alert_as_its_card() {
         let agent = "agent/example/atlas/builder";
         let mut ui = glass();
         ui.world.attention = Load::Ready(vec![
@@ -7206,15 +9104,19 @@ mod tests {
         ui.click(Hit::Alert(agent.into(), AlertTap::Toggle));
         let shown = screen(&ui);
         let lines: Vec<&str> = shown.lines().collect();
-        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ hide")).expect(&shown);
-        let rule = lines.iter().position(|line| line.contains("┄┄┄┄")).expect(&shown);
+        let title = lines.iter().position(|line| line.contains("◆ 2 alerts") && line.contains("▾ fold")).expect(&shown);
+        let card = lines.iter().position(|line| line.contains("┏━ PROMPT")).expect(&shown);
         let input = lines.iter().position(|line| line.contains("Message Atlas Builder")).expect(&shown);
-        assert!(title < rule && rule < input, "{shown}");
-        // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
-        let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
-        assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Now").count() == 2, "{shown}");
-        assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
+        assert!(title < card && card < input, "{shown}");
+        // The card is the one Inbox shows: the form's refusal, numbered, and its keys in view.
+        assert!(shown.contains("1. No"), "the answers stay in view: {shown}");
+        assert!(shown.contains("Ctrl+N to answer with the keys"), "{shown}");
+        // Neither names its call, so neither is allowed from here.
+        assert!(shown.contains("Fractal does not say which call this asks about"), "{shown}");
+        assert!(!shown.contains(". Yes"), "{shown}");
+        // A second card shows when it fits, else the band says how many more wait.
+        assert!(shown.matches("┏━ PROMPT").count() == 2 || shown.contains("+1 more in Inbox"), "{shown}");
+        assert!(!shown.contains("open in Inbox"), "{shown}");
     }
 
     #[test]
@@ -7235,7 +9137,7 @@ mod tests {
 
     #[test]
     fn the_missions_list_reads_running_first_and_ages_finished_runs_out() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).to_rfc3339();
         if let Load::Ready(missions) = &mut world.missions {
             let template = missions[0].clone();
@@ -7283,31 +9185,41 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_h_opens_home_and_closes_it_again() {
+    fn ctrl_h_opens_and_focuses_one_inbox_tab_and_ctrl_w_closes_it() {
         let mut ui = glass();
+        let agent = Pane::Agent(Some("agent/example/atlas/builder".into()));
+        ui.open_in_glass(agent.clone(), Open::Tab);
         ctrl(&mut ui, 'h');
-        assert!(ui.home_open());
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert!(!ui.home_open(), "Inbox is not a modal");
+        assert!(screen(&ui).contains("Inbox"));
+        let opened = open_panes(&ui);
+        ui.open_in_glass(agent.clone(), Open::Tab);
         ctrl(&mut ui, 'h');
-        assert!(!ui.home_open());
+        ctrl(&mut ui, 'h');
+        assert_eq!(open_panes(&ui), opened, "opening focuses the existing tab");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        ctrl(&mut ui, 'w');
+        assert_eq!(ui.focused_pane(), Some(agent));
+        assert!(!open_panes(&ui).contains(&"list:home".to_owned()));
     }
 
     #[test]
-    fn the_pane_behind_home_keeps_showing_itself() {
+    fn inbox_can_move_to_a_split_and_the_shortcut_focuses_it_there() {
         let mut ui = glass();
-        let agent = ui.world.agents.items()[0].id.clone();
-        ui.open_in_glass(Pane::Agent(Some(agent)), Open::Tab);
-        // What shows around Home's card: the glass's left edge, row by row.
-        let edge = |ui: &Ui| {
-            screen(ui)
-                .lines()
-                .skip(1)
-                .map(|line| line.chars().take(8).collect::<String>())
-                .collect::<Vec<_>>()
-        };
-        let before = edge(&ui);
+        let agent = Pane::Agent(Some("agent/example/atlas/builder".into()));
+        ui.open_in_glass(agent, Open::Tab);
         ui.open_home();
-        assert!(ui.home_open());
-        assert_eq!(edge(&ui), before, "the conversation, not Home's selection");
+        let tab = ui.glasses.glass().layout.groups()[0].current;
+        ui.drop_tab((0, tab), Drop::Edge { group: 0, side: Side::Right, first: false });
+        assert_eq!(ui.glasses.glass().layout.groups().len(), 2);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        screen(&ui);
+        press(&mut ui, KeyCode::Left, KeyModifiers::ALT);
+        assert!(matches!(ui.focused_pane(), Some(Pane::Agent(_))));
+        ctrl(&mut ui, 'h');
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
+        assert_eq!(open_panes(&ui).iter().filter(|key| *key == "list:home").count(), 1);
     }
 
     #[test]
@@ -7364,7 +9276,7 @@ mod tests {
         screen(&ui);
         assert_eq!(ui.selected_text().as_deref(), Some("1,204,881 rows"));
         ui.mouse(mouse(MouseEventKind::Up(MouseButton::Left), column + 13));
-        assert!(ui.home_open(), "a drag on Home keeps it open");
+        assert_eq!(ui.focused_pane(), Some(Pane::List(0)), "a drag keeps Inbox open");
         assert!(
             ui.flash
                 .as_ref()
@@ -7383,7 +9295,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell,
             title: "shell".into(),
@@ -7393,7 +9305,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -7476,7 +9388,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell.clone(),
             title: "shell".into(),
@@ -7486,7 +9398,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -7601,7 +9513,7 @@ mod tests {
             "{:?}",
             ui.effects
         );
-        ui.close_home();
+        ui.close_tab();
         assert!(ui.terminal_focused(), "the shell has the keys again");
         assert!(
             screen(&ui).contains("Return · Ctrl+\\   shell"),
@@ -7685,7 +9597,7 @@ mod tests {
         ui.open_in_glass(Pane::Terminal("terminal/example-shell".into()), Open::Tab);
         assert!(ui.terminal.is_none());
         let shown = screen(&ui);
-        assert!(shown.contains("Not attached. Ctrl+] attaches"), "{shown}");
+        assert!(shown.contains("Not attached. Enter attaches"), "{shown}");
         assert!(
             !shown.contains("Message "),
             "no agent's message box: {shown}"
@@ -7696,8 +9608,8 @@ mod tests {
     fn glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g() {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("glasses.json");
-        let mut ui = Ui::new(demo::world());
-        ui.glasses = Some(Glasses::open(None, Some(store.clone())));
+        let mut ui = Ui::new(demo::test_world());
+        ui.glasses = Glasses::open(None, Some(store.clone()));
         ctrl(&mut ui, 'k');
         typed(&mut ui, "atlas builder");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
@@ -7707,14 +9619,14 @@ mod tests {
         ctrl(&mut ui, 'k');
         ctrl(&mut ui, '5');
         typed(&mut ui, "review");
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         let new = ui
             .matches(palette)
             .iter()
             .position(|choice| choice.action == Action::NewGlass("review".into()))
             .unwrap();
         ui.open_choice(Some(new), Open::Here);
-        assert_eq!(ui.glasses.as_ref().unwrap().glass().name, "review");
+        assert_eq!(ui.glasses.glass().name, "review");
         assert_eq!(
             tabs(&ui),
             (0, 0, vec![vec![]]),
@@ -7726,7 +9638,7 @@ mod tests {
         ctrl(&mut ui, 'g');
         assert!(screen(&ui).contains("Rename “review”…"));
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(ui.glasses.as_ref().unwrap().glass().name, "main");
+        assert_eq!(ui.glasses.glass().name, "main");
         assert_eq!(tabs(&ui).2, vec![vec![ATLAS.to_owned()]]);
 
         // Another window on this device opens the last glass used, with its tabs, on the tab
@@ -7755,7 +9667,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The glass writes stui asked to send, leaving other effects.
+    /// The glass writes Fractal TUI asked to send, leaving other effects.
     fn writes(ui: &mut Ui) -> Vec<GlassWrite> {
         std::mem::take(&mut ui.effects)
             .into_iter()
@@ -7792,6 +9704,7 @@ mod tests {
         layout.split(0, Side::Right, Group::of(Tab::pane("mission:m")));
         layout.split(1, Side::Below, Group::default());
         layout.group_mut(2).unwrap().tabs.push(Tab {
+            id: new_id(),
             title: Some("hosts".into()),
             pane: "machine:h".into(),
         });
@@ -7815,7 +9728,7 @@ mod tests {
             writes(&mut ui).is_empty(),
             "nothing is written before st sends glasses"
         );
-        let local = ui.glasses.as_ref().unwrap().glass().id.clone();
+        let local = ui.glasses.glass().id.clone();
 
         // st has one glass made elsewhere; this device's glass moves in.
         ui.glasses_from_graph(vec![graph_glass("0190-a", "r1", "review", &[WEEKLY])]);
@@ -7844,15 +9757,13 @@ mod tests {
         );
         let names = ui
             .glasses
-            .as_ref()
-            .unwrap()
             .all
             .iter()
             .map(|glass| glass.name.clone())
             .collect::<Vec<_>>();
         assert_eq!(names, ["main", "review"]);
         assert_eq!(
-            ui.glasses.as_ref().unwrap().glass().name,
+            ui.glasses.glass().name,
             "main",
             "still showing main"
         );
@@ -7868,7 +9779,7 @@ mod tests {
         ui.glass_saved(&local, key, Ok(Some("r7".into())));
         assert!(ui.unsent_glass_writes().is_empty());
         assert_eq!(
-            ui.glasses.as_ref().unwrap().glass().revision.as_deref(),
+            ui.glasses.glass().revision.as_deref(),
             Some("r7")
         );
 
@@ -8008,10 +9919,10 @@ mod tests {
     #[test]
     fn a_device_with_no_glasses_shows_sts_glass_of_that_name_instead_of_making_another() {
         let mut ui = glass();
-        assert_eq!(ui.glasses.as_ref().unwrap().glass().name, "main");
+        assert_eq!(ui.glasses.glass().name, "main");
         ui.glasses_from_graph(vec![graph_glass("0190-m", "r4", "main", &[ATLAS])]);
         assert!(writes(&mut ui).is_empty(), "nothing new goes to st");
-        let glasses = ui.glasses.as_ref().unwrap();
+        let glasses = &ui.glasses;
         assert_eq!(glasses.all.len(), 1);
         assert_eq!(glasses.glass().id, "0190-m");
         assert_eq!(tabs(&ui).2, vec![vec![ATLAS.to_owned()]]);
@@ -8020,20 +9931,20 @@ mod tests {
     #[test]
     fn a_glass_closed_elsewhere_goes_and_closing_one_here_deletes_it_in_st() {
         let mut ui = glass();
-        let main = ui.glasses.as_ref().unwrap().glass().id.clone();
+        let main = ui.glasses.glass().id.clone();
         ui.glasses_from_graph(vec![
             graph_glass(&main, "r1", "main", &[]),
             graph_glass("0190-b", "r2", "spare", &[]),
             graph_glass("0190-c", "r3", "old", &[]),
         ]);
         writes(&mut ui);
-        assert_eq!(ui.glasses.as_ref().unwrap().all.len(), 3);
+        assert_eq!(ui.glasses.all.len(), 3);
         ui.glasses_from_graph(vec![
             graph_glass(&main, "r1", "main", &[]),
             graph_glass("0190-b", "r2", "spare", &[]),
         ]);
         assert_eq!(
-            ui.glasses.as_ref().unwrap().all.len(),
+            ui.glasses.all.len(),
             2,
             "old was closed elsewhere"
         );
@@ -8041,7 +9952,7 @@ mod tests {
         // Close "spare" from here: st is told to delete it, against what st last sent.
         ui.show_glass(1);
         ui.open_palette(Some(GLASSES), Open::Here);
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         let close = ui
             .matches(palette)
             .iter()
@@ -8058,12 +9969,12 @@ mod tests {
     #[test]
     fn what_is_typed_picks_the_action_it_names_before_starting_an_agent_called_that() {
         let mut ui = glass();
-        let glasses = ui.glasses.as_mut().unwrap();
+        let glasses = &mut ui.glasses;
         glasses.all.push(Glass::new("new terminal".into()));
         let first = |ui: &mut Ui, query: &str| {
             ui.open_palette(None, Open::Here);
             typed(ui, query);
-            let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+            let palette = ui.glasses.palette.as_ref().unwrap();
             let top = ui.matches(palette)[0].action.clone();
             press(ui, KeyCode::Esc, KeyModifiers::NONE);
             top
@@ -8071,6 +9982,23 @@ mod tests {
         assert_eq!(first(&mut ui, "new terminal"), Action::NewTerminal);
         assert_eq!(first(&mut ui, "close glass"), Action::CloseGlass);
         assert_eq!(first(&mut ui, "shell"), Action::NewTerminal);
+    }
+
+    /// The section digits are gone, so Ctrl+K reaches what they did: Usage over the space, and
+    /// the Fleet list in a tab.
+    #[test]
+    fn ctrl_k_opens_usage_and_the_fleet_list() {
+        let mut ui = glass();
+        ui.open_palette(None, Open::Here);
+        typed(&mut ui, "usage");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(ui.usage_open(), "{}", screen(&ui));
+        press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!ui.home_open());
+        ui.open_palette(None, Open::Here);
+        typed(&mut ui, "fleet");
+        press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ui.focused_pane(), Some(Pane::List(3)), "{}", screen(&ui));
     }
 
     #[test]
@@ -8087,7 +10015,7 @@ mod tests {
         let mut ui = glass();
         ctrl(&mut ui, 'k');
         typed(&mut ui, "a");
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         let sections = ui
             .matches(palette)
             .iter()
@@ -8103,12 +10031,12 @@ mod tests {
     fn a_digit_opens_the_palette_at_its_section_and_escape_closes_it() {
         let mut ui = glass();
         typed(&mut ui, "3");
-        let palette = ui.glasses.as_ref().unwrap().palette.as_ref().unwrap();
+        let palette = ui.glasses.palette.as_ref().unwrap();
         assert_eq!(palette.section, Some(2));
         assert!(ui.matches(palette).iter().all(|choice| choice.section == 2));
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-        assert!(ui.glasses.as_ref().unwrap().palette.is_none());
-        assert_eq!(ui.tab, 0, "the sidebar's tabs do not change underneath");
+        assert!(ui.glasses.palette.is_none());
+        assert_eq!(ui.tab(), 0, "the sidebar's tabs do not change underneath");
     }
 
     #[test]

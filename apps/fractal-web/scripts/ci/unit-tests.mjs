@@ -2,7 +2,7 @@
 //
 // APP_TEST_SET=all (the default; merge groups and manual runs) runs every test file.
 // APP_TEST_SET=related (pull requests) runs only the test files whose import graph reaches a file the
-// change touched, as `vitest related` resolves it across the app, the kit and the clients. Anything that
+// change touched, as `vitest related` resolves it across the app, the SDK, the kit and the clients. Anything that
 // could change a test without being imported by it, or that cannot be placed in the graph, runs them all:
 // package, lock, TypeScript and Vitest configuration, the test environment, CI inputs, a deleted file, a
 // data file, or a diff that cannot be read.
@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 
-const GRAPH_ROOTS = ['apps/fractal-web/', 'packages/fractal-ui/', 'clients/typescript/']
+const GRAPH_ROOTS = ['apps/fractal-web/', 'packages/fractal-sdk/', 'packages/fractal-ui/', 'clients/typescript/']
 const GRAPH_EXTENSIONS = /\.(?:[cm]?[jt]sx?|css)$/
 const EVERYTHING = [
   [/(?:^|\/)package\.json$/, 'a package manifest'],
@@ -58,7 +58,7 @@ function main() {
   const selection = selectTests(entries)
   if (selection.mode === 'all') all(selection.reason)
   if (!selection.files.length) {
-    console.log('App unit tests: none selected (no changed module is in the app, kit or client import graph)')
+    console.log('App unit tests: none selected (no changed module is in the app, SDK, kit or client import graph)')
     return
   }
   console.log(`App unit tests: related to ${selection.files.length} changed file(s)\n${selection.files.map(file => `  ${file}`).join('\n')}`)

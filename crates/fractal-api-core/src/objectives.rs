@@ -45,7 +45,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
                     rows.push(max_latency(&format!("{name}/{kind}"), about, label, max, &target[kind]));
                 }
             }
-            "cpu" => rows.push(cpu(about, target)),
+            "cpu" => rows.extend(cpu(about, target)),
             "database" => rows.push(database(about, target)),
             _ if target["min_percent"].is_number() => rows.push(share(name, about, target)),
             _ => {
@@ -170,27 +170,87 @@ fn max_latency(id: &str, about: &str, what: &str, target_ms: Option<f64>, window
     })
 }
 
-fn cpu(about: &str, target: &Value) -> Value {
+/// The member's CPU, its daemon and replication workers, as two rows: `cpu` over the hour, and
+/// `cpu/idle` over the hour's idle minutes. Either is no-data while it is unknown: the hour not
+/// whole, a minute's CPU not known, or too few idle minutes to judge.
+fn cpu(about: &str, target: &Value) -> [Value; 2] {
+    use crate::slo::cores;
+    let verdict = crate::slo::cpu_verdict(target);
     let max = target["max_cores"].as_f64().unwrap_or_default();
-    let cores = |w: &str| target["windows"][w]["cores"].as_f64();
-    let Some(hour) = cores("1h") else {
-        return json!({
-            "id": "cpu", "kind": "objective", "about": about, "target": format!("≤ {max} cores"),
-            "current": "not measured", "window": "1h", "remaining_percent": null, "status": "no-data",
-            "explain": format!("{about}. The daemon has not measured its CPU yet."),
-        });
+    let idle_max = target["idle_max_cores"].as_f64().unwrap_or_default();
+    let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
+    let window = |w: &str| target["windows"][w]["cores"].as_f64();
+    let status = |met: Option<bool>| match met {
+        Some(true) => "met",
+        Some(false) => "missed",
+        None => "no-data",
     };
-    let met = WINDOWS.iter().all(|w| cores(w).unwrap_or_default() <= max);
-    let remaining = clamp_percent(100.0 * (1.0 - hour / max));
-    json!({
-        "id": "cpu", "kind": "objective", "about": about,
-        "target": format!("≤ {max} cores"), "current": format!("{hour:.2} cores"), "window": "1h",
-        "remaining_percent": remaining, "status": if met { "met" } else { "missed" },
-        "explain": format!(
-            "{about}. Goal: the daemon uses at most {max} cores. Over the last hour it used {hour:.2} on average, so {remaining:.0}% of that allowance is left. Last minute {:.2}, last five minutes {:.2}.",
-            cores("1m").unwrap_or_default(), cores("5m").unwrap_or_default(),
-        ),
-    })
+    let remaining = |value: Option<f64>, of: f64| value.map(|value| clamp_percent(100.0 * (1.0 - value / of)));
+    let not_idle = target["idle"]["not_idle"]
+        .as_object()
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter(|(_, n)| n.as_u64().unwrap_or_default() > 0)
+                .map(|(reason, n)| format!("{reason} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|reasons| !reasons.is_empty())
+        .map_or(String::new(), |reasons| format!(" Minutes not idle, by why (one may have several reasons): {reasons}."));
+    let hour = match verdict.hour {
+        Some(hour) => json!({
+            "current": format!("{hour:.2} cores"),
+            "explain": format!(
+                "{about}. Goal: the member uses at most {} over the hour. Over the last hour it used {hour:.2} on average, so {:.0}% of that allowance is left. Last minute {}, last five minutes {}.",
+                cores(max),
+                remaining(Some(hour), max).unwrap_or_default(),
+                window("1m").map_or("unknown".to_owned(), |c| format!("{c:.2}")),
+                window("5m").map_or("unknown".to_owned(), |c| format!("{c:.2}")),
+            ),
+        }),
+        None => json!({
+            "current": format!("unknown: {} of 60 minutes known", target["windows"]["1h"]["minutes"].as_u64().unwrap_or_default()),
+            "explain": format!(
+                "{about}. Goal: the member uses at most {} over the hour. The hour is not known: a minute is known only once the daemon has been up for all of it and the CPU of every replication worker it runs is known for it.",
+                cores(max),
+            ),
+        }),
+    };
+    let idle = match verdict.idle {
+        Some(idle) => json!({
+            "current": format!("{idle:.2} cores over {}", plural(verdict.idle_minutes, "idle minute")),
+            "explain": format!(
+                "{about}. Goal: at most {} on average over the hour's idle minutes. {} of the last 60 were idle and used {idle:.2} cores, so {:.0}% of that allowance is left.{not_idle}",
+                cores(idle_max), verdict.idle_minutes, remaining(Some(idle), idle_max).unwrap_or_default(),
+            ),
+        }),
+        None => json!({
+            "current": if verdict.minutes < 60 {
+                format!("unknown: {} of 60 minutes held", verdict.minutes)
+            } else {
+                format!("unknown: {}, needs {needed}", plural(verdict.idle_minutes, "idle minute"))
+            },
+            "explain": format!(
+                "{about}. Goal: at most {} on average over the hour's idle minutes. It is judged once the daemon has been up for the whole hour and at least {needed} of its minutes are known to be idle; the hour holds {} minutes, {} of them idle.{not_idle}",
+                cores(idle_max), verdict.minutes, verdict.idle_minutes,
+            ),
+        }),
+    };
+    [
+        json!({
+            "id": "cpu", "kind": "objective", "about": about,
+            "target": format!("≤ {} over the hour", cores(max)), "current": hour["current"], "window": "1h",
+            "remaining_percent": remaining(verdict.hour, max), "status": status(verdict.hour_met),
+            "explain": hour["explain"],
+        }),
+        json!({
+            "id": "cpu/idle", "kind": "objective", "about": about,
+            "target": format!("≤ {} over idle minutes", cores(idle_max)), "current": idle["current"], "window": "1h",
+            "remaining_percent": remaining(verdict.idle, idle_max), "status": status(verdict.idle_met),
+            "explain": idle["explain"],
+        }),
+    ]
 }
 
 fn database(about: &str, target: &Value) -> Value {
@@ -443,6 +503,105 @@ fn budget(
     })
 }
 
+const MINUTE_MS: u64 = 60_000;
+const HOUR_MS: u64 = 60 * MINUTE_MS;
+/// A reading that rises by more than this between two minutes is a reset (or a new account
+/// reading), not spending: the rate is read only from what follows it.
+const RESET_JUMP_PERCENT: f64 = 1.0;
+/// Fewest readings a rate is worth fitting to; the log has one a minute.
+const MIN_FORECAST_READINGS: usize = 5;
+
+/// How far back a budget's recent rate is read, or `None` for a row that has no forecast: a
+/// budget whose reset is known and whose newest reading is current. A 5-hour limit follows the
+/// last hour; a weekly one, the last day.
+pub fn forecast_basis_ms(row: &Value, now_unix_ms: u64) -> Option<u64> {
+    if row["kind"] != "budget" || !matches!(row["status"].as_str(), Some("met" | "missed")) {
+        return None;
+    }
+    row["remaining_percent"].as_f64()?;
+    if row["resets_at_unix_ms"].as_u64()? <= now_unix_ms {
+        return None;
+    }
+    Some(if row["window"] == "5-hour" { HOUR_MS } else { 24 * HOUR_MS })
+}
+
+/// Say, on a budget row, how much of the allowance will be used when it resets at the rate of its
+/// recent past. `readings` are `(unix ms, remaining percent)` as the observation log holds them,
+/// oldest first, over the span `forecast_basis_ms` named. Adds `forecast_used_percent` (at most
+/// 100), `forecast_basis_minutes` and, when the allowance would run out first, `runs_out_at_unix_ms`,
+/// and says so in `explain`. A row with too few readings, or none since its last reset, is left
+/// as it was: no forecast is better than a guess from a minute of data.
+pub fn add_forecast(row: &mut Value, readings: &[(u64, f64)], now_unix_ms: u64) {
+    let Some(basis) = forecast_basis_ms(row, now_unix_ms) else { return };
+    let (Some(remaining), Some(resets_at)) = (row["remaining_percent"].as_f64(), row["resets_at_unix_ms"].as_u64()) else {
+        return;
+    };
+    // The log has one reading a minute, the row is live: a reset since the newest reading leaves
+    // only the last period's spending behind, which says nothing about the new one.
+    if readings.last().is_some_and(|(_, left)| remaining > left + RESET_JUMP_PERCENT) {
+        return;
+    }
+    // Only what follows the last reset says anything about the next stretch.
+    let from = readings
+        .windows(2)
+        .rposition(|pair| pair[1].1 > pair[0].1 + RESET_JUMP_PERCENT)
+        .map_or(0, |at| at + 1);
+    let used: Vec<(f64, f64)> = readings[from..]
+        .iter()
+        .filter(|(at, _)| *at <= now_unix_ms)
+        .map(|(at, left)| (*at as f64, 100.0 - left))
+        .collect();
+    let (Some(first), Some(last)) = (used.first(), used.last()) else { return };
+    let span_ms = (last.0 - first.0) as u64;
+    if used.len() < MIN_FORECAST_READINGS || span_ms < basis / 4 {
+        return;
+    }
+    // Least squares, so one noisy minute does not set the rate.
+    let n = used.len() as f64;
+    let (mean_t, mean_u) = (used.iter().map(|p| p.0).sum::<f64>() / n, used.iter().map(|p| p.1).sum::<f64>() / n);
+    let spread: f64 = used.iter().map(|p| (p.0 - mean_t).powi(2)).sum();
+    if spread == 0.0 {
+        return;
+    }
+    let per_ms = (used.iter().map(|p| (p.0 - mean_t) * (p.1 - mean_u)).sum::<f64>() / spread).max(0.0);
+    let used_now = 100.0 - remaining;
+    let until_reset = (resets_at - now_unix_ms) as f64;
+    let projected = clamp_percent(used_now + per_ms * until_reset);
+    let basis_minutes = span_ms / MINUTE_MS;
+    let runs_out_in = (per_ms > 0.0 && remaining > 0.0).then(|| remaining / per_ms).filter(|ms| *ms < until_reset);
+    let said = match runs_out_in {
+        Some(ms) => format!(
+            " At the rate of the last {}, it runs out in about {} and will not last until it resets.",
+            span_words(span_ms),
+            span_words(ms as u64),
+        ),
+        None => format!(
+            " At the rate of the last {}, {projected:.0}% will be used when it resets.",
+            span_words(span_ms),
+        ),
+    };
+    row["forecast_used_percent"] = json!(projected);
+    row["forecast_basis_minutes"] = json!(basis_minutes);
+    if let Some(ms) = runs_out_in {
+        row["runs_out_at_unix_ms"] = json!(now_unix_ms + ms as u64);
+    }
+    if let Some(explain) = row["explain"].as_str() {
+        row["explain"] = json!(format!("{explain}{said}"));
+    }
+}
+
+/// A span in the unit a person reads: minutes under two hours, hours under two days, else days.
+fn span_words(ms: u64) -> String {
+    let minutes = ((ms + MINUTE_MS / 2) / MINUTE_MS).max(1);
+    if minutes < 120 {
+        plural(minutes, "minute")
+    } else if minutes < 48 * 60 {
+        plural(minutes / 60, "hour")
+    } else {
+        plural(minutes / (24 * 60), "day")
+    }
+}
+
 /// The row named `id`, or the single row `id` is an unambiguous prefix of.
 pub fn find<'a>(rows: &'a [Value], id: &str) -> Result<&'a Value, String> {
     if let Some(row) = rows.iter().find(|row| row["id"] == id) {
@@ -490,6 +649,7 @@ mod tests {
             measured_by: "agent/a".into(),
             host: "host".into(),
             seats: vec![],
+            identity: None,
         }
     }
 
@@ -542,8 +702,9 @@ mod tests {
     #[test]
     fn cpu_database_and_a_phone_share_read_against_their_own_allowances() {
         let report = json!({"targets": [
-            {"name": "cpu", "about": "Daemon CPU", "max_cores": 2.0, "windows": {
-                "1m": {"cores": 0.5}, "5m": {"cores": 0.5}, "1h": {"cores": 0.5}}},
+            {"name": "cpu", "about": "Member CPU", "max_cores": 1.0, "idle_max_cores": 0.5, "idle_min_minutes": 10,
+             "windows": {"1m": {"cores": 0.5, "minutes": 1}, "5m": {"cores": 0.5, "minutes": 5}, "1h": {"cores": 0.25, "minutes": 60}},
+             "minutes": 60, "idle": {"minutes": 20, "cores": 0.1, "not_idle": {"seat": 40}}},
             {"name": "database", "about": "The store", "max_live_gb": 8.0, "max_growth_mb_per_day": 300,
              "size": {"live_bytes": 2_000_000_000u64, "growth_bytes_per_day": 60_000_000i64}},
             {"name": "ios-live-share", "about": "Phone live share", "min_percent": 99,
@@ -554,10 +715,47 @@ mod tests {
         ]});
         let rows = rows(&report, &[], 0, 0);
         assert_eq!(by_id(&rows, "cpu")["remaining_percent"], 75.0);
+        assert_eq!(by_id(&rows, "cpu/idle")["remaining_percent"], 80.0);
         assert_eq!(by_id(&rows, "database")["remaining_percent"], 75.0);
         assert_eq!(by_id(&rows, "database")["status"], "met");
         // 0.6% disconnected of the 1% allowed leaves 40%.
         assert_eq!(by_id(&rows, "ios-live-share")["remaining_percent"], 40.0);
+    }
+
+    #[test]
+    fn the_cpu_rows_are_met_missed_or_no_data_never_met_without_the_facts() {
+        let target = |hour: Option<f64>, minutes: u64, idle_minutes: u64, idle: Option<f64>| {
+            json!({"targets": [{"name": "cpu", "about": "Member CPU", "max_cores": 1.0, "idle_max_cores": 0.5,
+                "idle_min_minutes": 10, "windows": {"1m": {"cores": 0.2, "minutes": 1},
+                    "5m": {"cores": 0.2, "minutes": 5}, "1h": {"cores": hour, "minutes": minutes}},
+                "minutes": minutes, "idle": {"minutes": idle_minutes, "cores": idle,
+                    "not_idle": {"seat": 30, "start": 0, "deploy": 0, "catch-up": 2, "unknown": 1}}}]})
+        };
+        let both = |report: Value| {
+            let rows = rows(&report, &[], 0, 0);
+            (by_id(&rows, "cpu").clone(), by_id(&rows, "cpu/idle").clone())
+        };
+        let (hour, idle) = both(target(Some(0.4), 60, 27, Some(0.1)));
+        assert_eq!((hour["status"].as_str(), hour["target"].as_str()), (Some("met"), Some("≤ 1 core over the hour")));
+        assert_eq!((idle["status"].as_str(), idle["target"].as_str()), (Some("met"), Some("≤ 0.5 core over idle minutes")));
+        assert_eq!(idle["current"], "0.10 cores over 27 idle minutes");
+        let explain = idle["explain"].as_str().unwrap();
+        for reason in ["seat 30", "catch-up 2", "unknown 1"] {
+            assert!(explain.contains(reason), "{reason}: {explain}");
+        }
+        assert!(!explain.contains("deploy"), "{explain}");
+        let (hour, idle) = both(target(Some(1.2), 60, 27, Some(0.6)));
+        assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("missed"), Some("missed")));
+        assert_eq!((hour["remaining_percent"].as_f64(), idle["remaining_percent"].as_f64()), (Some(0.0), Some(0.0)));
+        // Too few idle minutes: unknown, however low.
+        let (_, idle) = both(target(Some(0.4), 60, 9, Some(0.01)));
+        assert_eq!((idle["status"].as_str(), idle["current"].as_str()), (Some("no-data"), Some("unknown: 9 idle minutes, needs 10")));
+        assert_eq!(idle["remaining_percent"], Value::Null);
+        // A daemon up less than the hour: both unknown.
+        let (hour, idle) = both(target(None, 42, 30, Some(0.01)));
+        assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("no-data"), Some("no-data")));
+        assert_eq!(hour["current"], "unknown: 42 of 60 minutes known");
+        assert_eq!(idle["current"], "unknown: 42 of 60 minutes held");
     }
 
     #[test]
@@ -578,6 +776,110 @@ mod tests {
         assert_eq!(five["status"], "missed");
         assert!(five["explain"].as_str().unwrap().contains("resets in 2 hours"));
         assert_eq!(by_id(&rows, "claude/def/weekly")["status"], "no-data");
+    }
+
+    /// One reading a minute for the `minutes` before `now`, oldest first, each the remaining
+    /// percent `left(minutes_ago)`.
+    fn minutely(now: u64, minutes: u64, left: impl Fn(u64) -> f64) -> Vec<(u64, f64)> {
+        (0..=minutes).rev().map(|ago| (now - ago * 60_000, left(ago))).collect()
+    }
+
+    fn five_hour_budget(used: f64, now: u64) -> Value {
+        let rows = rows(&json!({"targets": []}), &[limit("claude/abc", None, Some(used), Some(used))], now, 3_600_000);
+        by_id(&rows, "claude/abc/5h").clone()
+    }
+
+    #[test]
+    fn a_budget_spent_fast_says_when_it_runs_out_before_its_reset() {
+        let now = 10_000_000 + 60_000;
+        let mut row = five_hour_budget(40.0, now);
+        // 1% a minute for twenty minutes: 60% is left, so it lasts about an hour, not three.
+        add_forecast(&mut row, &minutely(now, 20, |ago| 60.0 + ago as f64), now);
+        assert_eq!(row["forecast_used_percent"], 100.0);
+        assert_eq!(row["forecast_basis_minutes"], 20);
+        let out = row["runs_out_at_unix_ms"].as_u64().unwrap();
+        assert!(out.abs_diff(now + 3_600_000) < 60_000, "{out}");
+        let explain = row["explain"].as_str().unwrap();
+        assert!(explain.contains("it runs out in about 60 minutes"), "{explain}");
+        assert!(explain.contains("the last 20 minutes"), "{explain}");
+    }
+
+    #[test]
+    fn a_budget_spent_slowly_forecasts_its_use_at_the_reset() {
+        let now = 10_000_000 + 60_000;
+        let mut row = five_hour_budget(40.0, now);
+        // 0.1% a minute; the reset is 179 minutes away: 40% + about 18%.
+        add_forecast(&mut row, &minutely(now, 20, |ago| 60.0 + ago as f64 * 0.1), now);
+        assert_eq!(row["forecast_used_percent"], 57.9);
+        assert!(row.get("runs_out_at_unix_ms").is_none(), "{row}");
+        assert!(row["explain"].as_str().unwrap().contains("58% will be used when it resets"), "{row}");
+    }
+
+    #[test]
+    fn a_budget_not_spent_at_all_forecasts_what_is_used_now() {
+        let now = 10_000_000 + 60_000;
+        let mut row = five_hour_budget(40.0, now);
+        add_forecast(&mut row, &minutely(now, 20, |_| 60.0), now);
+        assert_eq!(row["forecast_used_percent"], 40.0);
+        assert!(row.get("runs_out_at_unix_ms").is_none(), "{row}");
+    }
+
+    #[test]
+    fn the_rate_is_read_only_from_after_the_last_reset() {
+        let now = 10_000_000 + 60_000;
+        let mut row = five_hour_budget(1.0, now);
+        // Ten minutes at 5% a minute down to nothing, a reset, then 0.04% a minute: only the
+        // second stretch counts, so about 1% + 7% is used at the next reset.
+        let mut readings = minutely(now - 17 * 60_000, 9, |ago| 5.0 + ago as f64 * 5.0);
+        readings.extend(minutely(now, 16, |ago| 99.0 + ago as f64 * 0.04));
+        add_forecast(&mut row, &readings, now);
+        assert_eq!(row["forecast_used_percent"], 8.2);
+        assert_eq!(row["forecast_basis_minutes"], 16);
+        assert!(row.get("runs_out_at_unix_ms").is_none(), "{row}");
+    }
+
+    #[test]
+    fn a_reset_since_the_newest_reading_leaves_no_forecast_until_there_is_history_after_it() {
+        let now = 10_000_000 + 60_000;
+        // Twenty minutes at 1% a minute down to 1% left, then the live row reads a fresh allowance.
+        let mut row = five_hour_budget(0.5, now);
+        add_forecast(&mut row, &minutely(now - 60_000, 20, |ago| 1.0 + ago as f64 * 4.0), now);
+        for field in ["forecast_used_percent", "forecast_basis_minutes", "runs_out_at_unix_ms"] {
+            assert!(row.get(field).is_none(), "{field}: {row}");
+        }
+        assert!(!row["explain"].as_str().unwrap().contains("At the rate"), "{row}");
+    }
+
+    #[test]
+    fn too_little_history_or_a_row_without_a_current_reading_has_no_forecast() {
+        let now = 10_000_000 + 60_000;
+        let mut few = five_hour_budget(40.0, now);
+        add_forecast(&mut few, &minutely(now, 3, |ago| 60.0 + ago as f64), now);
+        assert!(few.get("forecast_used_percent").is_none(), "{few}");
+        // Five readings a minute apart cover too short a span to set a rate.
+        let mut short = five_hour_budget(40.0, now);
+        add_forecast(&mut short, &minutely(now, 4, |ago| 60.0 + ago as f64), now);
+        assert!(short.get("forecast_used_percent").is_none(), "{short}");
+        let mut stale = five_hour_budget(40.0, now + 7_200_000);
+        assert_eq!(stale["status"], "stale");
+        add_forecast(&mut stale, &minutely(now, 20, |ago| 60.0 + ago as f64), now + 7_200_000);
+        assert!(stale.get("forecast_used_percent").is_none(), "{stale}");
+        let mut none = five_hour_budget(40.0, now);
+        add_forecast(&mut none, &[], now);
+        assert!(none.get("forecast_used_percent").is_none(), "{none}");
+        let mut objective = p99("sql-statement", "x", "requests", Some(10.0), &windows(100, 5.0, 0));
+        assert_eq!(forecast_basis_ms(&objective, now), None);
+        add_forecast(&mut objective, &minutely(now, 20, |ago| 60.0 + ago as f64), now);
+        assert!(objective.get("forecast_used_percent").is_none(), "{objective}");
+    }
+
+    #[test]
+    fn a_weekly_budget_reads_its_rate_from_the_last_day() {
+        let now = 10_000_000 + 60_000;
+        let rows = rows(&json!({"targets": []}), &[limit("claude/abc", None, Some(10.0), Some(10.0))], now, 3_600_000);
+        let weekly = by_id(&rows, "claude/abc/weekly");
+        assert_eq!(forecast_basis_ms(weekly, now), Some(24 * 3_600_000));
+        assert_eq!(forecast_basis_ms(by_id(&rows, "claude/abc/5h"), now), Some(3_600_000));
     }
 
     #[test]
@@ -605,7 +907,7 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "database", "merge-latency/p50", "flakes"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database", "merge-latency/p50", "flakes"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();

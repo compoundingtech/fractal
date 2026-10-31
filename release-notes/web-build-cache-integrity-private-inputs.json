@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Protect reusable dependency generations against accidental writes and key private-overlay install inputs.",
+  "replay": { "status": "none", "detail": "No application-data replay." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only cache uses a v2 key combining the original public five-file digest with private install-input identity and requires integrity metadata. Legacy generations are not migrated in place; deployment owners select a fresh cache root." },
+  "downtime": { "status": "none", "detail": "No service activation or restart." },
+  "manual": { "status": "none", "detail": "No released-product manual step." },
+  "recovery": { "status": "none", "detail": "Metadata drift triggers diagnostic content verification, leased atomic retirement and source-based repopulation. Read-only mode bits prevent accidental writes but do not isolate hostile same-UID code." }
+}

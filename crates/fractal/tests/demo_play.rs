@@ -74,6 +74,22 @@ fn pty() -> Option<PathBuf> {
     })
 }
 
+/// Where the demo's agents keep their sessions, under the throwaway HOME.
+const INSTANCE_PTY_ROOT: &str = ".st-instance/demo-test/state/st3/pty";
+/// pty refuses a root whose session sockets would not fit `sun_path`: 90 bytes on Linux, 89 on
+/// macOS, and the agent then never starts.
+const PTY_ROOT_LIMIT: usize = 89;
+
+/// A throwaway HOME short enough for that root. TMPDIR can be too long for it (scripts/ci-local
+/// puts it under the account's cache, macOS under /var/folders); /tmp then holds the HOME.
+fn throwaway_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    if home.path().join(INSTANCE_PTY_ROOT).as_os_str().len() <= PTY_ROOT_LIMIT {
+        return home;
+    }
+    tempfile::tempdir_in("/tmp").unwrap()
+}
+
 fn processes_mentioning(needle: &str) -> Vec<String> {
     let output = std::process::Command::new("ps")
         .args(["-eo", "pid=,args="])
@@ -88,11 +104,14 @@ fn processes_mentioning(needle: &str) -> Vec<String> {
 
 #[test]
 fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
-    let Some(pty_binary) = pty() else {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let Some(_) = pty() else {
         eprintln!("skipped: no pty on PATH for the demo's agents");
         return;
     };
-    let root = tempfile::tempdir().unwrap();
+    let root = throwaway_home();
     let home = root.path();
     let file = home.join("garden.kdl");
     std::fs::write(&file, DEMO).unwrap();
@@ -101,14 +120,20 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
         "# Greenhouse notes\n\nWater bed three twice a week in summer.\n",
     )
     .unwrap();
-    // st launches agents through the login shell, which finds pty on its PATH.
-    let profile = format!(
-        "export PATH=\"{}:$PATH\"\n",
-        pty_binary.parent().unwrap().display()
-    );
-    for name in [".profile", ".bash_profile", ".zprofile"] {
+    // Login startup may reset PATH; keep all devshell tools, including the demo's python3.
+    let path = std::env::var("PATH").unwrap();
+    let profile = format!("export PATH='{path}'\n");
+    for name in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
         std::fs::write(home.join(name), &profile).unwrap();
     }
+    // Fish uses XDG_CONFIG_HOME, which --instance redirects below the instance root.
+    let fish = home.join(".st-instance/demo-test/config/fish");
+    std::fs::create_dir_all(&fish).unwrap();
+    std::fs::write(
+        fish.join("config.fish"),
+        format!("set -gx PATH '{path}'\n"),
+    )
+    .unwrap();
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -124,13 +149,7 @@ fn a_demo_plays_in_its_own_instance_and_ends_with_the_interface() {
     command.arg(&file);
     command.env_clear();
     command.env("HOME", home);
-    command.env(
-        "PATH",
-        format!(
-            "{}:/usr/bin:/bin",
-            pty_binary.parent().unwrap().display()
-        ),
-    );
+    command.env("PATH", std::env::var_os("PATH").unwrap());
     command.env("TERM", "xterm-256color");
     command.cwd(home);
     let mut child = pair.slave.spawn_command(command).unwrap();

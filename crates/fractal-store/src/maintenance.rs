@@ -184,6 +184,36 @@ pub async fn run_client_message_selectors_observed(
     drop(observer);
 }
 
+/// Hydrate completion-health candidates only after serving starts. Every chunk releases the
+/// writer and rests before another loan; an idle worker owns no Store and performs no SQL.
+pub async fn run_completion_health(store: std::sync::Weak<Store>) {
+    let (source, mut changed) = tokio::sync::watch::channel(());
+    let observer = {
+        let Some(current) = store.upgrade() else { return; };
+        current.observe_commits(move |_| { source.send_replace(()); })
+    };
+    loop {
+        changed.borrow_and_update();
+        let Some(current) = store.upgrade() else { return; };
+        let result = tokio::task::spawn_blocking(move || current.maintain_completion_health()).await;
+        match result {
+            Ok(Ok(true)) => tokio::time::sleep(Duration::from_millis(10)).await,
+            Ok(Ok(false)) => {
+                if changed.changed().await.is_err() { break; }
+            }
+            Ok(Err(error)) => {
+                tracing::error!(error = %error, "completion health hydration stopped");
+                return;
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "completion health hydration task failed");
+                return;
+            }
+        }
+    }
+    drop(observer);
+}
+
 fn contention(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(cause.downcast_ref::<rusqlite::Error>(),

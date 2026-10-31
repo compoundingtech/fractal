@@ -22,7 +22,7 @@ export function readinessTimings(marks, a11yEnabled) {
 }
 
 export function summarizeTimings(rows) {
-  const phases = new Map(), families = new Map()
+  const phases = new Map(), families = new Map(), files = new Map()
   for (const row of rows) {
     for (const [name, value] of Object.entries(row.timings ?? {})) {
       if (!Number.isFinite(value) || value < 0) continue
@@ -34,6 +34,12 @@ export function summarizeTimings(rows) {
     total.cases++
     total.elapsedSeconds += row.elapsedSeconds
     families.set(family, total)
+    if (row.storyFile) {
+      const file = files.get(row.storyFile) ?? { storyFile: row.storyFile, cases: 0, elapsedSeconds: 0 }
+      file.cases++
+      file.elapsedSeconds += row.elapsedSeconds
+      files.set(row.storyFile, file)
+    }
   }
   const phaseMilliseconds = Object.fromEntries([...phases].map(([name, values]) => {
     values.sort((a, b) => a - b)
@@ -41,7 +47,12 @@ export function summarizeTimings(rows) {
   }))
   const topCases = [...rows].sort((a, b) => b.elapsedSeconds - a.elapsedSeconds || a.id.localeCompare(b.id) || a.scheme.localeCompare(b.scheme) || a.width - b.width)
     .slice(0, 20).map(({ id, scheme, width, elapsedSeconds, pass }) => ({ id, scheme, width, elapsedSeconds, pass }))
-  return { phaseMilliseconds, topCases, storyFamilies: [...families.values()].sort((a, b) => b.elapsedSeconds - a.elapsedSeconds || a.family.localeCompare(b.family)) }
+  const phaseMeanMilliseconds = Object.fromEntries(Object.entries(phaseMilliseconds).map(([name, phase]) => [name, phase.mean]))
+  return {
+    phaseMilliseconds, phaseMeanMilliseconds, topCases,
+    storyFamilies: [...families.values()].sort((a, b) => b.elapsedSeconds - a.elapsedSeconds || a.family.localeCompare(b.family)),
+    storyFiles: [...files.values()].sort((a, b) => b.elapsedSeconds - a.elapsedSeconds || a.storyFile.localeCompare(b.storyFile)),
+  }
 }
 
 export function costTable(shards) {
@@ -50,8 +61,9 @@ export function costTable(shards) {
   const lines = [
     '## Fractal web cost', '',
     'Lane seconds cover ci-fractal-web (including install), not job provisioning. Case totals are worker-seconds, not runner-seconds.', '',
-    '| Shard | Lane s | Plays s | Storybook s | Cases |', '| --- | ---: | ---: | ---: | ---: |',
-    ...shards.map(({ shardIndex, laneSeconds, receipt }) => `| ${shardIndex} | ${number(laneSeconds)} | ${number(receipt?.elapsedSeconds)} | ${number(receipt?.storybookBuildSeconds)} | ${receipt?.cases ?? 'not run'} |`),
+    `Runner CPU classes: ${[...new Set(shards.map(shard => shard.runnerCpu?.cpuClass ?? 'unknown'))].sort().join(', ') || 'unavailable'}.`, '',
+    '| Shard | Lane s | Plays s | Storybook s | Cases | CPU class | CPU model |', '| --- | ---: | ---: | ---: | ---: | --- | --- |',
+    ...shards.map(({ shardIndex, laneSeconds, receipt, runnerCpu }) => `| ${shardIndex} | ${number(laneSeconds)} | ${number(receipt?.elapsedSeconds)} | ${number(receipt?.storybookBuildSeconds)} | ${receipt?.cases ?? 'not run'} | ${cell(runnerCpu?.cpuClass ?? 'unknown')} | ${cell(runnerCpu?.modelName || 'unavailable')} |`),
     '', '| Phase | Mean ms | p95 ms | Samples |', '| --- | ---: | ---: | ---: |',
   ]
   const rows = shards.flatMap(shard => shard.receipt?.rows ?? [])

@@ -123,6 +123,7 @@ mod tests {
             writer_wait_ms: 0,
             truncate_ms: None,
             recycled,
+            blocked_by: None,
         }
     }
 

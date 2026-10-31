@@ -47,7 +47,14 @@ pub fn request(method: Method, path: &str) -> Request<Body> {
                     async move {
                         // The wait starts counting when it is created, so create it before
                         // signalling: the test advances the clock as soon as it hears.
-                        let wait = tokio::time::sleep(Duration::from_millis(MAX_WAIT_MS));
+                        // On the real clock, just past the ordinary deadline proves it gave way;
+                        // the paused tests idle for the whole wait at no cost.
+                        let idle = if paused {
+                            Duration::from_millis(MAX_WAIT_MS)
+                        } else {
+                            ORDINARY + Duration::from_secs(1)
+                        };
+                        let wait = tokio::time::sleep(idle);
                         let _ = started.lock().unwrap().take().unwrap().send(());
                         wait.await;
                         Json(json!({ "items": [] }))

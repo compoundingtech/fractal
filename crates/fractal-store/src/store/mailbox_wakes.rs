@@ -175,7 +175,7 @@ impl Drop for Subscription {
 #[cfg(any(test, feature = "test-support"))]
 impl Store {
     pub fn miss_mailbox_owner_for_test(&self, subject: &str, component: &str) {
-        self.smalltalk
+        self.fractal
             .mailbox_wakes
             .get()
             .unwrap()
@@ -186,7 +186,7 @@ impl Store {
             .remove(&Dependency::Owner(subject.into(), component.into()));
     }
     pub fn miss_mailbox_recipient_for_test(&self, subject: &str) {
-        self.smalltalk
+        self.fractal
             .mailbox_wakes
             .get()
             .unwrap()

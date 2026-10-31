@@ -1,4 +1,4 @@
-//! The part of `store::work_list` that moved up from st3-store.
+//! The part of `store::work_list` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::work_list::*;
@@ -258,8 +258,8 @@ impl WorkListStore for Store {
     fn seat_queues_of(&self, seats: &BTreeSet<String>) -> Result<HashMap<String, SeatQueue>> {
         #[cfg(any(test, feature = "test-support"))]
         {
-            self.smalltalk.seat_order_reads.fetch_add(seats.len(), std::sync::atomic::Ordering::Relaxed);
-            *self.smalltalk.last_seats_read.lock().unwrap() = seats.clone();
+            self.fractal.seat_order_reads.fetch_add(seats.len(), std::sync::atomic::Ordering::Relaxed);
+            *self.fractal.last_seats_read.lock().unwrap() = seats.clone();
         }
         if seats.is_empty() {
             return Ok(HashMap::new());
@@ -295,18 +295,18 @@ impl WorkListStore for Store {
 
     fn count_seat_lookups(&self, count: usize) {
         #[cfg(any(test, feature = "test-support"))]
-        self.smalltalk.seat_lookups.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.seat_lookups.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
         #[cfg(not(test))]
         let _ = count;
     }
 
     fn count_direct_work_read(&self) {
         #[cfg(any(test, feature = "test-support"))]
-        self.smalltalk.direct_work_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.direct_work_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn published_work_list(&self) -> &published_list::PublishedList<WorkRows> {
-        &self.smalltalk.published_work
+        &self.fractal.published_work
     }
 }
 

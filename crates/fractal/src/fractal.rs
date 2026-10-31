@@ -1,33 +1,7 @@
-//! Additive program-name routing; the existing CLI and UI keep their own identity.
-use std::ffi::{OsStr, OsString};
+//! Local browser-session launching and installer alias ownership.
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum Dispatch {
-    Cli,
-    Web,
-}
-
-/// Rewrite only the new program's UI spelling. All legacy invocations pass through untouched.
-pub fn dispatch(arguments: &mut [OsString]) -> Dispatch {
-    let fractal = arguments
-        .first()
-        .and_then(|program| Path::new(program).file_name())
-        == Some(OsStr::new("fractal"));
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
-    // st and st3 retain their existing CLI parser, display strings and bare-program behavior.
-    if !fractal {
-        return Dispatch::Cli;
-    }
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
-    match arguments.get(1).and_then(|argument| argument.to_str()) {
-        Some("tui") => arguments[1] = "ui".into(),
-        Some("web") => return Dispatch::Web,
-        _ => {}
-    }
-    Dispatch::Cli
-}
 
 /// Only exact installer-created symlinks belong to this installation.
 pub fn owns_alias(path: &Path) -> bool {
@@ -55,18 +29,29 @@ pub fn installed_binaries(mut files: Vec<PathBuf>) -> Vec<PathBuf> {
     files
 }
 
-pub fn web(arguments: &[OsString]) -> ExitCode {
-    if arguments.len() > 2 {
-        if arguments.len() == 3 && matches!(arguments[2].to_str(), Some("--help" | "-h")) {
-            fractal_daemon::cli_println!("Usage: fractal web\n\nOpen the running web UI (FRACTAL_WEB_URL; default http://127.0.0.1:5173). This command does not start a server.");
-            return ExitCode::SUCCESS;
-        }
-        eprintln!("Usage: fractal web");
-        return ExitCode::from(2);
-    }
+pub fn web(explicit_state: Option<PathBuf>) -> ExitCode {
     let url = match std::env::var("FRACTAL_WEB_URL") {
         Ok(url) => url,
-        Err(std::env::VarError::NotPresent) => "http://127.0.0.1:5173".into(),
+        Err(std::env::VarError::NotPresent) => {
+            let path = explicit_state.or_else(|| {
+                fractal_daemon::config::Config::load_unvalidated(None).ok().map(|config| config.state_dir)
+            }).map(|state| state.join("web-launch-url"));
+            let result = path.ok_or_else(|| anyhow::anyhow!("cannot resolve daemon state directory"))
+                .and_then(|path| {
+                    use std::io::Read as _;
+                    let mut file = fractal_daemon::config::open_token_file(&path)?;
+                    let mut url = String::new();
+                    file.read_to_string(&mut url)?;
+                    Ok(url)
+                });
+            match result {
+                Ok(url) => url,
+                Err(error) => {
+                    eprintln!("fractal web: {error:#}; start the daemon with built web assets first");
+                    return ExitCode::from(1);
+                }
+            }
+        }
         Err(error) => {
             eprintln!("fractal web: FRACTAL_WEB_URL: {error}");
             return ExitCode::from(2);
@@ -100,17 +85,16 @@ pub fn web(arguments: &[OsString]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
-    fn route(input: &[&str]) -> (Dispatch, Vec<OsString>) {
-        let mut arguments = input.iter().map(OsString::from).collect::<Vec<_>>();
-        (dispatch(arguments.as_mut_slice()), arguments)
+    fn parse(input: &[&str]) -> crate::Cli {
+        use clap::Parser;
+        crate::Cli::try_parse_from(input).unwrap()
     }
 
     #[test]
     fn fractal_dispatch_no_arguments_keeps_onboarding_and_terminal_guards() {
-        let (dispatch, arguments) = route(&["/bin/fractal"]);
-        assert_eq!(dispatch, Dispatch::Cli);
-        assert_eq!(arguments, vec![OsString::from("/bin/fractal")]);
+        let arguments = [OsString::from("/bin/fractal")];
         for (stdin, stdout, seat, expected) in [
             (true, true, false, true),
             (false, true, false, false),
@@ -125,35 +109,17 @@ mod tests {
     }
 
     #[test]
-    fn fractal_dispatch_tui_reuses_ui_arguments() {
-        assert_eq!(
-            route(&["fractal", "tui", "--help"]),
-            (
-                Dispatch::Cli,
-                vec!["fractal".into(), "ui".into(), "--help".into()]
-            )
-        );
-    }
-
-    #[test]
-    fn fractal_dispatch_web() {
-        assert_eq!(route(&["fractal", "web"]).0, Dispatch::Web);
-    }
-
-    #[test]
-    fn fractal_dispatch_cli_passthrough_and_legacy_are_unchanged() {
-        for input in [
-            &["fractal", "work", "ls"][..],
-            &["fractal", "agents", "ls"],
-            &["st"],
-            &["st3"],
-            &["st", "web"],
-            &["st3", "tui"],
+    fn tui_alias_reuses_ui_arguments_with_global_endpoint() {
+        for arguments in [
+            &["fractal", "tui", "--demo"][..],
+            &["fractal", "--endpoint", "http://localhost:7410", "tui", "--demo"],
+            &["fractal", "tui", "--endpoint", "http://localhost:7410", "--demo"],
         ] {
-            assert_eq!(
-                route(input),
-                (Dispatch::Cli, input.iter().map(OsString::from).collect())
-            );
+            let cli = parse(arguments);
+            assert!(matches!(cli.command, crate::Command::Ui(options) if options.demo));
+            if arguments.contains(&"--endpoint") {
+                assert_eq!(cli.endpoint.as_deref(), Some("http://localhost:7410"));
+            }
         }
     }
 

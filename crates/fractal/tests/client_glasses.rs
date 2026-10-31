@@ -26,6 +26,9 @@ fn state(root: &Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 async fn request(
@@ -501,7 +504,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     device_name: "Fixture phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -511,6 +514,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         code: challenge.code,
         device_public_key: "a".repeat(64),
         key_storage: None,
+        fabric_node_id: None,
     },)
         .await
         .unwrap()

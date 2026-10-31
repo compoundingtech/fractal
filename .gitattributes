@@ -1,5 +1,5 @@
 evals/**/_git/objects/** binary
-# Written by st3-client-codegen: collapsed in GitHub reviews. After a merge conflict, take either
+# Written by fractal-client-codegen: collapsed in GitHub reviews. After a merge conflict, take either
 # side and regenerate (docs/st3/client-v0/README.md).
 crates/fractal-client/src/generated.rs linguist-generated=true
 crates/fractal-client/src/contract.rs linguist-generated=true

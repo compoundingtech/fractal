@@ -192,7 +192,7 @@ fn stale_delivery(agent: &Facts) -> bool {
     agent
         .delivery
         .as_ref()
-        .is_some_and(|delivery| delivery.state == "stale")
+        .is_some_and(|delivery| matches!(delivery.state.as_str(), "stale" | "refused"))
 }
 
 /// Why an agent in `state` needs someone, from what st says about it.
@@ -211,9 +211,9 @@ fn because(agent: &Facts, state: State) -> Option<String> {
                 agent
                     .delivery
                     .as_ref()
-                    .filter(|delivery| delivery.state == "stale")
+                    .filter(|delivery| matches!(delivery.state.as_str(), "stale" | "refused"))
                     .and_then(|delivery| delivery.reason.clone())
-                    .filter(|reason| reason.starts_with("delivery-control-unavailable:"))
+                    .filter(|reason| reason.starts_with("delivery-control-unavailable:") || reason.starts_with("delivery refused:"))
             })
             .or_else(|| {
                 (agent.blocked_on.as_deref() == Some("channel")).then(|| {
@@ -278,6 +278,46 @@ pub fn present(agent: &Facts) -> Presentation {
             .collect(),
         queued: agent.queued_work_count,
     }
+}
+
+/// The name a person reads for an agent named `name` on `host`: its last segment in title case
+/// ("image-sorter" reads as Image Sorter). `st agents new NAME` names a seat HOST.NAME; the host
+/// shows beside it, so the label drops it. An OMP seat reads as its parent's name.
+pub fn label(name: &str, host: Option<&str>) -> String {
+    let slug = name.rsplit('/').next().unwrap_or(name);
+    let host = host.map(|host| host.trim_start_matches("host/"));
+    let slug = host
+        .and_then(|host| {
+            slug.split_once('.')
+                .filter(|(prefix, rest)| prefix.eq_ignore_ascii_case(host) && !rest.is_empty())
+        })
+        .map_or(slug, |(_, rest)| rest);
+    let words = |slug: &str| {
+        slug.split('-')
+            .map(|word| match word.to_ascii_lowercase().as_str() {
+                "st3" => "ST".to_string(),
+                "cos" => "COS".to_string(),
+                "ios" => "iOS".to_string(),
+                "tui" => "TUI".to_string(),
+                "pty" => "PTY".to_string(),
+                "omp" => "OMP".to_string(),
+                _ => {
+                    let mut chars = word.chars();
+                    chars
+                        .next()
+                        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if slug.eq_ignore_ascii_case("omp")
+        && let Some(parent) = name.rsplit('/').nth(1)
+    {
+        return format!("{} · OMP", words(parent));
+    }
+    words(slug)
 }
 
 #[cfg(test)]

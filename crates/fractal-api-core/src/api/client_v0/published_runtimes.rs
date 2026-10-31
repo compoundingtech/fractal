@@ -132,7 +132,7 @@ pub fn page(
             filters: client_page_filters("runtimes", query),
             items: items[..end].to_vec(),
             page: ClientPageInfo { limit, has_more, next_cursor,
-                cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)) },
+                cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)), omitted_items: None },
             sync: client_sync_notice(state), replicated: None,
         };
         (snapshot, page)

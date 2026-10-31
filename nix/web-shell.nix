@@ -7,7 +7,7 @@ let
     pkgs = webPkgs;
     rules = effectUtilsPackages.buck2-rules;
     capabilities = effectUtilsPackages.buck2-capabilities;
-    cellName = "smalltalk";
+    cellName = "fractal";
     # The generator input under `repos/` carries effect-utils' own BUCK files.
     projectIgnore = [
       "**/__pycache__"

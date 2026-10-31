@@ -119,8 +119,9 @@ pub struct GatewayStore {
     db: Connection,
 }
 
-pub use crate::model::person_name;
-use crate::model::valid_word;
+// One definition of a person's name and a profile word, shared with root's tile registry.
+pub use fractal_tiles_registry::names::person_name;
+use fractal_tiles_registry::names::valid_word;
 
 /// A profile ID is `OWNER/NAME`, where OWNER is the owning person's name.
 pub fn check_profile_id(id: &str, owner: &str) -> Result<()> {
@@ -579,6 +580,69 @@ pub fn create_private_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_person_and_a_word_have_one_definition_shared_with_the_tile_registry() {
+        // The gateway's names are the registry's own items, not a copy of them.
+        assert_eq!(
+            std::any::type_name_of_val(&person_name),
+            "fractal_tiles_registry::names::person_name"
+        );
+        assert_eq!(
+            std::any::type_name_of_val(&valid_word),
+            "fractal_tiles_registry::names::valid_word"
+        );
+        let long = "a".repeat(64);
+        let too_long = "a".repeat(65);
+        for (word, valid) in [
+            ("ada", true),
+            ("agent-gh", true),
+            ("robin", true),
+            ("a_b.c-d", true),
+            ("x9", true),
+            (long.as_str(), true),
+            ("", false),
+            (too_long.as_str(), false),
+            (".ada", false),
+            ("-ada", false),
+            ("Ada", false),
+            ("a b", false),
+            ("a/b", false),
+            ("ädä", false),
+            ("a\0", false),
+        ] {
+            assert_eq!(valid_word(word), valid, "{word:?}");
+            assert_eq!(
+                fractal_tiles_registry::names::valid_word(word),
+                valid,
+                "{word:?}"
+            );
+        }
+        for (person, name) in [
+            ("person/ada", Some("ada")),
+            ("person/robin", Some("robin")),
+            ("person/", None),
+            ("person/ada!", None),
+            ("person/ada/x", None),
+            ("person/.ada", None),
+            ("persona/ada", None),
+            ("agent/ada", None),
+            ("ada", None),
+        ] {
+            assert_eq!(person_name(person), name, "{person:?}");
+            assert_eq!(
+                fractal_tiles_registry::names::person_name(person),
+                name,
+                "{person:?}"
+            );
+            assert_eq!(crate::tile_registry::names::person_name(person), name);
+        }
+        // A profile ID is checked with the same rule.
+        assert!(check_profile_id("ada/agent-gh", "person/ada").is_ok());
+        assert!(check_profile_id("bob/gh", "person/ada").is_err());
+        assert!(check_profile_id("ada/Agent", "person/ada").is_err());
+        assert!(check_profile_id("ada/.gh", "person/ada").is_err());
+    }
 
     #[test]
     fn profiles_grants_locks_and_the_log_round_trip() {

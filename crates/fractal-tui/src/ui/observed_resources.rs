@@ -155,6 +155,9 @@ mod socket_tests {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         for (id, kind, facts) in [
             (
@@ -244,6 +247,7 @@ mod socket_tests {
                             key: "a0".into(),
                         },
                     ],
+                version: None,
                 },
             )
             .await
@@ -256,10 +260,10 @@ mod socket_tests {
         assert_eq!(a.resolved.unwrap().folders[&pull.id], Some(folder));
         let mut sidebar = super::super::resource_sidebar::Sidebar::default();
         sidebar.observations = rows;
-        sidebar.observe(&super::super::demo::world());
+        sidebar.observe(&super::super::demo::test_world());
         assert!(sidebar.rows().iter().any(|row| matches!(row, super::super::resource_sidebar::Row::Resource(row) if row.id == pull_id)));
         sidebar.observations.clear();
-        sidebar.observe(&super::super::demo::world());
+        sidebar.observe(&super::super::demo::test_world());
         assert!(sidebar.rows().iter().any(|row| matches!(row, super::super::resource_sidebar::Row::Resource(row) if row.id == pull_id && row.missing)));
         server.abort();
     }

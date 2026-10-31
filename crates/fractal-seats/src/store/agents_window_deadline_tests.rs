@@ -9,7 +9,7 @@ fn agents_window_partial_projection_supplies_its_queue_deadline() {
         index, local: 0, history, covered, valid_until_unix_ms: deadline,
         items: Arc::new(Vec::new()), published_at_unix_ms: 0,
     };
-    let Ok(mut cache) = store.smalltalk.agent_resources_cache.lock() else {
+    let Ok(mut cache) = store.fractal.agent_resources_cache.lock() else {
         panic!("fixture cache was poisoned before deadline setup");
     };
     cache.push_back(entry(0, false, None, Some(100)));
@@ -21,7 +21,7 @@ fn agents_window_partial_projection_supplies_its_queue_deadline() {
     assert_eq!(store.agent_roster_valid_until(0, None), Some(200));
     assert_eq!(store.agent_roster_valid_until(1, None), Some(400));
     assert_eq!(store.agent_roster_valid_until(2, None), None);
-    let Ok(mut cache) = store.smalltalk.agent_resources_cache.lock() else {
+    let Ok(mut cache) = store.fractal.agent_resources_cache.lock() else {
         panic!("fixture cache was poisoned before clearing the lease deadline");
     };
     cache.push_back(entry(0, false, Some(BTreeSet::new()), None));

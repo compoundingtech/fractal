@@ -105,8 +105,14 @@ fn exchange_carrier_records_are_independent_local_and_cleared_on_restart() {
         code: "replication-exchange-metadata-too-large".into(),
         phase: smallclaims::replication::ReplicationFailurePhase::FollowUpExport,
         elapsed_ms: 1_234,
+        attempt_elapsed_ms: Some(37_862),
+        preparation_ms: Some(25),
+        request_body_bytes: Some(128),
+        request_body_uncompressed_bytes: Some(4096),
         http_status: Some(500),
         cause: "authenticated peer rejected the exchange; body withheld".into(),
+        correlation_id: Some("019aa000-0000-7000-8000-000000000001".into()),
+        client_stage: Some(smallclaims::replication::ReplicationClientStage::HeadersReceived),
     };
     let record;
     {
@@ -279,4 +285,74 @@ fn failure_details_round_trip_and_legacy_observations_remain_readable() {
     let decoded: ReplicationPeerFailureRequest =
         serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
     assert_eq!(decoded.failure, request.failure);
+}
+
+#[test]
+fn outer_context_preserves_inner_phase_elapsed_and_request_measurements() {
+    use smallclaims::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
+    use std::time::Duration;
+    let mut inner = ReplicationExchangeFailure::from_error(
+        &anyhow::anyhow!("transport failure"), ReplicationFailurePhase::RequestHeaders,
+        Duration::from_secs(20), None,
+    );
+    inner.preparation_ms = Some(862);
+    inner.request_body_bytes = Some(512);
+    inner.request_body_uncompressed_bytes = Some(8192);
+    let error = anyhow::Error::new(inner.clone()).context("outer request context");
+    let mut recorded = ReplicationExchangeFailure::from_error(
+        &error, ReplicationFailurePhase::Verify, Duration::from_millis(37_862), None,
+    );
+    recorded.attempt_elapsed_ms = Some(37_862);
+    assert_eq!(recorded.phase, ReplicationFailurePhase::RequestHeaders);
+    assert_eq!(recorded.elapsed_ms, 20_000);
+    assert_eq!(recorded.attempt_elapsed_ms, Some(37_862));
+    assert_eq!(recorded.preparation_ms, inner.preparation_ms);
+    assert_eq!(recorded.request_body_bytes, inner.request_body_bytes);
+    assert_eq!(recorded.request_body_uncompressed_bytes, inner.request_body_uncompressed_bytes);
+    let round_trip: ReplicationExchangeFailure =
+        serde_json::from_value(serde_json::to_value(&recorded).unwrap()).unwrap();
+    assert_eq!(round_trip, recorded);
+
+    let local = ReplicationExchangeFailure::from_error(
+        &anyhow::anyhow!("export failure"), ReplicationFailurePhase::LocalExport,
+        Duration::from_millis(123), None,
+    );
+    let contextual = ReplicationExchangeFailure::from_error(
+        &local.into(), ReplicationFailurePhase::FollowUpExport, Duration::from_secs(17), None,
+    );
+    assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
+    assert_eq!(contextual.elapsed_ms, 123);
+    assert_eq!(contextual.attempt_elapsed_ms, None);
+}
+
+/// A peer that keeps exchanging with us while our own dial to it is refused stays up: each
+/// refusal used to publish unknown and each exchange up again, a claim per exchange.
+#[test]
+fn a_refused_dial_does_not_flap_a_peer_that_keeps_exchanging() {
+    let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
+    let source = Store::open_memory("birch", Arc::new(Plain)).unwrap();
+    let exchange = source.export_replication_summary("sample-fleet").unwrap();
+    let observations = || {
+        store
+            .claims_for("host/birch", Some("transport.observed"))
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.origin == "alder")
+            .count()
+    };
+    for _ in 0..10 {
+        // What a receive does: the exchange, then this member's up observation of the peer.
+        store
+            .receive_replication_exchange_via("birch", "sample-fleet", &exchange, false, smallclaims::replication::ReplicationCarrier::Loopback)
+            .unwrap();
+        store.record_transport_observation("birch", "up", None, None).unwrap();
+        // What a failed outbound dial does: the failure, then an observation only when stale.
+        let stale = store
+            .record_peer_failure_via("birch", "refused", "service grant refused", Some(smallclaims::replication::ReplicationCarrier::Fabric), None)
+            .unwrap();
+        if stale {
+            store.record_transport_observation("birch", "refused", Some("service grant refused"), None).unwrap();
+        }
+    }
+    assert_eq!(observations(), 1, "one up observation, not one per refusal and exchange");
 }

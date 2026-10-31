@@ -1,4 +1,4 @@
-# st observability
+# Fractal observability
 
 This reference describes the current daemon, CLI, replication worker and hook
 telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
@@ -10,25 +10,26 @@ O11Y-R10–R18 remain the accepted constraints. They include coverage targets th
 are not all implemented; the mechanism and integration boundaries below state the
 current coverage. Budget limits are requirements, not claims of measured compliance.
 
-- **O11Y-R10 Process signals:** The st3 daemon, replication worker, and CLI use the OpenTelemetry
+- **O11Y-R10 Process signals:** The Fractal daemon, replication worker, and CLI use the OpenTelemetry
   SDK to produce traces, metrics, and logs. Their `service.name` values are `st-daemon`,
   `st-replication-worker`, and `st-cli`. Hooks send signals through the daemon and never export
   directly; hook spans and invocation metrics emitted by the observations exporter use
   `st-hook`. Harness-timer statusline commands remain exempt from telemetry initialization.
-- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, st3 builds no
+- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, Fractal builds no
   exporter or SDK provider, makes no telemetry network calls, and incurs no measurable telemetry
   overhead. Exporter configuration uses standard `OTEL_*` variables.
 - **O11Y-R12 Reactor isolation:** Export work must not run on the daemon's request reactor.
-- **O11Y-R13 Signal version:** Every st3 signal carries `service.version` from the machine build
+- **O11Y-R13 Signal version:** Every Fractal signal carries `service.version` from the machine build
   identity, including signals from the observations exporter.
-- **O11Y-R14 Bounded metrics and attributes:** st3 exposes a bounded rate, error, duration, and
+- **O11Y-R14 Bounded metrics and attributes:** Fractal exposes a bounded rate, error, duration, and
   saturation metric set with at most 2,000 active series per daemon. Agent, session, message,
-  terminal, attachment, and lease ids are forbidden in metric labels and `span.label`.
+  terminal, attachment, and lease ids are forbidden in metric labels and `span.label`,
+  except for the fleet-bounded `st.agent` delivery-health and mailbox-gauge axes documented below.
   Capabilities and their hashes are forbidden in every signal.
 - **O11Y-R15 Trace propagation:** W3C `traceparent` and `tracestate` propagate end to end across
-  st3 HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
+  Fractal HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
   protocol. Peer trace context is covered by the peer signature.
-- **O11Y-R16 Sampling:** st3 exports every span when traces are enabled and performs no
+- **O11Y-R16 Sampling:** Fractal exports every span when traces are enabled and performs no
   in-process sampling. The local collector applies the fleet sampling policy: keep traces
   with an error, a local root longer than 1 second, a sampled caller, and a deterministic
   1% of the rest. Sampling never affects metrics.
@@ -74,7 +75,7 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
 Local stderr diagnostics remain available. Standard `OTEL_*` environment variables configure
-export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every st3
+export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every Fractal
 unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 
 | Process unit | `service.name` | Shutdown budget |
@@ -120,10 +121,10 @@ The local collector applies tail sampling keyed by trace id (O11Y-R16), keeping 
 any span has status `ERROR`, a local root lasts more than 1 second, or the root came from a
 sampled caller. It keeps a deterministic trace-id ratio of 1% of the remaining traces.
 
-The sampled-caller signal is `st.parent.sampled`: because st3 exports every span with
+The sampled-caller signal is `st.parent.sampled`: because Fractal exports every span with
 AlwaysOn, every exported span carries the sampled flag, and the collector cannot recover the
 caller's decision from trace flags. Server spans set `st.parent.sampled=true` only when
-the remote parent is sampled and its tracestate has no `st` key. st's own clients mark
+the remote parent is sampled and its tracestate has no `st` key. Fractal's own clients mark
 collector-owned sampling with `st=c`; their AlwaysOn flag must not force the collector to
 keep every trace. Unsampled or st-marked parents record false; a missing parent records no
 attribute. The decision wait must be long enough for the daemon's SDK batch delay and
@@ -171,6 +172,8 @@ follows the collector sampling policy above; the process exports every span.
 ```text
 HTTP upgrade SERVER span (ends at 101)
     <link> st.subscription.first_frame INTERNAL root (subscribe -> first frame sent)
+frame remote parent -> st.subscription.first_frame SERVER span (valid subscribe trace)
+    <link> HTTP upgrade SERVER span
 HTTP receive SERVER span
     <link> st.replication.projection INTERNAL root (new or deferred data only)
 st.roster.rebuild INTERNAL root (cold build only; optional admission-holder link)
@@ -182,16 +185,31 @@ span. The context is captured before handler dispatch because the handler constr
 and terminal pumps. W3C context on the upgrade therefore survives task boundaries without
 extending the request span's lifetime.
 
-Each accepted subscribe constructs one `st.subscription.first_frame` root with an empty
-parent context and a link to the valid upgrade span context. It ends after the first
-frame is sent. Later rereads, resyncs, and changes construct no spans; there are no
-per-frame child spans. Construction is gated by the trace-export `AtomicBool`, before
-labels, collections, or counts are inspected (O11Y-R02, O11Y-R18).
+Accepted subscriptions to `missions`, `attention`, `agents`, `work`, `glasses`,
+`arrangements`, `conversation`, and `terminal` construct one bounded
+`st.subscription.first_frame` span linked to the valid upgrade context.
+The proposed optional subscribe `trace` field
+(pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)) carries W3C
+`traceparent` and optional `tracestate`; the field's repository-local naming and
+compatibility contract is in [collections.md](client-v0/collections.md).
+Every collection-socket subscribe variant accepts the field, but only the collections
+listed above use the W3C propagator to extract it for their first-frame span.
+A valid frame context parents a SERVER span and
+records `st.parent.sampled` through the same helper as HTTP SERVER spans.
+Absent, null, malformed, or invalid context never rejects a frame: the span remains
+an INTERNAL root with an empty parent. Dedicated streams have no subscribe frame
+and retain the INTERNAL root behavior.
+
+The span ends after the first frame is sent. Later rereads, resyncs, and changes
+construct no spans; there are no per-frame child spans. Construction and extraction
+are gated by the trace-export `AtomicBool`, before labels, collections, or counts
+are inspected (O11Y-R02, O11Y-R18). No command or strict HTTP body gains frame context.
 
 | First-frame attribute | Type / vocabulary |
 | --- | --- |
 | `st.collection` | String: `missions`, `attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, `terminal` |
 | `st.subscription.id` | String: protocol subscription identity, span-only |
+| `st.parent.sampled` | Boolean: valid external frame remote parent's sampled flag; st-marked parents record false, same policy as HTTP |
 | `st.projection.hit`, `st.projection.cold`, `st.projection.incremental`, `st.projection.shared` | Boolean: projection path used by the initial read |
 | `st.page.rows` | Integer: initial frame rows after truncation |
 | `st.page.bytes` | Integer: serialized initial frame bytes |
@@ -317,7 +335,7 @@ is span-only and never a metric label or `span.label`.
 
 ## Metric naming and cardinality
 
-The repository-local st3 instrument namespace uses lowercase dot-separated names:
+The repository-local Fractal instrument namespace uses lowercase dot-separated names:
 daemon work and storage instruments use `st.`, while HTTP and database client
 instruments use the OpenTelemetry `http.server` and `db.client` namespaces.
 Duration instruments use seconds. Depth, size, and age gauges describe saturation.
@@ -337,6 +355,11 @@ values map to `other`; routes are matched templates, not raw paths.
 | Replication `peer` | Fleet node membership |
 | Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 | Projection `collection` | `missions`, `agents`, `attention`, else `other` |
+| Delivery and mailbox `st.agent` | Full declared subject of each managed agent owned by the local host |
+| Delivery `st.delivery.state` | `live`, `stale`, `refused` |
+| Delivery `st.delivery.reason` | Empty unless refused; the fixed refusal-code vocabulary below |
+| Delivery `st.agent.desired` | `running`, `suspended`; selected from authoritative lifecycle, not observed liveness |
+| Mailbox `st.mailbox.state` | `pending`, `delivered`, `held` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -621,6 +644,128 @@ Excluded from FIFO telemetry are coalesced Notify/watch states, caches,
 durable inbox and seat queues, driver-side mailbox `Subscription` queues, and
 ping sidecar queues.
 
+## Per-agent delivery health
+
+The daemon's existing `st3` meter exports observable f64 gauge
+`st.delivery.state_age`, unit `s`, with exactly four point attributes:
+`st.agent`, `st.delivery.state`, `st.delivery.reason`, and `st.agent.desired`. Host identity stays in
+the daemon resource, not an additional point attribute.
+
+Membership comes exclusively from
+`mailbox_metrics::managed_agents_owned_by_local_host(&Store)`: declared subjects
+whose kind is `agent` and whose member host equals `store.origin()`. The full
+subject is used unchanged as `st.agent`, so this series joins the mailbox
+backlog gauges without display-name aliases or duplicate remote-host reporting.
+Every member contributes one series, including agents that have never bound
+and members not yet in the cached agents publication. Stopped declarations
+(kind `stop`), retired/undeclared agents and agents owned by another host are not exported.
+Stopping an agent therefore removes its series; it cannot page for stale delivery.
+
+`st.agent.desired` is `suspended` exactly when
+`suspension::current(&Store, agent)?.holds_seat()` holds, using the same authoritative
+suspend/resume fold as the reconciler. This includes quiescing, snapshotting,
+suspended, fencing-source, transferring, restoring and verifying phases; it stays
+suspended until resume completes, including failed resumes that retain the hold.
+Otherwise an exported declared agent is `running`, even if its harness never
+started or crashed. No `stopped` or `unknown` attribute value is exported because
+membership already proves an active agent declaration. The off-scrape worker
+updates this attribute; desired-state changes do not reset the delivery-state age.
+
+The cached delivery projection maps `current`, `outdated`, and `legacy` to
+`live`; an explicit bind refusal maps to `refused`. Every other case maps to
+`stale`, including startup `unknown`, a never-bound seat, a suspended seat, or
+missing publication data. This is deliberately stricter than the UI's startup
+grace: absence of confirmed delivery evidence is explicit rather than an absent
+time series.
+
+`st.delivery.reason` is always the empty string for `live` and `stale`. For
+`refused` its fixed vocabulary is `mailbox-runtime-indeterminate`,
+`stale-mailbox-session`, `mailbox-binding-conflict`, `mailbox-peer-mismatch`,
+`mailbox-not-authorized`, `recipient-retired`, and `other`. Unrecognized codes
+map to `other`; their original text remains in the warning log and API reason.
+Refusal observation follows caller identity proof: the provider, exact live
+physical runtime membership and daemon-selected observation paths must match.
+A nested Claude caller also passes the primary process gate; argv callers must
+pass physical process validation. Wrong-provider and outside-runtime rejections
+cannot mark healthy primary delivery refused. A subsequent session/fence refusal
+encountered by the authenticated caller remains visible.
+On non-Linux platforms there is no native authority on the Store bind route:
+after the Claude primary gate, permission to attempt that bind also permits
+its refusal diagnostics.
+
+Free-form diagnostic text is never exported as a label.
+
+The value is seconds since the current normalized state began in this daemon
+lifetime. `delivery.since_unix_ms` seeds the initial age once when available;
+otherwise age starts at the first successful metrics refresh. Thereafter a
+monotonic clock advances age: wall-clock corrections cannot move it backward
+or forward. Repeated refusals, unknown-to-stale transitions, and binary-version
+changes within `live` do not reset it. State or runtime-incarnation changes do
+reset it. The worker holds a roster-publication subscription for its lifetime,
+so heartbeat expiry, refusal and recovery keep refreshing without any UI reader.
+A single off-scrape worker refreshes membership and cached projection data, with at least
+30 seconds of rest after each refresh (or its elapsed duration if longer).
+Failures retain the last complete summary. Collection only reads this summary
+and advances ages; it does no store, graph, process, or filesystem reads.
+
+Alert on `st.delivery.state=stale` AND `st.agent.desired=running` AND
+`st.delivery.state_age > 600`. Add a corresponding `refused` rule if refused
+delivery should page too, retaining the desired-running filter. This detects
+channel health independently of unread messages and excludes intentional
+suspension. Daemon disappearance requires a separate exporter/host-availability
+alert; stopped declarations emit no series.
+
+## Durable mailbox gauges (contract v1)
+
+The `st3` meter exports these observable gauges from the daemon:
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.mailbox.unread` | Observable u64 gauge | `{message}` | `st.agent`, `st.mailbox.state` |
+| `st.mailbox.oldest_unread_age` | Observable f64 gauge | `s` | `st.agent`, `st.mailbox.state` |
+
+`st.agent` is the full declared subject, such as `agent/<owner>/<name>`,
+not a display name or runtime identity. This is a deliberate fleet-membership
+exception to O11Y-R14's identity-label prohibition. The reusable
+`managed_agents_owned_by_local_host` helper reads the same declared projection
+as `desired_subjects_named` and includes only agents whose `member.host` equals
+the store's local origin. Remote-owned agents, undeclared recipients and people
+are excluded. Each included agent contributes three states to each instrument
+(six series total), including agents with no messages. Host identity remains the
+`host.name` resource attribute (available as `host_name` downstream); neither
+instrument adds a per-point host attribute.
+
+Unread means no `message.read` or `message.closed` claim. Partition unread mail
+into `pending` for sent or staged messages, `delivered` for delivered messages,
+and `held` for silent messages for which `waits_for_turn` is true. Held takes
+precedence over the ordinary delivery state: a silent sent message is held,
+but a silent message already offered or delivered is not waiting for a turn.
+Every state reports a count and age of zero when empty. Age is seconds since the
+oldest included message's accepted `message.sent` timestamp, not its delivery
+time or a sender-provided field. Its unit is exactly `s`, matching
+`st.fifo.oldest_age`; it measures durable unread mail, not an in-process FIFO.
+
+While `coordination_backfill_status()?.2` is false, held metadata is incomplete.
+Omit only the `held` series, including held zeros; continue exporting `pending`
+and `delivered` and their mandatory zeros. During this bootstrap, ordinary
+delivery-state counts may include mail whose held classification is unavailable.
+Resume the complete three-state partition after the next successful refresh
+observes completed bootstrap.
+
+Registration is part of `start_published_lists`, after the first successful
+summary. A single blocking worker reads the desired declarations and builds
+a cached summary using an indexed query per locally owned recipient. Refresh
+cost is bounded by the declared-subject set plus those recipients' retained sent
+and unread-subject claim histories, not fleet-wide message bodies; there is no
+delivery-page cap or silent truncation. Cache size is at most three rows per
+local agent, plus temporary query candidates and the existing message-view cache.
+Refreshes never overlap; after each refresh the worker pauses for at least 30 seconds, or
+the refresh's elapsed duration if longer. SDK collection reads only the cached
+summary and advances ages from cached accepted timestamps; it does no store,
+graph or filesystem reads. Counts and membership therefore reflect the last
+successful refresh rather than the instant of collection.
+Failed refreshes retain the last complete summary and log a warning.
+
 ## Projection freshness telemetry
 
 The `projection-fresh` target (docs/clients/ui-contract.md, SLOs) does not sample a publication
@@ -633,6 +778,20 @@ adds one to a counter, so a catch-up is seen rather than hidden from the target.
 | `st.slo.projection_fresh.skipped` | Counter | `{publication}` | `collection=missions`, `agents`, `attention`, or `other` |
 
 It contributes at most 4 attribute series and counts only while daemon metrics are enabled.
+
+## Assistant read receipt telemetry
+
+Caller-bound assistant read receipts commit on one background writer after the read returns
+(docs/st3/external-assistants.md). Each writer transaction records how many receipts it
+committed; a receipt that fails to commit is counted and logged at `error` with its subject.
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.assistant.read_receipts.batch.size` | Histogram | `{receipt}` | none; buckets `1,2,4,…,256` |
+| `st.assistant.read_receipts.failures` | Counter | `{receipt}` | none |
+
+Both record only while daemon metrics are enabled. The same distribution is available in
+process from `ReceiptWriter::stats`, and each commit logs `receipt_count` at `debug`.
 
 ## Daemon startup telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
@@ -708,7 +867,7 @@ exchange(peer) → st.replication.round (detached root, one per exchange call)
 ```
 
 The root uses the OpenTelemetry API's `start_with_context` with an empty
-parent context. smallclaims depends on the OTel API only; st3 owns providers.
+parent context. smallclaims depends on the OTel API only; Fractal owns providers.
 The round does not inherit an ambient daemon or worker span. `span.label` is
 the bounded operation `round`.
 Span fields use the `st.replication.*` prefix. The round records `peer`,
@@ -844,7 +1003,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
 bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
-`stui` and the client TUI example leave it disabled. Without the feature, injection is
+`fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
 `crates/fractal-client-codegen/templates/lib.rs.in`; the
@@ -874,8 +1033,11 @@ no root, abnormal/failure results are ERROR, and roots remain parentless even wi
 both an entered tracing span and an attached OTel context.
 
 The stage-span receiver proof compares `st.request.id` with the HTTP envelope, checks
-roster/page stage values, and links first-frame roots to the exported upgrade trace/span
-ids. It asserts that repeated rereads or changes produce no additional first-frame
+roster/page stage values, and links first-frame spans to the exported upgrade trace/span
+ids. It checks valid frame parent trace/span IDs, SERVER kind, sampled and unsampled
+flags, and malformed-field fallback to an INTERNAL root without losing first-frame
+delivery. The client contract proof preserves old-shape subscribes and accepts malformed
+telemetry. Repeated rereads or changes produce no additional first-frame
 roots, cold roster builds are detached and unlinked, and receive projection roots are
 detached but linked to the receive request. Empty receives produce no projection root.
 

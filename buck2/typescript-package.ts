@@ -24,7 +24,7 @@ export const typescriptPackageBuck = ({
     .filter(
       (name) =>
         name === 'package.json' ||
-        (name.endsWith('.ts') && name.endsWith('.genie.ts') === false) ||
+        (/\.(?:ts|mts|mjs)$/.test(name) && name.endsWith('.genie.ts') === false) ||
         /^tsconfig.*\.json$/.test(name),
     )
     // Byte order, independent of the filesystem's directory order.

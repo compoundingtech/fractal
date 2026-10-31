@@ -1,5 +1,5 @@
 //! Fixture tools that need the store. The process tools (temporary directories, the fixture shell,
-//! command wrappers) live in st3-secrets and are re-exported here.
+//! command wrappers) live in fractal-secrets and are re-exported here.
 
 pub use fractal_secrets::test_support::*;
 

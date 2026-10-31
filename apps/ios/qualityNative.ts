@@ -13,7 +13,7 @@ export const quality = new LocalQuality(AsyncStorage, {
   after: (fn, ms) => setTimeout(fn, ms), cancel: timer => clearTimeout(timer as ReturnType<typeof setTimeout> | undefined),
   frame: fn => { requestAnimationFrame(fn); },
 // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
-}, 'ios', clientName('smalltalk-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD), AppState.currentState === 'active', launchStarted);
+}, 'ios', clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD), AppState.currentState === 'active', launchStarted);
 export const localDrafts = new LocalDrafts(AsyncStorage);
 AppState.addEventListener('change', state => quality.foreground(state === 'active'));
 

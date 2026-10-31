@@ -2,7 +2,7 @@
 name = "fractal-conversation-ui"
 version = "0.1.0"
 edition = "2024"
-description = "Renderer-independent Smalltalk conversation model with optional terminal drawing"
+description = "Renderer-independent Fractal conversation model with optional terminal drawing"
 license = "MIT"
 
 [features]

@@ -652,7 +652,7 @@ async fn a_backup_carries_the_long_bodies_a_member_owns_and_a_restore_proves_the
     assert!(!archived.contains("message/stray"));
     // Restored into a fresh state directory, every body is back, matched to its claim by hash.
     let restored_dir = root.path().join("restored");
-    let report = crate::backup::restore(&archive_path, &restored_dir.join("claims.sqlite3")).unwrap();
+    let report = crate::backup::restore(&archive_path, &restored_dir.join("claims.sqlite3"), &restored_dir).unwrap();
     assert_eq!(report.message_bodies_restored, 2);
     assert_eq!(report.message_bodies_unmatched, 0);
     assert_eq!(report.message_bodies_referenced, 2);
@@ -676,7 +676,7 @@ async fn a_backup_carries_the_long_bodies_a_member_owns_and_a_restore_proves_the
     let bare_path = root.path().join("bare.jsonl");
     std::fs::write(&bare_path, &bare).unwrap();
     assert_eq!(crate::backup::verify_file(&bare_path).unwrap().version, crate::backup::VERSION);
-    let report = crate::backup::restore(&bare_path, &root.path().join("bare").join("claims.sqlite3")).unwrap();
+    let report = crate::backup::restore(&bare_path, &root.path().join("bare").join("claims.sqlite3"), &root.path().join("bare")).unwrap();
     assert_eq!((report.message_bodies_restored, report.message_bodies_referenced), (0, 2));
 }
 

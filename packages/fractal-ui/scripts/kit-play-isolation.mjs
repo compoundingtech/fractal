@@ -19,9 +19,21 @@ export function testRunnerUserAgent(browser) {
 
 // Chromium's HTTP resource cache is intentionally retained: the job's server and
 // bundle are immutable. Cache Storage and every other origin storage type are not.
-export async function createIsolatedKitWorker(browser, base) {
+export async function createIsolatedKitWorker(browser, base, { workerId = null } = {}) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, userAgent: await testRunnerUserAgent(browser) })
   const origins = new Set()
+  let previousCase = null
+  const residualStorage = (boundary, snapshot) => {
+    const storage = [
+      { kind: 'localStorage', keys: snapshot.local },
+      { kind: 'sessionStorage', keys: snapshot.session },
+    ].filter(({ keys }) => keys.length)
+    if (!storage.length) return
+    const isolation = { boundary, origin: snapshot.origin, storage, workerId, previousCase }
+    const error = new Error(`Kit isolation ${boundary} audit: residual Web Storage ${JSON.stringify(isolation)}`)
+    error.isolation = isolation
+    throw error
+  }
   const trackOrigin = url => {
     const parsed = new URL(url)
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') origins.add(parsed.origin)
@@ -31,6 +43,11 @@ export async function createIsolatedKitWorker(browser, base) {
     trackOrigin(base)
     const control = await context.newPage()
     const client = await context.newCDPSession(control)
+    // Inert origin documents audit localStorage without creating and navigating
+    // another Chromium page for every case. They never execute story code or
+    // share a case's sessionStorage; fresh case documents audit that separately.
+    const auditPages = new Map()
+    const inertAudit = (origin, page) => !page.isClosed() && page.url() === new URL(origin).href && page.frames().length === 1 && page.workers().length === 0
     const assertControl = () => {
       if (control.isClosed() || control.url() !== 'about:blank') {
         throw new Error('Kit isolation control page must remain open and blank')
@@ -43,21 +60,60 @@ export async function createIsolatedKitWorker(browser, base) {
       for (const origin of origins) {
         const { usage } = await client.send('Storage.getUsageAndQuota', { origin })
         if (usage !== 0) throw new Error(`Kit isolation audit: residual storage at ${origin}: ${usage} bytes`)
+        // Quota excludes Web Storage. Keep one script-free document per origin
+        // so reading localStorage remains an independent check of CDP clearing.
+        let probe = auditPages.get(origin)
+        if (!probe) {
+          probe = await context.newPage()
+          // Routing is not a script boundary: service workers and blob URLs can
+          // bypass it. Disable document script execution on the target itself;
+          // explicit DevTools storage probes remain available.
+          const probeClient = await context.newCDPSession(probe)
+          await probeClient.send('Emulation.setScriptExecutionDisabled', { value: true })
+          await probe.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }))
+          await probe.goto(origin)
+          auditPages.set(origin, probe)
+        }
+        if (!inertAudit(origin, probe)) {
+          throw new Error(`Kit isolation audit page changed at ${origin}`)
+        }
+        residualStorage('reset', await probe.evaluate(() => ({
+          origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
+        })))
+      }
+      // Public audits also cover sessionStorage in still-live case pages;
+      // reset has already destroyed those browsing sessions.
+      for (const page of context.pages()) {
+        if (!origins.has(new URL(page.url()).origin)) continue
+        residualStorage('reset', await page.evaluate(() => ({
+          origin: location.origin, local: Object.keys(localStorage), session: Object.keys(sessionStorage),
+        })))
       }
     }
     return {
       context,
+      setPreviousCase(value) { previousCase = value },
       async reset() {
         const started = performance.now()
         assertControl()
         // Closing the entire previous page graph also removes sessionStorage,
         // globals, workers, in-flight scripts, and popups before clearing storage.
-        let pages = context.pages().filter(page => page !== control)
+        const casePages = () => context.pages().filter(page => page !== control && ![...auditPages.values()].includes(page))
+        let pages = casePages()
         while (pages.length) {
           const results = await Promise.allSettled(pages.map(page => page.close()))
           const failures = results.filter(result => result.status === 'rejected')
           if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Kit isolation page cleanup failed')
-          pages = context.pages().filter(page => page !== control)
+          pages = casePages()
+        }
+        // Guard accidental leaks between our own stories, not hostile stories.
+        // Retain only an inert single-frame, worker-free document at its exact
+        // URL with target scripts disabled; replace anything else before clear.
+        for (const [origin, probe] of auditPages) {
+          if (!inertAudit(origin, probe)) {
+            await probe.close()
+            auditPages.delete(origin)
+          }
         }
         await context.clearCookies()
         await context.clearPermissions()
@@ -101,9 +157,7 @@ export async function createIsolatedKitWorker(browser, base) {
             if (captured || ['http:', 'https:'].includes(new URL(page.url()).protocol)) {
               const snapshot = await firstSnapshot
               if (snapshot.error) throw new Error(`Kit isolation document-start audit failed at ${snapshot.origin}: ${snapshot.error}`)
-              if (snapshot.local.length || snapshot.session.length) {
-                throw new Error(`Kit isolation document-start audit: residual Web Storage at ${snapshot.origin}`)
-              }
+              residualStorage('document-start', snapshot)
             }
             return response
           }
