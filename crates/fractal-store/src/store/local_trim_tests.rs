@@ -834,6 +834,11 @@ enum Step {
     /// Two observations of one observer in one batch: the older is not the newest of its slot
     /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
     Twice(u8),
+    /// One source of a seat's status history: a harness transition (`kind` 0), observed inside
+    /// the seven-day history window or (`old`) nine days back, outside it; a runtime reset to an
+    /// incarnation (1); or a restored provider prompt (2), both dated by acceptance, inside it.
+    /// The status-history rule reads all three to judge a harness observation.
+    Seat { kind: u8, seat: u8, incarnation: u8, state: u8, old: bool },
 }
 
 fn step_strategy() -> impl Strategy<Value = Step> {
@@ -844,6 +849,8 @@ fn step_strategy() -> impl Strategy<Value = Step> {
         1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
         1 => (0..3u8).prop_map(Step::Shared),
         1 => (0..3u8).prop_map(Step::Twice),
+        6 => (0..3u8, 0..2u8, 0..3u8, 0..6u8, any::<bool>())
+            .prop_map(|(kind, seat, incarnation, state, old)| Step::Seat { kind, seat, incarnation, state, old }),
         1 => any::<bool>().prop_map(Step::Tombstone),
         1 => any::<u8>().prop_map(Step::PeerCite),
         1 => any::<bool>().prop_map(Step::CatchUp),
@@ -1040,6 +1047,48 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                 )
                 .unwrap();
         }
+        Step::Seat { kind, seat, incarnation, state, old } => {
+            let seat = SEATS[usize::from(*seat)];
+            let incarnation = format!("{seat}-{incarnation}");
+            let observed_at = now_ms() - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
+            let (kind, fields) = match kind {
+                0 => ("harness.observed", BTreeMap::from([
+                    ("state".into(), json!(STATES[usize::from(*state)])),
+                    ("driver".into(), json!("codex")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("status_transition".into(), json!(true)),
+                ])),
+                1 => ("runtime.observed", BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("runtime_id".into(), json!(seat.trim_start_matches("agent/"))),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ])),
+                _ => ("harness.diagnostic", BTreeMap::from([
+                    ("code".into(), json!("provider-auth-restored")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("driver".into(), json!("codex")),
+                    ("reason".into(), json!("fixture")),
+                    ("severity".into(), json!("warning")),
+                ])),
+            };
+            let mut fields = fields;
+            // Only a harness observation carries its own observation time; the others are dated
+            // by acceptance, inside the window.
+            if kind == "harness.observed" {
+                fields.insert("observed_at_ms".into(), json!(observed_at as u64));
+            }
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("seat-{n}")),
+                })
+                .unwrap();
+        }
         Step::Twice(observer) => {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
@@ -1093,7 +1142,8 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
 /// Stage `store` at `cut` as a local cut does, fully or scoped, and plan it.
 fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
     let kinds = smallclaims::store::LOCAL_TRIM_KINDS;
-    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(kinds)).unwrap();
+    let capture = smallclaims::store::local_trim_capture_kinds();
+    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(capture.as_slice())).unwrap();
     staged.protect_all_but(kinds).unwrap();
     staged.split_envelopes().unwrap();
     smallclaims::store::checkpoint_staging::without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
@@ -1105,6 +1155,54 @@ fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> 
         .map(|envelope| format!("{}/{}/{}", envelope.writer, envelope.sequence, envelope.envelope_hash))
         .collect();
     (claims, envelopes, staged.guard_answers(kinds).unwrap())
+}
+
+/// A seat whose harness transitions are all old, with a provider prompt raised and restored
+/// inside the history window between them: the status-history rule keeps the transition before
+/// the prompt (its predecessor, and what the restored prompt exposes), which only the
+/// diagnostics show and no harness rule keeps. A capture that left them out would drop it, and
+/// the seat's status history would change.
+#[test]
+fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let seat = SEATS[0];
+    let old = (now_ms() - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
+    let mut n = 0;
+    let mut append = |kind: &str, fields: Value| -> String {
+        n += 1;
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: kind.into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("prompt-{n}")),
+            })
+            .unwrap()
+            .id
+    };
+    let harness = |state: &str, at: u64| json!({"state": state, "driver": "codex", "incarnation_id": "one", "observed_at_ms": at});
+    let diagnostic = |code: &str| json!({"incarnation_id": "one", "code": code, "driver": "codex", "reason": "fixture", "severity": "warning"});
+    append("harness.observed", harness("ready", old));
+    append("harness.observed", harness("working", old + 1));
+    let before_prompt = append("harness.observed", harness("idle", old + 2));
+    append("harness.diagnostic", diagnostic("provider-auth-expired"));
+    append("harness.diagnostic", diagnostic("provider-auth-restored"));
+    // Later transitions the harness rule keeps instead: the newest that is not working, and the
+    // working run the seat is in now.
+    append("harness.observed", harness("ready", old + 3));
+    append("harness.observed", harness("working", old + 4));
+    store.seal_local_batches().unwrap();
+    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+    let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+    assert!(!full.0.contains(&before_prompt), "the whole capture keeps it");
+    assert_eq!(scoped.0, full.0, "and so does the scoped one");
+    assert_eq!(scoped.1, full.1);
 }
 
 proptest! {
