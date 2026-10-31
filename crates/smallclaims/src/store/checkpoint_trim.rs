@@ -980,7 +980,9 @@ impl Store {
         let delete = crate::profile::span("trim.delete");
         loop {
             if left == Some(0) {
-                // The cut stays `trimming`, and the next day's first step goes on from here.
+                // The cut stays `trimming`, and the next day's first step goes on from here. What
+                // its deletes deferred is rebuilt now, so a deferral outlasts no day's run.
+                self.rebuild_deferred_paced()?;
                 actions.push(CheckpointAction::TrimDeferred {
                     checkpoint: checkpoint.to_owned(),
                     envelopes: deleted_envelopes,
