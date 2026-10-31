@@ -236,9 +236,10 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
-/// Rows this member holds for a claim it no longer has.
+/// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
+/// claim by design (see schema.md), so it is not one.
 fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
-    ["replica_records", "claim_positions", "claim_signatures", "claim_verdicts"]
+    ["replica_records", "claim_signatures", "claim_verdicts"]
         .into_iter()
         .map(|table| {
             let sql = format!("SELECT COUNT(*) FROM {table} WHERE claim_id NOT IN (SELECT id FROM claims)");

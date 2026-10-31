@@ -46,10 +46,21 @@ fn main() {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let cut = args.get(4).map_or_else(|| smallclaims::store::checkpoint::newest_due_cut(now), |cut| cut.parse().unwrap());
     println!("cut {cut} ({})", smallclaims::store::checkpoint::checkpoint_name(cut));
+    if let Ok(every) = std::env::var("LOCAL_BENCH_QUERIES") {
+        // The slowest statements of the last five minutes, every `every` seconds.
+        let every = std::time::Duration::from_secs(every.parse().unwrap());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(every);
+            for query in smallclaims::performance::snapshot()["queries"].as_array().into_iter().flatten().take(8) {
+                println!("query: {}", query.to_string().chars().take(600).collect::<String>());
+            }
+        });
+    }
+    let trim_only = args.get(5).map(String::as_str) == Some("trim-only");
     let started = Instant::now();
     store.catch_up_local_trim_citations().unwrap();
     println!("citation cache caught up from nothing in {:?}", started.elapsed());
-    for (label, scope) in [("scoped", Some(LOCAL_TRIM_KINDS)), ("whole", None)] {
+    for (label, scope) in [("scoped", Some(LOCAL_TRIM_KINDS)), ("whole", None)].into_iter().filter(|_| !trim_only) {
         let dir = scratch.join(label);
         let started = Instant::now();
         let staged = store.checkpoint_staged_set_scoped(cut, None, &dir, scope).unwrap();
@@ -78,16 +89,16 @@ fn main() {
         println!("{label}: guard answers digest {}", hex::encode(sha2::Sha256::digest(staged.guard_answers(LOCAL_TRIM_KINDS).unwrap().join("\n").as_bytes())));
     }
     let started = Instant::now();
-    let check = store.verify_local_trim_citations().unwrap();
-    println!(
+    let check = if trim_only { store.catch_up_local_trim_citations().map(|()| None).unwrap() } else { Some(store.verify_local_trim_citations().unwrap()) };
+    if let Some(check) = check { println!(
         "verify: {:?}, {} claims read, {} citations between present claims, {} missing, {} extra",
         started.elapsed(),
         check.claims_read,
         check.citations,
         check.missing.len(),
         check.extra.len(),
-    );
-    if args.get(5).map(String::as_str) != Some("trim") {
+    ); }
+    if !matches!(args.get(5).map(String::as_str), Some("trim" | "trim-only")) {
         return;
     }
     let (before_pages, before_free, page_size) = pages(&store);
