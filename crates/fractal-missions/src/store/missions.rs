@@ -7067,12 +7067,12 @@ impl MissionsStore for Store {
                     };
                     let claim = match &compact_state {
                         Some(state) if compact => {
-                            if state_changed || deliver || newest_state.is_none() {
-                                record_state(transaction, &mut batches, &mut receipt_key, state)?
-                            } else {
-                                let (id, _, _) = newest_state.as_ref().expect("an unchanged state has a newest claim");
-                                claim_by_id_tx(transaction, id).map_err(internal)?
-                                    .ok_or_else(|| St3Error::new("internal", "the newest item state is gone"))?
+                            match &newest_state {
+                                Some((id, _, _)) if !state_changed && !deliver => {
+                                    claim_by_id_tx(transaction, id).map_err(internal)?
+                                        .ok_or_else(|| St3Error::new("internal", "the newest item state is gone"))?
+                                }
+                                _ => record_state(transaction, &mut batches, &mut receipt_key, state)?,
                             }
                         }
                         _ => {

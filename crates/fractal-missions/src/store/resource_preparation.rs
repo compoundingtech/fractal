@@ -45,6 +45,7 @@ pub struct Observation<'a> {
     pub mirrored: Option<&'a crate::model::MirroredPrior>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn inputs(
     transaction: &Connection,
     observer: &str,
