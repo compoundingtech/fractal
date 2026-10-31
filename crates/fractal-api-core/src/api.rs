@@ -1893,6 +1893,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "retire-revision-mismatch"
+        | "retire-incarnation-mismatch"
         | "invalid-custody-successor"
         | "custody-pending"
         | "not-found"

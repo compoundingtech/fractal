@@ -99,6 +99,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    RetireRevisionMismatch,
+    RetireIncarnationMismatch,
     InvalidCustodySuccessor,
     CustodyPending,
     AttentionMigrated,

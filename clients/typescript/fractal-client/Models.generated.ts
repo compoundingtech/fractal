@@ -1688,6 +1688,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "retire-revision-mismatch"
+  | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
   | "attention-migrated"

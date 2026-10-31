@@ -143,6 +143,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case identityUnknown
     case lifecycleUnavailable
     case retirementUpgradeRequired
+    case retireRevisionMismatch
+    case retireIncarnationMismatch
     case invalidCustodySuccessor
     case custodyPending
     case notFound
@@ -229,6 +231,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "identity-unknown": .identityUnknown
         case "lifecycle-unavailable": .lifecycleUnavailable
         case "retirement-upgrade-required": .retirementUpgradeRequired
+        case "retire-revision-mismatch": .retireRevisionMismatch
+        case "retire-incarnation-mismatch": .retireIncarnationMismatch
         case "invalid-custody-successor": .invalidCustodySuccessor
         case "custody-pending": .custodyPending
         case "agents-publication-row-too-large": .agentsPublicationRowTooLarge
@@ -317,6 +321,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .identityUnknown: "identity-unknown"
         case .lifecycleUnavailable: "lifecycle-unavailable"
         case .retirementUpgradeRequired: "retirement-upgrade-required"
+        case .retireRevisionMismatch: "retire-revision-mismatch"
+        case .retireIncarnationMismatch: "retire-incarnation-mismatch"
         case .invalidCustodySuccessor: "invalid-custody-successor"
         case .custodyPending: "custody-pending"
         case .agentsPublicationRowTooLarge: "agents-publication-row-too-large"
