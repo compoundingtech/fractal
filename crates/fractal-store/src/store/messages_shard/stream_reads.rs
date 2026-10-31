@@ -56,7 +56,8 @@ pub fn record_arrivals(graph: &super::super::Store) -> anyhow::Result<usize> {
         .query_row(/* sqlite-large-value: allow-for-now lv-h7d4a5fcca7d0 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ rusqlite::params![at as i64], |row| row.get::<_, Option<i64>>(0))?;
     let arrived = smallclaims::store::now_ms() as i64;
     for (subject, store_index, accepted) in &unrecorded {
-        let accepted = accepted.parse::<i64>().unwrap_or_default();
+        // An accepted time that does not parse shows when the item arrived, not at 1970.
+        let accepted = accepted.parse::<i64>().unwrap_or(arrived);
         let at_ms = shown.map_or(accepted, |before| accepted.max(before.saturating_add(1)));
         transaction.prepare_cached(
             /* sqlite-large-value: allow-for-now lv-h0c4f7d0d1e18 owner=fractal_store::store::messages_shard::stream_reads TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_arrivals(subject, store_index, graph_index, arrived_at_unix_ms, shown_at_unix_ms)
@@ -183,7 +184,9 @@ pub fn conversation_position(graph: &super::super::Store) -> anyhow::Result<u64>
 /// The stream items to or from any of `names` after `after`, newest first, each with the graph
 /// index it arrived at. Its claim's `store_index` is its `created_index`, past every graph
 /// index, as a message page lists it, and its `accepted_at_unix_ms` is the time its timeline
-/// entries show (`stream_arrivals.shown_at_unix_ms`). `limit` bounds a delta; without one the read keeps the
+/// entries show (`stream_arrivals.shown_at_unix_ms`), which can be a few milliseconds past the
+/// time the shard accepted it. These claims are for timeline reads: nothing should compare
+/// their accepted times with another store's. `limit` bounds a delta; without one the read keeps the
 /// newest 10,000 stream items, as the graph's conversation read keeps its newest 10,000 sends.
 pub fn conversation_items(
     graph: &super::super::Store,
