@@ -74,7 +74,13 @@ fn a_reused_identity_digest_is_the_walked_one_after_every_change_it_covers() {
                 &format!("diagnostic-{n}"),
             )
         };
-        claims.push(store.append_claim(&claim).unwrap().id);
+        // Warnings are written as an older build wrote them, before they became local.
+        let appended = if claim.kind == "daemon.diagnostic" {
+            store.append_as_older_build_for_test(&claim)
+        } else {
+            store.append_claim(&claim)
+        };
+        claims.push(appended.unwrap().id);
     }
     store.seal_local_batches().unwrap();
     // Envelope and tombstone writes below come from another connection, as from another
@@ -256,7 +262,7 @@ fn a_walk_a_fenced_change_interrupts_is_not_reused() {
     let cut: u128 = 1_000_000;
     for n in 0..100_u128 {
         store.set_write_clock_at(1_000 + n).unwrap();
-        store.append_claim(&input(
+        store.append_as_older_build_for_test(&input(
             "daemon/alder", "daemon.diagnostic", None,
             json!({"severity": "warning", "code": "slow-request", "reason": format!("slow {n}")}),
             &format!("diagnostic-{n}"),

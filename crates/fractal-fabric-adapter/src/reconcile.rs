@@ -255,8 +255,9 @@ fn desired(
             }
             // Do not turn arbitrary signed endpoint names into Fabric grants.
             ensure!(
-                endpoint["protocol"] == format!("st3/fleet/{fleet_id}"),
-                "member {} advertises a nonstandard Fabric replication protocol; expected st3/fleet/{fleet_id}",
+                endpoint["protocol"].as_str().is_some_and(|protocol|
+                    smallclaims::fleet::transport::is_fleet_fabric_protocol(protocol, fleet_id)),
+                "member {} advertises a nonstandard Fabric replication protocol; expected st3/fleet/{fleet_id} or fractal/fleet/{fleet_id}",
                 member.name
             );
             let node = endpoint["node"]

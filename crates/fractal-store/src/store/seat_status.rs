@@ -466,7 +466,7 @@ use super::*;
             .unwrap()
             .execute(
                 "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
-                params![(at - 60_000).to_string(), first.id],
+                params![(at - crate::store::RESTAMP_FALLBACK_MS).to_string(), first.id],
             )
             .unwrap();
         let heartbeat = observe(&store, "one", "idle", at + 1, "ready");

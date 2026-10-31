@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-# Prove scripts/install leaves `st` as a symlink to the installed `st3` in every starting state.
+# Prove physical fractal installation and transactional reverse aliases.
 set -Eeuo pipefail
 . "$(dirname "$0")/script-test-supervisor"
 
@@ -22,7 +22,7 @@ fail() {
 build() {
   local dir=$1 version=$2 binary
   mkdir -p "$dir"
-  for binary in st3 st3-migrate; do
+  for binary in fractal st3-migrate; do
     printf '#!/bin/sh\necho "%s %s"\n' "$binary" "$version" > "$dir/$binary"
     chmod 0755 "$dir/$binary"
   done
@@ -30,12 +30,11 @@ build() {
 
 check() {
   local bin=$1 version=$2 binary
-  [[ -L $bin/st && $(readlink "$bin/st") == st3 ]] || fail "$bin/st is not a symlink to st3"
-  [[ $("$bin/st") == "st3 $version" ]] || fail "st does not run st3 $version"
-  if [[ ${EXPECT_FOREIGN_FRACTAL:-false} != true ]]; then
-    [[ -L $bin/fractal && $(readlink "$bin/fractal") == st3 ]] || fail "fractal does not link to st3"
-  fi
-  for binary in st3 st3-migrate; do
+  for binary in st st3; do
+    [[ -L $bin/$binary && $(readlink "$bin/$binary") == fractal ]] || fail "$binary is not a reverse alias"
+    [[ $("$bin/$binary") == "fractal $version" ]] || fail "$binary does not run fractal $version"
+  done
+  for binary in fractal st3-migrate; do
     [[ -f $bin/$binary && ! -L $bin/$binary ]] || fail "$bin/$binary is not a regular file"
     [[ $("$bin/$binary") == "$binary $version" ]] || fail "$bin/$binary is not version $version"
   done
@@ -52,47 +51,75 @@ check "$work/fresh" 1
 
 # A stale `st` copied from an older st3 build is replaced by the link.
 mkdir -p "$work/stale"
-cp "$work/one/st3" "$work/stale/st"
-cp "$work/one/st3" "$work/stale/stui"
+cp "$work/one/fractal" "$work/stale/st"
+cp "$work/one/fractal" "$work/stale/stui"
 bash "$install" --from "$work/two" --bin-dir "$work/stale" > /dev/null
 check "$work/stale" 2
 
-# A reinstall over a previous install, and over a link to a foreign binary.
-ln -sfn "$work/one/st3" "$work/stale/st"
+# A reinstall over a previous physical installation.
 bash "$install" --from "$work/one" --bin-dir "$work/stale" > /dev/null
 check "$work/stale" 1
 
-# Foreign commands (including dangling links and directories) survive; st stays usable.
+# Named instances keep the inherited default login command and its exact entries.
+python3 - "$work/fresh" "$work/default-entries.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+Path(sys.argv[2]).write_text(json.dumps({
+    p.name: [p.lstat().st_dev, p.lstat().st_ino, os.readlink(p) if p.is_symlink() else p.read_bytes().hex()]
+    for p in root.iterdir()}))
+PY
+PATH="$work/fresh:$PATH" bash "$install" --instance coexist --from "$work/two" --bin-dir "$work/instance" > /dev/null
+check "$work/instance" 2
+python3 - "$work/fresh" "$work/default-entries.json" <<'PY'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+assert json.loads(Path(sys.argv[2]).read_text()) == {
+    p.name: [p.lstat().st_dev, p.lstat().st_ino, os.readlink(p) if p.is_symlink() else p.read_bytes().hex()]
+    for p in root.iterdir()}
+PY
+
+# Foreign canonical commands are refused before any command is installed.
 for kind in file link dangling directory; do
   bin="$work/collision-$kind"
   mkdir -p "$bin"
   case $kind in
     file) printf foreign > "$bin/fractal" ;;
-    link) ln -s "$work/one/st3" "$bin/fractal" ;;
+    link) ln -s "$work/one/fractal" "$bin/fractal" ;;
     dangling) ln -s /missing/fractal "$bin/fractal" ;;
     directory) mkdir "$bin/fractal" ;;
   esac
-  bash "$install" --from "$work/one" --bin-dir "$bin" > /dev/null 2> "$work/collision.err"
-  EXPECT_FOREIGN_FRACTAL=true check "$bin" 1
-  grep -q 'leaving fractal unchanged:.*use st' "$work/collision.err" || fail "missing collision guidance"
+  if bash "$install" --from "$work/one" --bin-dir "$bin" > /dev/null 2> "$work/collision.err"; then
+    fail "foreign canonical command accepted"
+  fi
+  if PATH="$work/fresh:$PATH" bash "$install" --instance coexist --from "$work/one" --bin-dir "$bin" > /dev/null 2> "$work/collision.err"; then
+    fail "named instance accepted foreign destination"
+  fi
+  [[ ! -e $bin/st && ! -e $bin/st3 ]] || fail "refusal installed reverse aliases"
+  grep -q 'foreign fractal command' "$work/collision.err" || fail "missing collision guidance"
   case $kind in
     file) [[ $(cat "$bin/fractal") == foreign ]] || fail "foreign file replaced" ;;
-    link) [[ $(readlink "$bin/fractal") == "$work/one/st3" ]] || fail "foreign link replaced" ;;
+    link) [[ $(readlink "$bin/fractal") == "$work/one/fractal" ]] || fail "foreign link replaced" ;;
     dangling) [[ $(readlink "$bin/fractal") == /missing/fractal ]] || fail "dangling link replaced" ;;
     directory) [[ -d $bin/fractal && -z $(ls -A "$bin/fractal") ]] || fail "foreign directory modified" ;;
   esac
 done
-# Both installer-owned link spellings converge to the relative alias.
-ln -sfn "$work/stale/st3" "$work/stale/fractal"
+# The historical owned forward alias converges to a physical executable.
+rm "$work/stale/fractal"
+ln -sfn "$work/one/fractal" "$work/stale/st3"
+ln -s st3 "$work/stale/fractal"
 bash "$install" --from "$work/one" --bin-dir "$work/stale" > /dev/null
 check "$work/stale" 1
 # A free destination must not introduce an alias shadowing a foreign PATH command.
 mkdir -p "$work/foreign-path"
-cp "$work/one/st3" "$work/foreign-path/fractal"
-PATH="$work/foreign-path:$PATH" bash "$install" --from "$work/one" --bin-dir "$work/path-collision" > /dev/null 2> "$work/path.err"
+cp "$work/one/fractal" "$work/foreign-path/fractal"
+if PATH="$work/foreign-path:$PATH" bash "$install" --from "$work/one" --bin-dir "$work/path-collision" > /dev/null 2> "$work/path.err"; then
+  fail "foreign PATH command accepted"
+fi
 [[ ! -e $work/path-collision/fractal && ! -L $work/path-collision/fractal ]] || fail "foreign PATH command shadowed"
-EXPECT_FOREIGN_FRACTAL=true check "$work/path-collision" 1
-grep -q 'PATH contains a foreign command' "$work/path.err" || fail "missing PATH guidance"
+[[ ! -e $work/path-collision/st ]] || fail "refusal installed st"
+grep -q 'PATH contains a foreign fractal command' "$work/path.err" || fail "missing PATH guidance"
 # A directory in the way is refused before anything is replaced.
 mkdir -p "$work/blocked/st"
 if bash "$install" --from "$work/two" --bin-dir "$work/blocked" 2> /dev/null; then
@@ -130,5 +157,126 @@ for bad in Try a_b ../x -a a--b abcdefghijklmnopqrstuvwxy; do
   fi
 done
 [[ $(ls "$work/home/.st-instance" | sort | tr '\n' ' ') == "other try " ]] || fail "a refused name left a directory"
+
+# Nix-owned canonical commands are refused, including dangling generations.
+mkdir -p "$work/nix"
+ln -s /nix/store/missing-fractal/bin/fractal "$work/nix/fractal"
+if bash "$install" --from "$work/one" --bin-dir "$work/nix" 2> "$work/nix.err"; then
+  fail "Nix-owned canonical command accepted"
+fi
+grep -q 'Nix-owned path' "$work/nix.err" || fail "missing Nix ownership guidance"
+[[ $(readlink "$work/nix/fractal") == /nix/store/missing-fractal/bin/fractal ]] || fail "Nix link replaced"
+
+# A failed alias rename restores the original canonical inode and both aliases.
+bash "$install" --from "$work/one" --bin-dir "$work/rollback" > /dev/null
+ln "$work/rollback/fractal" "$work/original-inode"
+ln -P "$work/rollback/st" "$work/original-st-entry"
+ln -P "$work/rollback/st3" "$work/original-st3-entry"
+export INSTALL_REAL_MV
+INSTALL_REAL_MV=$(command -v mv)
+export INSTALL_FAIL_DEST="$work/rollback/st3" INSTALL_FAIL_MARKER="$work/failed"
+cat > "$work/platform-bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for argument in "$@"; do
+  if [[ -n ${INSTALL_RESTORE_FAIL_NAME:-} && $argument == */previous/"$INSTALL_RESTORE_FAIL_NAME" ]]; then exit 1; fi
+done
+if [[ ${!#} == "$INSTALL_FAIL_DEST" && ! -e $INSTALL_FAIL_MARKER ]]; then
+  : > "$INSTALL_FAIL_MARKER"
+  exit 1
+fi
+exec "$INSTALL_REAL_MV" "$@"
+SH
+chmod +x "$work/platform-bin/mv"
+if bash "$install" --from "$work/three" --bin-dir "$work/rollback" > /dev/null; then
+  fail "failed transaction succeeded"
+fi
+check "$work/rollback" 1
+[[ $work/rollback/fractal -ef $work/original-inode ]] || fail "rollback lost canonical inode"
+[[ ! -e $work/rollback/.smalltalk-install.lock ]] || fail "rollback retained lock"
+python3 - "$work" <<'PY_ENTRIES'
+import os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+for name in ('st', 'st3'):
+    before = os.lstat(root / ('original-' + name + '-entry'))
+    after = os.lstat(root / 'rollback' / name)
+    assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino), name
+    assert os.readlink(root / 'rollback' / name) == 'fractal'
+PY_ENTRIES
+
+# Failure at the first move leaves regular files and retired relative/dangling
+# symlink objects untouched. Rollback must recognize those hardlinked entries.
+for kind in regular relative dangling; do
+  destination="$work/unchanged-$kind"
+  bash "$install" --from "$work/one" --bin-dir "$destination" > /dev/null
+  case "$kind" in
+    regular) printf 'previous retired tool\n' > "$destination/stui" ;;
+    relative) ln -s fractal "$destination/stui" ;;
+    dangling) ln -s missing-retired-tool "$destination/stui" ;;
+  esac
+  python3 - "$destination" "$work/before-$kind.json" <<'PY_SNAPSHOT'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+entries = {}
+for path in root.iterdir():
+    metadata = os.lstat(path)
+    entries[path.name] = {
+        'identity': [metadata.st_dev, metadata.st_ino],
+        'link': os.readlink(path) if path.is_symlink() else None,
+        'bytes': None if path.is_symlink() else path.read_bytes().hex(),
+    }
+Path(sys.argv[2]).write_text(json.dumps(entries))
+PY_SNAPSHOT
+  export INSTALL_FAIL_DEST="$destination/fractal" INSTALL_FAIL_MARKER="$work/failed-$kind"
+  if bash "$install" --from "$work/three" --bin-dir "$destination" > /dev/null; then
+    fail "first-move failure succeeded for $kind"
+  fi
+  python3 - "$destination" "$work/before-$kind.json" <<'PY_UNCHANGED'
+import json, os, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+before = json.loads(Path(sys.argv[2]).read_text())
+assert sorted(path.name for path in root.iterdir()) == sorted(before)
+for name, prior in before.items():
+    path = root / name
+    metadata = os.lstat(path)
+    assert [metadata.st_dev, metadata.st_ino] == prior['identity'], name
+    assert (os.readlink(path) if path.is_symlink() else None) == prior['link'], name
+    assert (None if path.is_symlink() else path.read_bytes().hex()) == prior['bytes'], name
+PY_UNCHANGED
+done
+# Failed/empty identity reads must use the real restore path, not assume equality.
+# A persistent restore failure must retain the original inode and recovery lock.
+for fault in stat-error stat-empty restore; do
+  destination="$work/recovery-$fault"
+  bash "$install" --from "$work/one" --bin-dir "$destination" > /dev/null
+  ln "$destination/fractal" "$work/recovery-original-$fault"
+  export INSTALL_FAIL_DEST="$destination/st3" INSTALL_FAIL_MARKER="$work/failure-$fault"
+  if [[ $fault == restore ]]; then
+    export INSTALL_RESTORE_FAIL_NAME=fractal
+  else
+    # Fail the untouched alias restore regardless of native same-inode mv semantics.
+    export INSTALL_RESTORE_FAIL_NAME=st3
+    printf '#!/bin/sh\n%s\n' "$([[ $fault == stat-error ]] && echo 'exit 1' || echo 'exit 0')" > "$work/platform-bin/stat"
+    chmod +x "$work/platform-bin/stat"
+  fi
+  if bash "$install" --from "$work/three" --bin-dir "$destination" > /dev/null 2> "$work/recovery-$fault.err"; then
+    fail "$fault unexpectedly succeeded"
+  fi
+  grep -q 'rollback failed' "$work/recovery-$fault.err" || fail "$fault hid rollback failure"
+  [[ -d $destination/.smalltalk-install.lock ]] || fail "$fault removed recovery lock"
+  if [[ $fault == restore ]]; then
+    previous=("$destination"/.source.install.*/previous/fractal)
+    [[ ${#previous[@]} == 1 && ${previous[0]} -ef $work/recovery-original-$fault ]] || fail "restore failure lost original inode"
+    [[ $("$destination/fractal") == 'fractal 3' ]] || fail "restore failure did not preserve failed replacement"
+  else
+    [[ $destination/fractal -ef $work/recovery-original-$fault ]] || fail "$fault skipped actual restore"
+  fi
+  unset INSTALL_RESTORE_FAIL_NAME
+  rm -f "$work/platform-bin/stat"
+done
+rm "$work/platform-bin/mv"
 
 echo 'install tests passed'
