@@ -145,7 +145,9 @@ impl Ui {
             return false;
         };
         let line = text.lines().next().unwrap_or_default();
-        popup.query.extend(line.chars().filter(|ch| !ch.is_control()));
+        popup
+            .query
+            .extend(line.chars().filter(|ch| !ch.is_control()));
         popup.filter();
         true
     }
@@ -381,7 +383,12 @@ mod tests {
         use ratatui::{Terminal, backend::TestBackend};
         let shows_selected = |terminal: &Terminal<TestBackend>, label: &str| {
             let buffer = terminal.backend().buffer();
-            let room = buffer.area.width.saturating_sub(4).min(88).saturating_sub(4) as usize;
+            let room = buffer
+                .area
+                .width
+                .saturating_sub(4)
+                .min(88)
+                .saturating_sub(4) as usize;
             let shown: String = label.chars().take(room).collect();
             (0..buffer.area.height).any(|y| {
                 let line: String = (0..buffer.area.width)
@@ -482,7 +489,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         draw(&ui);
-        let body = ui.terminal_body.get().expect("the attached program is drawn");
+        let body = ui
+            .terminal_body
+            .get()
+            .expect("the attached program is drawn");
         let mut reader = PacketReader::new();
         ui.input_event(Event::FocusGained);
         assert_eq!(input(&mut peer, &mut reader), b"\x1b[I");
@@ -523,7 +533,10 @@ mod tests {
             ui.mouse(mouse);
         }
         ui.paste("direct".into());
-        assert_eq!(ui.recent.popup.as_ref().unwrap().query, "recent-alphadirect");
+        assert_eq!(
+            ui.recent.popup.as_ref().unwrap().query,
+            "recent-alphadirect"
+        );
         // The outer terminal's own focus changes stay with the popup too.
         ui.input_event(Event::FocusLost);
         ui.input_event(Event::FocusGained);
