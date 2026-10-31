@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document a client-v0 run ETA and person pins contract for review; no behavior change",
+  "replay": {"status": "none", "detail": "Proposal only; claim replay and timing folds are unchanged."},
+  "schema": {"status": "none", "detail": "No wire or storage schema changes are implemented in this PR."},
+  "rules": {"status": "none", "detail": "Checkpoint, retention and fleet rules are unchanged."},
+  "compatibility": {"status": "none", "detail": "The proposed timing fields, ETA and Pins arrangement are not implemented; all current clients and daemons retain their current behavior."},
+  "downtime": {"status": "none", "detail": "No daemon change or rollout."},
+  "manual": {"status": "none", "detail": "No configuration or operator action."},
+  "recovery": {"status": "none", "detail": "Reverting removes the proposal and its release note only."}
+}
