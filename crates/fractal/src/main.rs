@@ -4265,6 +4265,7 @@ enum MessageCommand {
     ///   fractal conversations send agent/example --from agent/sender --body - <<'EOF'
     ///   Run `cargo test` and report $STATUS.
     ///   EOF
+    #[command(verbatim_doc_comment)]
     Send(MessageSendArgs),
     /// List the current mailbox for one explicit identity.
     Ls(MessageListArgs),
