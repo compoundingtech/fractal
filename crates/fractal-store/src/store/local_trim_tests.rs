@@ -7,7 +7,7 @@ use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
-const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked"];
+const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked", "ended"];
 
 /// A member with both seats declared, so the seat readers have something to answer.
 fn member(trims_locally: bool) -> Store {
@@ -50,7 +50,7 @@ fn write() -> impl Strategy<Value = Write> {
         (0..3u8, 0..3u8).prop_map(|(resource, state)| Write::Resource { resource, state }),
         (0..3u8, 0..3u8, 0..3u8, 0..3u8)
             .prop_map(|(observer, status, resource, state)| Write::Poll { observer, status, resource, state }),
-        (0..2u8, 0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
+        (0..2u8, 0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
             |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
                 seat,
                 incarnation,
@@ -167,7 +167,8 @@ fn apply(store: &Store, write: &Write, n: usize) {
 /// Every answer the readers of these kinds give: the whole graph, each observer's and resource's
 /// newest observation (what resources and reconcile read), each resource's observations newest
 /// first (what a GitHub watch walks back to find when a pull request left the merge queue), each
-/// seat's current harness, and each seat's status history.
+/// seat's current harness, status history, newest turn or end, and newest `working` (when its last
+/// turn began, and whether it worked after a given time).
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
@@ -194,7 +195,18 @@ fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
         let history = seat_status::history_at(&connection, seat, now, i64::MAX as u64).unwrap();
-        seats.push(format!("{seat}: {harness:?} {history}"));
+        let turn = super::attention_snapshot::last_turn_or_end(&connection, seat).unwrap();
+        let worked: Option<(String, Option<i64>)> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.observed_since_ms') FROM claims
+                 WHERE subject=?1 AND kind='harness.observed' AND json_extract(body, '$.fields.state')='working'
+                 ORDER BY store_index DESC LIMIT 1",
+                [seat],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        seats.push(format!("{seat}: {harness:?} {history} {turn:?} {worked:?}"));
     }
     (graph_digest_of(store), seats)
 }
@@ -520,7 +532,7 @@ fn local_trim_keeps_where_a_needs_login_run_began() {
 }
 
 fn harness_write() -> impl Strategy<Value = Write> {
-    (0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(|(incarnation, state, restamp, provider_auth)| {
+    (0..2u8, 0..6u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(|(incarnation, state, restamp, provider_auth)| {
         Write::Harness { seat: 0, incarnation, state, restamp, provider_auth }
     })
 }
