@@ -1202,6 +1202,20 @@ fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> 
     (claims, envelopes, staged.guard_answers(kinds).unwrap())
 }
 
+#[test]
+fn a_local_cut_s_scoped_capture_stages_every_kind_its_rules_read() {
+    let capture = smallclaims::store::local_trim_capture_kinds();
+    for kind in smallclaims::store::LOCAL_TRIM_KINDS {
+        let missing = checkpoint_rules::kinds_read_for(kind)
+            .into_iter()
+            .filter(|read| !capture.contains(read))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "judging {kind} reads {missing:?}, which a local cut does not stage");
+    }
+    // The status-history rule reads a seat's runtime resets and diagnostics.
+    assert!(checkpoint_rules::kinds_read_for("harness.observed").contains("runtime.observed"));
+}
+
 /// A seat whose harness transitions are all old, with a provider prompt raised and restored
 /// inside the history window between them: the status-history rule keeps the transition before
 /// the prompt (its predecessor, and what the restored prompt exposes), which only the

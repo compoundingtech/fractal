@@ -96,6 +96,11 @@ In a conversation, letters type into its message box and commands are chords: `C
 `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
+Agent details visibility is one device-local preference for every agent, saved as
+`agent_details` in the existing `stui/prefs.json`; absent defaults to visible.
+Conversation `Ctrl+D` flips that preference. Below 90 pane columns details auto-hide
+instead of replacing the conversation.
+
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
 conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
 its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
