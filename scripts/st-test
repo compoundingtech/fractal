@@ -52,6 +52,10 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
+A run's TMPDIR (and TMP and TEMP), for itself and every check, is a directory of its own on disk, /var/tmp/st-test.XXXXXXXX (in
+ST_TEST_TMP when set), removed when the run ends; --keep keeps it and says where. Each `nix develop` leaves a nix-shell.* directory
+there, with whatever its check's tests wrote. A run that was killed leaves its directory behind, and the next run removes it.
+
 Each check's --time-limit counts only the time it runs: the waits for a host build slot that scripts/ci-local reports as they happen
 (CI_LOCAL_QUEUE_LOG) extend it, up to --queue-limit seconds of waiting in all, so a busy host's queue cannot use up a check's time. A
 scripts/ci-local check's time counts only from ci-local's own start (its `ci-local: stage logs in` line, after its load gate): before it,
@@ -93,6 +97,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -168,7 +173,7 @@ TREE_FREE_FALLBACK_SECONDS = 60  # a tree this waiter has seen free this long, u
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
 POOL_SETTINGS = {}  # the ST_TEST_* settings (pool, pool cap, signing jobs, member limit, runs file) as the caller set them: read before the seat scrub drops every ST_* name
-SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS',
+SETTING_NAMES = ('ST_TEST_TREES', 'ST_TEST_POOL', 'ST_TEST_TMP', 'ST_TEST_POOL_MAX_GB', 'ST_TEST_SIGN_JOBS', 'ST_TEST_MEMBERS_LIMIT', 'ST_TEST_RUNS',
                  'ST_TEST_MAX_LOAD', 'ST_TEST_LOAD_WAIT_MINUTES')
 POOL_MAX_GB = 60.0  # all repositories' pools together under the pool directory; ST_TEST_POOL_MAX_GB (0 or off: no cap) replaces it
 
@@ -700,13 +705,16 @@ def governed(argv, name):
 
     A caller whose own cgroup is already under a memory and a CPU limit runs the check in place: a seat with a lane
     (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it. The kernel's limits decide, never a slice
-    name or an environment variable a caller could set."""
+    name or an environment variable a caller could set. The check then runs with BUILDS_SLICE_ACTIVE=1, which a build host's cargo
+    front door reads as "already in a build cap": without it, that front door moves each cargo command into builds.slice, out of
+    the lane. A seat's harness has it from its lane, but a job the seat starts as a unit of its own in the lane does not inherit
+    it (2026-10-30, on a build host: such a run's cargo and tests ran in builds.slice)."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
     cap = own_cap()
     if cap:
         print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
-        return argv
+        return [shutil.which('env') or '/usr/bin/env', 'BUILDS_SLICE_ACTIVE=1'] + argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
@@ -939,6 +947,85 @@ def pool_root():
 
 def pool_base():
     return Path(POOL_SETTINGS.get('ST_TEST_POOL') or Path.home() / '.cache/st-test')
+
+
+TMP_NAMES = ('TMPDIR', 'TMP', 'TEMP')
+RUN_TMP_PREFIX = 'st-test.'
+KEPT = 'KEPT'  # in a run's TMPDIR that --keep kept: no later run removes it
+RUN_TMP_FRESH = 600  # seconds: a run TMPDIR younger than this is never swept, as its run may not have locked it yet
+
+
+def run_tmp_root():
+    """Where runs make their TMPDIR: ST_TEST_TMP, else /var/tmp (on disk; /tmp can be a small tmpfs that swaps). Not under ~/.cache: the
+    path must stay short, as tests bind Unix sockets a few levels below a `nix develop`'s nix-shell.XXXXXX in it (108 bytes in all), and
+    one of scripts/ci-local-web-test's no longer fit under ~/.cache/st-test/tmp/XXXXXXXX."""
+    configured = POOL_SETTINGS.get('ST_TEST_TMP')
+    if configured:
+        return Path(configured)
+    return Path('/var/tmp') if os.path.isdir('/var/tmp') else Path(tempfile.gettempdir())
+
+
+def remove_tree(path):
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.lexists(path):  # a read-only directory inside (a copied store path, a Go module cache): make it writable and try again
+        subprocess.run(['chmod', '-R', 'u+w', '--', str(path)], stderr=subprocess.DEVNULL, check=False)
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def sweep_run_tmp(root):
+    """Remove the TMPDIR of every run that is gone. A run holds a lock on its directory for as long as it lives, so a free one older than
+    RUN_TMP_FRESH belongs to a run that ended without removing it: killed, or run by a base copy older than this cleanup."""
+    try:
+        entries = [entry for entry in root.iterdir() if entry.name.startswith(RUN_TMP_PREFIX)]
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            status = entry.lstat()
+            if (not stat.S_ISDIR(status.st_mode) or status.st_uid != os.getuid() or (entry / KEPT).exists()
+                    or time.time() - status.st_mtime < RUN_TMP_FRESH):
+                continue  # another account's, or kept, or too new to judge
+            fd = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            continue  # not a directory (or a symlink), or gone already
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue  # its run is still going
+        remove_tree(entry)
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def run_tmpdir(keep=False):
+    """This run's TMPDIR, TMP and TEMP, for st-test and every check it starts: a directory of its own in run_tmp_root(), /var/tmp/st-test.XXXXXXXX.
+    It holds each `nix develop`'s nix-shell.* directory (never removed when its command ends), whatever the checks' tests leave and
+    evidence-wrap's key files, and it is removed when the run ends, unless --keep. scripts/ci-local and scripts/ci-local-web set their own."""
+    root = run_tmp_root()
+    root.mkdir(parents=True, exist_ok=True)
+    sweep_run_tmp(root)
+    path = Path(tempfile.mkdtemp(prefix=RUN_TMP_PREFIX, dir=root))
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    saved, saved_tempdir = {name: os.environ.get(name) for name in TMP_NAMES}, tempfile.tempdir
+    os.environ.update({name: str(path) for name in TMP_NAMES})
+    tempfile.tempdir = None
+    try:
+        yield path
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        tempfile.tempdir = saved_tempdir
+        if keep:
+            (path / KEPT).touch()
+            print(f'fractal-test: kept this run\'s TMPDIR {path} (--keep): no later run removes it, so remove it when you are done', file=sys.stderr)
+        else:
+            remove_tree(path)
+        os.close(fd)
 
 
 def pool_max_gb():
@@ -2239,6 +2326,11 @@ def utc(seconds):
 
 
 def main(argv):
+    with contextlib.ExitStack() as cleanup:
+        return run_main(argv, cleanup)
+
+
+def run_main(argv, cleanup):
     main_started = time.monotonic()
     CLAIMED.clear()
     POOL_SETTINGS.clear()
@@ -2269,6 +2361,8 @@ def main(argv):
     parser.add_argument('--status', action='store_true', help='run nothing: say whether each check is already covered for this tree (a lane edit, '
                         'and with no --check a policy check that has no local command, count as covered: CI runs them); exit 0 if all are, 3 if not')
     parser.add_argument('--toolchain-sha256', help='passed to evidence-wrap: skip the nix evaluation, record this digest')
+    parser.add_argument('--keep', action='store_true', help="keep this run's TMPDIR (/var/tmp/st-test.XXXXXXXX, what the checks "
+                        'left there) instead of removing it at the end, and say where it is')
     args = parser.parse_args(argv)
     if args.out is not None:
         args.out = str(Path(args.out).resolve())
@@ -2322,6 +2416,7 @@ def main(argv):
     limit = load_limit()
     if limit:
         wait_for_load(limit)
+    cleanup.enter_context(run_tmpdir(keep=args.keep))  # what the checks start uses it; a run refused above leaves nothing
     reap_stale()
     with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)

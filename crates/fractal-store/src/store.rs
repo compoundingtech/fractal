@@ -722,7 +722,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h82624af80f95 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h806ead738248 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -732,6 +732,10 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Shared action-key admission must seek one actor/key, never scan retained resolutions.
+CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
+ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
+WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -5676,11 +5680,11 @@ impl Store {
     }
 
     /// The newest claim or local observation of `kind` for `subject`.
-    /// When this node last heard `subject`'s harness report for `incarnation`: its newest local
-    /// `harness.observed`, if that is of the incarnation. Local observations never replicate, so
-    /// only the node that runs the seat has one; it hears every re-stamp, replicated or not. One
-    /// seek in `local_observations_subject_kind_index`, whatever the log holds.
-    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+    /// The seat's newest local harness report: its incarnation and when this node heard it. Local
+    /// observations never replicate, so only the node that runs the seat has one; it hears every
+    /// re-stamp, replicated or not. One seek in `local_observations_subject_kind_index`, whatever
+    /// the log holds.
+    pub fn local_harness_newest(&self, subject: &str) -> Result<Option<(String, u128)>> {
         let connection = self.readers.get();
         let newest: Option<(i64, Option<String>)> = connection
             .prepare_cached(
@@ -5690,9 +5694,50 @@ impl Store {
             )?
             .query_row(/* sqlite-large-value: allow-for-now lv-hdfe967515468 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        Ok(newest
-            .filter(|(_, of)| of.as_deref() == Some(incarnation))
-            .map(|(at, _)| at.max(0) as u128))
+        Ok(newest.and_then(|(at, incarnation)| Some((incarnation?, at.max(0) as u128))))
+    }
+
+    /// [`Self::local_harness_newest`] for many seats in one statement: one seek per seat in
+    /// `local_observations_subject_kind_index`, so a roster read is one query, not one per card.
+    pub fn local_harness_newest_many(&self, subjects: &[&str]) -> Result<HashMap<String, (String, u128)>> {
+        if subjects.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT seats.value, local.observed_at_unix_ms, json_extract(local.body, '$.fields.incarnation_id')
+             FROM json_each(?1) AS seats
+             JOIN local_observations AS local ON local.id=(
+                 SELECT id FROM local_observations INDEXED BY local_observations_subject_kind_index
+                 WHERE subject=seats.value AND kind='harness.observed' ORDER BY id DESC LIMIT 1)",
+        )?;
+        let rows = statement.query_map([serde_json::to_string(subjects)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?))
+        })?;
+        let mut newest = HashMap::new();
+        for row in rows {
+            let (subject, at, incarnation) = row?;
+            if let Some(incarnation) = incarnation {
+                newest.insert(subject, (incarnation, at.max(0) as u128));
+            }
+        }
+        Ok(newest)
+    }
+
+    /// When this node last heard `subject`'s harness report for `incarnation`, from its local log.
+    pub fn local_harness_observed_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        Ok(self
+            .local_harness_newest(subject)?
+            .filter(|(of, _)| of == incarnation)
+            .map(|(_, at)| at))
+    }
+
+    /// When this node, or the seat's host as it last pushed, heard `subject`'s harness for
+    /// `incarnation`.
+    pub fn heard_harness_at(&self, subject: &str, incarnation: &str) -> Result<Option<u128>> {
+        let local = self.local_harness_observed_at(subject, incarnation)?;
+        let relayed = self.extension::<RelayedFreshness>().heard_at(subject, incarnation);
+        Ok(local.max(relayed))
     }
 
     pub fn latest_observation(&self, subject: &str, kind: &str) -> Result<Option<ClaimRecord>> {
@@ -8535,6 +8580,13 @@ pub fn local_retention(kind: &str) -> bool {
         .is_some_and(|spec| spec.retention == fractal_schema::Retention::Local)
 }
 
+/// Whether the retention policy names this claim's `code` as observability only, so it goes to
+/// the local observation log although its kind replicates. See `local_codes` in retention.toml.
+pub fn local_code(input: &ClaimInput) -> bool {
+    fractal_schema::retention::policy()
+        .local_code(&input.kind, input.fields.get("code").and_then(Value::as_str))
+}
+
 pub fn system_local_retention(kind: &str) -> bool {
     fractal_schema::registry()
         .claim(kind)
@@ -11347,6 +11399,17 @@ fn merge_actual_value(
     if let Value::Object(fields) = source {
         if kind == "resource.observed" {
             resources::merge_observation(merged, &fields);
+            return;
+        }
+        // A compact item state lays its facts over the item's observed facts, as the resource
+        // projection does, and names the item's kind when no observation did.
+        if kind == fractal_schema::github_plugin::ITEM_STATE {
+            if let Some(item_kind) = fields.get("item_kind") {
+                merged.entry("kind").or_insert_with(|| item_kind.clone());
+            }
+            if let Some(facts) = merged.entry("facts").or_insert_with(|| json!({})).as_object_mut() {
+                fractal_schema::github_plugin::overlay_item_state(facts, &fields);
+            }
             return;
         }
         let registry = fractal_schema::registry();
@@ -21312,6 +21375,10 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Write the claim as a build from before its kind became a local observation did: a
+    /// replicated claim. Tests use it for the claims older members still replicate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub as_older_build: bool,
 }
 
 pub fn append_claim_with_commit_context(
@@ -21362,8 +21429,14 @@ pub fn append_claim_with_commit_context(
     if !context.retirement_writer {
         validate_claim_input(input)?;
     }
-    if local_retention(&input.kind)
-        || (input.actor.is_none() && system_local_retention(&input.kind))
+    #[cfg(any(test, feature = "test-support"))]
+    let older_build = context.as_older_build;
+    #[cfg(not(any(test, feature = "test-support")))]
+    let older_build = false;
+    if !older_build
+        && (local_retention(&input.kind)
+            || local_code(input)
+            || (input.actor.is_none() && system_local_retention(&input.kind)))
     {
         let connection = graph.readers.get();
         admission(&connection)?;
@@ -21784,9 +21857,46 @@ fn append_local_observation_fenced(
                     return Err(St3Error::new("stale-subject", "the local action receipt slot is occupied"));
                 }
             }
+            // A key an older build recorded as a replicated claim, before the kind became local,
+            // still names that request: a retry gets the claim and a changed request is refused.
+            if let Some(claim) = replicated_operation_outcome_tx(transaction, input)? {
+                return Ok((claim, false));
+            }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
         .map_err(|error| St3Error::new("internal", error))?
+}
+
+/// The outcome of `input`'s idempotency key in the replicated operation registry, as a claim
+/// append would settle it: the stored claim for a retry, an error for a changed or conflicting
+/// request or a checkpointed one, and `None` when no claim was ever written for the key.
+fn replicated_operation_outcome_tx(
+    transaction: &Transaction<'_>,
+    input: &ClaimInput,
+) -> Result<Option<ClaimRecord>, St3Error> {
+    let Some((operation_id, request_digest)) = claim_operation(input)? else {
+        return Ok(None);
+    };
+    if let Some((stored_digest, canonical_claim, state)) =
+        operation_tx(transaction, &operation_id).map_err(internal)?
+    {
+        if state == "conflict" {
+            return Err(St3Error::new("idempotency-conflict", "the replicated operation has conflicting requests")
+                .with_detail("operation_id", operation_id));
+        }
+        if stored_digest != request_digest {
+            return Err(St3Error::new("idempotency-mismatch", "the idempotency key already identifies a different request")
+                .with_detail("operation_id", operation_id)
+                .with_detail("stored_digest", stored_digest)
+                .with_detail("request_digest", request_digest));
+        }
+        return claim_by_id_tx(transaction, &canonical_claim)
+            .map_err(internal)?
+            .ok_or_else(|| St3Error::new("internal", "the operation claim is missing"))
+            .map(Some);
+    }
+    checkpointed_operation_outcome(transaction, &operation_id, &request_digest)?;
+    Ok(None)
 }
 
 /// Record an observation of `latest` retention. The local observation log keeps every
@@ -22346,3 +22456,31 @@ pub mod checkpoint_agreement_tests_shared_attention_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod checkpoint_capture_epoch_tests_shared_attention_tests;
+
+/// When each seat's host last heard it, as the host pushed it (`seat_freshness`), kept in memory
+/// by the member it pushed to. It is never stored: a restart starts empty, and each host pushes
+/// its seats in full to a member whose `daemon.started` changed. The card's freshness rule ages
+/// the time itself, so an answer needs no expiry: a host that stops pushing reads stale.
+#[derive(Default)]
+pub struct RelayedFreshness(std::sync::Mutex<HashMap<String, (String, u128)>>);
+
+impl RelayedFreshness {
+    /// Record when the seat's host heard each `(agent, incarnation, heard_at)`, keeping the newest.
+    pub fn record(&self, seats: impl IntoIterator<Item = (String, String, u128)>) {
+        let mut heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (agent, incarnation, heard_at) in seats {
+            let newer = heard
+                .get(&agent)
+                .is_none_or(|(of, at)| *of != incarnation || *at < heard_at);
+            if newer {
+                heard.insert(agent, (incarnation, heard_at));
+            }
+        }
+    }
+
+    /// When the seat's host last said it heard `subject`'s `incarnation`.
+    pub fn heard_at(&self, subject: &str, incarnation: &str) -> Option<u128> {
+        let heard = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        heard.get(subject).filter(|(of, _)| of == incarnation).map(|(_, at)| *at)
+    }
+}
