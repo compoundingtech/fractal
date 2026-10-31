@@ -69,19 +69,18 @@ A document that cannot be shown says why (not found, not synced yet, the host di
 text). Reads go through `document.get`, `documents.list` and `document-references.get`, and the
 page is `fractal_ui_model::documents`, the model the phone and web read.
 
-Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
-cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
-down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
-`◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
-The existing standalone `◆` stays immediately before the agent or mission name when
-its reported state needs a person; the alert count is separate and does not replace it.
-A separate `?` marks a current question prompt from live attention, including questions
-that can only be answered in the terminal or whose client-answer window expired.
-Question identity comes from the native question kind or the exact named question
+Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
+or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
+Mission, Inbox and other tabs have no prefix. One attention suffix follows the title:
+`?` for a live open question, otherwise `◆` for open alerts or a needs-person state.
+Only counts above one are shown (`?2`, `◆3`); loading attention has no placeholder.
+Questions include those answerable only in the terminal or whose client-answer window
+expired. Question identity comes from the native question kind or exact named question
 tool call; cached calls without an open live prompt cannot set it. Mission tabs
 aggregate their agents' current question prompts; Inbox aggregates all of them.
-Counts drop first in a narrow strip; type, activity and question markers precede the
-truncated name. Overflow markers still reach hidden tabs.
+Titles retain 26 cells. A narrow strip drops counts first, then the attention suffix,
+while keeping activity at the left, even if padding and the title no longer fit.
+Overflow markers reach hidden tabs.
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
