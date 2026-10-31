@@ -65,18 +65,24 @@ a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
 
-On Linux the daemon observes worker-only routes (`/v1/internal/replication/*`,
-`/v1/internal/seat-freshness`, `/v1/internal/seat-snapshot` and
-`/v1/internal/client-read/forward`) against the Unix connector's process
-generation. Services use the supervisor-observed worker; foreground operation
-uses the explicitly enrolled process. This preparatory observation logs
-would-refuse requests without changing route admission. On macOS no socket-bound
-process-generation witness is available: these routes retain existing admission
-and emit `unverified-platform`, not an authentication success. The unbound local
-caller authority gap remains open on macOS. `LOCAL_PEERPID` and `LOCAL_PEERTOKEN`
-resolve through a live numeric PID; after PID reuse they can attribute a surviving
-socket to the wrong worker. Operator fleet routes retain their existing local
-authority boundary.
+On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) require the
+Unix connector's kernel-observed process generation to match the replication
+worker. Services use the supervisor-observed worker; foreground operation uses
+the explicitly enrolled process. An unrelated unbound process is not a worker.
+Authentication precedes body decoding; unavailable process or supervisor
+evidence fails closed. Re-observation admits a restarted supervised worker
+and revokes its predecessor, including inherited connections.
+
+On macOS these routes retain existing admission and emit `unverified-platform`,
+not an authentication success. The unbound local caller authority gap remains
+open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
+after PID reuse they can attribute a surviving socket to the wrong worker.
+
+This Linux boundary does not protect against same-UID service-manager takeover or
+ptrace of the trusted worker. User-service ownership and process debugging
+remain host trust assumptions; process pinning is not a separate-user sandbox.
+Operator fleet routes retain their existing local authority boundary.
 
 
 Adapters that retain a departing member's transport must instead make their
