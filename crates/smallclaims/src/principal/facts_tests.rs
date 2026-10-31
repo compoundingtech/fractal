@@ -15,17 +15,25 @@ fn record_roots_require_the_signers_window_and_allow_anchor_bootstrap() {
     let (key, _) = MemberKey::generate().unwrap();
     let admission = FleetClaim {
         id: "admission".into(), kind: "fleet.member-admitted".into(),
-        subject: "host/example".into(), writer: "example".into(), sequence: 1,
+        subject: "host/example".into(), writer: "example".into(), sequence: 5,
         fields: serde_json::from_value(json!({
             "member_key":key.public(),"via":"anchor","writer_floor":4
         })).unwrap(),
         signers: BTreeSet::from([key.public().into()]),
     };
+    let mut below_floor = admission.clone();
+    below_floor.sequence = 1;
+    let invalid_membership = Membership::fold(Some(key.public()), &[below_floor]);
+    assert!(!invalid_membership.counts("admission"));
+    assert!(!root_eligible("host/example", key.public(), RootContext::Record {
+        membership: &invalid_membership, writer: "example", sequence: 1, claim_id: "admission",
+    }));
     let membership = Membership::fold(Some(key.public()), &[admission]);
+    assert!(membership.counts("admission"));
     let eligible = |writer, sequence, claim_id| root_eligible(
         "host/example", key.public(), RootContext::Record { membership: &membership, writer, sequence, claim_id },
     );
-    assert!(eligible("example", 1, "admission"));
+    assert!(eligible("example", 5, "admission"));
     assert!(!eligible("example", 4, "ordinary"));
     assert!(eligible("example", 5, "ordinary"));
     assert!(!eligible("carrier", 5, "ordinary"));
