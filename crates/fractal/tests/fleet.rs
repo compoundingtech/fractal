@@ -6068,3 +6068,88 @@ async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade()
     let checks = member.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
     assert_eq!(checks["checks"]["head_sha"], "b".repeat(40), "{checks}");
 }
+
+/// Ask `node` to look at fixture/app again now, as a refresh does.
+fn refresh_fixture_app(node: &Node, id: &str) {
+    let file = node.root.join(format!("refresh-{id}.kdl"));
+    fs::write(&file, format!("version 2\nresource \"github/fixture/app\" {{ refresh {id:?} {{ timeout \"60s\" }} }}\n")).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+}
+
+/// Whether `node` holds a claim of `kind` on pull request 12 of fixture/app whose head is `head`.
+async fn item_claim_with_head(node: &Node, kind: &str, head: &str) -> bool {
+    node.claims().await.iter().any(|claim| {
+        claim["subject"] == "resource/github/fixture/app/pull-request/12"
+            && claim["kind"] == kind
+            && (claim.pointer("/body/fields/facts/head_sha") == Some(&json!(head))
+                || claim.pointer("/body/fields/head_sha") == Some(&json!(head)))
+    })
+}
+
+/// A member of the previous release that depends on a repository, through a seat that watches it,
+/// keeps its poller writing item snapshots, which it reads. Once it upgrades and advertises
+/// the GitHub plugin, the poller records the next change as compact state alone.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_dependent_keeps_item_snapshots_until_it_upgrades() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let mut elder = Node::new(root.path(), "fixture-elder");
+    elder.binary = old;
+    elder.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api.clone())]);
+    let code = poller.invite("fixture-elder", &[]);
+    let output = elder.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    elder.start().await;
+    watch_fixture_app(&poller);
+    wait_until("the poller fills its mirror", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" }
+    }).await;
+    wait_until("the elder holds the repository's observer", 90, || async {
+        elder.claims().await.iter().any(|claim| claim["subject"] == "observer/github/fixture/app")
+    }).await;
+    // The elder depends on the repository: a seat on it watches the pull request. The poller's
+    // observer is already running, so the watch is the elder's subscription on it.
+    watch_fixture_app(&elder);
+    wait_until("the poller holds the elder's watch", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"].as_str().is_some_and(|subject| subject.starts_with("subscription/watch/fixture/app/12/"))
+                && claim["origin"] == "fixture-elder"
+        })
+    }).await;
+
+    // A new head while the elder runs the previous release: the poller still writes a snapshot,
+    // which the elder receives.
+    *head.lock().unwrap() = "c".repeat(40);
+    refresh_fixture_app(&poller, "head-c");
+    wait_until("the elder receives a snapshot of head c", 120, || async {
+        item_claim_with_head(&elder, "resource.observed", &"c".repeat(40)).await
+    }).await;
+
+    // The elder upgrades in place and advertises the plugin: the next head is compact state alone.
+    elder.stop();
+    elder.binary = PathBuf::from(st3());
+    elder.start().await;
+    elder.wait_listening().await;
+    wait_until("the poller sees the elder advertise the plugin", 90, || async {
+        poller.claims().await.iter().any(|claim| {
+            claim["subject"] == "daemon/fixture-elder" && claim["kind"] == "daemon.started"
+                && claim.pointer("/body/fields/features/github_plugin").is_some()
+        })
+    }).await;
+    *head.lock().unwrap() = "d".repeat(40);
+    refresh_fixture_app(&poller, "head-d");
+    wait_until("the poller records head d as compact state", 120, || async {
+        item_claim_with_head(&poller, "vcs.item.state", &"d".repeat(40)).await
+    }).await;
+    assert!(!item_claim_with_head(&poller, "resource.observed", &"d".repeat(40)).await, "no snapshot of head d");
+    let pull = elder.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["head_sha"], "d".repeat(40), "{pull}");
+}
