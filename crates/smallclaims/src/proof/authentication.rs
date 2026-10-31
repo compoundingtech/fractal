@@ -133,7 +133,7 @@ pub(super) fn authenticated_actor_alias(
 ) -> Result<bool, ProofError> {
     if requested == storage { return Ok(true); }
     if !requested.starts_with("agent/") || !storage.starts_with("agent/") { return Ok(false); }
-    for candidate in authentication.records.values().filter(|record| {
+    if let Some(candidate) = authentication.records.values().find(|record| {
         record.claim.kind == "agent.renamed" && record.claim.subject == storage
             && record.claim.body["fields"]["to"].as_str() == Some(requested)
     }) {
@@ -233,10 +233,9 @@ fn validate_rename_schema(claim: &ClaimRecord) -> Result<(), ProofError> {
         }
     }
     for (name, field) in [("expected_naming_revision", "previous_revision"), ("expected_declaration", "declaration")] {
-        if let Some(value) = request.get(name).filter(|value| !value.is_null()) {
-            if !value.is_string() || value != &fields[field] {
-                return Err(chain_error(format!("request {name} disagrees with effect")));
-            }
+        if let Some(value) = request.get(name).filter(|value| !value.is_null())
+            && (!value.is_string() || value != &fields[field]) {
+            return Err(chain_error(format!("request {name} disagrees with effect")));
         }
     }
     let key = request["idempotency_key"].as_str().expect("checked string");
