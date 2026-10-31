@@ -136,7 +136,10 @@ semantics identify an exact retry; changed input is rejected. Graph-derived clai
 persisted in the spool before the first HTTP attempt so retries preserve their original attribution.
 Byte-identical snapshot reports leave both the snapshot and event queue untouched after ownership
 validation. WAL commits retain full synchronization and SQLite's default 1,000-page automatic
-checkpoint threshold; closing a short-lived producer or reader does not force a checkpoint.
+checkpoint threshold. Connections defer last-close checkpoints only while the existing WAL is
+below a 1,000-page byte budget (32-byte header plus 1,000 page frames). At or above that budget,
+SQLite's ordinary last-close checkpoint remains enabled. This also recycles the WAL across
+zero-connection gaps, when SQLite rebuilds shared-memory backfill/restart state.
 
 Authority reads reuse up to 128 harness-spool SQLite connections across the process, with
 at most 64 per thread. At either limit a thread evicts its least recently used connection;

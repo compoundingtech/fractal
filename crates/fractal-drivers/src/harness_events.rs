@@ -99,9 +99,15 @@ fn connect(agent_dir: &Path) -> Result<Connection> {
     CONNECTION_OPENS.with(|opens| opens.set(opens.get() + 1));
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA synchronous=FULL;")?;
-    // Producers are short lived. Closing the last connection must not checkpoint the
-    // rolling history on every report; WAL's normal 1000-page threshold still applies.
-    connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    // Short-lived producers must not checkpoint history on every report. Once
+    // the WAL reaches the default 1000-page budget, allow SQLite's normal last-
+    // close checkpoint: zero-connection gaps discard SHM backfill/restart state,
+    // so automatic checkpoints alone cannot recycle this retained WAL.
+    let page_size: u64 = connection.pragma_query_value(None, "page_size", |row| row.get(0))?;
+    let checkpoint_bytes = 32 + 1000 * (page_size + 24);
+    let defer_checkpoint = agent_dir.join(format!("{DATABASE}-wal")).metadata()
+        .map_or(true, |metadata| metadata.len() < checkpoint_bytes);
+    connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, defer_checkpoint)?;
     Ok(connection)
 }
 

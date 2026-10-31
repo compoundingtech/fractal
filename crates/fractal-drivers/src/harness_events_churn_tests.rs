@@ -142,7 +142,7 @@ fn report_wal_bytes_per_1000_unchanged_reports() {
 }
 
 #[test]
-fn automatic_checkpoints_bound_wal_across_5000_short_lived_producers() {
+fn checkpoint_budget_bounds_wal_across_5000_short_lived_producers() {
     let root = setup();
     let connection = open(root.path()).unwrap();
     let pages: u64 = connection.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0)).unwrap();
@@ -151,24 +151,30 @@ fn automatic_checkpoints_bound_wal_across_5000_short_lived_producers() {
     assert_eq!(connection.pragma_query_value(None, "synchronous", |row| row.get::<_, u64>(0)).unwrap(), 2);
     drop(connection);
     assert_no_open_spool_connections(root.path());
-    // The automatic threshold is checked after commit. Reserve 32 extra frames
-    // for a small report transaction crossing that threshold, including splits.
+    // A connection opened just below the 1000-frame close budget can append
+    // one transaction before a successor enables last-close checkpointing.
+    // Bound = 32-byte WAL header + (1000 + max_tx_frames) * (page_size + 24).
+    // These small reports reserve 32 frames for that transaction, including splits.
     let bound = 32 + (pages + 32) * (page_size + 24);
     let wal = root.path().join(format!("{DATABASE}-wal"));
     let mut peak = 0;
+    let mut checkpoints = 0;
     for report in 0..5000 {
         let body = serde_json::to_vec(&json!({"incarnation":"provider", "report":report})).unwrap();
         write_snapshot(root.path(), "harness-todo", &body).unwrap();
         assert_no_open_spool_connections(root.path());
-        let bytes = wal.metadata().unwrap().len();
-        assert!(bytes > 0, "producer close must retain the WAL");
+        let bytes = wal.metadata().map_or(0, |metadata| metadata.len());
+        if bytes == 0 {
+            checkpoints += 1;
+        }
         if report < 5 || report % 250 == 249 {
             eprintln!("short-lived producer report={report} wal_bytes={bytes}");
         }
         peak = peak.max(bytes);
     }
     assert_eq!(pending(root.path(), 6000).unwrap().len(), 5001);
-    eprintln!("5000 short-lived producers: peak_wal_bytes={peak} bound={bound} autocheckpoint_pages={pages} page_size={page_size}");
+    eprintln!("5000 short-lived producers: peak_wal_bytes={peak} bound={bound} checkpoints={checkpoints} autocheckpoint_pages={pages} page_size={page_size}");
+    assert!(peak > 0 && checkpoints > 0 && checkpoints < 500, "checkpoints must be batched, not per-report");
     assert!(peak <= bound, "WAL high-water mark {peak} exceeded {bound}");
 }
 
