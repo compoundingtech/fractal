@@ -3462,6 +3462,44 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
     assert!(state.store.active_mission_runs().unwrap().is_empty());
 }
 
+/// A seat freshness push names the member it came from; only the replication worker, which runs
+/// in no harness, may record one. A bound harness is refused before the handler, and nothing is
+/// recorded.
+#[tokio::test]
+async fn a_bound_harness_cannot_record_seat_freshness() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let received = crate::peer::ReceivedSeatFreshness {
+        from: "another-member".into(),
+        seats: vec![crate::peer::SeatHeard {
+            agent: "agent/another-member.seat".into(),
+            incarnation_id: "one".into(),
+            heard_at_unix_ms: 1_000,
+        }],
+    };
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(serde_json::to_vec(&received).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "foreign-agent-actor");
+    assert_eq!(
+        state.store.extension::<crate::store::RelayedFreshness>().heard_at("agent/another-member.seat", "one"),
+        None
+    );
+}
+
 #[tokio::test]
 async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     use crate::store::message_subscriptions::{PERFORMANCE_DECLARATIONS, PERFORMANCE_REGISTRATION};

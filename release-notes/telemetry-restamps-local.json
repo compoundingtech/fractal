@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Contract C3 of the claims-store breakup (approved). Remote seat freshness comes from the seat's host: its own cards read its local log, and other members read its seat_freshness pushes. An older member, which reads report ages, keeps every host it can see on the five-minute fallback, inside its 661-second down rule; its cards read a resting remote seat as stale after 90 seconds, as they already do for resting native seats. The host's wake acknowledgement reads its local log, so a working re-stamp after a wake still counts. No claim kind, field, wire or CLI shape changes."
+    "detail": "Contract C3 of the claims-store breakup (approved). Remote seat freshness comes from the seat's host: its own cards read its local log, and other members read its seat_freshness pushes. An older member, which reads report ages, keeps every host it can see on the five-minute fallback, inside its 661-second down rule; its cards read a resting remote seat as stale after 90 seconds, as they already do for resting native seats. The host's wake acknowledgement reads its local log, so a working re-stamp after a wake still counts. No claim kind, field, wire or CLI shape changes. Two follow-ups to the seat freshness push: a pushed time later than the receiver's clock plus 60 seconds is taken as that, so a host whose clock runs ahead cannot keep a seat looking fresh; and a bound harness calling the daemon's /v1/internal/seat-freshness as itself is refused with foreign-agent-actor, as it is on /v1/internal/client-read/forward."
   },
   "downtime": {
     "status": "none",

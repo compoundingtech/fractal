@@ -7066,6 +7066,14 @@ pub async fn guard_bound_request(
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
     }
+    // A seat freshness push names the member it came from, which the replication worker
+    // authenticated. A harness would speak for another host's seats.
+    if path.starts_with(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH) {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            format!("this harness is `{bound_agent}` and cannot record another member's seat freshness"),
+        )));
+    }
     if ![
         "/v1/intent/apply",
         "/v1/sets/",

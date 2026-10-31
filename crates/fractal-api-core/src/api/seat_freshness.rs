@@ -17,6 +17,8 @@ pub const SEAT_FRESHNESS_COALESCE: Duration = Duration::from_secs(10);
 pub const SEAT_FRESHNESS_ANSWER: Duration = Duration::from_secs(10);
 /// How soon a push that failed, or left a seat owed, is tried again, even with no new commit.
 const SEAT_FRESHNESS_RETRY: Duration = Duration::from_secs(60);
+/// How far ahead of this node's clock a pushed time may be.
+pub const SEAT_FRESHNESS_CLOCK_SKEW: Duration = Duration::from_secs(60);
 /// The longest wait between retries while seats stay owed.
 const SEAT_FRESHNESS_LONGEST_RETRY: Duration = Duration::from_secs(15 * 60);
 
@@ -37,11 +39,14 @@ pub async fn seat_freshness(
             .filter(|desired| desired.member.as_ref().is_some_and(|member| member.host == received.from))
             .map(|desired| desired.subject)
             .collect::<BTreeSet<_>>();
+        // A host's clock may run ahead: a time past this node's now plus a minute is taken as
+        // that, so a skewed clock cannot keep a seat looking fresh.
+        let latest = smallclaims::store::now_ms() + SEAT_FRESHNESS_CLOCK_SKEW.as_millis();
         let seats = received
             .seats
             .into_iter()
             .filter(|seat| hosted.contains(&seat.agent))
-            .map(|seat| (seat.agent, seat.incarnation_id, u128::from(seat.heard_at_unix_ms)))
+            .map(|seat| (seat.agent, seat.incarnation_id, u128::from(seat.heard_at_unix_ms).min(latest)))
             .collect::<Vec<_>>();
         let recorded = seats.iter().map(|(agent, _, _)| agent.clone()).collect();
         store.extension::<RelayedFreshness>().record(seats);

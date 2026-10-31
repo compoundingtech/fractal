@@ -163,6 +163,14 @@ async fn a_member_records_the_freshness_a_host_pushes_for_its_own_seats_only() {
     assert_eq!(relayed.heard_at(&ours, "one"), Some(1_000));
     assert_eq!(relayed.heard_at(&theirs, "one"), None);
     assert_eq!(relayed.heard_at(&ours, "zero"), None, "the time is of one incarnation");
+    // A host whose clock runs ahead cannot keep a seat fresh: a time past now plus a minute is
+    // taken as that.
+    let ahead = (smallclaims::store::now_ms() + 3_600_000) as u64;
+    let before = smallclaims::store::now_ms();
+    relay.push_seat_freshness(RECEIVER, &SeatFreshnessPush { seats: vec![SeatHeard { agent: ours.clone(), incarnation_id: "skewed".into(), heard_at_unix_ms: ahead }] }, Duration::from_secs(10)).await.unwrap();
+    let clamped = relayed.heard_at(&ours, "skewed").unwrap();
+    assert!(clamped <= smallclaims::store::now_ms() + 60_000 && clamped >= before + 60_000, "{clamped}");
+    relay.push_seat_freshness(RECEIVER, &SeatFreshnessPush { seats: vec![heard(&ours, 1_000)] }, Duration::from_secs(10)).await.unwrap();
     // An older push never moves the time back.
     relay.push_seat_freshness(RECEIVER, &SeatFreshnessPush { seats: vec![heard(&ours, 500)] }, Duration::from_secs(10)).await.unwrap();
     assert_eq!(relayed.heard_at(&ours, "one"), Some(1_000));

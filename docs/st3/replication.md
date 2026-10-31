@@ -327,8 +327,11 @@ The push is reactive:
 - A failed push is retried a minute later, with or without a new commit, and the round runs once
   when the daemon starts. Otherwise nothing is sent while nothing changes.
 
-The receiver records a seat only when its declaration places the seat on the member that pushed
-it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
+The receiver takes a pushed time later than its own clock plus a minute as that time, so a host
+whose clock runs ahead can't keep a seat looking fresh. A bound harness is refused on the
+daemon's `/v1/internal/seat-freshness`: only the replication worker, which authenticated the
+sender, records a push. The receiver records a seat only when its declaration places the seat on
+the member that pushed it, keeps the newest time per seat and incarnation in memory, and answers with the seats it
 recorded. A seat it left out, such as one whose declaration hasn't reached it yet, stays owed. The
 host retries it a minute later without waiting for a commit, then less often while it stays owed,
 doubling up to every 15 minutes. An agent card's freshness and a
