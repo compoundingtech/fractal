@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod browser;
 mod locator;
+mod reveal;
 mod strict;
 mod validation;
 pub use browser::{
