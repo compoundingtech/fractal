@@ -29,6 +29,17 @@ use crate::replication::InventoryCheckpoint;
 /// report where a seat's needs-login run begins (see #4237).
 pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed"];
 
+/// The kinds a local cut's capture also stages, because judging a claim of `LOCAL_TRIM_KINDS`
+/// reads them: the status-history rule folds a seat's harness observations with its runtime
+/// resets and harness diagnostics, and keeps a transition a reset or a restored prompt depends
+/// on. They are staged as context and protected like every other kind, never dropped.
+pub const LOCAL_TRIM_CONTEXT_KINDS: &[&str] = &["runtime.observed", "harness.diagnostic"];
+
+/// What a local cut's capture stages: the kinds it drops and the kinds judging them reads.
+pub fn local_trim_capture_kinds() -> Vec<&'static str> {
+    LOCAL_TRIM_KINDS.iter().chain(LOCAL_TRIM_CONTEXT_KINDS).copied().collect()
+}
+
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
@@ -467,7 +478,7 @@ impl Store {
         }
         let _completion = super::checkpoint_completion::Completion::outer();
         // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
-        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
+        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(&local_trim_capture_kinds()))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
         staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
