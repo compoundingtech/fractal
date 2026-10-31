@@ -501,10 +501,16 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
             .sum::<usize>()
     };
     assert_eq!(graph(), 6, "three state changes, each seat's first limits reading and the account's one change");
+    // Once every member hears this node's seats, a working re-stamp past the five-minute
+    // fallback stays local too, and still exports.
+    store.set_fleet_hears_seats(true).unwrap();
+    state("working", start + 60_000);
+    state("working", start + 420_000);
+    assert_eq!(graph(), 7, "the transition replicates; the re-stamp the fleet hears through its host stays local");
 
     let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
     exporter.export_once(&store).await.unwrap();
-    assert_eq!(graph(), 6, "exporting writes nothing to the graph");
+    assert_eq!(graph(), 7, "exporting writes nothing to the graph");
     let requests = collector.requests.lock().unwrap();
     let logs = requests
         .iter()
@@ -512,7 +518,7 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
         .flat_map(|(_, body)| records(body))
         .filter(|record| record["eventName"].as_str().is_some_and(|kind| kind.starts_with("harness.")))
         .count();
-    assert_eq!(logs, 8, "the full series: every reading, including those the graph kept local");
+    assert_eq!(logs, 10, "the full series: every reading, including those the graph kept local");
     let metrics = requests
         .iter()
         .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
@@ -671,4 +677,37 @@ async fn the_limits_gauge_keeps_the_newest_measured_reading() {
     reading("agent/node.dan", 40.0, start + 90_000);
     exporter.export_once(&store).await.unwrap();
     assert_eq!(gauges().last(), Some(&(40.0, at(start + 90_000))), "a newer reading still updates it");
+}
+
+/// Diagnostics, which stay in the local log (C4 for daemon.diagnostic, and 2c for observability
+/// codes of harness.diagnostic), export at their own severity with their code as an attribute, so
+/// a collector can filter on both; a diagnostic without a severity stays INFO.
+#[test]
+fn diagnostics_export_at_their_severity_with_their_code() {
+    let store = Store::open_memory("node-a").unwrap();
+    let diagnostic = |subject: &str, kind: &str, actor: Option<&str>, fields: Value| {
+        store.append_local_observations_for_test(&[ClaimInput {
+            subject: subject.into(),
+            kind: kind.into(),
+            actor: actor.map(str::to_owned),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }]);
+    };
+    diagnostic("daemon/node-a", "daemon.diagnostic", None, json!({"severity":"error", "code":"reconcile-failed", "reason":"invented"}));
+    diagnostic("daemon/node-a", "daemon.diagnostic", None, json!({"severity":"warning", "code":"kill-survivor", "reason":"invented"}));
+    let batch = store.local_observations_after(0, 10).unwrap();
+    let logs = otlp_logs("node-a", &batch);
+    let records = records(&logs);
+    let code = |record: &Value| {
+        record["attributes"].as_array().unwrap().iter()
+            .find(|attribute| attribute["key"] == "st3.code")
+            .map(|attribute| attribute["value"]["stringValue"].clone())
+    };
+    assert_eq!((records[0]["severityText"].clone(), records[0]["severityNumber"].clone()), (json!("ERROR"), json!(17)));
+    assert_eq!(code(&records[0]), Some(json!("reconcile-failed")));
+    assert_eq!((records[1]["severityText"].clone(), records[1]["severityNumber"].clone()), (json!("WARN"), json!(13)));
+    assert_eq!(code(&records[1]), Some(json!("kill-survivor")));
 }

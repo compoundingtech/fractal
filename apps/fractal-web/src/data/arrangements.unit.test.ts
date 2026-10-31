@@ -68,8 +68,10 @@ const harness = () => {
       const stream: CollectionStream = {
         subscribeGlasses: () => undefined,
         subscribeArrangements: (...args) => { socket.subscribed.push(args) },
+        subscribeOrderedMemberships: () => undefined,
         subscribe: () => undefined,
         subscribeAgent: async () => undefined,
+        subscribeAgentsPublication: async () => undefined,
         subscribeTerminal: () => undefined,
         subscribeConversation: () => undefined,
         unsubscribe: () => undefined,
@@ -354,6 +356,20 @@ describe('sidebarWinner', () => {
     expect(sidebarWinner([arrangement(2, 'Sidebar'), reserved], owner)).toEqual(reserved)
     expect(reservedSidebarSubject(owner)).toBe(reserved.id)
     expect(sidebarWinner([arrangement(2, 'Sidebar')], owner)?.id).toBe(arrangement(2).id)
+  })
+
+  it('ignores v2 layouts at both the reserved subject and a lower-id Sidebar candidate', () => {
+    const reserved = arrangement(1, 'Archive')
+    const named = arrangement(2, 'Sidebar')
+    const v2 = (item: Arrangement): Arrangement => ({
+      ...item,
+      body: { version: 2, name: item.body.name, folders: item.body.folders },
+    })
+    const legacy = arrangement(3, 'Sidebar')
+    const rows = [v2(reserved), v2(named), legacy]
+    expect(sidebarCandidates(rows, owner)).toEqual([legacy])
+    expect(sidebarWinner(rows, owner)).toEqual(legacy)
+    expect(sidebarWinner([v2(reserved), v2(named)], owner)).toBeUndefined()
   })
 
   it('selects the lowest UUIDv7 among exact-name live person-owned legacy candidates', () => {

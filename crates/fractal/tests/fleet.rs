@@ -149,6 +149,24 @@ impl Node {
         let pty = root.join("bin/pty");
         fs::write(&pty, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
+        // Private supervisor evidence, including replacement workers; never consult host services.
+        for (tool, script) in [
+            ("systemctl", "#!/bin/sh\ncase \"$*\" in\n*MainPID*) cat \"$HOME/../worker.pid\";;\n*'show st3-replication.service '*) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*' show '*) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n';;\n*) exit 1;;\nesac\n"),
+            ("launchctl", "#!/bin/sh\ncase \"$*\" in\n*com.compoundingtech.st3.replication*) printf 'state = running\\npid = '; cat \"$HOME/../worker.pid\";;\n*) exit 1;;\nesac\n"),
+        ] {
+            let mut script = script.to_owned();
+            if tool == "systemctl"
+                && let Ok(real) = fractal_runtime::resolve_executable(tool, &std::env::vars().collect())
+            {
+                // Preserve user-scope isolation without consulting real fleet service units.
+                script = script.replace("case \"$*\" in\n", &format!(
+                    "case \"$*\" in\n*'.scope'*|*show-environment*) exec '{}' \"$@\";;\n",
+                    real.to_string_lossy().replace('\'', "'\\''")));
+            }
+            let path = root.join("bin").join(tool);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
         for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
@@ -197,7 +215,7 @@ impl Node {
             .args(arguments)
             .current_dir(&self.root)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", format!("{}:{}", self.root.join("bin").display(), std::env::var("PATH").unwrap_or_default()))
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
@@ -334,6 +352,7 @@ impl Node {
                 .spawn()
                 .unwrap(),
         );
+        fs::write(self.root.join("worker.pid"), self.worker.as_ref().unwrap().id().to_string()).unwrap();
     }
 
     fn stop_worker(&mut self) {
@@ -341,6 +360,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
     }
 
     fn stop(&mut self) {
@@ -352,6 +372,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
         let _ = fs::remove_file(self.socket());
     }
 
@@ -1274,6 +1295,151 @@ async fn create_after_standalone_run_records_explicit_name_before_restart() {
     node.wait_listening().await;
     let peer = joined(root.path(), &node, "fern", &[]).await;
     peer.st_ok(&["fleet", "wait", "--timeout", "90s"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_explicit_store_fleet_create_resolves_identity_under_admission_lock() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    for requested in [None, Some("fern")] {
+        let directory = if requested.is_some() { "renamed" } else { "configured" };
+        let mut node = Node::named(root.path(), directory, "orchid");
+        let store_dir = node.root.join("external-store");
+        fs::create_dir(&store_dir).unwrap();
+        fs::write(
+            node.root.join("config/st3/config.toml"),
+            format!("node = \"orchid\"\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+        ).unwrap();
+        let pin = node.state_dir().join("node-identity.json");
+        assert!(!pin.exists());
+        assert!(!store_dir.join("claims.sqlite3").exists());
+        let mut arguments = vec!["fleet", "create", "--no-service", "--dial-out"];
+        if let Some(name) = requested {
+            arguments.extend(["--name", name]);
+        }
+        let founded = node.st_json(&arguments);
+        let expected = requested.unwrap_or("orchid");
+        assert_eq!(founded["node"], expected);
+        assert_eq!(
+            serde_json::from_slice::<String>(&fs::read(&pin).unwrap()).unwrap(),
+            expected,
+        );
+        assert_eq!(
+            fractal_daemon::config::FleetFile::load(&node.state_dir()).unwrap().unwrap().node.as_deref(),
+            Some(expected),
+        );
+        assert!(!node.state_dir().join("claims.sqlite3").exists());
+        node.name = expected.into();
+        node.start().await;
+        assert_eq!(node.st_json(&["fleet", "status"])["node"], expected);
+        assert!(store_dir.join("claims.sqlite3").exists());
+        assert!(!node.state_dir().join("claims.sqlite3").exists());
+        node.stop();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_store_writer_changes_are_refused_before_join_side_effects() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    for source in ["argument", "code", "configuration"] {
+        let old_name = format!("standalone-{source}");
+        let new_name = format!("joined-{source}");
+        let mut node = Node::new(root.path(), &old_name);
+        let store_dir = node.root.join("external-store");
+        fs::create_dir(&store_dir).unwrap();
+        let config_path = node.root.join("config/st3/config.toml");
+        fs::write(
+            &config_path,
+            format!("node = {old_name:?}\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+        ).unwrap();
+        // Establish the real standalone database writer and identity pin.
+        node.start().await;
+        node.stop();
+        let database = store_dir.join("claims.sqlite3");
+        let writer = || {
+            rusqlite::Connection::open_with_flags(
+                &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            ).unwrap().query_row(
+                "SELECT value FROM meta WHERE key='local_node_writer'", [], |row| row.get::<_, String>(0),
+            ).unwrap()
+        };
+        assert_eq!(writer(), old_name);
+        let pin = node.state_dir().join("node-identity.json");
+        let original_pin = fs::read(&pin).unwrap();
+        let code = if source == "configuration" {
+            fs::write(
+                &config_path,
+                format!("node = {new_name:?}\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+            ).unwrap();
+            // An unnamed invitation falls back to the configured node.
+            sponsor.st_ok(&["fleet", "invite", "--code-only", "--via", "loopback", "--as", PERSON])
+                .trim().to_owned()
+        } else {
+            sponsor.invite(&new_name, &[])
+        };
+        let invites_before = sponsor.st_json(&["fleet", "invites", "--all"]);
+        let mut arguments = vec!["fleet", "join", code.as_str(), "--no-service"];
+        if source == "argument" {
+            arguments.extend(["--name", new_name.as_str()]);
+        }
+        let refused = node.st(&arguments);
+        assert!(!refused.status.success(), "{source}: {refused:?}");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("writer"),
+            "{source}: {refused:?}"
+        );
+        for path in ["fleet.toml", "join.json", "node.key"] {
+            assert!(!node.state_dir().join("fleet").join(path).exists(), "{source}: {path}");
+        }
+        assert_eq!(fs::read(&pin).unwrap(), original_pin, "{source}");
+        assert_eq!(writer(), old_name, "{source}");
+        let first_sync_rows: u64 = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap().query_row(
+            "SELECT count(*) FROM meta WHERE key='first_sync'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(first_sync_rows, 0, "{source}");
+        // A real sponsor still sees the untouched invitation, not a redeemed member.
+        assert_eq!(sponsor.st_json(&["fleet", "invites", "--all"]), invites_before, "{source}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_store_join_resume_uses_checkpoint_name_before_configured_name() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let sponsor = anchor(root.path(), "orchid").await;
+    let node = Node::new(root.path(), "fern");
+    let store_dir = node.root.join("external-store");
+    fs::create_dir(&store_dir).unwrap();
+    fs::write(
+        node.root.join("config/st3/config.toml"),
+        format!("node = \"fern-computer\"\nperson = {PERSON:?}\nstore_dir = {store_dir:?}\n"),
+    ).unwrap();
+    let code = sponsor.st_ok(&[
+        "fleet", "invite", "--code-only", "--via", "loopback", "--as", PERSON,
+    ]).trim().to_owned();
+    let joined = node.join(&code, &[]);
+    assert!(joined.status.success(), "{joined:?}");
+    let membership = node.state_dir().join("fleet/fleet.toml");
+    let saved_membership = fs::read(&membership).unwrap();
+    let resumed = node.st(&["fleet", "join", &code, "--no-service"]);
+    assert!(resumed.status.success(), "{resumed:?}");
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("fern joined"));
+    assert!(String::from_utf8_lossy(&resumed.stdout).contains("resumed"));
+    assert_eq!(fs::read(&membership).unwrap(), saved_membership);
+    let pin: String = serde_json::from_slice(
+        &fs::read(node.state_dir().join("node-identity.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(pin, "fern");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2786,8 +2952,7 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
-    // profiles (fish's config.fish among them) that put it on PATH.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2807,6 +2972,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "run",
                 "bin",
                 "bin/pty",
+                "bin/systemctl",
+                "bin/launchctl",
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
@@ -3291,10 +3458,10 @@ fn backup_baseline_graph(old: &Node, directory: &Path) {
         .unwrap();
     drop(reader);
     let archive = directory.join("baseline-claims.jsonl");
-    let header = fractal_daemon::backup::create_from_database(&copy, &archive).unwrap();
+    let header = fractal_daemon::backup::create_from_database(&copy, directory, &archive).unwrap();
     let source = fractal_daemon::store::Store::open(&copy, "backup-reader").unwrap();
     let target = directory.join("baseline-restored.db");
-    let report = fractal_daemon::backup::restore(&archive, &target).unwrap();
+    let report = fractal_daemon::backup::restore(&archive, &target, directory).unwrap();
     let restored = fractal_daemon::store::Store::open(&target, &report.writer).unwrap();
     assert!(old_schema <= header.source_schema);
     assert_eq!(report.graph_digest, header.graph_digest);
@@ -4774,6 +4941,7 @@ async fn outbound_only_member_returns_after_minutes_and_aged_hours_without_alert
                 .spawn()
                 .unwrap(),
         );
+        fs::write(traveller.root.join("worker.pid"), traveller.worker.as_ref().unwrap().id().to_string()).unwrap();
         for node in [&a, &b, &traveller] {
             wait_for_notes(node, &expected, 10, &[&a, &b, &traveller]).await;
         }
@@ -4968,6 +5136,17 @@ async fn action_coverage_fleet_controls_and_checkpoint_administration_survive_re
         "--reason",
         "The fixture projection was checked.",
     ]);
+    let resumed = amber.st_json(&[
+        "replication",
+        "signatures",
+        "resume",
+        "--as",
+        PERSON,
+        "--reason",
+        "The fixture signature migration was checked.",
+    ]);
+    assert!(resumed["cleared"].is_null(), "{resumed}");
+    assert_eq!(resumed["migration"]["phase"], "done", "{resumed}");
     amber.restart().await;
     amber.wait_listening().await;
     cobalt.st_ok(&[
@@ -5700,3 +5879,215 @@ mission "orchard/release" state="ready" {
 
 #[path = "fleet/schedule_standby.rs"]
 mod schedule_standby;
+
+/// A GitHub with one repository, `fixture/app`, and one open pull request, #12, whose head is
+/// the value of `head`. Every other read answers an empty list, as the watch fixture's does.
+async fn fake_github_with_pull_request(head: std::sync::Arc<std::sync::Mutex<String>>) -> String {
+    let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", http.local_addr().unwrap());
+    let issue = json!({"number": 12, "state": "open", "title": "Copper proof", "node_id": "PR_copper",
+        "html_url": "https://github.com/fixture/app/pull/12", "updated_at": "2026-10-01T00:00:00Z",
+        "created_at": "2026-10-01T00:00:00Z", "user": {"login": "fixture-author"}, "comments": 0,
+        "pull_request": {"url": "https://api.github.com/repos/fixture/app/pulls/12"}});
+    let listed = issue.clone();
+    let graphql_head = head.clone();
+    let app = axum::Router::new()
+        .route("/graphql", axum::routing::post(move || {
+            let head = graphql_head.lock().unwrap().clone();
+            async move {
+                let pull = json!({
+                    "id": "PR_copper", "number": 12, "title": "Copper proof",
+                    "url": "https://github.com/fixture/app/pull/12", "isDraft": false,
+                    "headRefOid": head, "headRefName": "agent/copper", "baseRefName": "main",
+                    "createdAt": "2026-10-01T00:00:00Z", "author": {"login": "fixture-author"},
+                    "reviewDecision": "REVIEW_REQUIRED", "mergeQueueEntry": null,
+                    "latestReviews": {"nodes": []},
+                    "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "FAILURE", "contexts": {"nodes": [
+                        {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ]}}}}]},
+                });
+                axum::Json(json!({"data": {
+                    "repository": {"pullRequests": {"pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": [pull]}},
+                    "nodes": [{"id": "PR_copper", "state": "OPEN", "number": 12, "url": "https://github.com/fixture/app/pull/12"}],
+                }}))
+            }
+        }))
+        .fallback(axum::routing::get(move |uri: axum::http::Uri| {
+            let issue = listed.clone();
+            async move {
+                let path = uri.path();
+                axum::Json(if path == "/repos/fixture/app" {
+                    json!({"id": 77, "full_name": "fixture/app"})
+                } else if path.ends_with("/issues/12") {
+                    issue
+                } else if path.ends_with("/issues") {
+                    json!([issue])
+                } else if path == "/user" {
+                    json!({"login": "fixture-bot"})
+                } else {
+                    json!([])
+                })
+            }
+        }));
+    tokio::spawn(async move {
+        axum::serve(http, app).await.unwrap();
+    });
+    api
+}
+
+/// `st gh prs` as `actor` on `node`, as JSON, or null while it fails, as it does until the
+/// repository's observer is declared.
+fn gh_prs(node: &Node, actor: &str) -> Value {
+    let output = node.st(&["--json", "gh", "prs", "fixture/app", "--state", "all", "--as", actor]);
+    if !output.status.success() {
+        return Value::Null;
+    }
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Declare `agent/example/watch` on `node` and watch fixture/app#12 as it, so `node` polls the
+/// repository.
+fn watch_fixture_app(node: &Node) {
+    let file = node.root.join("seat.kdl");
+    fs::write(&file, format!(
+        "version 2\nagent \"example/watch\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        node.name, node.root,
+    )).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", file.to_str().unwrap(), "--as", PERSON]);
+    let output = node
+        .command(&["gh", "watch", "fixture/app#12", "--as", "agent/example/watch"])
+        .env("ST_AGENT", "agent/example/watch")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stderr), node.logs());
+}
+
+/// The member that polls a repository answers `st gh prs|pr|checks` from its plugin mirror.
+/// Another member relays the read to it and shows the poller's mirror; with the poller down, it
+/// answers from its own graph and says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from_a_member() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("a".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let mut poller = anchor_with(root.path(), "fixture-poller", &[("GH_TOKEN", "fixture-token"), ("ST3_GITHUB_API_URL", &api)]).await;
+    let reader = joined(root.path(), &poller, "fixture-reader", &[]).await;
+    watch_fixture_app(&poller);
+    wait_until("the poller mirrors pull request 12", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
+    }).await;
+
+    let pull = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(pull["pull"]["facts"]["title"], "Copper proof", "{pull}");
+    assert_eq!(pull["source"]["host"], "host/fixture-poller");
+    let checks = poller.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "a".repeat(40), "{checks}");
+    assert_eq!(checks["checks"]["heads"].as_array().unwrap().len(), 1);
+    let human = poller.st_ok(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(human.contains("from the GitHub plugin mirror on host/fixture-poller"), "{human}");
+
+    // A lost mirror refills from GitHub itself, not the graph, and serves full facts again;
+    // until then the poller answers from its graph and says so.
+    poller.stop();
+    let plugin = poller.state_dir().join("plugins/github");
+    for entry in fs::read_dir(&plugin).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_string_lossy().starts_with("github.sqlite3") {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the poller refills its lost mirror from GitHub", 90, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move {
+            assert!(answer.is_null() || answer["source"]["kind"] == "mirror" || answer["source"]["kind"] == "graph", "{answer}");
+            answer["source"]["kind"] == "mirror"
+        }
+    }).await;
+    let refilled = poller.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(refilled["pull"]["facts"]["title"], "Copper proof", "{refilled}");
+    assert_eq!(refilled["pull"]["facts"]["head_sha"], "a".repeat(40));
+    assert!(refilled["source"]["filled_at_unix_ms"].is_i64(), "{refilled}");
+
+    // Another member relays to the poller.
+    wait_until("the reader relays to the poller's mirror", 90, || {
+        let answer = gh_prs(&reader, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-poller" }
+    }).await;
+    let relayed = reader.st_json(&["gh", "pr", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
+    assert_eq!(relayed["poller"], "host/fixture-poller");
+
+    // With the poller down, the reader answers from its graph and says why.
+    poller.stop();
+    let fallback = gh_prs(&reader, PERSON);
+    assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
+    assert_eq!(fallback["source"]["host"], "host/fixture-reader");
+    assert!(fallback["source"]["reason"].as_str().unwrap().contains("did not answer"), "{fallback}");
+    assert_eq!(fallback["pulls"][0]["number"], 12);
+    let checks = reader.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert!(checks["checks"]["heads"].is_null(), "the graph keeps no head history: {checks}");
+    let human = reader.st_ok(&["gh", "prs", "fixture/app", "--as", PERSON]);
+    assert!(human.contains("from host/fixture-reader's graph"), "{human}");
+    poller.start().await;
+}
+
+/// An older poller beside a member of this build: the member answers from its graph and says the
+/// poller runs a build without the plugin, and both keep replicating. Upgrading the poller in
+/// place refills its mirror from GitHub while it reads on from the history the older build
+/// recorded, and the member then relays
+/// to it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the st3 of the previous published release"]
+async fn previous_release_poller_beside_a_github_plugin_member_and_its_upgrade() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the baseline st3"));
+    let root = tempfile::tempdir().unwrap();
+    let head = std::sync::Arc::new(std::sync::Mutex::new("b".repeat(40)));
+    let api = fake_github_with_pull_request(head.clone()).await;
+    let member = anchor(root.path(), "fixture-member").await;
+    let mut poller = Node::new(root.path(), "fixture-old-poller");
+    poller.binary = old;
+    poller.env.extend([("GH_TOKEN".to_owned(), "fixture-token".to_owned()), ("ST3_GITHUB_API_URL".to_owned(), api)]);
+    let code = member.invite("fixture-old-poller", &[]);
+    let output = poller.join(&code, &[]);
+    assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    poller.start().await;
+    watch_fixture_app(&poller);
+
+    wait_until("the member reads the old poller's pull request from its graph", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["pulls"][0]["number"] == 12 }
+    }).await;
+    let answer = gh_prs(&member, PERSON);
+    assert_eq!(answer["source"]["kind"], "graph", "{answer}");
+    assert_eq!(answer["poller"], "host/fixture-old-poller");
+    assert!(answer["source"]["reason"].as_str().unwrap().contains("runs a build without the GitHub plugin"), "{answer}");
+    for node in [&member, &poller] {
+        let status = node.st_json(&["replication", "status"]);
+        assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
+    }
+
+    // The old poller's history, upgraded in place.
+    poller.stop();
+    poller.binary = PathBuf::from(st3());
+    poller.start().await;
+    poller.wait_listening().await;
+    wait_until("the upgraded poller refills its mirror from GitHub", 120, || {
+        let answer = gh_prs(&poller, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["pulls"][0]["number"] == 12 }
+    }).await;
+    wait_until("the member relays to the upgraded poller", 120, || {
+        let answer = gh_prs(&member, PERSON);
+        async move { answer["source"]["kind"] == "mirror" && answer["source"]["host"] == "host/fixture-old-poller" }
+    }).await;
+    let checks = member.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
+    assert_eq!(checks["checks"]["head_sha"], "b".repeat(40), "{checks}");
+}

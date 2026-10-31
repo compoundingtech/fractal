@@ -422,6 +422,13 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
+    /// A local trim deleted the day's claims (`[trim] daily_claims`) and stopped; the cut stays
+    /// `trimming` and goes on the next day. The counts are this step's.
+    TrimDeferred {
+        checkpoint: String,
+        envelopes: usize,
+        claims: usize,
+    },
     /// Signature and verdict rows of claims an earlier build's trim dropped were deleted.
     SweptTrimmedClaimRows {
         rows: usize,
@@ -897,13 +904,20 @@ impl Store {
         if rows > 0 {
             actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
         }
+        // What a trim deferred and a crash left before its rebuild.
+        self.rebuild_deferred_paced()?;
         if self.replication_catching_up() {
             return Ok(actions);
         }
-        // A member that trims locally takes no part in checkpoints; it only finishes a trim it
-        // had already committed.
+        // A member that trims locally takes no part in checkpoints: it finishes a trim it had
+        // already committed, then trims its own due cut.
         if self.trims_locally() {
+            self.trim_day.store(
+                u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             self.finish_interrupted_trims(&mut actions)?;
+            self.trim_local_cut(context, &mut actions)?;
             return Ok(actions);
         }
         let claims = self.checkpoint_claims()?;
@@ -1137,12 +1151,25 @@ impl Store {
     /// A person looked at a trim that stopped because the graph would change. The rows stay
     /// as they are, and checkpoints go on from the next one.
     pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
+        self.resume_checkpoints_allowing(actor, reason, None)
+    }
+
+    /// As [`Self::resume_checkpoints`], and on a member that trims locally `agent` may resume
+    /// too: the agent its stop alerts (`[trim] notify`), which owns the fault. Resuming past a
+    /// stop is the safety decision, so no other agent may.
+    pub fn resume_checkpoints_allowing(
+        &self,
+        actor: &str,
+        reason: &str,
+        agent: Option<&str>,
+    ) -> Result<(), St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
-        if !actor.starts_with("person/") || reason.trim().is_empty() {
+        let allowed = actor.starts_with("person/") || (self.trims_locally() && agent == Some(actor.as_str()));
+        if !allowed || reason.trim().is_empty() {
             return Err(St3Error::new(
                 "invalid-checkpoint-resume",
-                "a person resumes checkpoints, with a reason",
+                "a person resumes checkpoints, with a reason (or, where trim is local, the [trim] notify agent)",
             ));
         }
         let mut connection = self.connection.write();

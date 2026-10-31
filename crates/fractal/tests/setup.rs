@@ -85,10 +85,11 @@ impl Fixture {
                 .find(|p| p.is_file())
                 .unwrap_or_else(|| panic!("test needs {name}"))
         };
-        fs::copy(test_env!("CARGO_BIN_EXE_fractal-fixture"), self.path("archive/st3")).unwrap();
-        fs::set_permissions(self.path("archive/st3"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::copy(test_env!("CARGO_BIN_EXE_fractal-fixture"), self.path("archive/fractal")).unwrap();
+        fs::set_permissions(self.path("archive/fractal"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink(search("pty"), self.path("archive/pty")).unwrap();
-        symlink("st3", self.path("archive/st")).unwrap();
+        symlink("fractal", self.path("archive/st")).unwrap();
+        symlink("fractal", self.path("archive/st3")).unwrap();
     }
 }
 
@@ -406,7 +407,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
         ));
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(data.join("st3/install.json")).unwrap()).unwrap();
-        for name in ["st3", "st", "pty"] {
+        for name in ["fractal", "st3", "st", "pty"] {
             let installed = fixture.path(&format!("home/.local/bin/{name}"));
             assert!(
                 manifest["files"]
@@ -427,7 +428,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
                     "--keep-binaries",
                 ],
             ));
-            for name in ["st3", "st", "pty"] {
+            for name in ["fractal", "st3", "st", "pty"] {
                 assert!(fixture.path(&format!("home/.local/bin/{name}")).exists());
             }
             // Setup is the archive installer again, so it can record this second install.
@@ -449,7 +450,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
         }
         let dry = success(&run(&installed, &["uninstall", "--dry-run"]));
         assert!(!dry.contains("no release install manifest"), "{dry}");
-        for name in ["st3", "st", "pty"] {
+        for name in ["fractal", "st3", "st", "pty"] {
             assert!(
                 dry.contains(&format!(
                     "remove\t{}",
@@ -462,7 +463,7 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
             &installed,
             &["uninstall", "--yes", "--erase-local-graph", "--no-service"],
         ));
-        for name in ["st3", "st", "pty"] {
+        for name in ["fractal", "st3", "st", "pty"] {
             assert!(
                 fs::symlink_metadata(fixture.path(&format!("home/.local/bin/{name}"))).is_err()
             );
@@ -506,6 +507,174 @@ fn setup_does_not_claim_managed_executables_or_no_install_runs() {
         fs::read(&record).unwrap(),
         b"existing managed installation record"
     );
+}
+
+#[test]
+fn setup_refuses_foreign_canonical_commands_before_payload_or_alias_mutations() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for (named_instance, case) in [
+        (false, "regular"), (false, "symlink"), (false, "dangling"), (false, "elsewhere"),
+        (true, "regular"), (true, "symlink"), (true, "dangling"),
+    ] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path(if named_instance {
+            "home/.st-instance/demo/bin"
+        } else {
+            "home/.local/bin"
+        });
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("pty"), b"previous pty").unwrap();
+        fs::write(bin.join("st3"), b"previous runtime").unwrap();
+        symlink("st3", bin.join("st")).unwrap();
+        let canonical = bin.join("fractal");
+        match case {
+            "regular" => {
+                fs::write(&canonical, b"foreign executable").unwrap();
+                fs::set_permissions(&canonical, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            "symlink" => symlink("pty", &canonical).unwrap(),
+            "dangling" => symlink("missing-foreign-command", &canonical).unwrap(),
+            "elsewhere" => {
+                fs::write(fixture.path("bin/fractal"),
+                    b"#!/bin/sh\necho executed > \"$HOME/foreign-command-ran\"\nexit 99\n").unwrap();
+                fs::set_permissions(fixture.path("bin/fractal"),
+                    fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = fs::read_dir(&bin).unwrap().map(|entry| {
+            let path = entry.unwrap().path();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            let link = fs::read_link(&path).ok();
+            let bytes = metadata.is_file().then(|| fs::read(&path).unwrap());
+            (path, metadata.dev(), metadata.ino(), link, bytes)
+        }).collect::<Vec<_>>();
+        let mut command = fixture.command(&fixture.path("archive/fractal"));
+        if named_instance {
+            command.args(["--instance", "demo"]);
+        }
+        let output = command
+            .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+            .output().unwrap();
+        assert!(!output.status.success(), "{case}: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("foreign fractal command"),
+            "{case}: {output:?}");
+        assert_eq!(fs::read_dir(&bin).unwrap().count(), before.len());
+        for (path, dev, ino, link, bytes) in before {
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert_eq!((metadata.dev(), metadata.ino()), (dev, ino), "{case}: {path:?}");
+            assert_eq!(fs::read_link(&path).ok(), link);
+            assert_eq!(metadata.is_file().then(|| fs::read(&path).unwrap()), bytes);
+        }
+        assert!(!fixture.path("home/foreign-command-ran").exists());
+        assert!(!fixture.path("home/.local/share/st3/install.json").exists());
+    }
+}
+
+#[test]
+fn setup_upgrades_owned_physical_and_historical_alias_layouts() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    for historical in [false, true] {
+        let fixture = Fixture::new();
+        fixture.unpack_archive();
+        let bin = fixture.path("home/.local/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let old = bin.join(if historical { "st3" } else { "fractal" });
+        fs::write(&old, b"previous runtime").unwrap();
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+        let open_old = fs::File::open(&old).unwrap();
+        let old_inode = open_old.metadata().unwrap().ino();
+        if historical {
+            symlink("st3", bin.join("fractal")).unwrap();
+            symlink("st3", bin.join("st")).unwrap();
+        } else {
+            symlink("fractal", bin.join("st3")).unwrap();
+            symlink("fractal", bin.join("st")).unwrap();
+        }
+        let output = fixture.command(&fixture.path("archive/fractal"))
+            .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+            .output().unwrap();
+        success(&output);
+        assert!(!bin.join("fractal").is_symlink());
+        assert_eq!(fs::read(bin.join("fractal")).unwrap(),
+            fs::read(fixture.path("archive/fractal")).unwrap());
+        assert_ne!(fs::metadata(bin.join("fractal")).unwrap().ino(), old_inode);
+        assert_eq!(open_old.metadata().unwrap().len(), b"previous runtime".len() as u64);
+        for name in ["st", "st3"] {
+            assert_eq!(fs::read_link(bin.join(name)).unwrap(), Path::new("fractal"));
+        }
+    }
+}
+
+#[test]
+fn setup_preserves_managed_app_style_executables_and_links() {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fixture.unpack_archive();
+    let app = fixture.path("home/Applications/SmallTalk.app/Contents/MacOS/fractal");
+    fs::create_dir_all(app.parent().unwrap()).unwrap();
+    fs::copy(fixture.path("archive/fractal"), &app).unwrap();
+    let bin = fixture.path("home/.local/bin");
+    fs::create_dir_all(&bin).unwrap();
+    symlink(&app, bin.join("fractal")).unwrap();
+    for name in ["st", "st3"] {
+        symlink("fractal", bin.join(name)).unwrap();
+    }
+    let digest = |path: &Path| {
+        use sha2::Digest as _;
+        let mut file = fs::File::open(path).unwrap();
+        let mut hash = sha2::Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer).unwrap();
+            if count == 0 { break; }
+            hash.update(&buffer[..count]);
+        }
+        hash.finalize()
+    };
+    let bytes = digest(&app);
+    let link_inode = fs::symlink_metadata(bin.join("fractal")).unwrap().ino();
+    // The captured login PATH cannot find this app; its st is a different image.
+    symlink(fixture.path("archive/fractal"), fixture.path("bin/st")).unwrap();
+    let inode = fs::metadata(&app).unwrap().ino();
+    let output = fixture.command(&bin.join("fractal"))
+        .env("PATH", fixture.path("bin"))
+        .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+        .output().unwrap();
+    success(&output);
+    assert_eq!(fs::metadata(&app).unwrap().ino(), inode);
+    assert_eq!(fs::read_link(bin.join("fractal")).unwrap(), app);
+    assert_eq!(digest(&app), bytes);
+    assert_eq!(fs::symlink_metadata(bin.join("fractal")).unwrap().ino(), link_inode);
+    assert!(!fixture.path("home/.local/share/st3/install.json").exists());
+    for name in ["st", "st3"] {
+        assert_eq!(fs::read_link(bin.join(name)).unwrap(), Path::new("fractal"));
+    }
+    // A different source build must use the signing-aware installer for upgrades.
+    let output = fixture.command(&fixture.path("archive/fractal"))
+        .env("PATH", std::env::join_paths([bin.clone(), fixture.path("bin")]).unwrap())
+        .args(["setup", "--person", "ada", "--yes", "--service", "false", "--start", "false"])
+        .output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("foreign fractal command"), "{output:?}");
+    assert_eq!(fs::metadata(&app).unwrap().ino(), inode);
+    assert_eq!(fs::read_link(bin.join("fractal")).unwrap(), app);
+    assert_eq!(digest(&app), bytes);
+    assert_eq!(fs::symlink_metadata(bin.join("fractal")).unwrap().ino(), link_inode);
+    assert!(!fixture.path("home/.local/share/st3/install.json").exists());
 }
 
 #[cfg(target_os = "linux")]
@@ -711,6 +880,16 @@ fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_
     }
     let fixture = Fixture::new();
     fixture.unpack_archive();
+    use std::os::unix::fs::MetadataExt as _;
+    let default = fixture.path("bin/fractal");
+    fs::write(&default, b"default login command").unwrap();
+    fs::set_permissions(&default, fs::Permissions::from_mode(0o755)).unwrap();
+    symlink("fractal", fixture.path("bin/st")).unwrap();
+    symlink("fractal", fixture.path("bin/st3")).unwrap();
+    let before: Vec<_> = ["fractal", "st", "st3"].map(|name| {
+        let metadata = fs::symlink_metadata(fixture.path(&format!("bin/{name}"))).unwrap();
+        (metadata.dev(), metadata.ino())
+    }).into();
     let text = success(
         &fixture
             .command(&fixture.path("archive/st3"))
@@ -730,11 +909,22 @@ fn an_instance_setup_installs_below_the_instance_and_leaves_the_default_install_
             .unwrap(),
     );
     let instance = fixture.path("home/.st-instance/demo");
-    assert_eq!(fs::read_link(instance.join("bin/st")).unwrap(), Path::new("st3"));
-    assert!(instance.join("bin/st3").is_file() && instance.join("bin/pty").is_file());
+    assert_eq!(fs::read_link(instance.join("bin/st")).unwrap(), Path::new("fractal"));
+    assert_eq!(fs::read_link(instance.join("bin/st3")).unwrap(), Path::new("fractal"));
+    assert!(!instance.join("bin/fractal").is_symlink());
+    assert!(instance.join("bin/fractal").is_file() && instance.join("bin/pty").is_file());
     assert!(instance.join("config/st3/config.toml").is_file());
     assert!(text.contains("This instance's commands are in"), "{text}");
     assert!(!text.contains("export PATH"), "{text}");
+    assert_eq!(fs::read(&default).unwrap(), b"default login command");
+    for (index, name) in ["fractal", "st", "st3"].into_iter().enumerate() {
+        let path = fixture.path(&format!("bin/{name}"));
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert_eq!((metadata.dev(), metadata.ino()), before[index]);
+        if name != "fractal" {
+            assert_eq!(fs::read_link(path).unwrap(), Path::new("fractal"));
+        }
+    }
     // The default install's places stay exactly as the fixture made them.
     assert!(!fixture.path("home/.local").exists());
     assert!(!fixture.path("home/.config/st3/config.toml").exists());
@@ -772,9 +962,12 @@ fn archive_setup_installs_st_and_starts_one_isolated_daemon_without_gh_or_harnes
     );
     assert_eq!(
         fs::read_link(fixture.path("home/.local/bin/st")).unwrap(),
-        Path::new("st3")
+        Path::new("fractal")
     );
     assert!(fixture.path("home/.local/bin/pty").is_file());
+    assert_eq!(fs::read_link(fixture.path("home/.local/bin/st3")).unwrap(), Path::new("fractal"));
+    assert!(!fixture.path("home/.local/bin/fractal").is_symlink());
+    assert!(fixture.path("home/.local/bin/fractal").is_file());
     assert!(
         !fixture
             .path("home/.config/systemd/user/st3.service")
@@ -928,19 +1121,24 @@ async fn onboarding_api(
     let store = std::sync::Arc::new(
         fractal_daemon::store::Store::open(&state_dir.join("claims.sqlite3"), "studio").unwrap(),
     );
-    let state = fractal_daemon::api::AppState { owning_person: None,
-    store: store.clone(),
-    notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-    event_notify: tokio::sync::watch::channel(0_u64).0,
-    node: "studio".into(),
-    state_dir: state_dir.clone(),
-    pty_root: state_dir.join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = fractal_daemon::api::AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "studio".into(),
+        state_dir: state_dir.clone(),
+        pty_root: state_dir.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     // These declarations use a simulated provider; no host provider or daemon is touched.
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
         |request: axum::extract::Request, next: axum::middleware::Next| async move {

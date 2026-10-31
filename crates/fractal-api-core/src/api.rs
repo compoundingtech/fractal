@@ -92,6 +92,7 @@ use crate::model::IntentInput;
 use crate::store::Store;
 
 pub mod wire_names;
+pub mod seat_freshness;
 mod client_blobs;
 mod client_documents;
 #[cfg(test)]
@@ -112,10 +113,17 @@ mod harness_health_controls;
 mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
+mod github_plugin;
 mod github_watch;
 pub mod harness_events;
+mod harness_questions;
+pub use harness_questions::{
+    HarnessQuestion, HarnessQuestionAdapterError, HarnessQuestionSettleSink, live_input_session,
+};
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod delivery_metrics;
+pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -143,6 +151,8 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod launch_card;
+pub mod prompt_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
@@ -240,6 +250,8 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Native answering is unavailable unless an adapter is explicitly installed.
+    pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
     /// Caller-bound assistant read receipts committed off the request path. Shut it down before
     /// the store closes; the last state reference to drop commits what remains.
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
@@ -435,6 +447,8 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "retire-revision-mismatch"
+            | "retire-incarnation-mismatch"
             | "custody-pending"
             | "stale-subject"
             | "stale-fence"
@@ -667,6 +681,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/agents/source-offline", post(agents::override_placement_source))
         .route("/v1/agents/suspend", post(agents::suspend_agent))
         .route("/v1/agents/resume", post(agents::resume_agent))
+        .route("/v1/agents/lane", get(agents::agent_lane))
         .route("/v1/internal/seat-snapshot", post(agents::seat_snapshot_chunk))
         .route("/v1/agents/native-session", post(agents::report_native_session))
         .route("/v1/missions/{id}", get(launches::get_mission))
@@ -767,6 +782,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/status", get(replication::checkpoint_status))
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
+        .route("/v1/signatures/resume", post(replication::signature_resume))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -795,6 +811,8 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/internal/replication/answers",
             post(replication::replication_answers),
         )
+        // crate::peer::SEAT_FRESHNESS_INTERNAL_PATH; the cost inventory reads route literals.
+        .route("/v1/internal/seat-freshness", post(seat_freshness::seat_freshness))
         .route(
             "/v1/internal/replication/answers-check",
             post(replication::replication_answers_check),
@@ -815,6 +833,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(fleet::fleet_admission_residue),
         )
         .route("/v1/internal/fleet/status", get(fleet::fleet_status))
+        // Fleet views a seat may read: internal routes refuse seat callers.
+        .route("/v1/fleet/status", get(fleet::fleet_status))
+        .route("/v1/fleet/membership", get(fleet::fleet_membership_view))
+        .route("/v1/fleet/admission-residue", get(fleet::fleet_admission_residue))
+        .route("/v1/fleet/invites", get(fleet::fleet_invite_list))
         .route(
             "/v1/internal/fleet/invites",
             get(fleet::fleet_invite_list).post(fleet::fleet_invite_create),
@@ -865,6 +888,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/waiting-on",
             get(waiting_on::get_run_waiting_on),
         )
+        .route("/v1/blocked-runs", get(waiting_on::get_blocked_runs))
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -888,6 +912,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/github/watches", get(github_watch::watches))
         .route("/v1/github/comment", post(github_watch::comment))
         .route("/v1/github/own", post(github_watch::own))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls", get(github_plugin::pulls))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}", get(github_plugin::pull))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/pulls/{number}/checks", get(github_plugin::checks))
+        .route("/v1/plugins/github/repos/{owner}/{repo}/events", get(github_plugin::events))
         .route("/v1/work/done", post(work::done_person_step))
         .route("/v1/work/cancel-ask", post(work::cancel_person_ask))
         .route("/v1/work", get(work::list_work))
@@ -1766,7 +1794,7 @@ pub fn client_snapshot_at(state: &AppState, store_index: u64) -> ClientSnapshot 
 }
 
 /// The snapshot at `store_index` when its acceptance time (`projection_time_at`) is already known.
-fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
+pub fn client_snapshot_with_time(state: &AppState, store_index: u64, unix_ms: u128) -> ClientSnapshot {
     let created_at = client_timestamp(unix_ms);
     let fingerprint = hex::encode(Sha256::digest(
         format!(
@@ -1826,6 +1854,11 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-arrangement-subject" | "invalid-arrangement-action"
         | "invalid-arrangement-operations" | "invalid-arrangement-folder"
         | "invalid-arrangement-name" | "invalid-arrangement-key" | "invalid-subject-reference"
+        | "invalid-arrangement-version" | "invalid-arrangement-body"
+        | "unsupported-membership-container" | "membership-owner-forbidden"
+        | "invalid-membership-member" | "invalid-membership-bucket"
+        | "invalid-membership-key" | "invalid-membership-operations"
+        | "membership-edit-too-large"
     )) { return false; }
     matches!(
         code,
@@ -1853,6 +1886,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "agents-publication-row-too-large"
         | "identity-cycle"
         | "identity-occupied"
         | "identity-retired-source"
@@ -1860,6 +1894,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
+        | "retire-revision-mismatch"
+        | "retire-incarnation-mismatch"
         | "invalid-custody-successor"
         | "custody-pending"
         | "not-found"
@@ -1869,6 +1905,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
+        | "invalid-answer"
+        | "not-answerable"
         | "idempotency-key-expired"
         | "legacy-action-receipt-untrusted"
         | "issuer-required"
@@ -1888,6 +1926,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-arrangement-name"
         | "invalid-arrangement-key"
         | "invalid-subject-reference"
+        | "invalid-arrangement-version"
+        | "invalid-arrangement-body"
+        | "unsupported-membership-container"
+        | "membership-owner-forbidden"
+        | "invalid-membership-member"
+        | "invalid-membership-bucket"
+        | "invalid-membership-key"
+        | "invalid-membership-operations"
+        | "membership-edit-too-large"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
@@ -2513,11 +2560,16 @@ pub async fn client_capabilities(
     // The request snapshot may predate a checkpoint or legacy conversion. Advertise the
     // frontier and floor from one current read so the SDK's first event request can resume.
     let store = state.store.clone();
-    let (oldest, newest) =
-        blocking_store(move || store.read_snapshot(|_| store.event_bounds())).await?;
+    let capability_state = state.clone();
+    let capability_session = session.clone();
+    let (oldest, newest, capabilities) = blocking_store(move || {
+        // No further than the published index, as an event page (`read_event_page`).
+        let through = store.index()?;
+        let (oldest, newest) = store.read_snapshot(|_| store.event_bounds())?;
+        Ok((oldest, newest.min(through), client_v0::capabilities(&capability_state, &capability_session)))
+    }).await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
-    let capabilities = client_v0::capabilities(&state, &session);
     // The longest message body this daemon takes, so a composer shows a limit only when told.
     let max_message_bytes = message_body::MAX_BYTES;
     Ok(Json(json!({
@@ -3179,6 +3231,8 @@ fn overlay_agent_resources_at(
 ) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
+        let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subjects.iter().map(String::as_str).collect::<Vec<_>>())?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
@@ -3192,12 +3246,11 @@ fn overlay_agent_resources_at(
             let harness: Option<crate::model::CurrentHarnessView> = serde_json::from_value(source)?;
             // Freshness is approximate presentation. Use the card's already reduced observation;
             // querying diagnostic and local-observation history here made every read grow with it.
-            let report_age_ms = harness
+            // The seat's host also hears the re-stamps that stay local, read for every card at once.
+            let heard_at = harness
                 .as_ref()
-                .map(|harness| {
-                    u64::try_from(now.saturating_sub(harness.observed_at_unix_ms))
-                        .unwrap_or(u64::MAX)
-                });
+                .map(|harness| heard.heard_at(store, item["id"].as_str().unwrap_or_default(), harness));
+            let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
                 Some(age) if age > 90_000 => "stale",
@@ -3232,6 +3285,33 @@ fn overlay_agent_resources_at(
         }
         Ok(())
     })
+}
+
+/// When this node last heard the seat's harness: its replicated report; on the seat's host the
+/// newest local re-stamp of the same incarnation; elsewhere the seat's host's latest answer about
+/// it (`seat_freshness`), whichever is latest. Re-stamps that change nothing stay in the host's
+/// local log, so without them a resting seat reads stale.
+pub fn heard_at(store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> anyhow::Result<u128> {
+    Ok(HeardSeats::read(store, &[subject])?.heard_at(store, subject, harness))
+}
+
+/// The local log's newest harness report of many seats, read in one statement, so a roster's
+/// cards cost one query rather than one per card.
+pub struct HeardSeats(std::collections::HashMap<String, (String, u128)>);
+
+impl HeardSeats {
+    pub fn read(store: &Store, subjects: &[&str]) -> anyhow::Result<Self> {
+        Ok(Self(store.local_harness_newest_many(subjects)?))
+    }
+
+    /// [`heard_at`] from the seats read here.
+    pub fn heard_at(&self, store: &Store, subject: &str, harness: &crate::model::CurrentHarnessView) -> u128 {
+        let local = self.0.get(subject).filter(|(of, _)| *of == harness.incarnation_id).map(|(_, at)| *at);
+        let relayed = store
+            .extension::<crate::store::RelayedFreshness>()
+            .heard_at(subject, &harness.incarnation_id);
+        harness.observed_at_unix_ms.max(local.unwrap_or(0)).max(relayed.unwrap_or(0))
+    }
 }
 
 // A marker describes a replacement, not proof that its owner is still progressing.
@@ -3426,6 +3506,7 @@ fn agent_delivery_presence(
     ))
 }
 
+
 #[cfg(any(test, feature = "test-support"))]
 pub fn client_agent_resources_uncached(
     store: &Store,
@@ -3568,6 +3649,7 @@ fn client_agent_cards_presented(
         BTreeMap::new()
     };
     let stop_deferral_faults = store.stop_deferral_faults_for(&agent_subjects, snapshot_index)?;
+    let parked_seats = store.parked_seats_for(&agent_subjects, snapshot_index)?;
     // Harnesses, activity, and who can have a suspension or rollout, for many agents at once.
     // Each status names the actual-state claim it selected, the newest runtime observation
     // whenever the agent has one.
@@ -3607,7 +3689,10 @@ fn client_agent_cards_presented(
         .filter(|subject| history || subject.projection.layer == "current")
         .map(|mut subject| -> anyhow::Result<(String, Value)> {
             subject.harness = card_reads.take_harness(store, &subject.subject)?;
-            let member_fault = member_faults.get(&subject.subject);
+            // A seat st parked is a fault until it runs again, not a seat someone stopped.
+            let parked = end_reason::holding_park(&subject, parked_seats.get(&subject.subject), retired_subjects.contains(&subject.subject));
+            let member_fault = member_faults.get(&subject.subject)
+                .or_else(|| parked.map(|parked| &parked.reason));
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
@@ -3814,7 +3899,7 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -4358,6 +4443,13 @@ fn client_attention_resources_from_items(
         });
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
+        }
+        // An ask resolves by itself at its deadline, with its default answer if it has one.
+        if let Some(deadline) = item.deadline_unix_ms {
+            resource["deadline_at"] = json!(client_timestamp(deadline));
+        }
+        if let Some(default) = item.default_answer {
+            resource["default_answer"] = default;
         }
         for (name, value) in [
             ("conversation_id", item.conversation),
@@ -6941,6 +7033,9 @@ fn is_bound_actor(store: &Store, actor: &str, bound_identity: &str) -> Result<bo
     }
 }
 
+/// The prefix of the routes only this node's own processes call.
+pub const INTERNAL_ROUTE_PREFIX: &str = "/v1/internal/";
+
 pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
@@ -6949,6 +7044,14 @@ pub async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
+    // Internal routes serve this node's own processes: its replication worker and its operator's
+    // CLI. A seat's harness reads fleet views through their public routes instead.
+    if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
+        )));
+    }
     if request.method() == axum::http::Method::GET
         && !client_v0::administrative_get(&request) {
         return Ok(request);
@@ -7014,6 +7117,8 @@ pub async fn guard_bound_request(
         "/v1/diagnostic",
         "/v1/rules/",
         "/v1/repair",
+        "/v1/signatures/",
+        "/v1/checkpoint/",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
@@ -7068,7 +7173,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":1},
     })))
 }
 
@@ -7280,6 +7385,8 @@ fn doctor_attention_items(
     let mut items = store.attention_snapshot(None, now)?;
     items.extend(store.fault_snapshot(now)?.into_iter().map(|fault| {
         crate::model::AttentionItemView {
+            deadline_unix_ms: None,
+            default_answer: None,
             person: fault.owner.unwrap_or_else(|| "no owning agent".into()),
             ..fault.item
         }
@@ -8343,7 +8450,7 @@ fn doctor_report_with_operation_drift(
             let mut blocked = agents
                 .iter()
                 .filter(|agent| {
-                    agent.pointer("/delivery/state").and_then(Value::as_str) == Some("stale")
+                    matches!(agent.pointer("/delivery/state").and_then(Value::as_str), Some("stale" | "refused"))
                         || agent.pointer("/delivery/reason").and_then(Value::as_str)
                             .is_some_and(|reason| delivery_presence::unprotected_reason(reason)
                                 || reason.starts_with("ownership proof unavailable"))
@@ -10074,7 +10181,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
     blocking_store(move || {
+        // A commit is visible here before its writer publishes the store index that client
+        // snapshots read at. A cursor past that index would let a client read a resource older
+        // than the events it already consumed, then wait for events that already came.
+        let through = store.index()?;
         store.read_snapshot(|frontier| {
+            let frontier = frontier.min(through);
             let (oldest, newest) = store.event_bounds()?;
             let floor = oldest.saturating_sub(1);
             if after < floor || after > newest {
@@ -10085,12 +10197,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     details: Box::new(serde_json::Map::from_iter([
                         ("full_resync".into(), json!(true)),
                         ("resume_floor".into(), json!(floor)),
-                        ("frontier".into(), json!(newest)),
+                        ("frontier".into(), json!(newest.min(through))),
                     ])),
                 }));
             }
             let (items, next_after, has_more) =
-                store.events_page(after, subject.as_deref(), owner.as_deref(), limit)?;
+                store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             Ok(Ok(EventPage {
                 items,
                 next_after,
@@ -10692,13 +10804,7 @@ pub async fn input_session_as(
     {
         return Ok(Json(session_control_response(&subject, &result)));
     }
-    let session = live_session(state, &subject, Some(&request.expected_incarnation))?;
-    if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
-            "unsupported-capability",
-            "session input requires a terminal session",
-        )));
-    }
+    let session = live_input_session(state, &subject, &request.expected_incarnation)?;
     let bytes = match request.mode {
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)

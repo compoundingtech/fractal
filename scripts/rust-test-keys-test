@@ -17,6 +17,17 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout only.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
+
+
 def load(name, path):
     loader = importlib.machinery.SourceFileLoader(name, str(path))
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
@@ -228,13 +239,51 @@ class NoTests(unittest.TestCase):
         ws.commit()
         self.assertEqual(keys.read_inputs(str(ws.dir), 'HEAD')['no_tests'], ['a'])
 
+    def test_preferred_inputs_and_explicit_old_pin_do_not_mix(self):
+        """arn:lmig:smalltalk:2026-10-27-dot-fractal-config"""
+        ws = workspace(self)
+        ws.write('.st/rust-test-inputs.json', '{"no_tests": ["old"]}')
+        old = ws.commit()
+        ws.write('.fractal/rust-test-inputs.json', '{"no_tests": ["new"]}')
+        both = ws.commit()
+        self.assertEqual(keys.read_inputs(str(ws.dir), old)['no_tests'], ['old'])
+        self.assertEqual(keys.read_inputs(str(ws.dir), both)['no_tests'], ['new'])
+        ws.write('.fractal/rust-test-inputs.json', '{broken')
+        ws.commit()
+        with self.assertRaises(keys.Failure):
+            keys.read_inputs(str(ws.dir), 'HEAD')
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — only an explicitly declared same-file layout pair permits absence.
+def declared_path_exists(files, declared, path):
+    if path == '.' or path in files or any(f.startswith(path.rstrip('/') + '/') for f in files):
+        return True
+    for layout, other in (('.st/', '.fractal/'), ('.fractal/', '.st/')):
+        if path.startswith(layout):
+            counterpart = other + path[len(layout):]
+            return path in declared and counterpart in declared and counterpart in files
+    return False
+
+
+class DeclaredLayoutPairs(unittest.TestCase):
+    def test_absence_requires_both_names_declared_and_one_same_file_present(self):
+        old, new = '.st/evidence-policy.json', '.fractal/evidence-policy.json'
+        for present, absent in ((old, new), (new, old)):
+            self.assertTrue(declared_path_exists({present}, [old, new], absent))
+            self.assertFalse(declared_path_exists({present}, [absent], absent))
+        self.assertFalse(declared_path_exists(set(), [old, new], old))
+        self.assertFalse(declared_path_exists(set(), [old, new], new))
+        self.assertFalse(declared_path_exists({'.st/another.json'}, [old, new], new))
+        self.assertFalse(declared_path_exists({'.st/evidence-policy.json/child'}, [old, new], new))
+        self.assertFalse(declared_path_exists({'other/file'}, ['missing/file', 'other/file'], 'missing/file'))
+
 
 class Repository(unittest.TestCase):
     """This repository's own tree and its committed .st/rust-test-inputs.json."""
 
     @classmethod
     def setUpClass(cls):
-        cls.inputs = json.loads((ROOT / '.st/rust-test-inputs.json').read_text())
+        cls.inputs = json.loads(root_config('rust-test-inputs.json').read_text())
         cls.tree = 'HEAD^{tree}'
         cls.members, cls.patched, _ = keys.layout(ROOT, cls.tree)
 
@@ -248,7 +297,7 @@ class Repository(unittest.TestCase):
             self.assertTrue(path in files or any(f.startswith(path + '/') for f in files), f'global path {path} does not exist')
         for name, entry in self.inputs['crates'].items():
             for path in entry['extra']:
-                self.assertTrue(path == '.' or path in files or any(f.startswith(path.rstrip('/') + '/') for f in files), f'{name} declares {path}, which does not exist')
+                self.assertTrue(declared_path_exists(files, entry['extra'], path), f'{name} declares {path}, which does not exist')
 
     def test_the_member_set_is_the_one_cargo_metadata_gives(self):
         # A parsing gap in the manifest reader would drop a crate silently; this compares it with cargo's own view (a test, not run in the gate).

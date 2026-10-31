@@ -28,6 +28,157 @@ pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>
         })
 }
 
+/// How long a person has to answer an ask that names no deadline, unless `[asks]
+/// default_deadline` says otherwise.
+pub const DEFAULT_ASK_DEADLINE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The `meta` key holding when this node first counted ask deadlines, the first reconcile pass
+/// after `[asks] deadlines` was turned on. An ask made before then carries none, so its deadline
+/// counts from then rather than from when it was asked.
+pub const ASK_DEADLINES_SINCE: &str = "person_ask_deadlines_since_unix_ms";
+
+/// When this node started counting ask deadlines; zero before it has.
+pub fn ask_deadlines_since(connection: &Connection) -> Result<u128> {
+    Ok(connection
+        .query_row("SELECT value FROM meta WHERE key=?1", [ASK_DEADLINES_SINCE], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0))
+}
+
+/// The `meta` key holding this node's `[asks] default_deadline`, so that transaction code, such
+/// as a person's home, reads the same default the reconciler resolves asks with.
+pub const ASK_DEFAULT_DEADLINE: &str = "person_ask_default_deadline_ms";
+
+/// When this node started counting ask deadlines, and its default deadline.
+pub fn ask_deadline_policy(connection: &Connection) -> Result<(u128, u64)> {
+    let default = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [ASK_DEFAULT_DEADLINE],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_ASK_DEADLINE_MS);
+    Ok((ask_deadlines_since(connection)?, default))
+}
+
+/// Records, once, that this node counts ask deadlines from `now`. Returns whether it had not.
+pub fn start_counting_ask_deadlines(connection: &Connection, now: u128) -> Result<bool> {
+    Ok(connection.execute(
+        /* sqlite-large-value: allow-for-now lv-h3beacc1959d7 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO meta(key,value) VALUES(?1,?2)",
+        params![ASK_DEADLINES_SINCE, now.to_string()],
+    )? > 0)
+}
+
+/// Forgets when this node started counting, on a pass that sees deadlines off: an ask made
+/// while they were off then counts from when they are next turned on, not from the first time.
+/// Returns whether it had been counting.
+pub fn stop_counting_ask_deadlines(connection: &Connection) -> Result<bool> {
+    Ok(connection.execute(/* sqlite-large-value: allow-for-now lv-hdb4786de6904 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [ASK_DEADLINES_SINCE])? > 0)
+}
+
+/// Which of an ask's responses stand once a deadline has applied its default. Members resolve
+/// independently, so a person may answer on another member before the deadline while the
+/// ask's own member applies the default: a person's answer accepted before the cutoff (the
+/// ask's deadline, or when the default was applied for an ask made without one) wins, and one
+/// accepted at or after it does not. Every member holds the same claims with the same accept
+/// times, so every member keeps the same responses. Without a deadline response all stand.
+pub fn standing_responses<T>(
+    responses: Vec<T>,
+    by_deadline: impl Fn(&T) -> bool,
+    is_person_answer: impl Fn(&T) -> bool,
+    accepted_at: impl Fn(&T) -> u128,
+    deadline: Option<u128>,
+) -> (Vec<T>, bool) {
+    let Some(applied) = responses.iter().find(|response| by_deadline(response)) else {
+        return (responses, false);
+    };
+    let cutoff = deadline.unwrap_or_else(|| accepted_at(applied));
+    let answered_in_time = responses
+        .iter()
+        .any(|response| is_person_answer(response) && accepted_at(response) < cutoff);
+    let standing = responses
+        .into_iter()
+        .filter(|response| {
+            if by_deadline(response) {
+                !answered_in_time
+            } else {
+                !is_person_answer(response) || accepted_at(response) < cutoff
+            }
+        })
+        .collect();
+    (standing, answered_in_time)
+}
+
+/// When an ask resolves by itself if the person has not answered: the deadline it was asked
+/// with, or, for an ask made before deadlines, `default_ms` after it was asked or after this
+/// node began counting (`since`), whichever is later. An update waits for nobody and has none.
+pub fn ask_deadline(ask: &ClaimRecord, since: u128, default_ms: u64) -> Option<u128> {
+    if is_update(ask) {
+        return None;
+    }
+    if let Some(deadline) = ask.body["fields"]["deadline_unix_ms"].as_u64() {
+        return Some(u128::from(deadline));
+    }
+    Some(ask.accepted_at_unix_ms.max(since) + u128::from(default_ms))
+}
+
+/// The answer id that applies at an ask's deadline, if it names one.
+pub fn ask_default_answer(ask: &ClaimRecord) -> Option<&str> {
+    ask.body["fields"]["default_answer"].as_str()
+}
+
+impl Store {
+    /// Sets how long a person has to answer an ask that names no deadline. It is kept in `meta`
+    /// too, written only when it changes, for the asks that carry no deadline of their own.
+    pub fn set_default_ask_deadline_ms(&self, deadline_ms: u64) -> Result<()> {
+        self.default_ask_deadline_ms
+            .store(deadline_ms, std::sync::atomic::Ordering::Relaxed);
+        if ask_deadline_policy(&self.readers.get())?.1 == deadline_ms {
+            return Ok(());
+        }
+        self.connection
+            .batched(|tx| {
+                tx.execute(
+                    /* sqlite-large-value: allow-for-now lv-hcb7506bd8ba2 owner=fractal_store::store::person_work TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+                    params![ASK_DEFAULT_DEADLINE, deadline_ms.to_string()],
+                )
+                .map(drop)
+            })
+            .map_err(anyhow::Error::msg)??;
+        self.ask_deadline_policy_changed();
+        Ok(())
+    }
+
+    /// The ask deadline policy in `meta` changed. A person's home shows deadlines by it, and
+    /// no claim tells the attention list refresher, so wake it: its next refresh sees the
+    /// publication's policy differ and folds again.
+    pub fn ask_deadline_policy_changed(&self) {
+        if let Some(wake) = self.fractal.attention_list.refresher.get() {
+            wake.notify_one();
+        }
+    }
+
+    pub fn default_ask_deadline_ms(&self) -> u64 {
+        self.default_ask_deadline_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turns ask deadlines on or off (`[asks] deadlines`).
+    pub fn set_ask_deadlines(&self, enabled: bool) {
+        self.ask_deadlines
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn ask_deadlines(&self) -> bool {
+        self.ask_deadlines.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 pub fn validate_delegated_answer(
     ask: &ClaimRecord,
     fields: &BTreeMap<String, Value>,
@@ -327,9 +478,10 @@ pub fn enrich_responses(
     connection: &Connection,
     view: &mut StepRunView,
 ) -> rusqlite::Result<()> {
-    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc33957175dec owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut query = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h65cae3d401d5 owner=fractal_store::store::person_work TODO=trace-statement-and-value-representation */ &canonical_sql(
         "SELECT resolution.subject, resolution.actor, resolution.body, resolution.accepted_at_unix_ms,
-          json_extract(request.body,'$.fields.origin_step')=?1 FROM claims resolution JOIN claims request
+          json_extract(request.body,'$.fields.origin_step')=?1, resolution.kind,
+          json_extract(request.body,'$.fields.deadline_unix_ms') FROM claims resolution JOIN claims request
         ON request.subject=resolution.subject AND request.kind='work.person-asked'
         WHERE resolution.kind IN ('work.person-done','work.person-cancelled')
           -- Only asks this step made, or the step's own ask: an index walk, not every answer.
@@ -350,16 +502,56 @@ pub fn enrich_responses(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, Option<bool>>(4)?.unwrap_or(false),
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (ask, actor, body, accepted, from_origin) in responses {
+    // Each ask's responses, in canonical order, keeping only those that stand after a deadline.
+    let mut asks: Vec<(String, Option<u128>, Vec<_>)> = Vec::new();
+    for (ask, actor, body, accepted, from_origin, kind, deadline) in responses {
         let Ok(body) = serde_json::from_str::<Value>(&body) else {
             continue;
         };
+        let response = (actor, body, accepted, from_origin, kind);
+        match asks.iter_mut().find(|(subject, _, _)| *subject == ask) {
+            Some((_, _, responses)) => responses.push(response),
+            None => asks.push((ask, deadline.and_then(|deadline| u128::try_from(deadline).ok()), vec![response])),
+        }
+    }
+    for (ask, deadline, responses) in asks {
+        let (standing, overridden) = standing_responses(
+            responses,
+            |(_, body, _, _, _)| body["fields"]["resolved_by"] == "deadline",
+            |(_, body, _, _, kind)| kind == "work.person-done" && body["fields"]["resolved_by"] != "deadline",
+            |(_, _, accepted, _, _)| accepted.parse().unwrap_or(0),
+            deadline,
+        );
+        if overridden && standing.iter().any(|(_, _, _, from_origin, _)| *from_origin) {
+            view.constraints.push(format!(
+                "Person response to {ask}: the person answered before its deadline, so their answer replaces the default the deadline applied"
+            ));
+        }
+        for (actor, body, accepted, from_origin, _) in standing {
+            enrich_response(view, ask.clone(), actor, &body, accepted, from_origin);
+        }
+    }
+    Ok(())
+}
+
+/// Adds one standing response to the view, as a constraint for its asker and as data.
+fn enrich_response(
+    view: &mut StepRunView,
+    ask: String,
+    actor: Option<String>,
+    body: &Value,
+    accepted: String,
+    from_origin: bool,
+) {
+    {
         let fields = &body["fields"];
         let Some(summary) = fields["summary"].as_str() else {
-            continue;
+            return;
         };
         if from_origin {
             let mut constraint = format!("Person response: {summary}");
@@ -400,9 +592,12 @@ pub fn enrich_responses(
                 .filter(|answer| answer.is_object())
                 .cloned(),
             evidence: serde_json::from_value(body["evidence"].clone()).unwrap_or_default(),
+            resolved_by: fields
+                .get("resolved_by")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         });
     }
-    Ok(())
 }
 
 
@@ -651,3 +846,41 @@ pub mod reconcile_candidates_tests_shared_seats;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod revision_provenance_tests_shared_missions;
+
+#[cfg(test)]
+mod standing_responses_tests {
+    use super::standing_responses;
+
+    /// (name, by the deadline, a person's answer, accepted at)
+    type Response = (&'static str, bool, bool, u128);
+
+    fn standing(responses: Vec<Response>, deadline: Option<u128>) -> (Vec<&'static str>, bool) {
+        let (kept, overridden) = standing_responses(
+            responses,
+            |response| response.1,
+            |response| response.2,
+            |response| response.3,
+            deadline,
+        );
+        (kept.into_iter().map(|response| response.0).collect(), overridden)
+    }
+
+    #[test]
+    fn a_person_answer_before_the_cutoff_beats_the_default_and_a_later_one_does_not() {
+        let default = ("default", true, false, 1_000);
+        let in_time = ("in-time", false, true, 999);
+        let late = ("late", false, true, 1_000);
+        let cancelled = ("cancelled", false, false, 2_000);
+        // An answer accepted before the deadline stands over the default, in any arrival order.
+        assert_eq!(standing(vec![default, in_time], Some(1_000)), (vec!["in-time"], true));
+        assert_eq!(standing(vec![in_time, default], Some(1_000)), (vec!["in-time"], true));
+        // At or after the deadline it does not, and the default stands alone.
+        assert_eq!(standing(vec![default, late], Some(1_000)), (vec!["default"], false));
+        // Without a deadline on the ask, the cutoff is when the default was applied.
+        assert_eq!(standing(vec![("default", true, false, 1_500), ("late", false, true, 1_500)], None), (vec!["default"], false));
+        assert_eq!(standing(vec![("default", true, false, 1_500), in_time], None), (vec!["in-time"], true));
+        // A cancellation is not a person's answer and always stands; without a default all do.
+        assert_eq!(standing(vec![default, cancelled], Some(1_000)), (vec!["default", "cancelled"], false));
+        assert_eq!(standing(vec![late, cancelled], Some(1_000)), (vec!["late", "cancelled"], false));
+    }
+}

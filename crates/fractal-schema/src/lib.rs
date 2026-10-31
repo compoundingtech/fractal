@@ -7,7 +7,10 @@ pub mod directive_notes;
 pub mod deploy;
 pub mod deploy_policy;
 pub mod full_value;
+pub mod github_plugin;
 pub mod glasses;
+pub mod lifecycle;
+pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
@@ -459,8 +462,10 @@ Each transaction records backfill progress in `meta` under `client_message_selec
 "#;
 
 impl Registry {
+    /// Covers the claim registry and the lifecycle policy registry declared beside it.
     pub fn digest(&self) -> String {
-        let bytes = serde_json::to_vec(self).expect("the schema registry is serializable");
+        let bytes = serde_json::to_vec(&(self, lifecycle::registry()))
+            .expect("the schema and lifecycle registries are serializable");
         hex::encode(Sha256::digest(bytes))
     }
 
@@ -737,9 +742,14 @@ impl Registry {
                 }
             }
         }
-        if subject_spec.family == "arrangement" {
+        if kind == lifecycle::MEMBERSHIP_CLAIM {
+            ordered_membership::operations(subject, fields)?;
+        } else if subject_spec.family == "arrangement" {
             if kind != "arrangement.edited" {
-                return Err(error("claim-write-forbidden", "an arrangement requires arrangement.edited"));
+                return Err(error(
+                    "claim-write-forbidden",
+                    "an arrangement requires arrangement.edited or ordered-membership.edited",
+                ));
             }
             arrangements::operations_with_registry(subject, fields, self, replicated)?;
         }
@@ -1131,6 +1141,12 @@ fn build_registry() -> Registry {
             "pty",
             "pty/RUN/LOCAL_ID",
             "A mission-run terminal runtime.",
+            false,
+        ),
+        (
+            github_plugin::EVENT_FAMILY,
+            "github-event/RESOURCE/ITEM/NUMBER/KEY",
+            "One keyed thing that happened to a GitHub pull request or issue, written once by its repository's poller.",
             false,
         ),
         (
@@ -1549,6 +1565,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            lifecycle::MEMBERSHIP_CLAIM,
+            &["arrangement"],
+            WritePolicy::OrdinaryClient,
+            Cardinality::Append,
+            Some("ordered-memberships"),
+            false,
+            &[],
+        ),
+        (
             "glass.upserted",
             &["glass"],
             WritePolicy::AuthorizedRequester,
@@ -1924,6 +1949,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("resources"),
             true,
             &["resource"],
+        ),
+        (
+            github_plugin::ITEM_STATE,
+            &["resource"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("resources"),
+            true,
+            &[],
+        ),
+        (
+            github_plugin::EVENT,
+            &[github_plugin::EVENT_FAMILY],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            Some("resources"),
+            true,
+            &[],
         ),
         (
             "observer.observed",
@@ -2962,6 +3005,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("oldCommit", required_string()), ("newCommit", required_string()),
         ],
         slo_breaches::KIND => &[("record", FieldSpec { required: true, ..object() })],
+        github_plugin::ITEM_STATE => github_plugin::item_state_fields(),
+        github_plugin::EVENT => github_plugin::event_fields(),
         "client.launch" | "client.js-error" | "client.native-crash" | "client.hang" => &[
             ("event_id", required_string()),
             ("launch_id", required_string()),
@@ -3037,7 +3082,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("revision", string()),
             ("desired", object()),
         ],
-        "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
+        "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("version", integer()), ("action_id", string()), ("action_digest", string())],
+        "ordered-membership.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
         "glass.upserted" => &[
             ("body", object()),
             ("base_revision", string()),
@@ -3209,6 +3255,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("legacy_request", string()),
             ("requester_declaration", string()),
             ("request", object()),
+            ("deadline_unix_ms", integer()),
+            ("deadline_ms", integer()),
+            ("default_answer", string()),
         ],
         "work.person-done" | "work.person-cancelled" => &[
             ("attempt", integer()),
@@ -3217,6 +3266,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("key", string()),
             ("episode", string()),
             ("answer", object()),
+            ("resolved_by", string()),
         ],
         "work.person-reassigned" => &[
             ("previous_person", reference()),
@@ -3465,6 +3515,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
             ("owner_host", required_string()),
             ("declaration", required_string()),
+            ("runtime_incarnation", string()),
+            ("desired_revision", string()),
             ("successor", reference_to(&["agent"])),
             ("transfer", string()),
         ],
@@ -4719,8 +4771,6 @@ mod tests {
     }
 
     #[test]
-
-
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {

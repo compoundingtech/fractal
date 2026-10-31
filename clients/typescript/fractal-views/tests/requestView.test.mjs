@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ANSWERS, isRequest, report, spaced, yesNo } from '@fractal/views/requestView';
+import { ANSWERS, askDeadline, isRequest, report, spaced, yesNo } from '@fractal/views/requestView';
 
 // The same report the Fractal terminal UI's test reads (crates/fractal-tui/src/ui/screens.rs).
 const text = 'The deploy finished: {"status":"failed","error":"unit st3.service did not start","commit":"8821eced","host":"willow","attempt":2,"log":"/var/log/x","duration_ms":1234,"members":["maple","cedar"],"plan":{"a":1},"notes":"long\\nnotes"}';
@@ -38,4 +38,15 @@ assert.equal(spaced('The release run on the Linux runner failed: mold is missing
   assert.deepEqual(personAnswer(decision, 'change', 'rename it'), { id: 'change', text: 'rename it' });
   assert.deepEqual(personAnswer(decision, undefined, 'rename it'), { id: 'change', text: 'rename it' });
   assert.equal(typeof personAnswer({ type: 'choice', answers: options }, undefined, 'words'), 'string');
+}
+
+// Every ask has a deadline; the card says how long is left and what then applies.
+{
+  const now = Date.parse('2026-10-26T08:00:00Z');
+  assert.equal(
+    askDeadline({ deadline_at: '2026-10-26T11:00:00Z', default_answer: { id: 'keep-open', label: 'Keep it open' } }, now),
+    'answer within 3h, or “Keep it open” applies',
+  );
+  assert.equal(askDeadline({ deadline_at: '2026-10-28T08:00:00Z' }, now), 'answer within 2d, or it times out');
+  assert.equal(askDeadline({}, now), null, 'an update or an older daemon has no deadline');
 }

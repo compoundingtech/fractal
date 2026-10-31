@@ -211,12 +211,24 @@ fn rust_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = action_method(id);
+        if id == "arrangements.memberships" {
+            writeln!(out, "    pub async fn arrangements_memberships(&self, person_name: &str, uuid: &str, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<OrderedMembershipPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements/{{}}/{{}}/memberships?person={{}}\", percent_encode(person_name), percent_encode(uuid), percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
+            continue;
+        }
         if id == "arrangements.list" {
             writeln!(out, "    pub async fn arrangements_list(&self, person: &str, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ArrangementPage>, ClientError> {{ let mut path = format!(\"/v1/client/arrangements?person={{}}\", percent_encode(person)); if let Some(cursor) = cursor {{ path.push_str(&format!(\"&cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ path.push_str(&format!(\"&limit={{limit}}\")); }} self.get(&path).await }}")?;
             continue;
         }
         if id == "arrangements.get" {
             writeln!(out, "    pub async fn arrangements_get(&self, person_name: &str, uuid: &str) -> Result<Envelope<Arrangement>, ClientError> {{ self.get(&format!(\"/v1/client/arrangements/{{}}/{{}}\", percent_encode(person_name), percent_encode(uuid))).await }}")?;
+            continue;
+        }
+        if id == "harness-questions.list" {
+            writeln!(out, "    pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<Page>, ClientError> {{ let mut query = Vec::new(); if let Some(cursor) = cursor {{ query.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} if let Some(limit) = limit {{ query.push(format!(\"limit={{limit}}\")); }} let suffix = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/harness-questions{{suffix}}\")).await }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    pub async fn harness_question(&self, id: &str) -> Result<Envelope<HarnessQuestion>, ClientError> {{ self.get(&format!(\"/v1/client/harness-questions/{{}}\", percent_encode(id))).await }}")?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
@@ -318,6 +330,8 @@ fn rust_operation_methods(
             writeln!(out, "    pub async fn status_history_get(&self, id: &str) -> Result<Envelope<StatusHistory>, ClientError> {{ self.get(&format!(\"/v1/client/status-history/{{}}\", percent_encode(id))).await }}")?;
         } else if id == "harness-inventory.get" {
             writeln!(out, "    pub async fn harness_inventory_get(&self, agent_id: &str, query: &HarnessInventoryQuery) -> Result<Envelope<HarnessInventory>, ClientError> {{ let mut fields = vec![format!(\"owner_host_id={{}}\", percent_encode(&query.owner_host_id)), format!(\"session_id={{}}\", percent_encode(&query.session_id)), format!(\"native_session_id={{}}\", percent_encode(&query.native_session_id)), format!(\"runtime_incarnation={{}}\", percent_encode(&query.runtime_incarnation)), format!(\"collection={{}}\", percent_encode(&query.collection)), format!(\"directory={{}}\", percent_encode(&query.directory)), format!(\"prefix={{}}\", percent_encode(&query.prefix))]; if let Some(limit) = query.limit {{ fields.push(format!(\"limit={{limit}}\")); }} if let Some(cursor) = &query.cursor {{ fields.push(format!(\"cursor={{}}\", percent_encode(cursor))); }} self.get(&format!(\"/v1/client/harness-inventory/{{}}?{{}}\", percent_encode(agent_id), fields.join(\"&\"))).await }}")?;
+            // A relayed read of the GitHub plugin's mirror on its poller (docs/st3/plugins.md).
+            out.push_str(GITHUB_PLUGIN_READ);
         } else if id == "agent-queue.get" {
             writeln!(
                 out,
@@ -400,12 +414,24 @@ fn swift_operation_methods(
         let id = read["id"].as_str().context("read id")?;
         let path = read["path"].as_str().context("read path")?;
         let method = lower_camel(&pascal(id));
+        if id == "arrangements.memberships" {
+            writeln!(out, "    public func arrangementsMemberships(personName: String, uuid: String, person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<OrderedMembershipPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))/memberships\", query: query) }}")?;
+            continue;
+        }
         if id == "arrangements.list" {
             writeln!(out, "    public func arrangementsList(person: String, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ArrangementPage> {{ var query: [URLQueryItem] = [.init(name: \"person\", value: person)]; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/arrangements\", query: query) }}")?;
             continue;
         }
         if id == "arrangements.get" {
             writeln!(out, "    public func arrangementsGet(personName: String, uuid: String) async throws -> Envelope<Arrangement> {{ try await get(\"v1/client/arrangements/\\(Self.routedSessionID(personName))/\\(Self.routedSessionID(uuid))\") }}")?;
+            continue;
+        }
+        if id == "harness-questions.list" {
+            writeln!(out, "    public func harnessQuestions(cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> {{ var query: [URLQueryItem] = []; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/harness-questions\", query: query) }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    public func harnessQuestion(id: String) async throws -> Envelope<HarnessQuestionResource> {{ try await get(\"v1/client/harness-questions/\\(Self.routedSessionID(id))\") }}")?;
             continue;
         }
         if let Some((projection, request, response)) = assistant_read(read)? {
@@ -733,6 +759,7 @@ fn validate_surfaces(
         bail!("KNOWN_RESOURCE_KINDS has {listed} kinds; the schema knows {}", known.len());
     }
     for definition in [
+        "Capability",
         "DirectiveNote",
         "DirectiveNotes",
         "ResourceObservation",
@@ -763,6 +790,7 @@ fn validate_surfaces(
         "SubjectDefinition",
         "PublicationDefinition",
         "AgentsStatusWatermark",
+        "Snapshot",
         "AgentsPublicationMetadata",
         "AgentsPublication",
         "UsagePeriod",
@@ -857,16 +885,101 @@ fn validate_surfaces(
         "PersonAnswerInput",
         "PersonAnswer",
         "PersonAnswerRecord",
+        "HarnessQuestionItem",
+        "HarnessAnswerInput",
+        "HarnessResolvedAnswer",
+        "HarnessQuestionResolution",
+        "HarnessQuestionAnswerability",
+        "HarnessAnswerParameters",
+        "HarnessAnswerResult",
+        "HarnessInvalidAnswerDetails",
+        "HarnessNotAnswerableDetails",
+        "ArrangementMembershipEditParameters",
+        "OrderedMembership",
+        "OrderedMembershipPage",
+        "OrderedMembershipState",
     ] {
         validate_model(schema, definition, definition, definition, rust, swift)?;
+    }
+    // Membership window frames decode by hand into typed events; every schema field of an
+    // `ordered-memberships` snapshot/changes branch must reach the Rust and Swift frames.
+    let swift_frame = struct_block(swift, "public struct OrderedMembershipCollectionFrame:")?;
+    for branch in schema["$defs"]["CollectionFrame"]["oneOf"]
+        .as_array()
+        .context("CollectionFrame.oneOf")?
+        .iter()
+        .filter(|branch| branch["properties"]["collection"]["const"] == "ordered-memberships")
+    {
+        let (variant, kind) = match branch["properties"]["kind"]["const"].as_str() {
+            Some("snapshot") => ("MembershipSnapshot", "snapshot"),
+            Some("changes") => ("MembershipChanges", "changes"),
+            other => bail!("ordered-memberships frame has unexpected kind {other:?}"),
+        };
+        let start = rust_client
+            .find(&format!("    {variant} {{"))
+            .with_context(|| format!("Rust CollectionEvent has no `{variant}`"))?;
+        let rust_variant = &rust_client[start..];
+        let rust_variant = &rust_variant[..rust_variant.find("\n    },").unwrap_or(rust_variant.len())];
+        for property in branch["properties"]
+            .as_object()
+            .context("ordered-memberships frame properties")?
+            .keys()
+            .filter(|name| !matches!(name.as_str(), "kind" | "collection"))
+        {
+            if !rust_variant.contains(&format!("        {property}:"))
+                || !rust_client.contains(&format!("(&frame, \"{property}\")"))
+            {
+                bail!("Rust `{variant}` does not decode `{kind}` frame field `{property}`");
+            }
+            if !swift_frame.contains(&lower_camel_snake(property)) {
+                bail!("Swift `OrderedMembershipCollectionFrame` does not model `{property}`");
+            }
+        }
+    }
+    for definition in ["AgentsSnapshotChunk", "AgentsChanges"] {
+        let mut properties = schema_properties(&schema["$defs"][definition]).peekable();
+        if properties.peek().is_none() {
+            bail!("client schema `{definition}` has no properties");
+        }
+        let rust_variant = rust_client
+            .split(&format!("    {definition} {{"))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }").next())
+            .with_context(|| format!("Rust CollectionEvent::{definition}"))?;
+        let swift_variant = struct_block(swift, &format!("public struct {definition}:"))?;
+        for property in properties.flat_map(|properties| properties.keys()).filter(|name| name.as_str() != "kind") {
+            if !rust_variant.contains(&format!("{property}:"))
+                || !swift_variant.contains(&lower_camel_snake(property))
+            {
+                bail!("revisioned `{definition}` loses schema field `{property}`");
+            }
+        }
+    }
+    for code in schema["$defs"]["ErrorCode"]["anyOf"][0]["enum"]
+        .as_array().context("ErrorCode known values")?
+    {
+        let code = code.as_str().context("ErrorCode string")?;
+        if !rust.contains(&format!("    {},", pascal(code)))
+            || !swift.contains(&format!("\"{code}\""))
+        {
+            bail!("known ErrorCode `{code}` is missing from a typed client");
+        }
+    }
+    if rust_client.contains("pub async fn send(")
+        || !rust_client.contains("async fn send(&mut self, command:")
+    {
+        bail!("CollectionStream raw send must remain private");
     }
     for token in [
         "pub async fn diagnostics_submit",
         "pub async fn observations_report",
+        "pub async fn harness_questions(",
+        "pub async fn harness_question(",
         "pub async fn push_register",
         "pub async fn push_unregister",
         "pub async fn pairing_begin",
         "pub async fn pairing_complete",
+        "pub async fn subscribe_agents_publication(",
         "pub async fn terminal_stream",
         "pub async fn terminal_screen_change",
         "Endpoint::Unix",
@@ -879,6 +992,9 @@ fn validate_surfaces(
     for token in [
         "func diagnosticsSubmit(",
         "func capabilities(",
+        "func harnessQuestions(",
+        "func harnessQuestion(",
+        "func agentsPublicationStream(",
         "func timeline(",
         "cursor: String?",
         "func events(",
@@ -912,6 +1028,8 @@ fn validate_surfaces(
             "events.list" => "events".into(),
             "terminal.screen" => "terminal_screen".into(),
             "agent-queue.get" => "agent_queue".into(),
+            "harness-questions.list" => "harness_questions".into(),
+            "harness-questions.get" => "harness_question".into(),
             id => action_method(id),
         };
         let swift_method = lower_camel(&pascal(read["id"].as_str().unwrap()));
@@ -922,6 +1040,8 @@ fn validate_surfaces(
             "events.list" => "events".into(),
             "terminal.screen" => "terminalScreen".into(),
             "agent-queue.get" => "agentQueue".into(),
+            "harness-questions.list" => "harnessQuestions".into(),
+            "harness-questions.get" => "harnessQuestion".into(),
             _ => swift_method,
         };
         if !rust_client.contains(&format!("pub async fn {rust_method}("))
@@ -1324,6 +1444,30 @@ fn ts_loose_json_fields(definition: &Value, fields: &[&str]) -> Value {
     loose
 }
 
+/// Closed same-kind branches must stay disjoint in TypeScript too: an ordinary union
+/// otherwise accepts a mix of a legacy window and publication-only fields.
+fn ts_closed_union(definition: &Value, defs: &serde_json::Map<String, Value>) -> Result<String> {
+    let branches = definition["oneOf"].as_array().context("closed union branches")?;
+    let properties = branches.iter().map(|branch| {
+        let resolved = if let Some(reference) = branch["$ref"].as_str() {
+            defs.get(reference.rsplit('/').next().context("union reference")?)
+                .context("union definition")?
+        } else { branch };
+        if resolved["additionalProperties"] != false {
+            bail!("closed union contains an open branch");
+        }
+        resolved["properties"].as_object().context("closed union properties")
+    }).collect::<Result<Vec<_>>>()?;
+    let all_fields: std::collections::BTreeSet<_> = properties.iter()
+        .flat_map(|fields| fields.keys()).collect();
+    let members = branches.iter().zip(&properties).map(|(branch, fields)| {
+        let forbidden = all_fields.iter().filter(|name| !fields.contains_key(name.as_str()))
+            .map(|name| format!("{name}?: never;")).collect::<Vec<_>>().join(" ");
+        Ok(format!("({} & {{ {forbidden} }})", ts_type(branch)?))
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(format!("({})", members.join(" | ")))
+}
+
 fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant]) -> Result<String> {
     let defs = schema["$defs"].as_object().context("schema definitions")?;
     // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
@@ -1358,6 +1502,8 @@ fn typescript_models(schema: &Value, operations: &Value, constants: &[Constant])
                 branches.retain(|branch| branch["$ref"] != "#/$defs/UnknownResource");
             }
             ts_type(&known)?
+        } else if matches!(name.as_str(), "CollectionCommand" | "CollectionFrame") {
+            ts_closed_union(definition, defs)?
         } else {
             ts_conditional_body(&loose)?.unwrap_or(ts_type(&loose)?)
         };
@@ -1442,12 +1588,24 @@ fn typescript_operation_methods(
         } else {
             path.to_owned()
         };
+        if id == "arrangements.memberships" {
+            writeln!(out, "    async arrangementsMemberships(personName: string, uuid: string, person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<OrderedMembershipPage>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}/memberships` + query({{ person, ...options }}), undefined, requestOptions); }}")?;
+            continue;
+        }
         if id == "arrangements.list" {
             writeln!(out, "    async arrangementsList(person: string, options: PageOptions = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<ArrangementPage>> {{ return this.get('/v1/client/arrangements' + query({{ person, ...options }}), undefined, requestOptions); }}")?;
             continue;
         }
         if id == "arrangements.get" {
             writeln!(out, "    async arrangementsGet(personName: string, uuid: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Arrangement>> {{ return this.get(`/v1/client/arrangements/${{encodeURIComponent(personName)}}/${{encodeURIComponent(uuid)}}`, undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "harness-questions.list" {
+            writeln!(out, "    async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<Page>> {{ return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }}")?;
+            continue;
+        }
+        if id == "harness-questions.get" {
+            writeln!(out, "    async harnessQuestion(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<HarnessQuestion>> {{ return this.get(`/v1/client/harness-questions/${{encodeURIComponent(id)}}`, undefined, requestOptions); }}")?;
             continue;
         }
         if id == "conversation.search" {
@@ -1579,9 +1737,27 @@ fn typescript_operation_methods(
     Ok(out.trim_end().into())
 }
 
+/// The owner side of a relayed GitHub plugin read: it asks this daemon's own mirror only, so a
+/// relayed read is never relayed again.
+const GITHUB_PLUGIN_READ: &str = r#"    /// A read of this daemon's GitHub plugin mirror, `/v1/plugins/github/repos/...` with its
+    /// query, answered from that mirror alone, so a relayed read is never relayed again.
+    pub async fn github_plugin_read(&self, path: &str) -> Result<serde_json::Value, ClientError> {
+        // No segment may be only dots, so the path cannot step out of the plugin's routes.
+        let dot_segment = path.split(['/', '?']).any(|part| !part.is_empty() && part.chars().all(|c| c == '.'));
+        if !path.starts_with("/v1/plugins/github/repos/") || dot_segment || path.contains('#') {
+            return Err(ClientError::Protocol(format!("not a GitHub plugin read: {path}")));
+        }
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut body: serde_json::Value = self.get(&format!("{path}{separator}local=1")).await?;
+        // The daemon wraps the answer in its API envelope; the relay carries the answer alone.
+        Ok(body.get_mut("value").map(serde_json::Value::take).unwrap_or(body))
+    }
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1733,6 +1909,185 @@ mod tests {
         Ok(())
     }
 
+    /// Structural guard for the generated models, not a Swift parser. Model declarations
+    /// are column-zero; nested declarations are indented. Ignore ordinary quoted strings
+    /// (including escapes), line comments, and Swift's nested block comments.
+    fn validate_swift_model_structure(source: &str) -> Result<()> {
+        let mut depth = 0usize;
+        let mut block_depth = 0usize;
+        let mut in_string = false;
+        for (line_index, line) in source.lines().enumerate() {
+            let line_number = line_index + 1;
+            let mut code = String::new();
+            let mut chars = line.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if block_depth > 0 {
+                    if ch == '/' && chars.peek() == Some(&'*') {
+                        chars.next();
+                        block_depth += 1;
+                    } else if ch == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        block_depth -= 1;
+                    }
+                    continue;
+                }
+                if in_string {
+                    if ch == '\\' {
+                        chars.next();
+                    } else if ch == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '/' if chars.peek() == Some(&'/') => break,
+                    '/' if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        block_depth = 1;
+                        code.push(' ');
+                    }
+                    '"' => {
+                        in_string = true;
+                        code.push(' ');
+                    }
+                    _ => code.push(ch),
+                }
+            }
+            // Balance alone misses a closing brace moved from one declaration to another.
+            for declaration in ["public struct ", "public enum ", "public class ", "extension "] {
+                if code.starts_with(declaration) && depth != 0 {
+                    bail!("Swift declaration boundary at line {line_number} has brace depth {depth}");
+                }
+            }
+            for ch in code.chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth = depth.checked_sub(1).with_context(|| {
+                            format!("unmatched Swift closing brace at line {line_number}")
+                        })?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ensure!(!in_string, "unterminated Swift string");
+        ensure!(block_depth == 0, "unterminated Swift block comment");
+        ensure!(depth == 0, "unclosed Swift braces: {depth}");
+        Ok(())
+    }
+
+    #[test]
+    fn generated_swift_models_keep_balanced_top_level_declarations() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let actions = operations["actions"].as_object().context("actions")?;
+        let swift = render_marker(
+            SWIFT_MODELS_TEMPLATE,
+            "    // @st3-codegen:swift-action-constructors",
+            &swift_action_constructors(actions)?,
+        )?;
+        validate_swift_model_structure(&swift)?;
+
+        let extra_closer = swift.replacen(
+            "\npublic struct AgentsSnapshotChunk:",
+            "\n}\n\npublic struct AgentsSnapshotChunk:",
+            1,
+        );
+        assert_ne!(extra_closer, swift);
+        let original_defect = extra_closer.replacen(
+            "\n}\n\npublic struct ErrorEnvelope:",
+            "\n\npublic struct ErrorEnvelope:",
+            1,
+        );
+        assert_ne!(original_defect, extra_closer);
+        // The reviewed defect has equal total counts, but an unmatched early closer.
+        assert_eq!(original_defect.matches('{').count(), original_defect.matches('}').count());
+        assert!(validate_swift_model_structure(&original_defect)
+            .unwrap_err().to_string().contains("unmatched Swift closing brace"));
+
+        // Moving the event's closer to EOF balances every prefix, but nests ErrorEnvelope.
+        let misplaced_closer = format!("{}\n}}", swift.replacen(
+            "\n}\n\npublic struct ErrorEnvelope:",
+            "\n\npublic struct ErrorEnvelope:",
+            1,
+        ));
+        assert_eq!(misplaced_closer.matches('{').count(), misplaced_closer.matches('}').count());
+        assert!(validate_swift_model_structure(&misplaced_closer)
+            .unwrap_err().to_string().contains("Swift declaration boundary"));
+        Ok(())
+    }
+
+    #[test]
+    fn swift_structure_guard_ignores_strings_and_comments() -> Result<()> {
+        validate_swift_model_structure(r#"
+// } public struct NotADeclaration {
+/* } /* nested { */ }
+public enum AlsoNotADeclaration {
+*/
+public struct Example {
+    let text = "} // /* \" {"
+    enum Nested { case value }
+}
+public enum Next { case value } // {
+"#)?;
+        assert!(validate_swift_model_structure("public struct Open {").is_err());
+        assert!(validate_swift_model_structure("}").is_err());
+        assert!(validate_swift_model_structure("/* unclosed").is_err());
+        assert!(validate_swift_model_structure("\"unclosed").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn revisioned_collection_contract_is_disjoint_and_templates_keep_every_field() -> Result<()> {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))?;
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let actions = operations["actions"].as_object().context("actions")?;
+        let reads = operations["reads"].as_array().context("reads")?;
+        let rust = render_marker(RUST_MODELS_TEMPLATE, "    // @st3-codegen:rust-action-constructors", &rust_action_constructors(actions)?)?;
+        let rust_client = render_marker(RUST_CLIENT_TEMPLATE, "    // @st3-codegen:rust-operation-methods", &rust_operation_methods(reads, actions)?)?;
+        let swift = render_marker(SWIFT_MODELS_TEMPLATE, "    // @st3-codegen:swift-action-constructors", &swift_action_constructors(actions)?)?;
+        let swift_client = render_marker(SWIFT_CLIENT_TEMPLATE, "    // @st3-codegen:swift-operation-methods", &swift_operation_methods(reads, actions)?)?;
+        validate_surfaces(&schema, &operations, &rust, &rust_client, &swift, &swift_client)?;
+        let command = &schema["$defs"]["AgentsPublicationSubscribe"];
+        assert_eq!(command["additionalProperties"], false);
+        assert_eq!(command["properties"]["agents_publication_version"]["const"], 1);
+        assert_eq!(command["properties"].as_object().unwrap().len(), 5);
+        for definition in ["AgentsSnapshotChunk", "AgentsChanges"] {
+            let branch = &schema["$defs"][definition];
+            assert_eq!(branch["additionalProperties"], false);
+            assert_eq!(branch["properties"]["collection"]["const"], "agents");
+            assert_eq!(branch["properties"]["has_more"]["const"], false);
+            assert_eq!(branch["properties"]["publication"]["$ref"], "#/$defs/AgentsPublicationMetadata");
+        }
+        for branch in schema["$defs"]["CollectionFrame"]["oneOf"].as_array().unwrap() {
+            if branch.get("$ref").is_some() { continue; }
+            let fields = branch["properties"].as_object().unwrap();
+            for name in ["publication", "chunk_index", "chunk_count", "base_revision"] {
+                assert!(!fields.contains_key(name), "legacy frame acquired {name}");
+            }
+        }
+        let ts = typescript_models(&schema, &operations, &contract_constants(&operations)?)?;
+        for name in ["AgentsPublicationSubscribe", "AgentsSnapshotChunk", "AgentsChanges"] {
+            assert!(ts.contains(&format!("export type {name} =")));
+        }
+        assert!(ts.contains("published_at: Timestamp;"));
+        assert!(TYPESCRIPT_CLIENT_TEMPLATE.contains("subscribeAgentsPublication:"));
+        assert!(TYPESCRIPT_CLIENT_TEMPLATE.contains("agents_publication_version: 1"));
+        assert!(SWIFT_CLIENT_TEMPLATE.contains("AgentsPublicationSubscribe(id:"));
+        let rich = rich::models(&schema)?;
+        assert!(rich.contains("agents-publication-row-too-large"));
+        assert!(rich.contains("chunk_count"));
+        assert!(rich.contains("\"publication\": Schema.optionalKey(Schema.Never)"));
+        assert!(rich.contains("\"agents_publication_version\": Schema.optionalKey(Schema.Never)"));
+        Ok(())
+    }
+
     #[test]
     fn check_rejects_model_and_route_drift_and_generation_restores_stable_bytes() -> Result<()> {
         let operations: Value = serde_json::from_str(include_str!(
@@ -1829,6 +2184,38 @@ mod tests {
             output(&path, expected, true)?;
             std::fs::remove_file(&path)?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn harness_methods_have_stable_public_names_and_encoded_detail_ids() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let reads = operations["reads"].as_array().unwrap();
+        let actions = operations["actions"].as_object().unwrap();
+        let rust = rust_operation_methods(reads, actions)?;
+        assert!(rust.contains("pub async fn harness_questions(&self, cursor: Option<&str>, limit: Option<usize>)"));
+        assert!(rust.contains("cursor={}\", percent_encode(cursor)"));
+        assert!(rust.contains("/v1/client/harness-questions{suffix}"));
+        assert!(rust.contains("pub async fn harness_question(&self, id: &str)"));
+        assert!(rust.contains("pub async fn harness_answer("));
+        assert!(rust.contains("parameters: HarnessAnswerParameters"));
+        assert!(rust.contains("/v1/client/harness-questions/{}\", percent_encode(id)"));
+        assert_eq!(rust, rust_operation_methods(reads, actions)?);
+        let swift = swift_operation_methods(reads, actions)?;
+        assert!(swift.contains("func harnessQuestions(cursor: String? = nil, limit: Int? = nil)"));
+        assert!(swift.contains("get(\"v1/client/harness-questions\", query: query)"));
+        assert!(swift.contains("func harnessQuestion(id: String)"));
+        assert!(swift.contains("func harnessAnswer("));
+        assert!(swift.contains("Self.routedSessionID(id)"));
+        let typescript = typescript_operation_methods(reads, actions)?;
+        assert!(typescript.contains("async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'>"));
+        assert!(typescript.contains("'/v1/client/harness-questions' + query(options), undefined, requestOptions"));
+        assert!(typescript.contains("async harnessQuestion(id: string, requestOptions: RequestOptions = {})"));
+        assert!(typescript.contains("async harnessAnswer("));
+        assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}"));
+        assert!(typescript.contains("harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions"));
         Ok(())
     }
 

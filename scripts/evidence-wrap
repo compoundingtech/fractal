@@ -136,6 +136,12 @@ def git(*args, stdin=None, check=True, env_extra=None, transport=False):
     return done
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for extracted signing tools.
+def config_path(base, name):
+    path = f'.fractal/{name}'
+    return path if git('ls-tree', '--full-tree', '-z', base, '--', path).stdout else f'.st/{name}'
+
+
 def dirty():
     return git('status', '--porcelain').stdout.decode().strip()
 
@@ -192,9 +198,7 @@ def lane_inputs(verifier_path, base, check, tree, command):
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(verifier)
     try:
-        shown = git('show', f'{base}:{verifier.LANES_PATH}', check=False)
-        if shown.returncode != 0:
-            raise Failure(f'no lane file at {base}:{verifier.LANES_PATH}; nothing was signed')
+        shown = git('show', f'{base}:{config_path(base, "required-lanes.json")}')
         rules = verifier.lane_rules(shown.stdout.decode(), check)
         base_tree = git('rev-parse', '--verify', '--end-of-options', base + '^{tree}').stdout.decode().strip()
         definition = verifier.lane_definition('.', base_tree, tree, rules)
@@ -332,11 +336,10 @@ def main(argv):
         if exit_code == 0 and Path(args.verifier).exists():
             keys = ['--keys', args.keys] if args.keys else None
             if keys is None:
-                shown = git('show', f'{args.keys_from}:.st/evidence-keys', check=False)
-                if shown.returncode == 0:
-                    path = Path(os.environ.get('TMPDIR', '/tmp')) / f'evidence-keys-{os.getpid()}'
-                    path.write_bytes(shown.stdout)
-                    keys = ['--keys', str(path)]
+                shown = git('show', f'{args.keys_from}:{config_path(args.keys_from, "evidence-keys")}')
+                path = Path(os.environ.get('TMPDIR', '/tmp')) / f'evidence-keys-{os.getpid()}'
+                path.write_bytes(shown.stdout)
+                keys = ['--keys', str(path)]
             if keys:
                 # A per-crate record (one crate, one input key) is checked as that crate's: the tree's newest record of the check may be
                 # another crate's, and once one crate's failed record is on the tree it answered "not verified" for every crate signed after.

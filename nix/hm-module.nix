@@ -9,20 +9,21 @@ let
   inherit (lib) mkEnableOption mkIf mkOption types;
   cfg = config.services.smalltalk;
   externallyManaged = cfg.binary.path != null;
-  # Copy st3 itself: a symlinkJoin-only executable resolves current_exe() back to the
+  # Copy fractal itself: a symlinkJoin-only executable resolves current_exe() back to the
   # original package, whose bin/pty would still win when seats prepend that directory.
   effectivePackage =
     if cfg.ptyPackage == null then
       cfg.package
     else
       pkgs.symlinkJoin {
-        name = "st3-with-pty";
+        name = "fractal-with-pty";
         paths = [ cfg.package ];
         postBuild = ''
-          rm "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
-          cp ${cfg.package}/bin/st3 "$out/bin/st3"
+          rm "$out/bin/fractal" "$out/bin/st3" "$out/bin/pty" "$out/bin/st"
+          cp ${cfg.package}/bin/fractal "$out/bin/fractal"
           # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-          ln -s st3 "$out/bin/st"
+          ln -s fractal "$out/bin/st"
+          ln -s fractal "$out/bin/st3"
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           ln -s ${cfg.ptyPackage}/bin/pty "$out/bin/pty"
         '';
@@ -30,7 +31,7 @@ let
   # Keep the real executable with the daemon's per-user state: current_exe()
   # resolves store symlinks, but seats must watch one replaceable path across deploys.
   binDir = if externallyManaged then builtins.dirOf cfg.binary.path else "${cfg.stateDir}/bin";
-  executable = if externallyManaged then cfg.binary.path else "${binDir}/st3";
+  executable = if externallyManaged then cfg.binary.path else "${binDir}/fractal";
   environment = cfg.environment // {
     # The Linux daemon asks the user manager to move PTY servers into their own scopes via busctl.
     PATH = binDir + ":" + lib.makeBinPath (
@@ -104,7 +105,7 @@ let
     while IFS= read -r line; do marker=$line; done < "$fence"
     [ "$marker" = ${lib.escapeShellArg configFenceMarker} ] || exit 1
   '';
-  targetExecutable = if externallyManaged then cfg.binary.path else "${targetDaemonState}/bin/st3";
+  targetExecutable = if externallyManaged then cfg.binary.path else "${targetDaemonState}/bin/fractal";
   targetArgs = lib.replaceStrings [ legacyState ] [ targetState ];
   targetUpArgs = map targetArgs upArgs ++ [ "--config" "${config.xdg.configHome}/fractal/config.toml" ];
   targetEnvironment = lib.mapAttrs (_: targetArgs) environment;
@@ -164,10 +165,6 @@ let
   # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
 in
 {
-  options.programs.smalltalk.fractalBinary.enable = mkEnableOption ''
-    the opt-in fractal alias in the Home Manager-owned Fractal stable bin directory.
-    Requires services.smalltalk.enable; ignored when services.smalltalk.binary.path is set
-  '';
 
 
   options.services.smalltalk = {
@@ -185,19 +182,19 @@ in
     # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-service-labels-fractal
     package = mkOption {
       type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.st3;
-      description = "The st3 package.";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.fractal;
+      description = "The complete Fractal package.";
     };
     binary.path = mkOption {
       type = types.nullOr types.str;
       default = null;
-      example = "/opt/fractal/bin/st3";
+      example = "/opt/fractal/bin/fractal";
       description = ''
         Stable absolute executable path owned by an external deployer. When set,
-        Home Manager neither installs the st3 package nor copies its executable,
+        Home Manager neither installs the Fractal package nor copies its executable,
         uses pty from the same directory instead of ptyPackage, and does not
         restart the daemon on package changes. Null keeps Home Manager
-        responsible for installing and restarting st3.
+        responsible for installing and restarting Fractal.
       '';
     };
     person = mkOption {
@@ -242,7 +239,7 @@ in
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      description = "Additional arguments passed to st3 up.";
+      description = "Additional arguments passed to fractal up.";
     };
     memoryHigh = mkOption {
       type = types.nullOr types.str;
@@ -348,33 +345,43 @@ in
           (
             set -eu
             binDir=${lib.escapeShellArg binDir}
-            source=${lib.escapeShellArg "${effectivePackage}/bin/st3"}
+            source=${lib.escapeShellArg "${effectivePackage}/bin/fractal"}
             target=${lib.escapeShellArg executable}
+            # Adopt only the historical forward alias or a physical executable
+            # with both reverse aliases; matching payload bytes are not ownership.
+            if [[ -e "$target" || -L "$target" ]]; then
+              owned=false
+              if [[ -L "$target" ]]; then
+                case "$(${pkgs.coreutils}/bin/readlink "$target")" in
+                  st3|"$binDir/st3") owned=true ;;
+                esac
+              elif [[ -f "$target" && -x "$target" ]]; then
+                owned=true
+                for name in st st3; do
+                  if [[ ! -L "$binDir/$name" ]]; then owned=false; break; fi
+                  case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                    fractal|"$target") ;;
+                    *) owned=false; break ;;
+                  esac
+                done
+              fi
+              if ! "$owned"; then
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
+            fi
             ${pkgs.coreutils}/bin/mkdir -p "$binDir"
             # Preserve the inode on no-op activation; replace symlinks even if bytes match.
             if [[ -L "$target" ]] || ! ${pkgs.diffutils}/bin/cmp -s "$source" "$target"; then
-              temporary=$(${pkgs.coreutils}/bin/mktemp "$binDir/.st3.XXXXXX")
+              temporary=$(${pkgs.coreutils}/bin/mktemp "$binDir/.fractal.XXXXXX")
               trap '${pkgs.coreutils}/bin/rm -f "$temporary"' EXIT
               ${pkgs.coreutils}/bin/cp "$source" "$temporary"
               ${pkgs.coreutils}/bin/chmod 755 "$temporary"
               ${pkgs.coreutils}/bin/mv -f "$temporary" "$target"
             fi
             # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-            ${pkgs.coreutils}/bin/ln -sfn st3 "$binDir/st"
-            ${if config.programs.smalltalk.fractalBinary.enable then ''
-              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
-                : # Already points at the stable executable.
-              elif [[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]; then
-                ${pkgs.coreutils}/bin/ln -s st3 "$binDir/fractal" ||
-                  echo "Could not create $binDir/fractal; kept the existing path. Fractal remains available as st." >&2
-              else
-                echo "Not replacing $binDir/fractal: it is not a Fractal alias. Move it yourself to opt in; use st meanwhile." >&2
-              fi
-            '' else ''
-              if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
-                ${pkgs.coreutils}/bin/rm "$binDir/fractal"
-              fi
-            ''}
+            ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st"
+            ${pkgs.coreutils}/bin/ln -sfn fractal "$binDir/st3"
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
           )
         fi

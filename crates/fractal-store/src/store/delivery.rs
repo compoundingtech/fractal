@@ -1,6 +1,91 @@
 use super::*;
 
 impl Store {
+    /// Summarize accepted, unread messages for one recipient, without a delivery-page cap.
+    ///
+    /// The indexed candidate walk is bounded by this recipient's retained `message.sent`
+    /// history (including aliases), not fleet message bodies. Projection work is bounded by
+    /// the claim history of its unread candidate subjects. Repeated sends count only once,
+    /// using their oldest accepted timestamp. Empty states are omitted.
+    ///
+    /// When held classification is unavailable, `include_held=false` leaves sent silent
+    /// messages in pending rather than dropping them from the unread total.
+    pub fn mailbox_unread_summary(
+        &self,
+        recipient: &str,
+        include_held: bool,
+    ) -> Result<Vec<(String, u64, u128)>> {
+        let connection = self.readers.get();
+        let recipient = super::identities::resolve_reference_conn(
+            &connection,
+            &normalize_message_party(recipient),
+        )?;
+        smallclaims::touched::note_read(|| format!("mailbox:{recipient}"));
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h69bd7a4056c3 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ concat!(
+            "WITH candidates AS (
+                 SELECT DISTINCT subject FROM claims INDEXED BY claims_message_to_index
+                 WHERE kind='message.sent' AND ", message_sent_recipient_match!(), "
+             )
+             SELECT claims.subject, claims.accepted_at_unix_ms,
+                    (SELECT MIN(store_index) FROM claims history
+                     WHERE history.subject=claims.subject)
+             FROM candidates CROSS JOIN claims ON claims.subject=candidates.subject
+             WHERE claims.kind='message.sent'
+               AND NOT EXISTS (
+                   SELECT 1 FROM claims consumed WHERE consumed.subject=claims.subject
+                     AND consumed.kind IN ('message.read','message.closed')
+               )"
+        ))?;
+        let mut candidates = BTreeMap::<String, (u64, u128)>::new();
+        let rows = statement.query_map(
+            params![recipient, message_bare_recipient(&recipient)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )?;
+        for row in rows {
+            let (subject, accepted, created_index) = row?;
+            let accepted = accepted.parse::<u128>()?;
+            candidates
+                .entry(subject)
+                .and_modify(|(_, oldest)| *oldest = (*oldest).min(accepted))
+                .or_insert((created_index, accepted));
+        }
+        drop(statement);
+        let mut states = BTreeMap::<&str, (u64, u128)>::new();
+        for (subject, (created_index, accepted)) in candidates {
+            let message = self.message_view_cached(&connection, &subject, created_index)?;
+            if message.to != recipient || matches!(message.status.as_str(), "read" | "closed") {
+                continue;
+            }
+            let state = if include_held && crate::silent::waits_for_turn(&message) {
+                "held"
+            } else {
+                match message.status.as_str() {
+                    "sent" | "staged" => "pending",
+                    "delivered" => "delivered",
+                    _ => continue,
+                }
+            };
+            smallclaims::touched::note_read(|| subject.clone());
+            states
+                .entry(state)
+                .and_modify(|(count, oldest)| {
+                    *count += 1;
+                    *oldest = (*oldest).min(accepted);
+                })
+                .or_insert((1, accepted));
+        }
+        Ok(states
+            .into_iter()
+            .map(|(state, (count, oldest))| (state.to_owned(), count, oldest))
+            .collect())
+    }
+
     pub fn messages(
         &self,
         recipient: Option<&str>,
@@ -331,6 +416,8 @@ impl Store {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 items.push(AttentionItemView {
+                    deadline_unix_ms: None,
+                    default_answer: None,
                     episode: failure.id.clone(),
                     priority: "high".into(),
                     kind: "fault".into(),
@@ -376,4 +463,110 @@ fn subscription_failure_is_current_tx(
     failure: &ClaimRecord,
 ) -> Result<bool> {
     Ok(declaration_stopped_tx(connection, &failure.subject)?.is_none())
+}
+
+#[cfg(test)]
+mod mailbox_metrics_tests {
+    use super::*;
+
+    fn append(store: &Store, subject: &str, status: &str, fields: Value) -> ClaimRecord {
+        let mut fields: BTreeMap<String, Value> = serde_json::from_value(fields).unwrap();
+        fields.insert("status".into(), json!(status));
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: format!("message.{status}"),
+                actor: Some("agent/example.old".into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    }
+
+    fn sent(store: &Store, subject: &str, to: &str, from: &str, tags: &[&str]) -> ClaimRecord {
+        append(store, subject, "sent", json!({
+            "to": to, "from": from, "tags": tags, "content": "example"
+        }))
+    }
+
+    #[test]
+    fn summarizes_states_without_delivery_batch_truncation() {
+        let store = Store::open_memory("node").unwrap();
+        let pending = sent(&store, "message/pending", "agent/example.worker", "agent/example.sender", &[]);
+        // Current admission requires full references; retained legacy sends can be bare.
+        store.connection.write().execute(
+            "UPDATE claims SET body=json_set(body,'$.fields.to','example.worker') WHERE id=?1",
+            [&pending.id],
+        ).unwrap();
+        let staged = sent(&store, "message/staged", "agent/example.worker", "agent/example.sender", &[]);
+        append(&store, &staged.subject, "staged", json!({}));
+        let delivered = sent(&store, "message/delivered", "agent/example.worker", "agent/example.sender", &["st3-silent"]);
+        append(&store, &delivered.subject, "delivered", json!({}));
+        let waking = sent(&store, "message/waking", "agent/example.worker", "person/example", &["st3-silent"]);
+        let mut held_oldest = u128::MAX;
+        for index in 0..20 {
+            let claim = sent(&store, &format!("message/held-{index}"), "agent/example.worker", "agent/example.sender", &["st3-fyi"]);
+            held_oldest = held_oldest.min(claim.accepted_at_unix_ms);
+        }
+        sent(&store, "message/other", "agent/example.other", "agent/example.sender", &[]);
+        assert_eq!(
+            store.mailbox_unread_summary("agent/example.worker", true).unwrap(),
+            vec![
+                ("delivered".into(), 1, delivered.accepted_at_unix_ms),
+                ("held".into(), 20, held_oldest),
+                ("pending".into(), 3, pending.accepted_at_unix_ms.min(staged.accepted_at_unix_ms).min(waking.accepted_at_unix_ms)),
+            ],
+        );
+        let incomplete = store.mailbox_unread_summary("example.worker", false).unwrap();
+        assert_eq!(incomplete.len(), 2);
+        assert_eq!(incomplete[1].0, "pending");
+        assert_eq!(incomplete[1].1, 23);
+        assert!(store.mailbox_unread_summary("agent/example.empty", true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn aliases_repeated_sends_and_terminal_claims_preserve_unread_truth() {
+        let store = Store::open_memory("node").unwrap();
+        let first = sent(&store, "message/repeated", "agent/example.old", "agent/example.sender", &[]);
+        // Replication can retain repeated sends even though local admission forbids them.
+        store.connection.write().execute(
+            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+             SELECT 'repeated-send',batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+             FROM claims WHERE id=?1",
+            [&first.id],
+        ).unwrap();
+        for status in ["read", "closed"] {
+            let subject = format!("message/{status}");
+            sent(&store, &subject, "agent/example.old", "agent/example.sender", &[]);
+            append(&store, &subject, "delivered", json!({}));
+            if status == "closed" {
+                append(&store, &subject, "read", json!({}));
+            }
+            append(&store, &subject, status, json!({}));
+            // Imported history can project a later sent state; the terminal claim still wins
+            // for unread accounting.
+            store.connection.write().execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.status','sent') WHERE subject=?1 AND kind=?2",
+                params![subject, format!("message.{status}")],
+            ).unwrap();
+        }
+        store.connection.write().execute(
+            "UPDATE claims SET accepted_at_unix_ms='100' WHERE id=?1",
+            [&first.id],
+        ).unwrap();
+        store.connection.write().execute(
+            "INSERT INTO identity_names(name,identity) VALUES('agent/example.old','agent/example.worker')",
+            [],
+        ).unwrap();
+        assert_eq!(
+            store.mailbox_unread_summary("agent/example.worker", true).unwrap(),
+            vec![("pending".into(), 1, 100)],
+        );
+        assert_eq!(
+            store.mailbox_unread_summary("agent/example.old", true).unwrap(),
+            vec![("pending".into(), 1, 100)],
+        );
+    }
 }

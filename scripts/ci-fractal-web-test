@@ -288,8 +288,11 @@ gate = [
     (("cancelled", "", "skipped"), False, "cancelled detection"),
     (("success", "", "skipped"), False, "detection without a decision"),
     (("success", "true", "skipped", "true", "pull_request"), True, "trusted PR evidence skips execution"),
-    (("success", "true", "skipped", "true", "merge_group"), False, "queue evidence never replaces execution"),
+    (("success", "true", "skipped", "true", "merge_group"), True, "trusted queue evidence skips execution"),
     (("success", "true", "skipped", "true", "workflow_dispatch"), False, "manual evidence never replaces execution"),
+    (("success", "true", "skipped", "true", "push"), False, "main evidence never replaces hosted proof"),
+    (("success", "true", "skipped", "false", "merge_group"), False, "queue without evidence requires execution"),
+    (("success", "true", "failure", "true", "merge_group"), False, "queue evidence never hides failure"),
     (("success", "true", "skipped", "false", "pull_request"), False, "negative evidence never permits skip"),
     (("success", "true", "failure", "true", "pull_request"), False, "evidence never hides execution failure"),
     (("success", "true", "cancelled", "true", "pull_request"), False, "evidence never hides cancellation"),
@@ -311,6 +314,29 @@ for event in ("pull_request", "merge_group", "workflow_dispatch"):
     assert f"  {event}:" in header, event
 blocks = dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)", jobs))
 changes, execution, gate_job = blocks["fractal-web-changes"], blocks["fractal-web-execution"], blocks["fractal-web"]
+
+# A relevant, sharded merge group covered by evidence produces no execution or receipts.
+conditions = [
+    re.search(r"^    if: (.*)$", execution, re.M)[1],
+    re.search(r"id: cost-receipts.*?\n        if: (.*)", gate_job, re.S)[1].splitlines()[0],
+    re.search(r"name: Require every kit shard and exact full-index coverage\n        if: (.*)", gate_job)[1],
+]
+for event in ("pull_request", "merge_group", "push"):
+    for skip in ("true", "false"):
+        actual = []
+        for condition in conditions:
+            text = condition.removeprefix('"').removesuffix('"').replace("${{", "").replace("}}", "")
+            text = text.replace("github.event_name", repr(event)).replace("!cancelled()", "True")
+            text = text.replace("github.event.pull_request.draft", "False").replace("success()", "True")
+            text = re.sub(r"(?<!['\w])false(?!['\w])", "False", text)
+            text = re.sub(r"needs\.[\w-]+\.outputs\.skip", repr(skip), text)
+            text = re.sub(r"needs\.[\w-]+\.outputs\.refuse", "'false'", text)
+            text = re.sub(r"needs\.[\w-]+\.outputs\.[\w-]+", "'true'", text)
+            text = re.sub(r"needs\.[\w-]+\.result", "'success'", text)
+            text = text.replace("&&", " and ").replace("||", " or ").replace("!(", "not (")
+            actual.append(bool(eval(text, {"__builtins__": {}})))
+        assert actual == [skip != "true", skip != "true", skip != "true" and event != "pull_request"], (event, skip, actual)
+print("passed: evidence skips consistently suppress web execution, receipt download and shard coverage")
 for pattern in detector_contract["PATTERNS"]:
     assert f'"{pattern}"' in changes, f"generated detector omits {pattern}"
 for pattern in ("crates/fractal-client*/**", "crates/fractal-schema/**", "docs/st3/client-v0/**"):
