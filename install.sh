@@ -200,10 +200,11 @@ while IFS= read -r member; do
     case "/$member/" in */../*) printf 'install: archive contains a parent path\n' >&2; exit 1 ;; esac
 done < "$work/members"
 tar -xzf "$work/$archive" -C "$work"
-# Only retained archives without the canonical command use the historical payload.
+# Only a physical canonical payload selects fractal; retained forward aliases
+# still install their historical st3 payload without replacing an existing fractal.
 # This is an archive-format decoder, not a fallback around a foreign destination.
 command_name=fractal
-[ -x "$work/$package/bin/fractal" ] || command_name=st3
+[ -x "$work/$package/bin/fractal" ] && [ ! -L "$work/$package/bin/fractal" ] || command_name=st3
 # Retained releases keep their historical installer spelling.
 "$work/$package/install.sh" --bin-dir "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd)
@@ -212,9 +213,7 @@ bin_dir=$(cd "$bin_dir" && pwd)
 write_receipt() (
     receipt_stage=
     trap '[ -z "$receipt_stage" ] || rm -f "$receipt_stage"' EXIT
-    # Retained archives keep their original physical st3 payload.
-    release_binary="$work/$package/bin/fractal"
-    [ -x "$release_binary" ] || release_binary="$work/$package/bin/st3"
+    release_binary="$work/$package/bin/$command_name"
     version=$("$release_binary" --version --json) || return 1
     case "$version" in '{"machine_version":"'*'"}') ;; *) return 1 ;; esac
     version=${version#'{"machine_version":"'}
