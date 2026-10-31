@@ -1288,6 +1288,10 @@ enum MissionViewCommand {
     ReportTo(MissionReportToArgs),
     /// Set a finished run's outcome to completed, failed, or cancelled, with a reason.
     Outcome(MissionOutcomeArgs),
+    /// Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it.
+    ///
+    /// A person or the fleet's fault agent may. A later failure of the same source is a new fault.
+    DismissFault(MissionDismissFaultArgs),
     /// Retire a mission so it leaves the lists and cannot start; publishing it again brings it back.
     Retire(MissionRetireArgs),
     /// Show one agent's current claim and its queued mission runs in order; same as `fractal agents queue AGENT`.
@@ -1508,6 +1512,22 @@ struct MissionOutcomeArgs {
     #[arg(long)]
     reason: String,
     /// A person, or an agent that requested the run or may revise its mission.
+    #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+    #[arg(long = "as", value_parser = parse_publication_actor)]
+    actor: String,
+}
+
+#[derive(Args)]
+struct MissionDismissFaultArgs {
+    /// The fault's run (`mission-run/...`) or its exact source subject, as its fault message names it.
+    source: String,
+    /// The fault's episode, needed only when its source has more than one current fault.
+    #[arg(long)]
+    episode: Option<String>,
+    /// Why the fault can be put aside, for example that the run ended and a later run replaced it.
+    #[arg(long)]
+    reason: String,
+    /// A person, or the fleet's fault agent.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", value_parser = parse_publication_actor)]
     actor: String,
@@ -5938,6 +5958,7 @@ fn guard_mutating_cli_actor(
             MissionViewCommand::RenameId(args) => Some(args.actor.as_str()),
             MissionViewCommand::Cancel(args) => Some(args.actor.as_str()),
             MissionViewCommand::Outcome(args) => Some(args.actor.as_str()),
+            MissionViewCommand::DismissFault(args) => Some(args.actor.as_str()),
             MissionViewCommand::ReportTo(args) => Some(args.actor.as_str()),
             MissionViewCommand::Retire(args) => Some(args.actor.as_str()),
             MissionViewCommand::Release(args) | MissionViewCommand::CancelRequest(args) => {
