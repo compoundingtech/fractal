@@ -1232,16 +1232,23 @@ pub(crate) fn replication_worker_pid() -> Result<u32> {
 pub(crate) fn daemon_is_service_managed() -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
-        // Inspect kernel cgroup placement, not caller-controlled service environment variables.
-        let groups = fs::read_to_string("/proc/self/cgroup")?;
-        Ok(groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
-            .any(|path| path.trim_end_matches('/').ends_with(".service")))
+        // A foreground fixture can inherit its runner's unrelated service cgroup.
+        Ok(daemon_service_cgroup(&fs::read_to_string("/proc/self/cgroup")?))
     }
     #[cfg(target_os = "macos")]
     {
         // launchd directly owns the daemon; a reparented foreground process also fails closed.
         Ok(unsafe { libc::getppid() } == 1)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_service_cgroup(groups: &str) -> bool {
+    let old = service_name();
+    let new = old.replacen("st3", "fractal", 1);
+    groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
+        .filter_map(|path| path.trim_end_matches('/').rsplit('/').next())
+        .any(|unit| unit == old || unit == new || unit == "smalltalk.service")
 }
 
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
@@ -1710,4 +1717,14 @@ mod tests {
         assert_eq!(service_label(), "com.compoundingtech.st3");
         assert_eq!(replication_service_label(), "com.compoundingtech.st3.replication");
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn foreground_worker_enrollment_distinguishes_daemon_and_runner_services() {
+    assert!(daemon_service_cgroup("0::/user.slice/st3.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/fractal.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/smalltalk.service"));
+    assert!(!daemon_service_cgroup("0::/system.slice/actions.runner.service"));
+    assert!(!daemon_service_cgroup("0::/user.slice/fractal-test.scope"));
 }
