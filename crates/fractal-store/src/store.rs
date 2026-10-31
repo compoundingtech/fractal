@@ -5835,7 +5835,7 @@ impl Store {
 
     /// Each dismissed fault, by subject and episode. A new episode at the same source is a new
     /// fault, so a dismissal never hides a later failure.
-    fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
+    pub fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
             "SELECT subject, json_extract(body, '$.fields.episode') FROM claims INDEXED BY claims_kind_index
