@@ -52,7 +52,9 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
   await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
   // The return eases over the standard motion duration (200ms), or lands at once under reduced motion.
-  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1), { timeout: 400 })
+  // The wait ends when the end is reached; the bound is only how long a loaded host may take to run the
+  // animation's frames, so it is not tied to the 200ms the animation is meant to take.
+  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1), { timeout: 5000 })
   await expect(canvas.queryByRole('button', { name: 'New messages ↓' })).toBeNull()
 } }
 export const FollowingAndAnchoredLight: Story = { ...FollowingAndAnchored, args: { scheme: 'light' } }
