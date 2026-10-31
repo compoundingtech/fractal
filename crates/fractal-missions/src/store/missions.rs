@@ -7075,7 +7075,8 @@ impl MissionsStore for Store {
                     let claim = match &compact_state {
                         Some(state) if compact && !delivery_changed => {
                             match &newest_state {
-                                Some((id, _, _)) if !state_changed && !deliver => {
+                                // An unchanged state is pinned as it is, by every delivery of it.
+                                Some((id, _, _)) if !state_changed => {
                                     claim_by_id_tx(transaction, id).map_err(internal)?
                                         .ok_or_else(|| St3Error::new("internal", "the newest item state is gone"))?
                                 }

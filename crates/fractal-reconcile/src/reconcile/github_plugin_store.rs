@@ -312,6 +312,23 @@ impl GithubPluginStore {
         refills.insert(repository.to_owned(), (now.saturating_add(wait), wait));
     }
 
+    /// Whether `repository`'s mirror is filled and followed every look up to `cursor`, the cursor
+    /// the next look starts from. A mirror that missed a look, as when its write failed or the
+    /// daemon stopped after the graph write, is behind the graph and is not a look's prior.
+    pub fn current(&self, repository: &str, cursor: Option<&str>) -> Result<bool> {
+        let followed: Option<(Option<String>, bool)> = self
+            .connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .query_row(
+                "SELECT cursor_digest, filled_at_unix_ms IS NOT NULL FROM mirror_repositories WHERE repository=?1",
+                [repository],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(followed.is_some_and(|(digest, filled)| filled && digest.as_deref() == Some(cursor_digest(cursor).as_str())))
+    }
+
     /// Fill `repository`'s mirror from one look at GitHub that recorded nothing else: each item
     /// it saw replaces the mirror's row, without events, and the mirror then answers reads. The
     /// mirror must still be at the poll cursor the last [`Self::mirror`] recorded; otherwise

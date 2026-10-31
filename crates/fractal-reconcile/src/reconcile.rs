@@ -16940,7 +16940,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             _ => observation.cursor.clone(),
                         };
                         let mirrored = (spec.provider == "github.repository")
-                            .then(|| mirrored_prior(&store, &github_plugin, &poller_host, &spec, &observation.facts))
+                            .then(|| mirrored_prior(&store, &github_plugin, &poller_host, &spec, &observation.facts, cursor.as_deref()))
                             .flatten();
                         match store.record_resource_observation_mirrored(
                             &observer_subject,
@@ -18629,9 +18629,12 @@ fn mirrored_prior(
     host: &str,
     spec: &crate::model::ObserverSpec,
     facts: &Value,
+    polled_from: Option<&str>,
 ) -> Option<crate::model::MirroredPrior> {
     let read = || -> Result<Option<crate::model::MirroredPrior>> {
-        if !plugin.filled(&spec.resource)? {
+        // Only a mirror that followed every look up to the one this look starts from knows at
+        // least what the graph does.
+        if !plugin.current(&spec.resource, polled_from)? {
             return Ok(None);
         }
         let mut items = HashMap::new();
@@ -40976,6 +40979,15 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         // never recorded: that is a baseline, and nothing is delivered twice.
         poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1]), "c5").await;
         assert_eq!(delivered(), after_close, "a move after compact-only changes delivers nothing twice");
+
+        // A filled mirror that missed a look, as when its write failed after the graph write, is
+        // not a look's prior: the look is compared with the graph.
+        let spec = crate::graph::observer_spec(
+            &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
+        ).unwrap();
+        let facts = listing("closed", "Orchid, renamed", &[1]);
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4")).is_some());
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
