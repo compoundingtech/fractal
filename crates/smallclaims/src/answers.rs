@@ -337,6 +337,10 @@ pub const READER_PREFIX: &str = "reader/";
 /// order, and a `moving` key for each subject with a claim at or after the cut. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
 pub type FoldReaders = Arc<dyn Fn(&Connection, u128) -> Result<BTreeMap<String, Vec<AnswerKey>>> + Send + Sync>;
 
+/// Explicit (reader kind, subject, slot) keys that moved after a kept summary's cut.
+pub type ReaderMoves = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+pub type ReaderMovement = Arc<dyn Fn(&Connection, &BTreeSet<String>, u128) -> Result<ReaderMoves> + Send + Sync>;
+
 /// A fold reader's answers as a kind: its summary entry, and every key with its bucket digests.
 pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (String, KindAnswers, KindBuckets) {
     let kind = format!("{READER_PREFIX}{name}");
@@ -597,6 +601,7 @@ const KEPT_KINDS: usize = 8;
 pub struct AnswersCache {
     state: Mutex<CacheState>,
     readers: Mutex<Option<FoldReaders>>,
+    movement: Mutex<Option<ReaderMovement>>,
 }
 
 #[derive(Default)]
@@ -718,13 +723,21 @@ impl CacheState {
 
     /// Mark every key of a `moved` subject moving in the kept fold readers, and count each reader
     /// that had one again, in the summary as in its buckets.
-    fn remark_moving(&mut self, moved: &BTreeSet<String>) {
+    fn remark_moving(&mut self, moved: &BTreeSet<String>, slots: &ReaderMoves) {
         let Some(summary) = self.summary.as_mut() else { return };
         for every in &mut self.readers {
-            if !every.keys.iter().any(|key| !key.moving && moved.contains(&key.subject)) {
+            let moves = |key: &AnswerKey| {
+                if every.kind.starts_with("reader/slots/") {
+                    slots.get(&every.kind).and_then(|keys| keys.get(&key.subject))
+                        .is_some_and(|slots| slots.contains(&key.origin))
+                } else {
+                    moved.contains(&key.subject)
+                }
+            };
+            if !every.keys.iter().any(|key| !key.moving && moves(key)) {
                 continue;
             }
-            for key in every.keys.iter_mut().filter(|key| moved.contains(&key.subject)) {
+            for key in every.keys.iter_mut().filter(|key| moves(key)) {
                 key.moving = true;
                 key.claim.clear();
             }
@@ -742,6 +755,11 @@ impl AnswersCache {
         *self.readers.lock().unwrap_or_else(PoisonError::into_inner) = Some(readers);
     }
 
+    /// Track runtime-defined retention slots without moving unrelated slots of the same subject.
+    pub fn set_reader_movement(&self, movement: ReaderMovement) {
+        *self.movement.lock().unwrap_or_else(PoisonError::into_inner) = Some(movement);
+    }
+
     /// Answer `request` from what is kept, or answer `pending` and start computing it on a thread
     /// of its own, unless one already does.
     pub fn answer<S>(self: &Arc<Self>, store: &Arc<S>, request: &AnswersRequest) -> AnswersReply
@@ -757,10 +775,13 @@ impl AnswersCache {
             let store: &Store = (**store).borrow();
             let current = still_current(&store.readers.get(), mark, request.cut_unix_ms);
             let moved = moved_since(&store.readers.get(), &counted, request.cut_unix_ms);
+            let slots = self.movement.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                .map(|movement| movement(&store.readers.get(), &counted, request.cut_unix_ms))
+                .unwrap_or_else(|| Ok(ReaderMoves::new()));
             state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
-                match moved {
-                    Ok(moved) => state.remark_moving(&moved),
+                match moved.and_then(|moved| Ok((moved, slots?))) {
+                    Ok((moved, slots)) => state.remark_moving(&moved, &slots),
                     Err(error) => eprintln!("st3: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
                 }
             }

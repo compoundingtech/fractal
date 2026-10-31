@@ -82,6 +82,12 @@ fn retained_history_case(kind: &str) {
             transaction.commit().unwrap();
         }
         let summary = || {
+            if kind == "resource.observed" {
+                let mut connection = store.connection.write();
+                let transaction = connection.transaction().unwrap();
+                resources::refresh(&transaction, subject).unwrap();
+                transaction.commit().unwrap();
+            }
             let connection = store.readers.get();
             let mut summary = smallclaims::answers::summary(&connection, 1_000).unwrap();
             for (name, keys) in fold_reader_answers(&connection, 1_000).unwrap() {
@@ -152,4 +158,72 @@ fn slot_readers_preserve_field_carriers_and_distinct_slots() {
     store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&carriers[0]]).unwrap();
     let lost = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
     assert_ne!(full["slots/observer.observed"], lost["slots/observer.observed"]);
+}
+
+fn observation(store: &Store, subject: &str, kind: &str, writer: &str, at: u128, fields: Value) -> String {
+    store.set_write_clock_at(at).unwrap();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    let claim = append_claim_tx(&transaction, writer, subject, kind, None, &json!({"fields":fields}), &[], None).unwrap();
+    if subject.starts_with("resource/") { resources::refresh(&transaction, subject).unwrap(); }
+    transaction.commit().unwrap();
+    claim.id
+}
+
+#[test]
+fn resource_reader_includes_compact_overlay_timing() {
+    let answer = |at| {
+        let store = Store::open_memory("alder").unwrap();
+        let subject = "resource/example/issue/1502";
+        observation(&store, subject, "resource.observed", "alder", at,
+            json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
+        observation(&store, subject, "vcs.item.state", "alder", 200,
+            json!({"item_kind":"vcs.issue","state":"closed"}));
+        slot_reader_answers(&store.readers.get(), 1_000).unwrap()["slots/resource.observed"].clone()
+    };
+    assert_ne!(answer(100), answer(300), "the same compact state overlays only the older observation");
+}
+
+#[test]
+fn slot_readers_exclude_repaired_originals() {
+    let store = Store::open_memory("alder").unwrap();
+    let subject = "observer/example";
+    let original = observation(&store, subject, "observer.observed", "alder", 100, json!({"cursor":"repaired"}));
+    observation(&store, subject, "observer.observed", "alder", 200, json!({"state":"healthy"}));
+    store.connection.write().execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&original]).unwrap();
+    let retained = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
+    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
+    assert_eq!(retained, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
+}
+
+#[test]
+fn served_cache_moves_only_the_written_transport_slot() {
+    use smallclaims::answers::{AnswersCache, AnswersRequest};
+    let store = Arc::new(Store::open_memory("alder").unwrap());
+    observation(&store, "host/example", "transport.observed", "a", 100, json!({"status":"up"}));
+    observation(&store, "host/example", "transport.observed", "b", 100, json!({"status":"up"}));
+    let cache = Arc::new(AnswersCache::default());
+    cache.set_readers(Arc::new(fold_reader_answers));
+    cache.set_reader_movement(Arc::new(slot_reader_movement));
+    let request = AnswersRequest { cut_unix_ms:1_000, ..AnswersRequest::default() };
+    let answer = |cache: &Arc<AnswersCache>, store: &Arc<Store>| {
+        for _ in 0..500 {
+            let reply = cache.answer(store, &request);
+            if !reply.pending { return reply.summary.unwrap(); }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("cache did not answer");
+    };
+    assert_eq!(answer(&cache, &store).kinds["reader/slots/transport.observed"].keys, 2);
+    observation(&store, "host/example", "transport.observed", "b", 2_000, json!({"status":"down"}));
+    assert_eq!(answer(&cache, &store).kinds["reader/slots/transport.observed"].keys, 1,
+        "writer A remains counted when writer B moves");
+    let other = Arc::new(Store::open_memory("birch").unwrap());
+    observation(&other, "host/example", "transport.observed", "a", 100, json!({"status":"down"}));
+    observation(&other, "host/example", "transport.observed", "b", 2_000, json!({"status":"down"}));
+    let late = Arc::new(AnswersCache::default());
+    late.set_readers(Arc::new(fold_reader_answers));
+    late.set_reader_movement(Arc::new(slot_reader_movement));
+    assert!(smallclaims::answers::differing_kinds(&answer(&cache, &store), &answer(&late, &other), true)
+        .iter().any(|difference| difference.kind == "reader/slots/transport.observed"));
 }
