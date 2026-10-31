@@ -293,6 +293,8 @@
       "identity-unknown",
       "lifecycle-unavailable",
       "retirement-upgrade-required",
+      "retire-revision-mismatch",
+      "retire-incarnation-mismatch",
       "invalid-custody-successor",
       "custody-pending",
       "attention-migrated",
@@ -3086,7 +3088,7 @@
     "AgentRepository": {"type": "object", "additionalProperties": false, "required": ["path", "workspaces", "agent_ids"], "properties": {"path": {"type": "string"}, "workspaces": {"type": "array", "items": {"type": "string"}}, "agent_ids": {"type": "array", "items": {"type": "string"}}}},
     "HostRepositories": {"type": "object", "additionalProperties": false, "required": ["host_id", "repositories"], "properties": {"host_id": {"type": "string"}, "repositories": {"type": "array", "items": {"$ref": "#/$defs/AgentRepository"}}}},
     "AgentCreateParameters": {"type": "object", "additionalProperties": false, "required": ["name", "harness"], "properties": {"name": {"type": "string", "minLength": 1}, "harness": {"enum": ["claude", "codex", "pi", "omp", "opencode"]}, "host": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1}, "effort": {"type": "string", "minLength": 1}, "workspace": {"type": "string", "minLength": 1}, "repo": {"type": "string", "minLength": 1}, "base": {"type": "string", "minLength": 1}, "branch": {"type": "string", "minLength": 1}, "remove_at_run_end": {"type": "boolean"}, "description": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}},
-    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}}},
+    "AgentRetireParameters": {"type": "object", "additionalProperties": false, "required": ["agent", "reason"], "properties": {"agent": {"$ref": "#/$defs/Id"}, "reason": {"type": "string", "minLength": 1}, "successor": {"$ref": "#/$defs/Id"}, "expect_revision": {"type": "string", "minLength": 1}}},
     "MessageSendRefusal": {"oneOf": [
       {"type":"object", "required":["variant","recipient"], "properties":{"variant":{"const":"Retired"},"recipient":{"$ref":"#/$defs/Id"},"successor":{"$ref":"#/$defs/Id"},"transfer":{"type":"string"}}},
       {"type":"object", "required":["variant","recipient","reason"], "properties":{"variant":{"const":"LifecycleUnavailable"},"recipient":{"$ref":"#/$defs/Id"},"reason":{"enum":["unavailable","conflict"]}}}
