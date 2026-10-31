@@ -158,8 +158,8 @@ explicitly starts another onboarding run.
 Plain `st` opens the terminal interface. Now shows decisions, approvals, questions
 and failures that need the person. Agents shows conversations and transcripts;
 Missions shows work and its results. Ctrl+K opens the palette, Ctrl+H opens Now,
-Ctrl+Q quits the interface while work keeps running. Ctrl+] attaches to a selected
-agent's terminal and Ctrl+\ detaches. Raw terminal keys belong to the harness while
+Ctrl+Q quits the interface when detached while work keeps running. The Attach button opens
+an agent's terminal; Enter attaches a detached terminal pane. Ctrl+\ then c detaches. Raw terminal keys belong to the harness while
 attached. Use a choice or decision on Now for a person-only answer; do not leave
 questions solely in a harness terminal.
 
