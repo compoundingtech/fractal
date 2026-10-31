@@ -4490,10 +4490,11 @@ impl Ui {
                         Pane::Terminal(agent) => Some(format!("details:{agent}")),
                         _ => None,
                     });
-                    self.terminal_details_focused = key.is_some_and(|key| {
+                    let focused = key.is_some_and(|key| {
                         self.frame.borrow().panes.iter().any(|pane| pane.key == key)
                     });
-                    if !self.terminal_details_focused {
+                    self.focus_terminal_details(focused);
+                    if !focused {
                         self.flash("Agent details need a pane at least 120 columns wide");
                     }
                 }
@@ -5115,7 +5116,7 @@ mod tests {
             }
             ctrl(&mut ui, '\\');
             press(&mut ui, KeyCode::Char('d'), KeyModifiers::NONE);
-            assert_eq!(ui.terminal_details_focused, width >= 120);
+            assert_eq!(ui.terminal_details_focused.get(), width >= 120);
             ui.effects.clear();
             if width >= 120 {
                 press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
@@ -5125,7 +5126,7 @@ mod tests {
                 assert!(ui.effects.is_empty());
                 assert!(ui.input_terminal().is_none());
                 press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
-                assert!(!ui.terminal_details_focused);
+                assert!(!ui.terminal_details_focused.get());
                 assert!(ui.input_terminal().is_some());
             }
             press(&mut ui, KeyCode::Char('z'), KeyModifiers::NONE);
@@ -5144,11 +5145,11 @@ mod tests {
                 let details = ui.frame.borrow().panes.iter()
                     .find(|pane| pane.key == format!("details:{agent}")).unwrap().rect;
                 mouse(&mut ui, MouseEventKind::Down(MouseButton::Left), details.x, details.y);
-                assert!(ui.terminal_details_focused);
+                assert!(ui.terminal_details_focused.get());
                 ctrl(&mut ui, '\\');
                 press(&mut ui, KeyCode::Char('i'), KeyModifiers::NONE);
                 assert!(!ui.agent_details);
-                assert!(!ui.terminal_details_focused);
+                assert!(!ui.terminal_details_focused.get());
                 terminal.draw(|frame| ui.render(frame)).unwrap();
                 assert!(!ui.frame.borrow().panes.iter().any(|pane| pane.key.starts_with("details:")));
             }
@@ -5174,6 +5175,135 @@ mod tests {
             assert!(ui.frame.borrow().panes.iter().filter(|pane| pane.key.starts_with("details:"))
                 .all(|pane| pane.rect.x >= body.right()));
         }
+    }
+
+    struct DetailsTerminal {
+        ui: Ui,
+        terminal: Terminal<TestBackend>,
+        peer: std::os::unix::net::UnixStream,
+        packets: pty_core::protocol::PacketReader,
+    }
+
+    impl DetailsTerminal {
+        fn new() -> Self {
+            use std::io::Write as _;
+            use pty_core::protocol::{MessageType, PacketReader, encode_packet};
+            let mut ui = terminal_details_fixture();
+            let (client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            ui.terminal.as_mut().unwrap().native = Some(pty::NativeTerminal::spawn(
+                client, "agent/example/atlas/builder", "one".into(), 24, 200,
+            ));
+            peer.write_all(&encode_packet(
+                MessageType::Screen, b"\x1b[?1003h\x1b[?1006h\x1b[?1004h",
+            )).unwrap();
+            let mut fixture = Self {
+                ui, peer, packets: PacketReader::new(),
+                terminal: Terminal::new(TestBackend::new(140, 24)).unwrap(),
+            };
+            fixture.render(140);
+            assert!(fixture.sent().is_empty());
+            fixture
+        }
+
+        // A queued byte barrier is handled after initial replay and all earlier inputs.
+        // Blocking protocol reads synchronize the worker without sleeps or polling.
+        fn sent(&mut self) -> Vec<u8> {
+            use std::io::Read as _;
+            use pty_core::protocol::MessageType;
+            const BARRIER: &[u8] = b"details-test-barrier";
+            self.ui.native_terminal().unwrap().write(BARRIER.to_vec());
+            let mut data = Vec::new();
+            loop {
+                let mut bytes = [0; 1024];
+                let count = self.peer.read(&mut bytes).unwrap();
+                assert_ne!(count, 0);
+                for packet in self.packets.feed(&bytes[..count]).unwrap() {
+                    if packet.type_ == MessageType::Data { data.extend(packet.payload); }
+                }
+                if data.ends_with(BARRIER) {
+                    data.truncate(data.len() - BARRIER.len());
+                    return data;
+                }
+            }
+        }
+
+        fn render(&mut self, width: u16) {
+            self.terminal.backend_mut().resize(width, 24);
+            self.terminal.draw(|frame| self.ui.render(frame)).unwrap();
+        }
+
+        fn mouse(&mut self, kind: MouseEventKind, rect: Rect) {
+            self.ui.input_event(Event::Mouse(MouseEvent {
+                kind, column: rect.x + 1, row: rect.y + 1, modifiers: KeyModifiers::NONE,
+            }));
+        }
+
+        fn focus_details(&mut self) {
+            let details = self.ui.frame.borrow().panes.iter()
+                .find(|pane| pane.key.starts_with("details:")).unwrap().rect;
+            self.mouse(MouseEventKind::Down(MouseButton::Left), details);
+            self.mouse(MouseEventKind::Up(MouseButton::Left), details);
+            assert!(self.ui.terminal_details_focused.get());
+            assert_eq!(self.sent(), b"\x1b[O");
+        }
+    }
+
+    #[test]
+    fn terminal_details_own_mouse_motion_and_wheel_packets() {
+        let mut fixture = DetailsTerminal::new();
+        let body = fixture.ui.terminal_body.get().unwrap();
+        fixture.mouse(MouseEventKind::Moved, body);
+        assert!(fixture.sent().starts_with(b"\x1b[<35;"));
+        fixture.focus_details();
+        // The previous motion cache still names the program until another frame.
+        assert!(fixture.ui.frame.borrow().terminal_motion.is_some());
+        fixture.mouse(MouseEventKind::Moved, body);
+        fixture.mouse(MouseEventKind::ScrollUp, body);
+        assert!(fixture.sent().is_empty());
+        fixture.render(140);
+        assert!(fixture.ui.frame.borrow().terminal_motion.is_none());
+        fixture.mouse(MouseEventKind::Moved, body);
+        fixture.mouse(MouseEventKind::ScrollDown, body);
+        assert!(fixture.sent().is_empty());
+        fixture.mouse(MouseEventKind::Down(MouseButton::Left), body);
+        fixture.mouse(MouseEventKind::ScrollUp, body);
+        assert!(!fixture.sent().is_empty(), "clicking the program restores its mouse");
+    }
+
+    #[test]
+    fn terminal_details_resize_returns_native_focus_without_restoring_details_focus() {
+        let mut fixture = DetailsTerminal::new();
+        fixture.focus_details();
+        fixture.render(100);
+        assert!(!fixture.ui.terminal_details_focused.get());
+        assert_eq!(fixture.sent(), b"\x1b[I");
+        fixture.render(140);
+        assert!(!fixture.ui.terminal_details_focused.get());
+        assert!(fixture.sent().is_empty(), "widening must not restore details ownership");
+        fixture.ui.input_event(Event::Key(KeyCode::Char('z').into()));
+        assert_eq!(fixture.sent(), b"z");
+    }
+
+    #[test]
+    fn terminal_details_click_cancels_pending_and_expired_held_keys() {
+        let mut fixture = DetailsTerminal::new();
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        fixture.ui.input_event(Event::Key(key));
+        assert!(fixture.ui.terminal_hold.is_some());
+        fixture.focus_details();
+        assert!(fixture.ui.terminal_hold.is_none());
+        fixture.ui.terminal_hold = Some((key, Instant::now() - LEAVE_TAP));
+        fixture.ui.step_terminal_hold();
+        assert!(fixture.ui.terminal_hold.is_none());
+        assert!(fixture.sent().is_empty());
+        fixture.ui.terminal_hold = Some((key, Instant::now()));
+        fixture.ui.input_event(Event::Key(KeyCode::Char('z').into()));
+        assert!(fixture.sent().is_empty(), "the key-flush path also respects ownership");
+        fixture.ui.input_event(Event::Key(KeyCode::Esc.into()));
+        assert_eq!(fixture.sent(), b"\x1b[I");
+        fixture.ui.input_event(Event::Key(KeyCode::Char('z').into()));
+        assert_eq!(fixture.sent(), b"z");
     }
 
     fn press(ui: &mut Ui, code: KeyCode, modifiers: KeyModifiers) {

@@ -110,6 +110,9 @@ below their existing 90-column threshold instead of replacing the conversation.
 `Ctrl+\` then `d`, or clicking the details, gives them the keys: arrows/PageUp/PageDown
 scroll; `Esc` or `Tab` returns to terminal passthrough. Details links remain clickable.
 The details heading names the focus; no new raw terminal key is intercepted.
+Details focus also blocks program mouse motion and wheel input, and cancels a pending held
+terminal key. If resizing hides the details, focus returns to the program and stays there
+when the pane widens again.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
 conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
