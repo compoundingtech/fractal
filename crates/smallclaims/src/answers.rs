@@ -1,11 +1,9 @@
 //! What readers answer from each claim kind, summarized so two members can compare.
 //!
-//! A member that trims on its own deletes claims its peers may still hold, so members no longer
-//! hold the same claims and their envelope and claim digests stop agreeing. What must still agree
-//! is what a reader answers. For every kind a trim may touch, the answer for one key, a subject
-//! and the writer that wrote it, is the key's newest claim in canonical order; a trim never
-//! deletes it. So for each kind this summarizes the newest claim of every key, and two members
-//! whose summaries differ disagree about what some reader answers.
+//! Trimming can remove superseded claims, including a writer's newest claim when a slot spans
+//! writers. Claim inventories are diagnostics, not proof of reader disagreement. The runtime
+//! supplies folded reader values for retention slots; when both members supply such a reader,
+//! its values replace the corresponding kind's inventory comparison.
 //!
 //! The summary is taken at a cut, so members compare the same history while new claims arrive.
 //! A key counts only once its newest claim is older than the cut: a key with a newer claim is
@@ -15,19 +13,23 @@
 //! A key that gains a claim after the cut leaves the summary on each member when that claim
 //! arrives, so two members that compute at different times can differ only in such keys. The
 //! keys a narrowing lists therefore carry them too, marked `moving`, and a key moving on either
-//! member is no difference.
+//! member is no difference. A kept fold reader's answers learn of those claims as they are
+//! served: each subject with a claim at or after the cut by then moves, and the reader's digests
+//! are counted again without it, so two members that computed hours apart still agree.
 //!
 //! `keys` counts the keys a kind's digest covers and `claims` the kind's claims older than the
 //! cut. A member that trims holds fewer claims than one that does not, so callers compare
-//! `claims` only between members that trim the same way.
+//! `claims` only between members that trim the same way and have finished the same trims; see
+//! [`claims_compare`].
 //!
 //! Each key also falls in one of 256 buckets by a hash of the key, and each bucket has its own
 //! digest, so a difference narrows to a bucket and then to the keys in it without listing a kind.
 //!
-//! A summary reads every claim of every kind, one kind per statement, on a reader connection. On
-//! a store of three million claims that is about a minute and a half, so it is taken once a day
-//! and kept, never per request: [`AnswersCache`] computes on a thread of its own and answers
-//! `pending` until it has the answer.
+//! A summary reads every claim of every kind on a reader connection, a page of claims per
+//! statement, so no statement holds a read snapshot for long. On a store of three million claims
+//! that is ten minutes or more, so it is taken once a cut and kept, never per request:
+//! [`AnswersCache`] computes on a thread of its own, answers `pending` until it has the answer,
+//! and keeps the answer beside the store, so a restart serves it rather than computing again.
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -67,7 +69,28 @@ pub struct AnswersSummary {
     /// `claims` counts compare.
     #[serde(default)]
     pub trims_locally: bool,
+    /// The cut of the newest checkpoint the member finished trimming, and whether a trim of a
+    /// later one is unfinished; see [`claims_compare`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trimmed_cut_unix_ms: u128,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub trim_unfinished: bool,
     pub kinds: BTreeMap<String, KindAnswers>,
+}
+
+fn is_zero(value: &u128) -> bool {
+    *value == 0
+}
+
+/// Whether two summaries' `claims` counts compare: the members trim the same way, finished
+/// trimming the same checkpoint, and have no later trim unfinished. A trim deletes claims older
+/// than its cut, so a member that finished the day's trim before it computed counts fewer claims
+/// than one that finished it after, though both answer the same.
+pub fn claims_compare(ours: &AnswersSummary, theirs: &AnswersSummary) -> bool {
+    ours.trims_locally == theirs.trims_locally
+        && ours.trimmed_cut_unix_ms == theirs.trimmed_cut_unix_ms
+        && !ours.trim_unfinished
+        && !theirs.trim_unfinished
 }
 
 /// One key's answer: the newest claim of `kind` that `origin` wrote about `subject`.
@@ -132,6 +155,8 @@ pub fn bucket(subject: &str, origin: &str) -> usize {
 
 /// The claims that share one key's newest accepted time, and that time.
 type Newest = (u128, Vec<String>);
+/// A key's newest claims, and its newest claims older than the cut.
+type KeyClaims = (Option<Newest>, Option<Newest>);
 
 fn newer(newest: &mut Option<Newest>, accepted: u128, id: &str) {
     match newest {
@@ -179,48 +204,66 @@ fn each_answer(
     connection: &Connection,
     kind: &str,
     cut_unix_ms: u128,
+    visit: impl FnMut(AnswerKey, Option<String>) -> Result<()>,
+) -> Result<u64> {
+    each_answer_in_pages(connection, kind, cut_unix_ms, PAGE, visit)
+}
+
+/// Claims read per statement. A statement holds its read snapshot until it finishes, and while
+/// any snapshot is open the WAL cannot restart, so a statement reads one page in index order.
+const PAGE: i64 = 10_000;
+
+fn each_answer_in_pages(
+    connection: &Connection,
+    kind: &str,
+    cut_unix_ms: u128,
+    page: i64,
     mut visit: impl FnMut(AnswerKey, Option<String>) -> Result<()>,
 ) -> Result<u64> {
     let mut statement = connection.prepare_cached(
-        "SELECT subject, origin, id, accepted_at_unix_ms FROM claims INDEXED BY claims_kind_index
-         WHERE kind=?1 ORDER BY subject, origin",
+        "SELECT store_index, subject, origin, id, accepted_at_unix_ms FROM claims INDEXED BY claims_kind_index
+         WHERE kind=?1 AND store_index>?2 ORDER BY store_index LIMIT ?3",
     )?;
     let repaired = repaired_claims(connection)?;
-    let mut rows = statement.query([kind])?;
     let mut claims = 0;
-    // The current key, its newest claims, and its newest claims older than the cut.
-    let mut current: Option<(String, String, Option<Newest>, Option<Newest>)> = None;
-    let mut finish = |key: Option<(String, String, Option<Newest>, Option<Newest>)>| -> Result<()> {
-        let Some((subject, origin, Some((accepted, newest)), before)) = key else { return Ok(()) };
+    // Each key's claims. A key's claims can fall in different pages, so every key is finished
+    // after the last page.
+    let mut keys: BTreeMap<(String, String), KeyClaims> = BTreeMap::new();
+    let mut after = 0_i64;
+    loop {
+        let mut rows = statement.query(rusqlite::params![kind, after, page])?;
+        let mut read = 0;
+        while let Some(row) = rows.next()? {
+            read += 1;
+            after = row.get(0)?;
+            let id: String = row.get(3)?;
+            if repaired.contains(&id) {
+                continue;
+            }
+            let accepted: u128 = row
+                .get::<_, String>(4)?
+                .parse()
+                .with_context(|| format!("claim {id} has an unreadable acceptance time"))?;
+            let (newest, before) = keys.entry((row.get(1)?, row.get(2)?)).or_default();
+            newer(newest, accepted, &id);
+            if accepted < cut_unix_ms {
+                claims += 1;
+                newer(before, accepted, &id);
+            }
+        }
+        if read < page {
+            break;
+        }
+    }
+    for ((subject, origin), (newest, before)) in keys {
+        let Some((accepted, newest)) = newest else { continue };
         let before = before.map(|(_, ids)| pick(connection, ids)).transpose()?;
         let claim = match &before {
             Some(before) if accepted < cut_unix_ms => before.clone(),
             _ => pick(connection, newest)?,
         };
-        visit(AnswerKey { subject, origin, claim, moving: accepted >= cut_unix_ms }, before)
-    };
-    while let Some(row) = rows.next()? {
-        let subject: String = row.get(0)?;
-        let origin: String = row.get(1)?;
-        let id: String = row.get(2)?;
-        if repaired.contains(&id) {
-            continue;
-        }
-        let accepted: u128 = row
-            .get::<_, String>(3)?
-            .parse()
-            .with_context(|| format!("claim {id} has an unreadable acceptance time"))?;
-        if !matches!(&current, Some((key_subject, key_origin, ..)) if *key_subject == subject && *key_origin == origin) {
-            finish(current.replace((subject, origin, None, None)))?;
-        }
-        let (_, _, newest, before) = current.as_mut().expect("the current key");
-        newer(newest, accepted, &id);
-        if accepted < cut_unix_ms {
-            claims += 1;
-            newer(before, accepted, &id);
-        }
+        visit(AnswerKey { subject, origin, claim, moving: accepted >= cut_unix_ms }, before)?;
     }
-    finish(current)?;
     Ok(claims)
 }
 
@@ -280,7 +323,7 @@ pub fn summary(connection: &Connection, cut_unix_ms: u128) -> Result<AnswersSumm
         let answers = kind_answers(connection, &kind, cut_unix_ms)?;
         kinds_answers.insert(kind, answers);
     }
-    Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, trims_locally: false, kinds: kinds_answers })
+    Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, kinds: kinds_answers, ..AnswersSummary::default() })
 }
 
 /// Kinds named with this prefix are fold readers' answers, not claim kinds; see [`FoldReaders`].
@@ -293,6 +336,10 @@ pub const READER_PREFIX: &str = "reader/";
 /// key per subject they answer for, `origin` empty and `claim` a digest of the answer, in key
 /// order, and a `moving` key for each subject with a claim at or after the cut. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
 pub type FoldReaders = Arc<dyn Fn(&Connection, u128) -> Result<BTreeMap<String, Vec<AnswerKey>>> + Send + Sync>;
+
+/// Explicit (reader kind, subject, slot) keys that moved after a kept summary's cut.
+pub type ReaderMoves = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+pub type ReaderMovement = Arc<dyn Fn(&Connection, &BTreeSet<String>, u128) -> Result<ReaderMoves> + Send + Sync>;
 
 /// A fold reader's answers as a kind: its summary entry, and every key with its bucket digests.
 pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (String, KindAnswers, KindBuckets) {
@@ -379,6 +426,14 @@ pub fn differing_kinds(
     kinds
         .into_iter()
         .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
+        .filter(|kind| {
+            let replacement = format!("{READER_PREFIX}slots/{kind}");
+            !(ours.kinds.contains_key(&replacement) && theirs.kinds.contains_key(&replacement))
+        })
+        .filter(|kind| {
+            !kind.starts_with("reader/slots/")
+                || (ours.kinds.contains_key(*kind) && theirs.kinds.contains_key(*kind))
+        })
         .filter_map(|kind| {
             let (a, b) = (ours.kinds.get(kind), theirs.kinds.get(kind));
             // A member that holds no claim of a kind answers as one that counts none of its keys.
@@ -440,8 +495,24 @@ pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDiffer
 impl Store {
     /// Every kind's answers at a cut; see the module documentation for its cost.
     pub fn answers_summary(&self, cut_unix_ms: u128) -> Result<AnswersSummary> {
-        let mut summary = summary(&self.readers.get(), cut_unix_ms)?;
+        let connection = self.readers.get();
+        // The newest trimmed cut and the newest unfinished one, before and after the pass, so a
+        // trim that starts or finishes during it counts as unfinished.
+        let trims = || -> Result<(i64, i64)> {
+            Ok(connection.query_row(
+                "SELECT COALESCE(MAX(CASE WHEN state='trimmed' THEN cut_unix_ms END), 0),
+                        COALESCE(MAX(CASE WHEN state IN ('trimming', 'set-aside') THEN cut_unix_ms END), 0)
+                 FROM checkpoints",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        };
+        let before = trims()?;
+        let mut summary = summary(&connection, cut_unix_ms)?;
+        let (trimmed, unfinished) = trims()?;
         summary.trims_locally = self.trims_locally();
+        summary.trimmed_cut_unix_ms = u128::try_from(trimmed)?;
+        summary.trim_unfinished = unfinished > trimmed || before != (trimmed, unfinished);
         Ok(summary)
     }
 
@@ -517,23 +588,27 @@ impl AnswersReply {
     }
 }
 
-/// How long a computed answer serves requests. A check that found a difference asks again after
-/// longer than this, so both members compute again and count claims that arrived late.
+/// How long a claim kind's every key serves the requests that narrow it. A check that found a
+/// difference narrows again after longer than this, so both members read the kind again.
 pub const ANSWERS_FRESH: Duration = Duration::from_secs(20 * 60);
 /// The kinds whose every key is kept at once, for the bucket requests that narrow a difference.
 const KEPT_KINDS: usize = 8;
 
-/// Answers computed off the request path and kept for [`ANSWERS_FRESH`]: the summary at one cut,
-/// and every key of the few kinds a check is narrowing.
+/// Answers computed off the request path: the summary at one cut, kept until the cut changes and
+/// beside the store across restarts, and every key of the few kinds a check is narrowing, kept for
+/// [`ANSWERS_FRESH`].
 #[derive(Default)]
 pub struct AnswersCache {
     state: Mutex<CacheState>,
     readers: Mutex<Option<FoldReaders>>,
+    movement: Mutex<Option<ReaderMovement>>,
 }
 
 #[derive(Default)]
 struct CacheState {
-    summary: Option<(Instant, AnswersSummary)>,
+    summary: Option<AnswersSummary>,
+    /// The newest claim the summary has seen admitted; see [`still_current`].
+    summary_mark: i64,
     kinds: Vec<(Instant, KindBuckets)>,
     /// Every fold reader's keys at the summary's cut, kept apart so narrowing a claim kind never
     /// evicts them.
@@ -542,14 +617,147 @@ struct CacheState {
 }
 
 enum Computed {
-    Summary(AnswersSummary, Vec<KindBuckets>),
+    Summary(AnswersSummary, Vec<KindBuckets>, i64),
+    Kept(AnswersSummary, Vec<KindBuckets>, i64),
     Kind(KindBuckets),
+}
+
+/// The summary a store keeps beside it, with every fold reader's keys, the build that computed
+/// them and the newest claim admitted when it started. A restart serves it while it is current;
+/// a new build computes again, in case it answers differently.
+#[derive(Serialize, Deserialize)]
+struct Kept {
+    build: String,
+    summary: AnswersSummary,
+    readers: Vec<KindBuckets>,
+    mark: i64,
+}
+
+/// The store index of the newest claim admitted.
+fn newest_claim(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row("SELECT COALESCE(MAX(store_index), 0) FROM claims", [], |row| row.get(0))?)
+}
+
+/// The newest claim admitted, unless a claim older than the cut was admitted after `mark`, so a
+/// summary computed when `mark` was newest lacks it. A claim keeps the time its origin accepted
+/// it, so a member that was offline replays claims older than the cut long after it; a claim
+/// accepted after the cut only moves its key. The claims after `mark` are a short range of the
+/// primary key, and the mark moves up each time nothing older arrived.
+fn still_current(connection: &Connection, mark: i64, cut_unix_ms: u128) -> Result<Option<i64>> {
+    let newest = newest_claim(connection)?;
+    let late: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE store_index>?1 AND store_index<=?2
+             AND CAST(accepted_at_unix_ms AS INTEGER)<?3)",
+        rusqlite::params![mark, newest, i64::try_from(cut_unix_ms)?],
+        |row| row.get(0),
+    )?;
+    Ok((!late).then_some(newest))
+}
+
+/// The subjects of `subjects` with a claim accepted at or after the cut by now. A fold reader's
+/// key moves when any claim of its subject does, so a reader kept since before such a claim
+/// arrived still counts the subject a member computing now leaves out. One index read a subject.
+fn moved_since(connection: &Connection, subjects: &BTreeSet<String>, cut_unix_ms: u128) -> Result<BTreeSet<String>> {
+    let mut newest = connection.prepare_cached(
+        "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_subject_accepted_index WHERE subject=?1
+         ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC LIMIT 1",
+    )?;
+    let mut moved = BTreeSet::new();
+    for subject in subjects {
+        let accepted: Option<String> = newest.query([subject])?.next()?.map(|row| row.get(0)).transpose()?;
+        if accepted.is_some_and(|accepted| accepted.parse::<u128>().map_or(true, |accepted| accepted >= cut_unix_ms)) {
+            moved.insert(subject.clone());
+        }
+    }
+    Ok(moved)
+}
+
+/// Where `store` keeps its summary: beside its database, and nowhere for a store in memory.
+fn kept_path(store: &Store) -> Option<std::path::PathBuf> {
+    let mut path = store.path.clone().into_os_string();
+    path.push(".answers.json");
+    (!store.shared_memory).then(|| path.into())
+}
+
+/// The summary `store` kept at `cut`, if this build computed it as the store trims now.
+fn kept(store: &Store, cut_unix_ms: u128) -> Option<Kept> {
+    let kept: Kept = serde_json::from_slice(&std::fs::read(kept_path(store)?).ok()?).ok()?;
+    (kept.build == crate::store::checkpoint_agreement::checkpoint_build()
+        && kept.summary.cut_unix_ms == cut_unix_ms
+        && kept.summary.trims_locally == store.trims_locally())
+    .then_some(kept)
+}
+
+/// Keep `summary` beside `store`, replacing the summary it kept at an earlier cut.
+fn keep(store: &Store, summary: &AnswersSummary, readers: &[KindBuckets], mark: i64) -> Result<()> {
+    use std::io::Write as _;
+    let Some(path) = kept_path(store) else { return Ok(()) };
+    let kept = Kept {
+        build: crate::store::checkpoint_agreement::checkpoint_build(),
+        summary: summary.clone(),
+        readers: readers.to_vec(),
+        mark,
+    };
+    let mut written = path.clone().into_os_string();
+    written.push(".new");
+    // Readable by the store's owner only, as the store is; a mode applies only to a new file.
+    let _ = std::fs::remove_file(&written);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&written).with_context(|| format!("writing {}", path.display()))?;
+    file.write_all(&serde_json::to_vec(&kept)?).with_context(|| format!("writing {}", path.display()))?;
+    std::fs::rename(&written, &path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+impl CacheState {
+    /// The subjects the kept fold readers still count.
+    fn counted_subjects(&self) -> BTreeSet<String> {
+        self.readers
+            .iter()
+            .flat_map(|every| every.keys.iter().filter(|key| !key.moving).map(|key| key.subject.clone()))
+            .collect()
+    }
+
+    /// Mark every key of a `moved` subject moving in the kept fold readers, and count each reader
+    /// that had one again, in the summary as in its buckets.
+    fn remark_moving(&mut self, moved: &BTreeSet<String>, slots: &ReaderMoves) {
+        let Some(summary) = self.summary.as_mut() else { return };
+        for every in &mut self.readers {
+            let moves = |key: &AnswerKey| {
+                if every.kind.starts_with("reader/slots/") {
+                    slots.get(&every.kind).and_then(|keys| keys.get(&key.subject))
+                        .is_some_and(|slots| slots.contains(&key.origin))
+                } else {
+                    moved.contains(&key.subject)
+                }
+            };
+            if !every.keys.iter().any(|key| !key.moving && moves(key)) {
+                continue;
+            }
+            for key in every.keys.iter_mut().filter(|key| moves(key)) {
+                key.moving = true;
+                key.claim.clear();
+            }
+            let name = every.kind.strip_prefix(READER_PREFIX).unwrap_or(&every.kind).to_owned();
+            let (kind, answers, buckets) = reader_answers(&name, every.cut_unix_ms, std::mem::take(&mut every.keys));
+            summary.kinds.insert(kind, answers);
+            *every = buckets;
+        }
+    }
 }
 
 impl AnswersCache {
     /// Cover these fold readers' answers in every summary from now on.
     pub fn set_readers(&self, readers: FoldReaders) {
         *self.readers.lock().unwrap_or_else(PoisonError::into_inner) = Some(readers);
+    }
+
+    /// Track runtime-defined retention slots without moving unrelated slots of the same subject.
+    pub fn set_reader_movement(&self, movement: ReaderMovement) {
+        *self.movement.lock().unwrap_or_else(PoisonError::into_inner) = Some(movement);
     }
 
     /// Answer `request` from what is kept, or answer `pending` and start computing it on a thread
@@ -560,23 +768,52 @@ impl AnswersCache {
     {
         let fresh = |at: &Instant| at.elapsed() < ANSWERS_FRESH;
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
+            let mark = state.summary_mark;
+            let counted = state.counted_subjects();
+            drop(state);
+            let store: &Store = (**store).borrow();
+            let current = still_current(&store.readers.get(), mark, request.cut_unix_ms);
+            let moved = moved_since(&store.readers.get(), &counted, request.cut_unix_ms);
+            let slots = self.movement.lock().unwrap_or_else(PoisonError::into_inner).clone()
+                .map(|movement| movement(&store.readers.get(), &counted, request.cut_unix_ms))
+                .unwrap_or_else(|| Ok(ReaderMoves::new()));
+            state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms) {
+                match moved.and_then(|moved| Ok((moved, slots?))) {
+                    Ok((moved, slots)) => state.remark_moving(&moved, &slots),
+                    Err(error) => eprintln!("st3: answers at {}: moving keys could not be read: {error:#}", request.cut_unix_ms),
+                }
+            }
+            match current {
+                Ok(Some(newest)) => state.summary_mark = state.summary_mark.max(newest),
+                Ok(None) => {
+                    eprintln!(
+                        "st3: answers at {}: a claim older than the cut arrived since they were computed; \
+                         computing them again",
+                        request.cut_unix_ms
+                    );
+                    state.summary = None;
+                    state.readers.clear();
+                }
+                Err(error) => eprintln!("st3: answers at {} could not be checked: {error:#}", request.cut_unix_ms),
+            }
+        }
         match &request.kind {
             None => {
-                if let Some((at, summary)) = &state.summary
-                    && fresh(at)
+                if let Some(summary) = &state.summary
                     && summary.cut_unix_ms == request.cut_unix_ms
                 {
                     return AnswersReply { summary: Some(summary.clone()), ..AnswersReply::default() };
                 }
             }
             Some(kind) => {
-                let summary_fresh = state.summary.as_ref().is_some_and(|(at, summary)| {
-                    fresh(at) && summary.cut_unix_ms == request.cut_unix_ms
-                });
+                let summary_kept =
+                    state.summary.as_ref().is_some_and(|summary| summary.cut_unix_ms == request.cut_unix_ms);
                 let mut kept = state
                     .readers
                     .iter()
-                    .filter(|_| summary_fresh)
+                    .filter(|_| summary_kept)
                     .chain(state.kinds.iter().filter(|(at, _)| fresh(at)).map(|(_, every)| every));
                 if let Some(every) =
                     kept.find(|every| every.kind == *kind && every.cut_unix_ms == request.cut_unix_ms)
@@ -592,7 +829,7 @@ impl AnswersCache {
                         ..AnswersReply::default()
                     };
                 }
-                if summary_fresh && kind.starts_with(READER_PREFIX) {
+                if summary_kept && kind.starts_with(READER_PREFIX) {
                     // A reader this member does not run answers for nothing.
                     return AnswersReply {
                         buckets: Some(KindBuckets {
@@ -621,6 +858,16 @@ impl AnswersCache {
             let store: &Store = (*store).borrow();
             let computed = crate::task_cpu::blocking("replication.answers", || match &kind {
                 None => {
+                    if let Some(kept) = kept(store, cut) {
+                        match still_current(&store.readers.get(), kept.mark, cut)? {
+                            Some(newest) => return Ok(Computed::Kept(kept.summary, kept.readers, newest)),
+                            None => eprintln!(
+                                "st3: answers at {cut}: a claim older than the cut arrived since they were kept; \
+                                 computing them again"
+                            ),
+                        }
+                    }
+                    let mark = newest_claim(&store.readers.get())?;
                     let mut summary = store.answers_summary(cut)?;
                     let mut every = Vec::new();
                     if let Some(readers) = &readers {
@@ -630,23 +877,35 @@ impl AnswersCache {
                             every.push(buckets);
                         }
                     }
-                    Ok(Computed::Summary(summary, every))
+                    Ok(Computed::Summary(summary, every, mark))
                 }
                 Some(kind) => store
                     .answer_buckets(kind, cut, &(0..BUCKETS).collect())
                     .map(Computed::Kind),
             });
+            if let Ok(Computed::Summary(summary, readers, mark)) = &computed
+                && let Err(error) = keep(store, summary, readers, *mark)
+            {
+                eprintln!("st3: answers at {cut} could not be kept: {error:#}");
+            }
             let mut state = cache.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.computing.remove(&(cut, kind.clone()));
             match computed {
-                Ok(Computed::Summary(summary, readers)) => {
+                Ok(Computed::Summary(summary, readers, mark)) => {
                     eprintln!(
                         "st3: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
                         started.elapsed().as_secs(),
                         summary.kinds.len(),
                         readers.len()
                     );
-                    state.summary = Some((Instant::now(), summary));
+                    state.summary = Some(summary);
+                    state.summary_mark = mark;
+                    state.readers = readers;
+                }
+                Ok(Computed::Kept(summary, readers, mark)) => {
+                    eprintln!("st3: answers at {cut} kept from an earlier run: {} kinds", summary.kinds.len());
+                    state.summary = Some(summary);
+                    state.summary_mark = mark;
                     state.readers = readers;
                 }
                 Ok(Computed::Kind(every)) => {
@@ -677,6 +936,58 @@ impl KindBuckets {
             cut_unix_ms: self.cut_unix_ms,
             buckets: self.buckets.clone(),
             keys: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// The columns a kind's answers read.
+    fn fixture(claims: &[(u8, u8, u16)]) -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE claims(store_index INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE,
+                     subject TEXT, kind TEXT, origin TEXT, accepted_at_unix_ms TEXT);
+                 CREATE INDEX claims_kind_index ON claims(kind, store_index);
+                 CREATE TABLE projection_digest_repaired_claims(id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+        for (n, (subject, origin, at)) in claims.iter().enumerate() {
+            // Distinct times, so no two claims of a key tie.
+            let accepted = u64::from(*at) * 1_000 + n as u64;
+            connection
+                .execute(
+                    "INSERT INTO claims(id, subject, kind, origin, accepted_at_unix_ms) VALUES (?1, ?2, 'example.state', ?3, ?4)",
+                    rusqlite::params![format!("claim-{n}"), format!("item/{subject}"), format!("node-{origin}"), accepted.to_string()],
+                )
+                .unwrap();
+        }
+        connection
+    }
+
+    fn answers(connection: &Connection, cut: u128, page: i64) -> (u64, Vec<(AnswerKey, Option<String>)>) {
+        let mut keys = Vec::new();
+        let claims = each_answer_in_pages(connection, "example.state", cut, page, |key, before| {
+            keys.push((key, before));
+            Ok(())
+        })
+        .unwrap();
+        (claims, keys)
+    }
+
+    proptest! {
+        #[test]
+        fn a_kind_read_in_pages_answers_as_it_does_in_one(
+            claims in proptest::collection::vec((0u8..6, 0u8..3, 0u16..100), 0..60),
+            cut in 0u128..110_000,
+            page in 1i64..8,
+        ) {
+            let connection = fixture(&claims);
+            prop_assert_eq!(answers(&connection, cut, page), answers(&connection, cut, PAGE));
         }
     }
 }

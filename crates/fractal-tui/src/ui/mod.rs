@@ -56,6 +56,7 @@ pub mod screens;
 pub mod text;
 pub mod theme;
 mod objectives;
+mod triage;
 mod usage;
 mod voice;
 // The live client fills the variants and fields the demo does not use.
@@ -155,6 +156,8 @@ struct FrameInfo {
     glass_sidebar: Rect,
     /// Glasses: where each group's content was drawn, in group order.
     glass_leaves: Vec<Rect>,
+    /// Glasses: each group's tab strip as drawn, with its group, for the wheel.
+    glass_strips: Vec<(Rect, usize)>,
     /// The borders between a glass's splits, as drawn, to drag.
     glass_dividers: Vec<layout::Divider>,
     /// Glasses: where Home was drawn over the glass, while it is open.
@@ -389,6 +392,9 @@ const DRAFTS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct Ui {
     world: World,
+    /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
+    pub(super) keyboard_enhanced: bool,
+    triage: triage::Cursor,
     /// Each list's selection, by the section it lists (Now, Agents, Missions, Fleet, Usage,
     /// Worktrees). Which list has the keys is never stored: `tab()` reads it off the screen.
     selected: [usize; 6],
@@ -507,6 +513,14 @@ pub struct Ui {
     /// The options chosen so far on each harness question alert, by question, before sending: by
     /// the alert and its exact question call (`alerts::question_key`).
     question_choices: HashMap<String, std::collections::BTreeMap<usize, BTreeSet<usize>>>,
+    /// Where each prompt alert's form has its mark, once the person moved it.
+    prompt_marks: HashMap<String, usize>,
+    /// The prompt alert whose form has the keys (Ctrl+N in a conversation, `a` in Inbox).
+    prompt_keys: Option<String>,
+    /// The first digit typed on a form of ten or more rows, waiting for a second (or Enter).
+    prompt_digit: Option<(String, usize)>,
+    /// Each alert's band card from the last frame, with a hash of what it was drawn from.
+    band_cards: RefCell<HashMap<(String, usize, alerts::Place), alerts::KeptCard>>,
     /// The spaces: named layouts of tabs and split panes, the Ctrl+S sidebar, the palette, and
     /// Now and Usage floating over them. Fractal TUI has no other layout.
     pub(crate) glasses: glass::Glasses,
@@ -764,6 +778,8 @@ impl Ui {
             tab_statuses: glass::TabStatuses::new(&world, &HashSet::new(), &HashSet::new()),
             world,
             selected: [0; 6],
+            keyboard_enhanced: false,
+            triage: triage::Cursor::default(),
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
             conversation_state: fractal_conversation_ui::State::default(),
@@ -826,6 +842,10 @@ impl Ui {
             drafts_backoff: None,
             alerts_open: HashSet::new(),
             question_choices: HashMap::new(),
+            prompt_marks: HashMap::new(),
+            prompt_keys: None,
+            prompt_digit: None,
+            band_cards: RefCell::new(HashMap::new()),
             // A space kept in memory only; the live loop and the demo open the device's own.
             glasses: glass::Glasses::open(None, None),
             build: false,
@@ -891,6 +911,10 @@ impl Ui {
                     None => "closed, x clears it".into(),
                 });
                 kept.actions.clear();
+                // A closed prompt waits for nothing: its form offers no answer.
+                if let AttentionKind::Prompt { answers, .. } = &mut kept.kind {
+                    answers.clear();
+                }
             }
             items.push(kept);
         }
@@ -960,6 +984,23 @@ impl Ui {
             && !id.starts_with("terminal/")
         {
             targets.push(id);
+        }
+        // A prompt's card in Inbox shows the call it asks about, which is in its seat's
+        // conversation: follow that one too, or Inbox could offer only what needs no reading.
+        if self.inbox_in_view()
+            && let Some(seat) = self.attention_focus().and_then(|id| {
+                self.world.attention.items().iter().find_map(|item| match &item.kind {
+                    AttentionKind::Prompt { seat_id, answers, .. }
+                        if item.id == id && !answers.is_empty() =>
+                    {
+                        Some(seat_id.clone())
+                    }
+                    _ => None,
+                })
+            })
+            && !targets.contains(&seat)
+        {
+            targets.push(seat);
         }
         for id in self.glasses.shown_agents() {
             if !targets.contains(&id) {
@@ -1087,11 +1128,15 @@ impl Ui {
     pub(crate) fn toggle_conversation_first(&mut self) {
         self.conversation_first = Some(!self.conversation_first());
         self.save_prefs();
-        self.flash(if self.conversation_first() {
-            "Conversation first: agents open on their conversation · Ctrl+] attaches the terminal"
+        let said = if self.conversation_first() {
+            format!(
+                "Conversation first: agents open on their conversation · {} opens the terminal",
+                screens::terminal_route()
+            )
         } else {
-            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation"
-        });
+            "Agents attach their terminal when opened · Ctrl+\\ c shows the conversation".to_owned()
+        };
+        self.flash(said);
     }
 
     /// Whether this device opens agents on their conversation instead of attaching.
@@ -1102,7 +1147,7 @@ impl Ui {
     /// Attach the terminal of an agent just opened whose tab has been in front for a moment,
     /// unless this device opens agents on their conversation. An agent without a terminal (a
     /// session st did not start, a harness with none) stays on its conversation, and nothing is
-    /// said; Ctrl+] decides the same way.
+    /// said; the Attach button decides the same way.
     pub(crate) fn step_default_view(&mut self) {
         let Some((id, at)) = &self.attach_when else {
             return;
@@ -1123,7 +1168,7 @@ impl Ui {
             .iter()
             .any(|agent| agent.id == id && agent.terminal);
         if still_here && !attached && !self.editing && !self.conversation_first() && has_terminal {
-            // The tab turns into the terminal, as Ctrl+] does; Ctrl+\ turns it back.
+            // The tab turns into the terminal; Ctrl+\ turns it back.
             self.open_terminal();
         }
     }
@@ -2391,6 +2436,8 @@ impl Ui {
                 })
             }),
             chat,
+            // In Inbox the draft's key is the alert's id: no listing is built for it per frame.
+            form: self.form_state(key),
         }
     }
 
@@ -2791,15 +2838,16 @@ impl Ui {
         // What waits on the person in this conversation is one line above the box, a card only
         // when asked for. The box keeps its place and its size either way: the band takes its
         // rows from the conversation and never more than three fifths of the pane.
+        let room = (area
+            .height
+            .saturating_sub(header_height + composer_height + 4) as usize)
+            .min((area.height as usize * 3 / 5).max(1));
         let mut band = if agent.unmanaged || find.is_some() {
             Vec::new()
         } else {
-            self.alert_band(&agent.id, area.width as usize)
+            self.alert_band(&agent.id, area.width as usize, room, alerts::Place::Band)
         };
-        let room = area
-            .height
-            .saturating_sub(header_height + composer_height + 4) as usize;
-        band.truncate(room.min((area.height as usize * 3 / 5).max(1)));
+        band.truncate(room);
         let band_height = band.len() as u16;
         let body = Rect {
             y: area.y + header_height,
@@ -2826,6 +2874,11 @@ impl Ui {
         for (offset, row) in band.iter().enumerate() {
             let y = body.y + body.height + offset as u16;
             buf.set_line(area.x, y, &row.line, area.width);
+            if let Some((column, edge)) = &row.edge
+                && *column < area.width
+            {
+                buf.set_span(area.x + column, y, edge, area.width - column);
+            }
             for (column, width, hit) in &row.hits {
                 self.hit(
                     Rect {
@@ -3255,13 +3308,13 @@ impl Ui {
             buf.set_stringn(
                 area.x,
                 area.y + 1,
-                " Not attached. Ctrl+] attaches the terminal; Ctrl+\\ opens the leader list.",
+                " Not attached. Enter attaches the terminal; Ctrl+\\ opens the leader list.",
                 area.width as usize,
                 theme::dim(),
             );
             if area.height > 3 {
                 let mut doc = Doc::new();
-                doc.buttons(&[("Ctrl+]", "Attach", Hit::Attach, theme::ACCENT)]);
+                doc.buttons(&[("Enter", "Attach", Hit::Attach, theme::ACCENT)]);
                 let button = Rect::new(
                     area.x + 1,
                     area.y + 3,
@@ -3435,8 +3488,9 @@ impl Ui {
         if !agent.starts_with("agent/") || area.height < 6 {
             return 0;
         }
-        let mut band = self.alert_band(agent, area.width as usize);
-        band.truncate((area.height as usize / 2).max(1));
+        let room = (area.height as usize / 2).max(1);
+        let mut band = self.alert_band(agent, area.width as usize, room, alerts::Place::Terminal);
+        band.truncate(room);
         for (offset, row) in band.iter().enumerate() {
             let y = area.y + 1 + offset as u16;
             buf.set_style(
@@ -3707,6 +3761,17 @@ impl Ui {
                 None,
             ));
         }
+        // Tab badges are a compact form: the activity before the title, then what waits on you.
+        marks.lines(text::wrap(
+            &[text::run(
+                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts",
+                theme::soft(),
+            )],
+            column,
+            &[text::run("    ", theme::dim())],
+            &[text::run("    ", theme::dim())],
+            None,
+        ));
         marks.blank();
         let mut left = Doc::new();
         keys(
@@ -3722,6 +3787,13 @@ impl Ui {
                     "ctrl+h",
                     "open or focus Inbox (in a text box it is backspace)",
                 ),
+                ("ctrl+\\ [ ]", "back, forward across spaces"),
+                (
+                    "ctrl+[ ]",
+                    "back, forward (enhanced keyboard; not in terminals)",
+                ),
+                ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
+                ("ctrl+\\ l", "previous triage item, including in terminals"),
                 ("q", "quit"),
             ],
         );
@@ -3756,7 +3828,7 @@ impl Ui {
                 ),
                 ("t", "Agents, Missions: the path tree or the groups"),
                 ("x", "Missions: show Fractal's own missions"),
-                ("n", "Agents: a new agent; Missions: a new mission"),
+                ("n", "Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
                 ("x", "Inbox: dismiss a request, update or message"),
                 (
@@ -3764,6 +3836,12 @@ impl Ui {
                     "Usage: group by agent, mission, step...; change the period",
                 ),
             ],
+        );
+        let actions_keys = format!("ctrl+{}", screens::ACTIONS_CHORD);
+        let terminal_keys = format!("{actions_keys} {} · enter", screens::TERMINAL_ACTION);
+        let terminal_what = format!(
+            "{} attaches the agent's terminal; Enter (or the Attach button) attaches a detached terminal pane; Ctrl+T twice leaves it",
+            screens::terminal_route()
         );
         keys(
             &mut right,
@@ -3775,7 +3853,7 @@ impl Ui {
                 ("ctrl+f", "find in this conversation"),
                 ("ctrl+r", "retry opening a failed conversation (outside the message box)"),
                 (
-                    "ctrl+a",
+                    actions_keys.as_str(),
                     "the agent's actions: restart, suspend, retire, terminal…",
                 ),
                 (
@@ -3798,10 +3876,7 @@ impl Ui {
                     "ctrl+\\",
                     "the leader, in a terminal too: a list of what to press next; Ctrl+\\ again closes the tab, c shows the conversation",
                 ),
-                (
-                    "ctrl+]  ctrl+t ctrl+t",
-                    "attach the agent's terminal; Ctrl+T twice leaves it for the conversation",
-                ),
+                (terminal_keys.as_str(), terminal_what.as_str()),
                 (
                     "opening an agent",
                     "attaches its terminal; \"Conversation first\" in the palette (ctrl+k) opens the conversation instead, on this device",
@@ -4235,6 +4310,21 @@ impl Ui {
             return;
         }
         self.sync_terminal_slot();
+        if !self.terminal_focused() && self.navigation_key(key) {
+            return;
+        }
+        if !self.terminal_focused()
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            && matches!(key.code, KeyCode::Char('l' | 'L'))
+        {
+            self.triage_next(
+                !(self.keyboard_enhanced && key.modifiers.contains(KeyModifiers::SHIFT)),
+            );
+            return;
+        }
         // Retrying a failed initial attach uses the same path as opening its terminal.
         if self.terminal_focused()
             && key.code == KeyCode::Char('r')
@@ -4279,6 +4369,33 @@ impl Ui {
             } else {
                 self.confirm = None;
             }
+            return;
+        }
+        // A prompt's form with the keys takes them, and Ctrl+N gives them to it or takes them
+        // back: in a conversation it expands the band in place, in Inbox it is the selected card.
+        if !self.terminal_focused() {
+            if self.form_key(key) {
+                return;
+            }
+            if key.code == KeyCode::Char('n')
+                && key.modifiers == KeyModifiers::CONTROL
+                && (self.inbox_in_view() || self.conversation_here().is_some())
+            {
+                self.toggle_form_keys();
+                return;
+            }
+        }
+        if key.code == KeyCode::Enter
+            && key.modifiers == KeyModifiers::NONE
+            && !self.terminal_focused()
+            && matches!(self.focused_pane(), Some(Pane::Terminal(_)))
+            && !self.palette_open()
+            && !self.help
+            && !self.home_open()
+            && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
+            && self.popover.is_none()
+        {
+            self.open_terminal();
             return;
         }
         if self.glass_key(key) {
@@ -4590,13 +4707,6 @@ impl Ui {
                     "Grouped view · t for the tree"
                 });
             }
-            // Ctrl+] attaches the agent's terminal, beside Ctrl+\ that leaves it; terminals send
-            // it as 0x1d, which crossterm reports as Ctrl+5. Enter was too easy to hit by mistake.
-            KeyCode::Char(']' | '5')
-                if self.tab() == 1 && key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.open_terminal()
-            }
             KeyCode::Char('n') if self.tab() == 2 => self.open_new_mission(),
             KeyCode::Enter if self.tab() == 2 => {
                 if let Some(decision) = self.selected_id().and_then(|id| {
@@ -4899,6 +5009,7 @@ impl Ui {
                         }
                     }
                     ("request", 'y' | 'n') => self.confirm = Some(key),
+                    ("prompt", 'a') => self.toggle_form_keys(),
                     ("update", 'r') => self.read_update(),
                     ("message", 'm') => self.act('m'),
                     _ => {}
@@ -5571,7 +5682,7 @@ impl Ui {
                 self.open(&agent);
                 self.action_key('S');
             }
-            ('t', None) => {
+            (screens::TERMINAL_ACTION, None) => {
                 self.open(&agent);
                 self.open_terminal();
             }
@@ -5981,6 +6092,17 @@ impl Ui {
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => {
+                // Over a split's tab strip, the wheel moves the strip a whole tab, not the pane.
+                if let Some(group) = self.tab_strip_at(mouse.column, mouse.row) {
+                    self.scroll_tab_strip(
+                        group,
+                        matches!(
+                            mouse.kind,
+                            MouseEventKind::ScrollDown | MouseEventKind::ScrollRight
+                        ),
+                    );
+                    return;
+                }
                 let delta = if matches!(
                     mouse.kind,
                     MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft
@@ -6172,6 +6294,10 @@ impl Ui {
     }
 
     fn click(&mut self, hit: Hit) {
+        // A click anywhere but on a prompt's own form takes the keys back from it.
+        if !matches!(hit, Hit::Alert(..)) {
+            self.prompt_keys = None;
+        }
         match hit {
             Hit::Message | Hit::Subject | Hit::Resize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
@@ -6673,6 +6799,7 @@ pub fn run_demo(args: &[String]) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
     let mut ui = Ui::new(demo::loading_from(generated.world.clone()));
+    ui.keyboard_enhanced = _guard.enhanced;
     ui.resource_sidebar.arrangements = generated.arrangements;
     ui.load_prefs();
     // The demo keeps its spaces in memory only, and shows the sidebar as a new device does.
@@ -7176,6 +7303,8 @@ mod tests {
     fn a_custom_request_sends_the_generic_reply_and_has_no_yes_no_shortcut() {
         let mut world = demo::test_world();
         world.attention = Load::Ready(vec![Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/garden".into(),
             tier: Tier::Today,
@@ -7462,6 +7591,8 @@ mod tests {
     fn answering_a_request_leaves_the_next_one_closed() {
         let mut world = demo::test_world();
         let asks = |id: &str| Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7511,6 +7642,8 @@ mod tests {
     #[test]
     fn a_reconnect_keeps_the_answer_box_open_after_earlier_asks_left() {
         let asks = |id: &str| Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: id.into(),
             tier: Tier::Stopped,
@@ -7821,6 +7954,8 @@ mod tests {
             ..Default::default()
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/pick".into(),
             tier: Tier::Stopped,
@@ -7900,6 +8035,8 @@ mod tests {
                 attachments: Vec::new(),
             };
             let item = Attention {
+                deadline: None,
+                requested_at: None,
                 conversations: vec![],
                 id: "attention/feedback".into(),
                 tier: Tier::Stopped,
@@ -8034,6 +8171,8 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/shipped".into(),
             tier: Tier::Stopped,
@@ -8118,6 +8257,8 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/choose".into(),
             tier: Tier::Stopped,
@@ -8210,6 +8351,8 @@ mod tests {
             attachments: Vec::new(),
         };
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/decide".into(),
             tier: Tier::Stopped,
@@ -8289,6 +8432,8 @@ mod tests {
         let mut world = demo::test_world();
         let mission = "mission/release-proof";
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/capacity".into(),
             tier: Tier::Stopped,
@@ -8340,6 +8485,8 @@ mod tests {
     fn an_update_shows_what_was_asked_for_and_clears_once_read() {
         let mut world = demo::test_world();
         let item = Attention {
+            deadline: None,
+            requested_at: None,
             conversations: vec![],
             id: "attention/update".into(),
             tier: Tier::Later,
@@ -8593,6 +8740,8 @@ mod tests {
             items.insert(
                 0,
                 Attention {
+                    deadline: None,
+                    requested_at: None,
                     conversations: vec![],
                     id: "attention/request".into(),
                     tier: Tier::Stopped,
@@ -9564,12 +9713,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns() {
+    fn attach_opens_an_agents_terminal_and_ctrl_backslash_returns() {
         let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         press(&mut ui, KeyCode::Enter);
         assert!(ui.terminal.is_none(), "Enter alone never attaches");
-        ui.key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL));
+        ui.click(Hit::Attach);
         assert!(ui.terminal.is_some());
         let screen = frame(&ui, 120, 30).join("\n");
         assert!(screen.contains("Return"), "{screen}");

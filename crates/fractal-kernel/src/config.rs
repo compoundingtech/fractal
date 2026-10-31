@@ -39,6 +39,9 @@ pub struct Config {
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
+    /// Explicit placement for daemon-launched seats without a lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unlaned_seat: Option<fractal_runtime::UnlanedSeatPlacement>,
     /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
     /// means `off`: such a seat starts without one. Seats without a declaration never change.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +51,9 @@ pub struct Config {
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
+    /// SQLite database directory only; absent keeps the database in `state_dir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_dir: Option<PathBuf>,
     pub pty_root: Option<PathBuf>,
     /// Owner-local catalog roots supplying declared private-notes carrier provenance.
     pub private_notes_catalogs: Vec<PathBuf>,
@@ -581,11 +587,13 @@ impl Default for Config {
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
             seat_priority: None,
+            unlaned_seat: None,
             lanes: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
             state_dir,
+            store_dir: None,
             pty_root: None,
             private_notes_catalogs: Vec::new(),
             socket,
@@ -609,7 +617,19 @@ impl Default for Config {
     }
 }
 
+pub use fractal_client::product_dirs::STORE_DATABASE_FILES;
+
+/// Resolve only the SQLite directory, never the product's identity, keys or payload roots.
+pub fn store_dir(config: &Config) -> PathBuf {
+    config.store_dir.as_ref().unwrap_or(&config.state_dir).clone()
+}
+
 impl Config {
+    /// The configured database path; SQLite creates its WAL and SHM beside it.
+    pub fn store_path(&self) -> PathBuf {
+        store_dir(self).join(STORE_DATABASE_FILES[0])
+    }
+
     pub fn active_access_mode(&self) -> fractal_drivers::access::AccessMode {
         self.access_mode.unwrap_or_default()
     }
@@ -796,6 +816,14 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(directory) = &self.store_dir {
+            anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
+            anyhow::ensure!(
+                directory.is_dir(),
+                "configured store_dir {} is missing or is not a directory; create and populate it before starting",
+                directory.display()
+            );
+        }
         self.reconcile.validate()?;
         self.asks.validate()?;
         self.github.validate()?;
@@ -1107,6 +1135,41 @@ fn machine_host_name() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn store_directory_defaults_to_state_root_and_roundtrips_explicit_configuration() {
+        let state = tempfile::tempdir().unwrap();
+        let database = tempfile::tempdir().unwrap();
+        let mut config = super::Config {
+            state_dir: state.path().into(),
+            ..super::Config::default()
+        };
+        assert_eq!(super::store_dir(&config), state.path());
+        assert_eq!(config.store_path(), state.path().join("claims.sqlite3"));
+        assert!(!toml::to_string(&config).unwrap().contains("store_dir"));
+        config.store_dir = Some(database.path().into());
+        let restored: super::Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(super::store_dir(&restored), database.path());
+        assert_eq!(restored.store_path(), database.path().join(super::STORE_DATABASE_FILES[0]));
+        assert_eq!(restored.state_dir, state.path());
+        restored.validate().unwrap();
+    }
+
+    #[test]
+    fn store_directory_must_be_absolute_and_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = super::Config {
+            store_dir: Some(root.path().join("missing")),
+            ..super::Config::default()
+        };
+        assert!(config.validate().unwrap_err().to_string().contains("store_dir"));
+        config.store_dir = Some("relative".into());
+        assert!(config.validate().unwrap_err().to_string().contains("absolute"));
+        let file = root.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        config.store_dir = Some(file);
+        assert!(config.validate().unwrap_err().to_string().contains("not a directory"));
+    }
+
+    #[test]
     fn github_app_root_is_operator_supplied_absolute_and_optional() {
         let mut config = super::GithubConfig::default();
         assert!(config.app_token_root.is_none());
@@ -1194,6 +1257,20 @@ mod tests {
         assert_eq!(normal.active_seat_priority(), SeatPriority::Normal);
         assert!(toml::from_str::<Config>("seat_priority=\"high\"").is_err());
         assert!(!toml::to_string(&Config::default()).unwrap().contains("seat_priority"));
+    }
+
+    #[test]
+    fn unlaned_seat_config_is_optional_and_strict() {
+        assert!(Config::default().unlaned_seat.is_none());
+        assert!(!toml::to_string(&Config::default()).unwrap().contains("unlaned_seat"));
+        let fields = "[unlaned_seat]\nslice = 'app-seats.slice'\nmemoryMax = 8589934592\nmemorySwapMax = 0\noomPolicy = 'kill'\n";
+        let configured: Config = toml::from_str(fields).unwrap();
+        assert!(configured.unlaned_seat.is_some());
+        let slice_only: Config = toml::from_str("[unlaned_seat]\nslice = 'app-seats.slice'\n").unwrap();
+        assert!(slice_only.unlaned_seat.is_some());
+        assert!(toml::from_str::<Config>("[unlaned_seat]\nmemoryMax = 1024\n").is_err());
+        assert!(toml::from_str::<Config>(&fields.replace("8589934592", "0")).is_err());
+        assert!(toml::from_str::<Config>(&format!("{fields}unknown = true\n")).is_err());
     }
 
     #[test]

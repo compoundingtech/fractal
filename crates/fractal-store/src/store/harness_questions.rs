@@ -15,6 +15,11 @@ pub struct QuestionResolution {
     /// The `harness.answer` request that settled it, when one did.
     pub receipt: Option<Receipt>,
     pub resolved_at_unix_ms: u128,
+    /// Existing claim provenance, used only to authorize owner-local receipt replay.
+    #[serde(skip)]
+    pub origin: String,
+    #[serde(skip)]
+    pub actor: Option<String>,
 }
 
 /// A question as st holds it.
@@ -66,6 +71,8 @@ pub fn question_at(
                     .map_err(|error| anyhow::anyhow!("{}: {error}", claim.id))?,
                 receipt: field(claim, "receipt")?,
                 resolved_at_unix_ms: claim.accepted_at_unix_ms,
+                origin: claim.origin.clone(),
+                actor: claim.actor.clone(),
             })
         }
         None => None,
