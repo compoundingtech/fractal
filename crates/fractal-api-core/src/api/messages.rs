@@ -3,6 +3,12 @@ use crate::DeliveryStore;
 use crate::DelegationStore;
 use super::*;
 
+fn message_party_identity(store: &Store, party: &str) -> Result<String, ApiError> {
+    crate::store::identities::resolve_reference_conn(
+        &store.readers.get(), &normalize_message_party(party),
+    ).map_err(ApiError::bad)
+}
+
 pub async fn message_delivery(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
@@ -109,6 +115,39 @@ pub async fn decide_subscription_request(
     Ok(Json(response))
 }
 
+#[derive(Deserialize)]
+pub struct RecipientQuery {
+    to: String,
+}
+
+/// Native send preflight: O(1) indexed lookups for one identity, never a roster or queue fold.
+pub async fn recipient(
+    State(state): State<AppState>,
+    Query(query): Query<RecipientQuery>,
+) -> Result<Json<Value>, ApiError> {
+    blocking_api(move || {
+        let requested = normalize_message_party(&query.to);
+        crate::model::refuse_person_recipient(&requested).map_err(ApiError::bad)?;
+        let (recipient, identity) = receipt_recipient(&state.store, &requested)?;
+        if requested.starts_with("agent/") {
+            // These are exact subject-key reads; runtime evidence may come from another host
+            // and remains proof of existence even when the seat is stopped or undeclared.
+            let declared = state.store.selected_desired_token(&identity).map_err(ApiError::internal)?;
+            let runtime = state.store.latest_claim(&identity, Some("runtime.observed"))
+                .map_err(ApiError::internal)?;
+            if declared.is_none() && runtime.is_none() {
+                return Err(ApiError::bad(St3Error::new(
+                    "unknown-recipient",
+                    format!(
+                        "recipient `{requested}` is not known to this daemon; check `fractal agents ls` and fleet replication, or explicitly use --allow-undeclared-recipient if the seat exists on another host. Nothing was sent",
+                    ),
+                ).with_detail("recipient", requested)));
+            }
+        }
+        Ok(Json(json!({"recipient": recipient, "recipient_identity": identity})))
+    }).await
+}
+
 pub async fn send_message(
     State(state): State<AppState>,
     Json(request): Json<MessageSendRequest>,
@@ -198,9 +237,13 @@ pub async fn list_messages_page(
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<MessagePage>, ApiError> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
-    let to = query.to.as_deref().map(normalize_message_party);
-    let from = query.from.as_deref().map(normalize_message_party);
-    let acting_as = query.acting_as.as_deref().map(normalize_message_party);
+    let peer = peer.map(|Extension(mut peer)| {
+        peer.agent = message_party_identity(&state.store, &peer.agent)?;
+        Ok::<_, ApiError>(Extension(peer))
+    }).transpose()?;
+    let to = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let from = query.from.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let acting_as = query.acting_as.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
     query.validate_filters()?;
     if acting_as.is_some() && to.is_none() {
         return Err(ApiError::bad(St3Error::new(
@@ -212,7 +255,8 @@ pub async fn list_messages_page(
             state.store.agent_retirement(to).map_err(ApiError::bad)?
         } else { None };
         let permitted = if let Some(retirement) = retirement.as_ref() {
-            retirement.body["fields"]["successor"].as_str() == Some(actor)
+            retirement.body["fields"]["successor"].as_str()
+                .map(|successor| message_party_identity(&state.store, successor)).transpose()?.as_deref() == Some(actor)
         } else { to == actor };
         if !permitted {
             return Err(ApiError::bad(St3Error::new("wrong-message-recipient", format!(
@@ -253,6 +297,9 @@ pub async fn list_messages_page(
     let subject = query.subject.clone();
     let subject_prefix = query.subject_prefix.clone();
     let store = state.store.clone();
+    let cursor_to = to.clone();
+    let cursor_from = from.clone();
+    let cursor_actor = acting_as.clone();
     let (items, next_after) = blocking_store(move || {
         let native = !query.include_closed
             && peer
@@ -286,11 +333,11 @@ pub async fn list_messages_page(
             let cursor = MessagesPageCursor {
                 after,
                 through,
-                to: query.to.as_deref().map(normalize_message_party),
-                from: query.from.as_deref().map(normalize_message_party),
+                to: cursor_to.clone(),
+                from: cursor_from.clone(),
                 subject: query.subject.clone(),
                 subject_prefix: query.subject_prefix.clone(),
-                acting_as: query.acting_as.as_deref().map(normalize_message_party),
+                acting_as: cursor_actor.clone(),
                 include_closed: query.include_closed,
                 limit,
             };
@@ -316,7 +363,11 @@ pub async fn list_messages(
     Query(query): Query<MessagesQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
 ) -> Result<Json<Vec<MessageView>>, ApiError> {
-    let recipient = query.to.as_deref().map(normalize_message_party);
+    let recipient = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
+    let peer = peer.map(|Extension(mut peer)| {
+        peer.agent = message_party_identity(&state.store, &peer.agent)?;
+        Ok::<_, ApiError>(Extension(peer))
+    }).transpose()?;
     record_legacy_poll(
         peer.as_ref().map(|Extension(peer)| peer),
         recipient.as_deref(),
@@ -405,16 +456,20 @@ pub async fn post_message_claim(
                 "message lifecycle transitions require the recipient actor",
             ))
         })?;
-        let actor = normalize_message_party(&actor);
-        let retirement = if message.to.starts_with("agent/") {
-            store.agent_retirement(&message.to).map_err(ApiError::bad)?
+        let actor = message_party_identity(&store, &actor)?;
+        let recipient = message_party_identity(&store, &message.to)?;
+        let retirement = if recipient.starts_with("agent/") {
+            store.agent_retirement(&recipient).map_err(ApiError::bad)?
         } else { None };
-        let acting_for = retirement.as_ref().and_then(|claim| {
+        let successor = retirement.as_ref()
+            .and_then(|claim| claim.body["fields"]["successor"].as_str())
+            .map(|successor| message_party_identity(&store, successor)).transpose()?;
+        let acting_for = retirement.as_ref().and_then(|_| {
             (matches!(kind, "message.read" | "message.closed")
-                && claim.body["fields"]["successor"].as_str() == Some(actor.as_str()))
-                .then(|| message.to.clone())
+                && successor.as_deref() == Some(actor.as_str()))
+                .then(|| recipient.clone())
         });
-        if acting_for.is_none() && (retirement.is_some() || actor != message.to)
+        if acting_for.is_none() && (retirement.is_some() || actor != recipient)
             && !request
                 .delegation
                 .as_ref()

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Cover owned leader exit status while a descendant keeps its process group running.",
+  "replay": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Adds a deterministic Linux FIFO/pidfd regression for the existing owned-child reaping fix. It checks running-descendant status, child reaping and the persisted terminal record. Test-only addition; no further runtime or stored-format change."
+  }
+}

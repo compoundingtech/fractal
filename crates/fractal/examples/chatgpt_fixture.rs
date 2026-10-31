@@ -32,9 +32,9 @@ async fn main() -> anyhow::Result<()> {
     let source=format!("version 2\nagent \"prototype.worker\" {{ workspace {:?}; command \"true\"; restart always; }}\nmission \"prototype-mission\" state=\"ready\" {{ goal \"Prototype mission\"; }}",root);
     let intent=fractal_daemon::graph::parse_intent(&source,"prototype")?;
     store.apply_internal(&intent,"prototype-seed")?;
-    let ask=store.ask_person(&PersonAskRequest {legacy_request:None,person:"person/ada".into(),title:"Choose a prototype answer".into(),reason:"Exercise approved typed answer".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("prototype-ask".into()),incarnation:None,
+    let ask=store.ask_person(&PersonAskRequest {legacy_request:None,deadline_ms:None,default_answer:None,person:"person/ada".into(),title:"Choose a prototype answer".into(),reason:"Exercise approved typed answer".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("prototype-ask".into()),incarnation:None,
         request:Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"The owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),idempotency_key:"prototype-ask-seed".into()})?;
-    let expiry_ask=store.ask_person(&PersonAskRequest {legacy_request:None,person:"person/ada".into(),title:"Choose an expiry-test answer".into(),reason:"Exercise expiry after owner approval".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("expiry-ask".into()),incarnation:None,
+    let expiry_ask=store.ask_person(&PersonAskRequest {legacy_request:None,deadline_ms:None,default_answer:None,person:"person/ada".into(),title:"Choose an expiry-test answer".into(),reason:"Exercise expiry after owner approval".into(),actor:"agent/prototype.worker".into(),step:None,new_run:Some("expiry-ask".into()),incarnation:None,
         request:Some(json!({"version":1,"type":"choice","question":"Which option?","why_person":"The owner chooses.","answers":[{"id":"yes","label":"Yes","consequence":"Record yes."},{"id":"no","label":"No","consequence":"Record no."}]})),idempotency_key:"expiry-ask-seed".into()})?;
     let home=root.join("home");
     let transcript=home.join(".codex/sessions/2026/10/14/prototype.jsonl");
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     for (kind,fields) in [("runtime.observed",json!({"status":"running","runtime_id":"prototype-pty","incarnation_id":"native-pty:prototype","terminal":true})),("harness.observed",json!({"state":"working","driver":"codex","incarnation_id":"native-pty:prototype","evidence_incarnation":"prototype-provider"}))] {
         store.append_claim(&ClaimInput {subject:"agent/prototype.worker".into(),kind:kind.into(),actor:Some("agent/prototype.worker".into()),fields:serde_json::from_value(fields)?,evidence:vec![],expected_subject:None,idempotency_key:None})?;
     }
-    let state=AppState {owning_person:Some("person/ada".into()),store,notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,node:"prototype".into(),state_dir:root.clone(),pty_root:root.join("pty"),pty_binary:PathBuf::from("pty"),fleet_id:None,configured_peers:vec![],client_relay:None,native_session_home:Some(home),planner_default:Default::default(),assistant_receipts:Default::default(),private_notes:Default::default()};
+    let state=AppState {owning_person:Some("person/ada".into()),store,notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,node:"prototype".into(),state_dir:root.clone(),pty_root:root.join("pty"),pty_binary:PathBuf::from("pty"),fleet_id:None,configured_peers:vec![],client_relay:None,native_session_home:Some(home),harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default:Default::default()};
     fractal_daemon::api::start_agent_roster(&state);
     fractal_daemon::api::start_native_session_discovery(&state);
     let local=root.join("st3.sock");let gateway=root.join("st3-client.sock");

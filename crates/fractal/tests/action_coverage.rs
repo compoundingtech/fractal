@@ -49,7 +49,7 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
         connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
     }
     let run = || async {
-        let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command.args(["store", "prepare-indexes", "--endpoint", "unix:/nonexistent/offline.sock",
             "--daemon-wait", "0", "--store"]).arg(&path);
         command.output().await
@@ -88,7 +88,7 @@ async fn cli_prepare_owner_indexes_is_offline_fenced_idempotent_and_schema_gated
         String::from_utf8_lossy(&rejected.stdout),
         String::from_utf8_lossy(&rejected.stderr), definitions(&connection));
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("schema gate failed"));
-    let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
     assert!(!command.args(["store", "prepare-indexes"]).output().await.unwrap().status.success());
 }
 
@@ -548,19 +548,24 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState { owning_person: None,
-        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: Some(root.join("native")),
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        AppState {
+            owning_person: None,
+            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.into(),
+            pty_root: root.join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: Some(root.join("native")),
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
     }
 
     fn socket(&self) -> PathBuf {
@@ -765,7 +770,7 @@ impl Daemon {
     }
 
     fn cli_command_format(&self, actor: &str, args: &[&str], json_output: bool) -> tokio::process::Command {
-        let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command
             .args([
                 "--endpoint",
@@ -849,6 +854,8 @@ async fn dispatch(
         "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
+        "harness.answer" => harness_answer,
+        "arrangement.membership.edit" => arrangement_membership_edit,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
         "lane.mark" => lane_mark, "lane.move" => lane_move,
@@ -871,6 +878,49 @@ async fn dispatch(
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arrangement_membership_edits_survive_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let subject = "arrangement/person/avery/019a0000-0000-7000-8000-000000000001";
+    let fence = daemon.fence(PERSON).await;
+    dispatch(
+        &daemon.client(PERSON),
+        "arrangement.edit",
+        "coverage:membership-container",
+        fence,
+        json!({"subject": subject, "owner": PERSON, "version": 2,
+            "operations": [{"op": "create", "name": "Restart memberships"}]}),
+    )
+    .await
+    .unwrap();
+    let operations = json!([{"op": "place", "member": WORKER, "bucket": null, "key": "a0"}]);
+    let fence = daemon.fence(PERSON).await;
+    daemon
+        .exercise(
+            PERSON,
+            "arrangement.membership.edit",
+            json!({"subject": subject, "owner": PERSON, "operations": operations}),
+            fence,
+        )
+        .await;
+    // `exercise` reopened the disk-backed daemon after acceptance and replayed the edit.
+    let claims = daemon.store().claims_for(subject, Some("ordered-membership.edited")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(PERSON));
+    assert_eq!(claims[0].body["fields"]["owner"], PERSON);
+    assert_eq!(claims[0].body["fields"]["operations"], operations);
+    let memberships = daemon.store().ordered_memberships(subject, u64::MAX, None, 10).unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0]["container"], subject);
+    assert_eq!(memberships[0]["member"], WORKER);
+    assert_eq!(memberships[0]["position"], json!({"bucket": null, "key": "a0"}));
+    assert_eq!(memberships[0]["revision"], claims[0].id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2763,10 +2813,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
     }
 }
 
-/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
-/// after a restart, the same run reads the same way.
+/// What a run waits on and the blocked runs read the daemon's published lists, as a daemon
+/// serves them; before and after a restart, the same run reads the same way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_waiting_on_reads_published_lists_after_restart() {
+async fn cli_waiting_on_and_blocked_runs_read_published_lists_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
@@ -2792,6 +2842,16 @@ async fn cli_waiting_on_reads_published_lists_after_restart() {
         assert_eq!(waiting["open"][0]["path"], "work");
         assert_eq!(waiting["open"][0]["kind"], "ready");
         assert_eq!(waiting["open"][0]["who"], WORKER);
+        // Quiet for longer than a millisecond: nobody claims the ready step.
+        let output = daemon.cli(PERSON, &["missions", "blocked", "--quiet", "1ms"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"][0]["cause"], "unclaimed", "{blocked:#}");
+        assert_eq!(blocked["groups"][0]["runs"][0]["run"], run.subject.as_str());
+        let output = daemon.cli(PERSON, &["missions", "blocked"]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let blocked: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(blocked["groups"], json!([]), "within the default quiet limit nothing is blocked");
         daemon.restart().await;
     }
 }
@@ -3331,6 +3391,7 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     let image = daemon.root.path().join("copper.png");
     std::fs::write(&image, b"\x89PNG\r\n\x1a\nCopper image").unwrap();
     let arguments = [
@@ -3469,6 +3530,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     const PEER: &str = "agent/example/peer";
     let send = |key: &'static str, flag: &'static str| {
         vec![
@@ -3632,6 +3694,9 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
+    // Seed before the aged mail so the writer's monotonic clock does not make it fresh.
+    daemon.store().set_write_clock_at(now - 7_200_000).unwrap();
+    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\nagent \"example/other\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-cleanup-recipients");
     let mut messages = BTreeMap::new();
     for (name, recipient, phase, fresh) in [
         ("old-sent", READER, "sent", false),
@@ -4297,10 +4362,10 @@ PY
     let run = |args: Vec<String>| {
         let mut command = if args.get(1).map(String::as_str) == Some("reset") {
             let mut command = tokio::process::Command::new("python3");
-            command.args(["-c", "import os,pty,subprocess,sys; master,slave=pty.openpty(); os.write(master,b'yes\\nfixture-service\\nerase st state\\n'); result=subprocess.run(sys.argv[1:],stdin=slave); os.close(master); os.close(slave); sys.exit(result.returncode)", test_bin!("st3-fixture").to_str().unwrap()]);
+            command.args(["-c", "import os,pty,subprocess,sys; master,slave=pty.openpty(); os.write(master,b'yes\\nfixture-service\\nerase st state\\n'); result=subprocess.run(sys.argv[1:],stdin=slave); os.close(master); os.close(slave); sys.exit(result.returncode)", test_bin!("fractal-fixture").to_str().unwrap()]);
             command
         } else {
-            fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
+            fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"))
         };
         command
             .env_clear()
@@ -4318,7 +4383,7 @@ PY
             .env("XDG_DATA_HOME", root.path().join("data"))
             .env("XDG_RUNTIME_DIR", root.path().join("run"))
             .env("ST3_COVERAGE_ROOT", root.path())
-            .env("ST3_COVERAGE_BINARY", test_bin!("st3-fixture"))
+            .env("ST3_COVERAGE_BINARY", test_bin!("fractal-fixture"))
             .args(args);
         async move {
             tokio::time::timeout(Duration::from_secs(30), command.output())
@@ -6816,7 +6881,7 @@ fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
     .unwrap();
     std::fs::set_permissions(bin.join("fabric"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let st = |args: &[&str]| {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_remove("ST_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("XDG_CONFIG_HOME", root.path().join("config"))

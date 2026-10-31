@@ -126,7 +126,7 @@ pub async fn subscribe(
             }
             checked_state.store.bind_argv_mailbox_checked(&binding, member, validate)
         })?.is_some() { return Ok(false); }
-        authority::with_authority(&checked_state, &binding, &checked_peer, |owner, validate| {
+        authority::with_authority(&checked_state, &binding, &checked_peer, || {}, |owner, validate| {
         if checked_state.store.check_mailbox(&binding).is_ok() {
             // Upgrade a still-current pre-lease binding without changing its capability.
             checked_state.store.bind_mailbox_with_lease_checked(&binding, Some(owner), validate).map(|_| ())
@@ -152,17 +152,35 @@ pub async fn bind(
     let admission = fractal_drivers::harness_state::record_lock_admission(
         &authority::source_agent_dir(&state, &request),
     ).await.map_err(ApiError::internal)?;
-    let bound = authority_action(move || {
+    let attempted = request.clone();
+    let (bound, primary_admitted) = authority_action(move || {
         let _admission = admission;
-        authority::with_claude_primary(&bind_state, &request, &peer, None, || {
-        if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
+        let mut primary_admitted = false;
+        let bound = authority::with_claude_primary(&bind_state, &request, &peer, None, || {
+        if !cfg!(target_os = "linux") {
+            // No native authority on this route: permission to bind also permits diagnostics.
+            primary_admitted = true;
+            return bind_state.store.bind_mailbox(&request);
+        }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
+            validate()?;
+            primary_admitted = true;
             bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
         })? { return Ok(bound); }
-        authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
+        authority::with_authority(&bind_state, &request, &peer, || { primary_admitted = true; }, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
-    }) }).await?;
+    });
+        Ok((bound, primary_admitted))
+    }).await?;
+    let bound = bound.map_err(ApiError::bad).inspect_err(|error| {
+        if primary_admitted && crate::client::mailbox_bind_refusal(error.status.as_u16(), &error.code)
+        {
+            delivery_presence::bind_refused(&attempted, &error.code);
+            signal_local_change(&state);
+        }
+    })?;
+    delivery_presence::bind_recovered(&attempted);
     signal_local_change(&state);
     Ok(Json(bound.0))
 }
@@ -219,7 +237,7 @@ pub async fn attachment(
             "attachment-get unnegotiated"
         });
         if store.has_mailbox_lease(&fence)? {
-            authority::with_authority(&checked_state, &fence, &peer, |owner, validate| {
+            authority::with_authority(&checked_state, &fence, &peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -312,7 +330,7 @@ pub async fn receipt(
         let _admission = admission;
         authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
-            authority::with_authority(&checked_state, &request.fence, &checked_peer, |owner, validate| {
+            authority::with_authority(&checked_state, &request.fence, &checked_peer, || {}, |owner, validate| {
                 validate()?;
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
@@ -911,7 +929,7 @@ async fn stream_with_timers_inner<F, S, H>(
                     crate::otel::record_mailbox_fence_check(caller, started.elapsed());
                     if admitted { return false; }
                     let _ = authority::loss_if_current(&repair_state, &repair_fence, &peer);
-                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, |owner, validate| {
+                    matches!(authority::with_authority(&repair_state, &repair_fence, &peer, || {}, |owner, validate| {
                         repair_state.store.repair_mailbox_checked(&repair_fence, owner, validate)
                     }), Ok(true))
                 })).await {
@@ -1433,6 +1451,27 @@ mod tests {
     use super::*;
     use crate::client::{Client, Endpoint};
     use tokio_tungstenite::tungstenite::Message;
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn non_linux_store_bind_refusal_updates_delivery_state() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        crate::store::mailbox_tests::ready(&state.store, "current");
+        let subject = "agent/eval.worker";
+        let old = state.store.bind_mailbox(&Fence::new(subject, "current", "delivery")).unwrap();
+        let current = state.store.bind_mailbox(&Fence::new(subject, "current", "delivery")).unwrap();
+        let peer = NativeDeliveryPeer {
+            agent: subject.into(), transport: "omp-channel",
+            pid: std::process::id(), archives_inbox: false,
+        };
+        let error = bind(State(state.clone()), Some(Extension(peer)), Json(old)).await.unwrap_err();
+        assert_eq!(error.code, "stale-mailbox-session");
+        let delivery = delivery_presence::assess_current(subject, "omp", Some("current"));
+        assert_eq!(delivery.state, "refused");
+        assert_eq!(delivery.reason.as_deref(), Some("delivery refused: stale-mailbox-session"));
+        state.store.check_mailbox(&current).unwrap();
+    }
     use fractal_api_core::api::mailbox_tests_shared::{ControlledStream, age_sent, expect_pong, no_mail, read_all};
 
     #[cfg(all(feature = "test-support", target_os = "linux"))]
@@ -3081,7 +3120,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // The subscription pauses after each of its three failed connections (MailboxRetry: half to
+    // one and a half seconds each). On a paused clock those pauses are its own timers, which the
+    // runtime skips when idle, so only the connections and reads count against the six seconds,
+    // measured on a real clock: a tokio timer of six seconds would be skipped to as well.
+    #[tokio::test(start_paused = true)]
     async fn current_owner_recovers_recent_unoffered_mail_after_an_injected_snapshot_failure() {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
@@ -3156,10 +3199,15 @@ mod tests {
             fence.clone(),
             json!({}),
         );
-        let frame = tokio::time::timeout(Duration::from_secs(6), subscription.receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let (elapsed, deadline) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(6));
+            let _ = elapsed.send(());
+        });
+        let frame = tokio::select! {
+            frame = subscription.receiver.recv() => frame.unwrap(),
+            _ = deadline => panic!("no mailbox frame within six seconds of real time"),
+        };
         assert!(matches!(frame, Frame::Mailbox { messages }
             if messages.len() == 1 && messages[0].subject == input.subject));
         assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 4);

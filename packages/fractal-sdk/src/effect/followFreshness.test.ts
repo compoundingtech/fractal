@@ -5,7 +5,7 @@
  */
 import { it as effectIt } from '@effect/vitest'
 import type { CollectionFrame, CollectionSocket } from '@fractal/client'
-import type { CollectionName, Snapshot } from '@fractal/client'
+import type { CollectionName, ResourceCollectionName, Snapshot } from '@fractal/client'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import * as Layer from 'effect/Layer'
@@ -116,7 +116,7 @@ class FakeGateway {
     this.socket?.onmessage?.({ data: JSON.stringify(frame) })
   }
 
-  window(collection: CollectionName) {
+  window(collection: ResourceCollectionName) {
     this.send({
       kind: 'snapshot',
       id: this.idOf(collection),

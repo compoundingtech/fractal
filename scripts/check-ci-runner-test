@@ -360,9 +360,9 @@ for raw in cache_conditions:
             for cancelled in (False, True):
                 for succeeded in (False, True):
                     for local in ('', '1'):
-                      # A check whose evidence gate decided to skip turns its cache steps off too; an ordinary
-                      # run (no skip decision) must behave exactly as before.
-                      for skip in ('', 'true'):
+                      # A check whose evidence gate decided to skip, or refused an unsigned pull request of ours,
+                      # turns its cache steps off too; an ordinary run (neither decision) must behave exactly as before.
+                      for skip, refuse in (('', ''), ('true', ''), ('', 'true')):
                         expression = condition
                         for token, value in {
                             '!cancelled()': not cancelled,
@@ -370,8 +370,9 @@ for raw in cache_conditions:
                             'github.event_name': event,
                             'vars.CI_OUTAGE_FAST_QUEUE': switch,
                             'env.CI_LOCAL_CACHES': local,
-                            **{f'needs.evidence-gate-{gate}.outputs.skip': skip for gate in (
-                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate')},
+                            **{f'needs.evidence-gate-{gate}.outputs.{output}': value for gate in (
+                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate')
+                               for output, value in (('skip', skip), ('refuse', refuse))},
                         }.items():
                             expression = expression.replace(token, repr(value))
                         expression = expression.replace('!(', 'not (')
@@ -379,9 +380,9 @@ for raw in cache_conditions:
                         expected = not cancelled and (event != 'merge_group' or switch != 'on')
                         if 'success()' in condition:
                             expected = expected and succeeded and local != '1'
-                        if skip == 'true' and 'evidence-gate' in condition:
+                        if 'true' in (skip, refuse) and 'evidence-gate' in condition:
                             expected = False
-                        assert actual == expected, (condition, event, switch, cancelled, succeeded, local, skip)
+                        assert actual == expected, (condition, event, switch, cancelled, succeeded, local, skip, refuse)
 for job, block in blocks.items():
     assert 'CI_OUTAGE_FAST_QUEUE' not in block.split('    steps:', 1)[0], (job, 'outage switch must not skip jobs')
 for step in ('Download this run attempt’s successful test build', 'Verify source, hashes and extract test archives',

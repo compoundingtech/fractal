@@ -470,13 +470,15 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
     };
-    let state = fractal_daemon::api::AppState { owning_person: None,
-    store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-    event_notify: tokio::sync::watch::channel(0).0,
-    node: "todo-liveness".into(), state_dir: root.path().into(),
-    pty_root: root.path().join("pty"), pty_binary: "pty".into(),
-    fleet_id: None, configured_peers: vec![], client_relay: None,
-    native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = fractal_daemon::api::AppState {
+        owning_person: None,
+        store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0).0,
+        node: "todo-liveness".into(), state_dir: root.path().into(),
+        pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+        fleet_id: None, configured_peers: vec![], client_relay: None,
+        native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: Default::default(),
+    };
     let path = root.path().join("api.sock");
     let socket = path.clone();
     let server = tokio::spawn(async move {
@@ -640,6 +642,36 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
             "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
         });
     }
+}
+
+#[tokio::test]
+async fn an_unprepared_agents_roster_prints_its_own_code_and_says_to_retry() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("roster.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/roster-test",
+            "code": "agent-roster-not-ready",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let error = generated_client(&Endpoint::Unix(socket), None).unwrap()
+        .agents_list(None, Some(50), false).await.unwrap_err();
+    assert!(error.is_transient(), "{error:?}");
+    let error = anyhow::Error::new(error);
+    assert_eq!(cli_error_message(&error, false),
+        "Fractal is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    assert_eq!(plain_error(&error),
+        "st is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]
@@ -2056,6 +2088,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 refilled_at_ms: 1_234,
             },
             claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
+            claude_attachment_answered: Some(Instant::now()),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -2082,6 +2115,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // Nor the daemon's first answer: the replacement's attach window counts from its own.
+    assert!(back.loop_state.claude_attachment_answered.is_none());
     // An unpushed attachment poll is not carried: the replacement image polls once at once.
     assert!(back.loop_state.claude_attachment_polled.is_none());
 }
@@ -2162,6 +2197,59 @@ fn agent_card_shows_the_member_reconcile_fault() {
     assert!(card.contains(
         "FAULT        render refuses to change tracked file .claude/settings.local.json"
     ));
+}
+
+fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
+    serde_json::from_value(serde_json::json!({
+        "kind": "agent", "id": "agent/garden/worker", "revision": "one",
+        "updated_at": "2026-10-21T04:37:42Z", "name": "garden/worker",
+        "state": "stopped", "reachability": "unreachable", "runtime_ids": [],
+        "end_reason": end_reason
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
+    let parked = stopped_agent(serde_json::json!({
+        "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
+        "reason": "the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)"
+    }));
+    let card = render_client_agent(&parked, &[], 0);
+    assert!(card.contains(
+        "STATE        stopped\nWHY          parked by st after it failed to start at 2026-10-21T04:37:42.469Z: the explicit restart failed and the seat is parked again: start member runtime: spawn PTY failed: launcher-incompatible (exit status: 1)\n"
+    ), "{card}");
+    let by_person = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-person", "actor": "person/ada", "ended_at": "2026-10-22T09:00:00.000Z",
+        "reason": "Done for the week.\n\u{1b}[31mspoof"
+    }));
+    assert!(render_client_agent(&by_person, &[], 0).contains(
+        "WHY          stopped by person/ada at 2026-10-22T09:00:00.000Z: Done for the week. spoof\n"
+    ));
+    let by_run = stopped_agent(serde_json::json!({
+        "kind": "stopped-by-mission", "actor": "mission-run/garden/one", "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    let unknown = stopped_agent(serde_json::Value::Null);
+    let page: ClientPage = serde_json::from_value(serde_json::json!({
+        "kind": "page", "collection": "agents",
+        "items": [by_run, unknown],
+        "page": {"limit": 50, "has_more": false}
+    }))
+    .unwrap();
+    assert_eq!(
+        render_client_agents(&page, false, false, "st agents ls"),
+        "AGENTS  2\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped by mission-run/garden/one as its run ended at 2026-10-22T09:00:00.000Z\n\
+         agent/garden/worker\tgarden/worker\tstopped\n\
+         \x20 stopped, with no recorded reason\n"
+    );
+    // A running agent prints no stop line, even with an end reason from an earlier incarnation.
+    let mut running = stopped_agent(serde_json::json!({
+        "kind": "crashed", "exit_code": 1, "ended_at": "2026-10-22T09:00:00.000Z"
+    }));
+    running.state = "running".into();
+    assert!(!render_client_agent(&running, &[], 0).contains("WHY"));
 }
 
 #[test]
@@ -2461,19 +2549,24 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             ))
             .unwrap();
     }
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "pi-delivery-test".into(),
-    state_dir: root.path().to_path_buf(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "pi-delivery-test".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -2552,19 +2645,24 @@ async fn trace_after_index_reads_the_first_bounded_page() {
                 .store_index
         })
         .collect::<Vec<_>>();
-    let state = AppState { owning_person: None,
-    store,
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "trace-cursor-test".into(),
-    state_dir: root.path().to_path_buf(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store,
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "trace-cursor-test".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -2626,19 +2724,24 @@ async fn trace_wait_starts_after_existing_events() {
             .unwrap()
             .store_index;
     }
-    let state = AppState { owning_person: None,
-    store,
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "wait-cursor-test".into(),
-    state_dir: root.path().to_path_buf(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store,
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "wait-cursor-test".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -2760,7 +2863,7 @@ fn every_cli_command_has_a_valid_help_surface() {
             // These describe real executable filenames, not the product identity.
             if line.contains("Install Fractal (st3 and the st link) and pty")
                 || line.contains(
-                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                    "Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty)",
                 )
             {
                 continue;
@@ -3016,6 +3119,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     #[cfg(test)]
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
+    #[cfg(test)]
+    const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -3033,6 +3138,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("validate", VALIDATE_SOURCE),
         ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];
@@ -3752,6 +3858,27 @@ fn provider_capacity_backoff_is_bounded_deterministic_and_increases() {
     );
 }
 
+/// The model at capacity is retried whatever the turn shows; a 429 or a failing connection only
+/// once the seat is idle, since an active turn is still its harness's own to retry.
+#[test]
+fn a_provider_retry_is_owed_for_capacity_and_for_an_idle_rate_limit_or_connection() {
+    use fractal_drivers::harness_state::Activity;
+    assert_eq!(
+        provider_retry_cause(Activity::Idle, Some("providerCapacity")),
+        Some("providerCapacity")
+    );
+    for cause in ["rateLimited", "connection"] {
+        assert_eq!(provider_retry_cause(Activity::Idle, Some(cause)), Some(cause));
+        assert_eq!(provider_retry_cause(Activity::Active, Some(cause)), None, "{cause}");
+        assert_eq!(provider_retry_cause(Activity::Ended, Some(cause)), None, "{cause}");
+    }
+    assert_eq!(provider_retry_cause(Activity::Idle, Some("usageLimit")), None);
+    assert_eq!(provider_retry_cause(Activity::Idle, None), None);
+    let (waiting, exhausted) = provider_retry_reasons("rateLimited");
+    assert!(waiting.contains("429") && waiting.contains("resume this session"));
+    assert!(exhausted.contains("retry limit"));
+}
+
 #[test]
 fn context_occupancy_alone_is_not_reported_as_zero_tokens() {
     let mut page = fixture_product_page(&["session"], false);
@@ -4417,6 +4544,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         wake: MessageWakeArgs::default(),
         print_kdl: false,
         idempotency_key: Some("refuse-a-person".into()),
+        allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
         let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();
@@ -5765,19 +5893,24 @@ fn a_provenance_reads_as_one_line() {
 async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let state = AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("message-read-state").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "message-read-state".into(),
-    state_dir: root.path().to_path_buf(),
-    pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: Arc::new(Store::open_memory("message-read-state").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "message-read-state".into(),
+        state_dir: root.path().to_path_buf(),
+        pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -5859,12 +5992,17 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
-    let state = AppState { store: store.clone(), notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
-    state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
-    pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
-    client_relay: None, native_session_home: None, owning_person: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        store: store.clone(), notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+        state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+        client_relay: None, native_session_home: None, owning_person: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
     for _ in 0..100 {
@@ -7791,19 +7929,24 @@ async fn serve_test_store(
     node: &str,
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState { owning_person: None,
-    store,
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: node.into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store,
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -8550,6 +8693,233 @@ fn native_identity_rename_allows_generated_idempotency_key() {
 }
 
 #[test]
+fn harness_question_cli_reads_require_an_explicit_person() {
+    for command in [
+        vec!["fractal", "harness-questions", "list"],
+        vec!["fractal", "harness-questions", "show", "00000000000000000000000000000001"],
+    ] {
+        assert!(Cli::try_parse_from(command.clone()).is_err());
+        for actor in ["operator", "person/", "person/*", "agent/example"] {
+            let mut arguments = command.clone();
+            arguments.extend(["--as", actor]);
+            assert!(Cli::try_parse_from(arguments).is_err(), "{actor}");
+        }
+        let mut arguments = command;
+        arguments.extend(["--as", "person/operator"]);
+        assert!(matches!(
+            Cli::try_parse_from(arguments).unwrap().command,
+            Command::HarnessQuestions { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn harness_question_cli_list_forwards_limit_and_encoded_cursor() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("questions.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = json!({
+            "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
+            "request_id":"request/alex-list", "code":"forbidden", "message":"fixture refusal",
+            "retryable":false, "details":{}
+        }).to_string();
+        stream.write_all(format!(
+            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(), body
+        ).as_bytes()).await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let cli = Cli::try_parse_from([
+        "fractal", "harness-questions", "list", "--as", "person/alex",
+        "--limit", "1", "--cursor", "opaque+/=",
+    ]).unwrap();
+    let Command::HarnessQuestions { command } = cli.command else { panic!("expected harness questions") };
+    assert!(run_harness_questions(&Endpoint::Unix(socket), command, true).await.is_err());
+    let request = server.await.unwrap();
+    assert!(request.starts_with(
+        "GET /v1/client/harness-questions?cursor=opaque%2B/%3D&limit=1 HTTP/1.1\r\n"
+    ), "{request}");
+}
+
+#[test]
+fn harness_answer_action_identity_is_retryable_and_question_scoped() {
+    let key = "harness-answer-retry-key";
+    let question = "harness-question/00000000000000000000000000000001";
+    assert_eq!(
+        harness_answer_action_id(key, question),
+        harness_answer_action_id(key, question)
+    );
+    assert_ne!(
+        harness_answer_action_id(key, question),
+        harness_answer_action_id(key, "harness-question/00000000000000000000000000000002")
+    );
+    assert_ne!(
+        harness_answer_action_id("ab", "c"),
+        harness_answer_action_id("a", "bc")
+    );
+}
+
+#[test]
+fn harness_answer_cli_requires_positions_file_explicit_person_key_and_fences() {
+    let arguments = [
+        "fractal", "harness-questions", "answer",
+        "harness-question/00000000000000000000000000000001",
+        "--as", "person/operator", "--answers-file", "answers.json",
+        "--idempotency-key", "harness-answer-retry-key",
+        "--revision", "claim/reviewed-observation", "--incarnation", "reviewed-incarnation",
+    ];
+    assert!(matches!(
+        Cli::try_parse_from(arguments).unwrap().command,
+        Command::HarnessQuestions { command: HarnessQuestionsCommand::Answer { .. } }
+    ));
+    for flag in ["--as", "--answers-file", "--idempotency-key", "--revision", "--incarnation"] {
+        let index = arguments.iter().position(|argument| *argument == flag).unwrap();
+        let missing = arguments[..index].iter().chain(&arguments[index + 2..]).copied();
+        assert!(Cli::try_parse_from(missing).is_err(), "{flag}");
+    }
+}
+
+#[test]
+fn harness_answer_clap_orders_explicit_fences_before_retry_key() {
+    let mut command = Cli::command();
+    command.build();
+    let answer = command.find_subcommand("harness-questions").unwrap()
+        .find_subcommand("answer").unwrap();
+    let options: Vec<_> = answer.get_arguments()
+        .filter_map(|argument| argument.get_long())
+        .filter(|name| matches!(*name, "as" | "answers-file" | "revision" | "incarnation" | "idempotency-key"))
+        .collect();
+    assert_eq!(options, ["as", "answers-file", "revision", "incarnation", "idempotency-key"]);
+    for name in ["revision", "incarnation"] {
+        let argument = answer.get_arguments().find(|argument| argument.get_long() == Some(name)).unwrap();
+        assert!(argument.is_required_set());
+        assert!(argument.get_env().is_none());
+    }
+}
+
+#[tokio::test]
+async fn harness_question_cli_show_reads_detail_without_answering() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("question.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+            request.push(byte[0]);
+            if request.ends_with(b"\r\n\r\n") { break; }
+        }
+        stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let command = HarnessQuestionsCommand::Show {
+        question: "00000000000000000000000000000001".into(),
+        person: "person/operator".into(),
+    };
+    assert!(run_harness_questions(&Endpoint::Unix(socket), command, true).await.is_err());
+    let request = server.await.unwrap();
+    assert!(request.starts_with("GET /v1/client/harness-questions/00000000000000000000000000000001 "));
+}
+
+#[tokio::test]
+async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("question.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let canonical = "harness-question/00000000000000000000000000000001";
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for index in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let headers = String::from_utf8(request).unwrap();
+            let length = headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            }).unwrap_or(0);
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            requests.push((headers, body));
+            let (status, response) = if index == 0 {
+                let mut capabilities: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc58fa3f9b3bb owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
+                    "../../../docs/st3/client-v0/fixtures/capabilities.json"
+                )).unwrap();
+                capabilities["snapshot"]["id"] = json!("snapshot/fixture/42");
+                ("200 OK", capabilities)
+            } else {
+                ("409 Conflict", json!({
+                    "api_version":"st3.client.v0", "error_version":"st3.client.error.v0",
+                    "request_id":"request/question-answer", "code":"not-answerable",
+                    "message":"No native adapter is installed", "retryable":false,
+                    "details":{"reason":"adapter_missing"}
+                }))
+            };
+            let response = response.to_string();
+            stream.write_all(format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                response.len(),
+            ).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    let answers_file = root.path().join("answers.json");
+    fs::write(&answers_file, r#"{"q0":{"positions":[1]}}"#).unwrap();
+    let key = "fixture-harness-answer-key";
+    let error = run_harness_questions(
+        &Endpoint::Unix(socket),
+        HarnessQuestionsCommand::Answer {
+            question: "00000000000000000000000000000001".into(),
+            person: "person/operator".into(),
+            answers_file,
+            revision: "claim/reviewed-observation".into(),
+            incarnation: "reviewed-incarnation".into(),
+            idempotency_key: key.into(),
+        },
+        true,
+    ).await.unwrap_err();
+    assert!(error.to_string().contains("NotAnswerable"), "{error:#}");
+    let requests = server.await.unwrap();
+    assert!(requests[0].0.starts_with("GET /v1/client/capabilities "));
+    assert!(requests[1].0.starts_with("POST /v1/client/actions "));
+    let action: Value = serde_json::from_slice(&requests[1].1).unwrap();
+    assert_eq!(action["id"], harness_answer_action_id(key, canonical));
+    assert_eq!(action["idempotency_key"], key);
+    assert_eq!(action["parameters"], json!({
+        "question":canonical, "answers":{"q0":{"positions":[1]}}
+    }));
+    let expected_fence = serde_json::to_value(ClientFence {
+        snapshot_id: "snapshot/fixture/42".into(),
+        subject_revisions: BTreeMap::from([(canonical.into(), "claim/reviewed-observation".into())]),
+        runtime_incarnation: Some("reviewed-incarnation".into()),
+        ..Default::default()
+    }).unwrap();
+    assert_eq!(action["fence"], expected_fence);
+}
+
+#[test]
 fn github_watch_continuation_keeps_the_agent_executable() {
     assert_eq!(GH_UNWATCH_HINT, "To stop: st gh unwatch");
 }
@@ -8595,4 +8965,55 @@ async fn fabric_work_lease_guidance_unavailable_still_renders_detail() {
     assert!(rendered.contains("Lease renewal ownership is unavailable."));
     assert!(!rendered.contains("Renew it with:"));
     assert!(!rendered.contains("The lease expires at"));
+}
+
+#[tokio::test]
+async fn the_signature_job_keeps_a_persisted_fault_whole_and_goes_on_after_a_resume() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-job").unwrap());
+    let fault = "inventory page: fixture defect";
+    store.fail_signature_migration(fault).unwrap();
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Each start used to wrap the stored fault in `bootstrap job stopped: …` again.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(store.signature_migration().unwrap().fault.as_deref(), Some(fault));
+    assert!(!job.is_finished(), "a stopped job waits for a resume");
+    assert_eq!(store.resume_signature_migration().unwrap().as_deref(), Some(fault));
+    for _ in 0..200 {
+        if store.signature_migration().unwrap().done() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(store.signature_migration().unwrap().done());
+    assert!(!job.is_finished(), "the job stays to drain later verdict backlogs");
+    job.abort();
+}
+
+#[tokio::test]
+async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() {
+    let store = std::sync::Arc::new(Store::open_memory("signature-drain").unwrap());
+    {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        for i in 0..3_000 {
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h9837292e813d owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO claim_verdict_links(link,claim_id) VALUES ('root',?1)", [format!("claim/{i:05}")]).unwrap();
+        }
+        // The trust roots these verdicts relied on have since changed.
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h03aebe910c9e owner=fractal::main_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES ('claim_candidate_verdict_roots','earlier-roots')", []).unwrap();
+        tx.commit().unwrap();
+    }
+    let job = tokio::spawn(migrate_signature_candidates(store.clone()));
+    // Nothing is pending yet: the job finishes its startup pass and goes idle.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!store.verdicts_pending().unwrap());
+    store.judge_claims_slice(true).unwrap();
+    assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    // An in-memory store shares one cache, so this read can meet the job's writer.
+    while store.verdicts_pending().unwrap_or(true) {
+        assert!(Instant::now() < deadline, "the idle job drains what the pass left");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!job.is_finished());
+    job.abort();
 }

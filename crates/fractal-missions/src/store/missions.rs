@@ -4,6 +4,74 @@ use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
 
+/// The batches one resource observation seals its claims in. A claim whose retention class
+/// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
+/// class: an envelope is signed and deleted whole, so a durable message in an observer's batch
+/// would pin every superseded observation beside it. The one exception is a mission request,
+/// which travels with the discovery it names (see `with_observation`). Each batch is made at its
+/// first claim, so an observation that writes only one class seals one batch, as before.
+#[derive(Default)]
+pub struct ObservationBatches {
+    latest: Option<String>,
+    lasting: Option<String>,
+}
+
+impl ObservationBatches {
+    /// The batch a claim of `kind` goes in.
+    pub fn for_kind(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        kind: &str,
+    ) -> Result<String, St3Error> {
+        use fractal_schema::retention::Class;
+        let latest = matches!(
+            fractal_schema::retention::policy().kind(kind).class,
+            Class::Current | Class::Otel
+        );
+        self.for_class(transaction, origin, latest)
+    }
+
+    /// The latest-state batch, for a claim that must reach every member together with the
+    /// observation it names by ID. A subscription's mission request names its discovery, and
+    /// the host that starts the mission reads that claim when the request arrives, so the two
+    /// travel in one envelope. Few observations make a request, so few batches stay pinned.
+    pub fn with_observation(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+    ) -> Result<String, St3Error> {
+        self.for_class(transaction, origin, true)
+    }
+
+    fn for_class(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        latest: bool,
+    ) -> Result<String, St3Error> {
+        let slot = if latest { &mut self.latest } else { &mut self.lasting };
+        if let Some(batch) = slot {
+            return Ok(batch.clone());
+        }
+        let now = write_time(transaction, origin).map_err(internal)?;
+        let sequence = next_replica_sequence(transaction, origin).map_err(internal)?;
+        let previous_hash = previous_batch_hash(transaction, origin).map_err(internal)?;
+        let batch_hash = batch_header_hash(origin, sequence, previous_hash.as_deref(), now)
+            .map_err(internal)?;
+        let batch_id = format!("batch/{origin}/{sequence}/{batch_hash}");
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![batch_id, origin, sequence, previous_hash, batch_hash, now.to_string()],
+            )
+            .map_err(internal)?;
+        *slot = Some(batch_id.clone());
+        Ok(batch_id)
+    }
+}
+
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, St3Error> {
     let actor = normalize_actor(actor, "agent");
     resolve_reference_conn(connection, &actor)
@@ -4140,6 +4208,7 @@ impl MissionsStore for Store {
                 params![retired.id, retired.revision, mission_state_name(&retired.state), claim.id],
             )
             .map_err(internal)?;
+        fractal_store::store::ordered_membership::flush(&transaction).map_err(internal)?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h87aff5859f70 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO idempotency(operation_id, response) VALUES (?1, ?2)",
@@ -4727,11 +4796,13 @@ impl MissionsStore for Store {
             &self,
             id: &str,
         ) -> Result<(MissionRunView, Option<MissionSpec>)> {
-        let connection = self.readers.get();
-        let (view, mission) =
-            mission_run_view_and_definition_tx(&connection, id, MissionRunEnrichment::Evaluation)?;
-        note_run_view_reads(&view);
-        Ok((view, mission))
+        self.read_snapshot_unindexed(|| {
+            let connection = self.readers.get();
+            let (view, mission) =
+                mission_run_view_and_definition_tx(&connection, id, MissionRunEnrichment::Evaluation)?;
+            note_run_view_reads(&view);
+            Ok((view, mission))
+        })
     }
 
     fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>> {
@@ -6087,14 +6158,27 @@ impl MissionsStore for Store {
                 let readiness_epoch = current
                     .readiness_epoch
                     .saturating_add(u32::from(status == "ready" && current.status != "ready"));
-                transaction
-                    .execute(
-                        /* sqlite-large-value: allow-for-now lv-hc0f4401bbed1 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
+                if !publish {
+                    // A quiet renewal preserves ownership and state. Naming those indexed
+                    // columns in UPDATE still makes SQLite maintain their indexes, even
+                    // when every value is unchanged.
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-h8d3cdf97e396 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?2,
+                                updated_at_unix_ms=?3 WHERE subject=?1",
+                            params![subject, claim_expiry.map(|value| value.to_string()), now.to_string()],
+                        )
+                        .map_err(internal)?;
+                } else {
+                    transaction
+                        .execute(
+                            /* sqlite-large-value: allow-for-now lv-hc0f4401bbed1 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, worker_reported=?3, lease_owner=?4, lease_incarnation=?5,
                                 lease_expires_at_unix_ms=?6, blocked_reason=CASE WHEN ?10 THEN ?7 ELSE blocked_reason END, readiness_epoch=?8,
                                 updated_at_unix_ms=?9 WHERE subject=?1",
-                        params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
-                    )
-                    .map_err(internal)?;
+                            params![subject, status, worker_reported, claimant, claim_incarnation, claim_expiry.map(|value| value.to_string()), request.reason, readiness_epoch, now.to_string(), publish],
+                        )
+                        .map_err(internal)?;
+                }
                 renew_nested_ancestor_leases_tx(
                     transaction,
                     &current.generation,
@@ -6132,6 +6216,12 @@ impl MissionsStore for Store {
                 }
                 if let Some(input) = handoff {
                     adhoc_work::transfer_tx(transaction, &self.origin, &current, input, &mut body)?;
+                }
+                if matches!(action, "complete" | "fail" | "release") {
+                    // The run is judged on its origin, maybe another member, as soon as the step
+                    // ends, and a loop's token budget reads the seat's replicated usage then: its
+                    // held rollups replicate with this receipt, not when their hour is over.
+                    fractal_store::store::flush_held_usage_tx(transaction, &self.origin, &actor, now)?;
                 }
                 let claim_kind = match action {
                     "claim" => "work.claimed",
@@ -6793,28 +6883,10 @@ impl MissionsStore for Store {
                         changed_fields,
                         observation_claim: None,
                         message_subjects: Vec::new(),
+                        recorded_items: Vec::new(),
                     }, false)));
                 }
-                let now = write_time(transaction, &self.origin).map_err(internal)?;
-                let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
-                let previous_hash = previous_batch_hash(transaction, &self.origin).map_err(internal)?;
-                let batch_hash = batch_header_hash(&self.origin, sequence, previous_hash.as_deref(), now)
-                    .map_err(internal)?;
-                let batch_id = format!("batch/{}/{sequence}/{batch_hash}", self.origin);
-                transaction
-                    .execute(
-                        /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![
-                            batch_id,
-                            self.origin,
-                            sequence,
-                            previous_hash,
-                            batch_hash,
-                            now.to_string()
-                        ],
-                    )
-                    .map_err(internal)?;
+                let mut batches = ObservationBatches::default();
                 let mut receipt_key = Some(idempotency_key.as_str());
                 let observer_predecessors = latest_claim_id_tx(transaction, observer)
                     .map_err(internal)?
@@ -6832,7 +6904,7 @@ impl MissionsStore for Store {
                             "revision": desired_revision,
                         }}),
                         &observer_predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "observer.state")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -6845,6 +6917,8 @@ impl MissionsStore for Store {
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
+                        // For a repository observer, only how far it has read: its version maps
+                        // stay in the polling member's GitHub plugin database.
                         "cursor": cursor,
                         "changed": changed,
                     });
@@ -6862,7 +6936,7 @@ impl MissionsStore for Store {
                         None,
                         &json!({"fields": observer_fields}),
                         &observer_predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "observer.observed")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -6892,7 +6966,7 @@ impl MissionsStore for Store {
                                 "changed_fields": repository_changed_fields,
                             }}),
                             &predecessors,
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
                             &mut receipt_key,
                         )
                         .map_err(internal)?,
@@ -6903,6 +6977,7 @@ impl MissionsStore for Store {
                 let mut collection_discoveries = BTreeMap::<String, Vec<(String, String)>>::new();
                 let mut item_claims = Vec::new();
                 let mut item_mentions = Vec::new();
+                let mut mirrored_items = Vec::new();
                 for (field, item) in discovered {
                     let DiscoveredItem {
                         subject,
@@ -6968,10 +7043,16 @@ impl MissionsStore for Store {
                             "changed_fields": item_changed_fields,
                         }, "evidence": evidence}),
                         &predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
+                    mirrored_items.push(crate::model::RecordedItem {
+                        subject: subject.clone(),
+                        kind: kind.to_owned(),
+                        facts: item_facts.clone(),
+                        claim: claim.id.clone(),
+                    });
                     if !data_types.is_empty() {
                         let prior = recorded_items.get(&subject).cloned().flatten();
                         let mentions = if data_types.contains("mentions") {
@@ -7011,7 +7092,7 @@ impl MissionsStore for Store {
                                 "reason": (!target_exists).then_some("the delivery target is absent"),
                             }}),
                             &predecessors,
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "subscription.state")?),
                             &mut receipt_key,
                         )
                         .map_err(internal)?;
@@ -7045,7 +7126,7 @@ impl MissionsStore for Store {
                             continue;
                         }
                         message_subjects.extend(github_workflow_failures::deliver_tx(
-                            transaction, &self.origin, &batch_id, observer, resource,
+                            transaction, &self.origin, &mut batches, observer, resource,
                             subject, &subscription.to,
                             current_object.get("repository_id").unwrap_or(&Value::Null),
                             failures, workflow_baseline,
@@ -7135,7 +7216,7 @@ impl MissionsStore for Store {
                                         "tags": wake.tags,
                                     }, "evidence": [item_claim]}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7149,7 +7230,7 @@ impl MissionsStore for Store {
                                 end_watch_tx(
                                     transaction,
                                     &self.origin,
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "subscription.watch-ended")?),
                                     subscription_subject,
                                     watch,
                                     if merged { "merged" } else { "closed" },
@@ -7220,7 +7301,7 @@ impl MissionsStore for Store {
                             let entries = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batch_id,
+                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 &subscription.to,
@@ -7263,7 +7344,7 @@ impl MissionsStore for Store {
                                         "delivery_key": delivery_key,
                                     }, "evidence": entries.iter().map(|(_, claim, _)| claim).collect::<Vec<_>>()}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "subscription.batched")?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7297,7 +7378,7 @@ impl MissionsStore for Store {
                             let unowned = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batch_id,
+                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 mission,
@@ -7368,7 +7449,7 @@ impl MissionsStore for Store {
                                     .map(|(_, claim, _)| claim.clone())
                                     .collect::<Vec<_>>()}),
                                 &[],
-                                Some(&batch_id),
+                                Some(&batches.with_observation(transaction, &self.origin)?),
                                 &mut receipt_key,
                             )
                             .map_err(claim_append_error)?;
@@ -7469,7 +7550,7 @@ impl MissionsStore for Store {
                                     message_subjects.extend(route_item_to_owner_tx(
                                         transaction,
                                         &self.origin,
-                                        &batch_id,
+                                        &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                         subscription_subject,
                                         &delivery_resource,
                                         &owner,
@@ -7516,7 +7597,7 @@ impl MissionsStore for Store {
                                     None,
                                     &json!({"fields": request_fields, "evidence": evidence}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.with_observation(transaction, &self.origin)?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7570,18 +7651,19 @@ impl MissionsStore for Store {
                                 "tags": ["resource-change", subscription_subject],
                             }, "evidence": evidence}),
                             &[],
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                             &mut receipt_key,
                         )
                         .map_err(claim_append_error)?;
                         message_subjects.push(message_subject);
                     }
                 }
-                let outcome = ResourceObservationOutcome {
+                let mut outcome = ResourceObservationOutcome {
                     baseline,
                     changed_fields,
                     observation_claim: observation_claim.map(|claim| claim.id),
                     message_subjects,
+                    recorded_items: Vec::new(),
                 };
                 transaction
                     .execute(
@@ -7592,6 +7674,7 @@ impl MissionsStore for Store {
                         ],
                     )
                     .map_err(internal)?;
+                outcome.recorded_items = mirrored_items;
                 Ok(Some((outcome, true)))
                 })()?;
                 check_observer_completion(transaction, observer, desired_revision, current)?;
