@@ -839,7 +839,7 @@ impl Store {
                 (
                     format!("{seat} on {host} needs you to log in"),
                     format!(
-                        "{seat} on {host} needs you to log in: attach (use Attach in Fractal TUI, or Enter on a detached terminal pane) and {how}. A successful authenticated turn clears this alert automatically."
+                        "{seat} on {host} needs you to log in: attach (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane) and {how}. A successful authenticated turn clears this alert automatically."
                     ),
                 )
             } else {
@@ -849,7 +849,7 @@ impl Store {
                         names.len()
                     ),
                     format!(
-                        "{} on {host} share the login {login}, which needs you to sign in again: attach to {} (use Attach in Fractal TUI, or Enter on a detached terminal pane) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.",
+                        "{} on {host} share the login {login}, which needs you to sign in again: attach to {} (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.",
                         names.join(", "),
                         first.subject
                     ),
