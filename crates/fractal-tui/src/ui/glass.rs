@@ -2658,6 +2658,9 @@ impl Ui {
 
     /// A group's tabs, Home first in group 0; a tab whose subject needs the person shows `◆`.
     fn tab_strip(&self, buf: &mut Buffer, area: Rect, glass: &Glass, index: usize) {
+        if area.width == 0 {
+            return;
+        }
         let group = glass.layout.groups()[index];
         let focused = index == glass.focus;
         // With more than one split, the focused one's strip is lit and marked, so it is plain
@@ -2672,7 +2675,7 @@ impl Ui {
         if split && focused {
             buf.set_stringn(area.x, area.y, "▌", 1, theme::fg(theme::ACCENT).bg(strip));
         }
-        let mut x = area.x + 1;
+        let mut x = area.x + u16::from(area.width > 1);
         let tabs: Vec<_> = group.tabs.iter().map(|tab| {
             let pane = Pane::parse(&tab.pane);
             let title = tab.title.clone().unwrap_or_else(|| {
@@ -2694,7 +2697,7 @@ impl Ui {
         };
         // `+` keeps its place at the end while the tab in front and both markers still have room.
         let strip_room = area.width.saturating_sub(x - area.x);
-        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
+        let mut plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
             ADD
         } else {
             0
@@ -2712,15 +2715,18 @@ impl Ui {
         // One cell belongs to the tab, even when chrome consumes the nominal budget.
         // Fewer whole tabs are preferable to erasing their activity glyphs.
         let label_width = label_width.max(usize::from(available > 0));
-        let labels: Vec<_> = tabs
+        let mut labels: Vec<_> = tabs
             .iter()
             .map(|(title, badge)| (badge.label(title, label_width, counts), *badge))
             .collect();
-        let widths: Vec<u16> = labels.iter().map(|(label, _)| text::width(label) as u16).collect();
+        let mut widths: Vec<u16> = labels
+            .iter()
+            .map(|(label, _)| text::width(label) as u16)
+            .collect();
         // Tabs that do not fit are not lost: a marker at each end counts the hidden ones and
         // shows the nearest. The strip keeps its place, following the tab in front onto the
         // screen, until the wheel moves it; then it stays put until another tab comes in front.
-        let (first, last) = {
+        let (mut first, mut last) = {
             let mut strips = self.glasses.strips.borrow_mut();
             if strips.glass != glass.id {
                 strips.glass.clone_from(&glass.id);
@@ -2754,23 +2760,51 @@ impl Ui {
             view.most = window.most;
             (window.first, window.last)
         };
-        if first > 0 {
+        // Reserve only the cells actually painted after the final tab, including its gap.
+        let hidden_after = labels.len().saturating_sub(last + 1);
+        let mut tail = if hidden_after > 0 {
+            hidden_after.ilog10() as u16 + 4 + plus + u16::from(plus > 0)
+        } else if plus > 0 {
+            1 + plus
+        } else {
+            0
+        };
+        let before = if first > 0 {
+            first.ilog10() as u16 + 3
+        } else {
+            0
+        };
+        let tab_cells = widths
+            .iter()
+            .take(last + 1)
+            .skip(first)
+            .map(|width| u32::from(*width))
+            .sum::<u32>()
+            + (last - first) as u32;
+        let bare = !labels.is_empty()
+            && u32::from(before) + tab_cells + u32::from(tail) > u32::from(strip_room);
+        if bare {
+            // Chrome yields before a tab does. Following keeps the active tab; manual
+            // browsing keeps its visible tab, without selecting or revealing another one.
+            if (first..=last).contains(&group.current) {
+                first = group.current;
+            }
+            last = first;
+            plus = 0;
+            tail = 0;
+            labels[first].0 = tabs[first]
+                .1
+                .label(&tabs[first].0, usize::from(strip_room), counts);
+            widths[first] = text::width(&labels[first].0) as u16;
+            self.glasses.strips.borrow_mut().views[index].first = first;
+        }
+        if first > 0 && !bare {
             let marker = format!("‹{} ", first);
             let width = text::width(&marker) as u16;
             buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
             x += width;
         }
-        // Where tabs must stop so the right marker and `+` (each after a gap) stay in the strip.
-        let hidden_after = labels.len().saturating_sub(last + 1);
-        let tail = if hidden_after > 0 {
-            // Reserve the marker actually drawn, not the total tab count's upper bound.
-            hidden_after.ilog10() as u16 + 5 + plus
-        } else if plus > 0 {
-            1 + plus
-        } else {
-            0
-        };
         let stop = (area.x + area.width).saturating_sub(tail);
         for (shown, (label, badge)) in labels.iter().enumerate().take(last + 1).skip(first) {
             let needs = badge.needs_person;
@@ -2803,14 +2837,14 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
             x += width + 1;
         }
-        if last + 1 < labels.len() {
+        if last + 1 < labels.len() && !bare {
             let marker = format!(" {}›", labels.len() - 1 - last);
             let width = text::width(&marker) as u16;
             buf.set_stringn(x, area.y, &marker, width as usize, theme::fg(theme::PERSON).bg(strip));
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
-        if x + 3 <= area.x + area.width {
+        if plus > 0 && x + 3 <= area.x + area.width {
             buf.set_stringn(x, area.y, " + ", 3, theme::dim().bg(strip));
             self.hit(
                 Rect {
@@ -6263,6 +6297,60 @@ mod tests {
                     assert_marker_counts(&ui, &row, count);
                     if count == 1 {
                         assert_eq!(strip_markers(&ui), (None, None));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_narrow_strip_window_keeps_its_visible_activity() {
+        for count in 1..=60 {
+            let mut ui = tab_badge_world();
+            let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+            group.tabs = vec![group.tabs[0].clone(); count];
+            // Establish the transient view once; each case supplies its own initial offset.
+            tab_strip_row(&ui, 20);
+            for width in 1..=20 {
+                for current in 0..count {
+                    ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
+                    for first in 0..count {
+                        for manual in [false, true] {
+                            {
+                                let mut strips = ui.glasses.strips.borrow_mut();
+                                let view = &mut strips.views[0];
+                                view.first = first;
+                                view.manual = manual;
+                                view.current = Some((current, "agent:agent/a".into()));
+                            }
+                            let row = tab_strip_row(&ui, width);
+                            if count == 50 && width == 11 && first == 25 && current == 25 && !manual
+                            {
+                                println!("NARROW 11: |{row}|");
+                            }
+                            let info = ui.frame.borrow();
+                            let mut active_shown = false;
+                            let mut shown = 0;
+                            for (rect, hit) in &info.hits {
+                                if let Hit::GlassTab(0, tab) = hit {
+                                    assert!(rect.width > 0 && rect.right() <= width);
+                                    assert!(
+                                        row.chars()
+                                            .skip(usize::from(rect.x))
+                                            .take(usize::from(rect.width))
+                                            .any(|c| c == '●'),
+                                        "{count} tabs, {width} cells, first={first}, current={current}, manual={manual}: |{row}|"
+                                    );
+                                    active_shown |= *tab == current;
+                                    shown += 1;
+                                }
+                            }
+                            assert!(shown > 0);
+                            assert!(manual || active_shown, "|{row}|");
+                            assert_eq!(ui.glasses.glass().layout.groups()[0].current, current);
+                            drop(info);
+                            assert_marker_counts(&ui, &row, count);
+                        }
                     }
                 }
             }
