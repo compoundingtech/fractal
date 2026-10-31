@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v11.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v12.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1737,16 +1737,16 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Checkpoints trim in most runs, or the suite is worth little. With corpus v11,
-/// all 17 fixed seeds converge and trim a checkpoint, including seed 3.
-/// This measured characterization includes the GitHub plugin's two compact kinds.
-/// Keep the exact per-seed equality: claim generation consumes the schedule's RNG.
-const NEVER_TRIMS: &[u64] = &[];
+/// Checkpoints trim in most runs, or the suite is worth little. With corpus v12, every fixed
+/// seed converges, and all but seeds 2, 34 and 106 trim a checkpoint: v12 adds
+/// `fault.dismissed`, which shifts the draws. Keep the exact per-seed equality: claim
+/// generation consumes the schedule's RNG.
+const NEVER_TRIMS: &[u64] = &[2, 34, 106];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v11 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v12 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -1975,7 +1975,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v11.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v12.json"
         }))
         .unwrap(),
     )

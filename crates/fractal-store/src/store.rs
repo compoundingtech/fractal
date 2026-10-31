@@ -5842,8 +5842,10 @@ impl Store {
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
         let fallback = self.fleet_fault_agent()?;
+        let dismissed = self.dismissed_faults()?;
         self.current_attention(items, as_of)?
             .into_iter()
+            .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
             .map(|item| {
                 Ok(FaultView {
                     owner: self.fault_owner(&item, fallback.as_deref())?,
@@ -5851,6 +5853,109 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Each dismissed fault, by subject and episode. A new episode at the same source is a new
+    /// fault, so a dismissal never hides a later failure.
+    pub fn dismissed_faults(&self) -> Result<HashSet<(String, String)>> {
+        let connection = self.readers.get();
+        let mut query = connection.prepare(
+            "SELECT subject, json_extract(body, '$.fields.episode') FROM claims INDEXED BY claims_kind_index
+             WHERE kind='fault.dismissed'",
+        )?;
+        Ok(query
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+            .filter_map(|row| match row {
+                Ok((subject, Some(episode))) => Some(Ok((subject, episode))),
+                Ok((_, None)) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Dismiss a current fault whose run has ended. Nothing at such a source can close it: a
+    /// failed child run's outcome belongs to its parent step, and an ended run is not retried,
+    /// revised or cancelled. A person may, and so may the fleet's fault agent, which owns faults
+    /// no one else does; no other agent. A fault whose run is still open closes at its source.
+    pub fn dismiss_fault_as(
+        &self,
+        request: &crate::model::FaultDismissRequest,
+    ) -> Result<crate::model::FaultDismissal, St3Error> {
+        let actor = smallclaims::store::normalize_actor(&request.actor, "person");
+        let fault_agent = self.fleet_fault_agent().map_err(internal)?;
+        if !(actor.starts_with("person/") || fault_agent.as_deref() == Some(actor.as_str())) {
+            return Err(St3Error::new(
+                "fault-dismiss-forbidden",
+                format!("`{actor}` cannot dismiss a fault; a person, or the fleet's fault agent, can"),
+            ));
+        }
+        if request.reason.trim().is_empty() {
+            return Err(St3Error::new("fault-dismiss-reason", "a fault dismissal needs a reason"));
+        }
+        let source = request.source.as_str();
+        let matching = self
+            .fault_snapshot(now_ms())
+            .map_err(internal)?
+            .into_iter()
+            .map(|fault| fault.item)
+            .filter(|item| item.subject == source || item.mission_run.as_deref() == Some(source))
+            .filter(|item| request.episode.as_deref().is_none_or(|episode| item.episode == episode))
+            .collect::<Vec<_>>();
+        let item = match matching.as_slice() {
+            [item] => item,
+            [] => {
+                return Err(St3Error::new(
+                    "missing-fault",
+                    format!("`{source}` has no current fault{}", request.episode.as_deref().map(|episode| format!(" with episode `{episode}`")).unwrap_or_default()),
+                ));
+            }
+            several => {
+                return Err(St3Error::new(
+                    "ambiguous-fault",
+                    format!(
+                        "`{source}` has {} current faults; name one with --episode: {}",
+                        several.len(),
+                        several.iter().map(|item| format!("{} ({})", item.episode, item.title)).collect::<Vec<_>>().join("; ")
+                    ),
+                ));
+            }
+        };
+        let run = item
+            .mission_run
+            .clone()
+            .or_else(|| item.subject.starts_with("mission-run/").then(|| item.subject.clone()));
+        let ended = match &run {
+            Some(run) => self
+                .mission_run(run)
+                .map_err(internal)?
+                .is_some_and(|view| is_terminal_run_state(&view.status)),
+            None => false,
+        };
+        if !ended {
+            return Err(St3Error::new(
+                "fault-source-open",
+                format!("the fault on `{}` belongs to a run that has not ended; it closes at its source", item.subject),
+            ));
+        }
+        self.append_claim(&ClaimInput {
+            subject: item.subject.clone(),
+            kind: "fault.dismissed".into(),
+            actor: Some(actor.clone()),
+            fields: BTreeMap::from([
+                ("episode".into(), Value::String(item.episode.clone())),
+                ("reason".into(), Value::String(request.reason.clone())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("fault-dismissed:{}:{}", item.subject, item.episode)),
+        })?;
+        Ok(crate::model::FaultDismissal {
+            subject: item.subject.clone(),
+            episode: item.episode.clone(),
+            title: item.title.clone(),
+            actor,
+            reason: request.reason.clone(),
+        })
     }
 
     /// Clear a persisted signature fault and wake the stopped migration. A person may, and so

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A fault whose run has ended, which nothing at its source can close (a failed child loop run, whose outcome belongs to its parent step), can now be dismissed with a reason by a person or the fleet's fault agent: `st missions dismiss-fault RUN --reason ... --as ACTOR`. The dismissal closes that one fault (its subject and episode), drops it from `st doctor` attention-age, and records who and why; any other agent is refused, and a fault on a run that has not ended still closes only at its source",
+  "replay": {"status": "none", "detail": "No replay change; current faults are still derived from their sources on each read."},
+  "schema": {"status": "changed", "detail": "Adds the append-only claim kind fault.dismissed (episode, reason) on fault source subjects. No database DDL or storage version change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Adds POST /v1/faults/dismiss and `st missions dismiss-fault`. A daemon on an older build holds a replicated fault.dismissed claim until it runs this build, and keeps showing the fault until then."},
+  "downtime": {"status": "none", "detail": "No startup work or expected interruption."},
+  "manual": {"status": "changed", "detail": "After the roll, the fleet's fault agent dismisses the faults of ended runs that cannot close (issue #4476: the failed belt pass runs) with one reason each."},
+  "recovery": {"status": "changed", "detail": "Rollback is forward-only once a dismissal has been written locally; older members keep fault.dismissed as a claim waiting for a newer build. A dismissal is an ordinary claim; a later failure is a new fault and is not hidden."}
+}
