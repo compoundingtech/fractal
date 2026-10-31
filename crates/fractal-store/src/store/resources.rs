@@ -1078,6 +1078,22 @@ END;
                    projection_digest::oracle(&store.readers.get()).unwrap());
     }
 
+    /// A compact `required_checks` summary replaces the snapshot's state and keeps the checks it
+    /// counts and their execution, in the projection every reader takes.
+    #[test]
+    fn a_compact_required_checks_summary_keeps_the_snapshots_checks_and_execution() {
+        let store = Store::open_memory("item-state-checks").unwrap();
+        let subject = "resource/github/acme/garden/pull-request/7";
+        observed(&store, subject, json!({"number": 7, "state": "open", "head_sha": "a",
+            "required_checks": {"state": "pending", "source": "rules", "checks": ["build"], "execution": {"run": 4}}}));
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        item_state(&store, subject, json!({"state": "open", "head_sha": "a",
+            "required_checks": {"state": "pass", "source": "rules"}}));
+        assert_eq!(current(&store, subject)["facts"]["required_checks"],
+            json!({"state": "pass", "source": "rules", "checks": ["build"], "execution": {"run": 4}}));
+        assert_eq!(store.latest_actual_value(subject).unwrap().unwrap()["facts"]["required_checks"]["execution"], json!({"run": 4}));
+    }
+
     /// A store that ran an older build's triggers while it took compact states, as after a
     /// rollback, reads them once this build reopens it.
     #[test]
