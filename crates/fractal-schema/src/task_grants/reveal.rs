@@ -1,15 +1,8 @@
 use super::browser::{TaskBrowserStepV1, TaskRevealSourceKindV1};
 use super::{TaskManifestError, TaskProviderV1, invalid};
 
-/// ECMAScript TrimString whitespace, deliberately not Rust's Unicode whitespace.
-fn ecma_space(c: char) -> bool {
-    matches!(c, '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
-        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
-        | '\u{205f}' | '\u{3000}' | '\u{feff}')
-}
-
 pub(super) fn bounded_text(value: &str, max: usize) -> Result<(), TaskManifestError> {
-    if value.chars().all(ecma_space) || value.contains('\0')
+    if super::ecma_blank(value) || value.contains('\0')
         || value.encode_utf16().count() > max
     {
         return Err(invalid("text is blank, contains NUL, or exceeds its UTF-16 bound"));
