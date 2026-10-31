@@ -91,10 +91,10 @@ fn slot_reader_answers(
             let history = claims_of_kind_in_order(connection, &subject, kind)?;
             let cursor_moving = history.last().is_some_and(|claim| claim.accepted_at_unix_ms >= cut);
             let moving = cursor_moving || actual_moved(connection, &subject, cut)?;
-            let answer = json!({
-                "state": latest_actual(connection, &subject)?,
-                "cursor": resources::claimed_observer_cursor_at(connection, &subject)?,
-            });
+            let state = latest_actual(connection, &subject)?;
+            let cursor = resources::claimed_observer_cursor_at(connection, &subject)?;
+            if state.is_none() && cursor.is_none() { continue; }
+            let answer = json!({ "state": state, "cursor": cursor });
             let canonical = serde_json::to_string(&smallclaims::hash::canonical_json_value(&answer))?;
             keys.push(smallclaims::answers::AnswerKey {
                 subject: subject.clone(),
