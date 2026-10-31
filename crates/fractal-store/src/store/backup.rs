@@ -557,7 +557,7 @@ mod tests {
 
     fn diagnostic(store: &Store, reason: &str) {
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: format!("daemon/{}", store.origin()),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
