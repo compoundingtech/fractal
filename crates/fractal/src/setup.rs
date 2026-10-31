@@ -748,6 +748,15 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     // An instance always gets its own copies, below its own directory, so removing the
     // directory removes them and the default install is never the one that runs.
     let instance = fractal_daemon::instance::current();
+    // A login shell may omit this command even when its canonical link runs this image.
+    if instance.is_none()
+        && std::env::var_os("HOME").is_some_and(|home| {
+            let canonical = PathBuf::from(home).join(".local/bin/fractal");
+            canonical.is_symlink() && same_file(&canonical, executable)
+        })
+    {
+        return Ok(executable.into());
+    }
     // Keep managed installations (including the signed macOS app bundle) in place.
     if instance.is_none()
         && let Ok(environment) = fractal_daemon::environment::snapshot()

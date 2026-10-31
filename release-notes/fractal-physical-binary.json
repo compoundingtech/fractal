@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Cargo emits fractal. Current archives, native setup, macOS bundles and Home Manager-owned stable paths install physical fractal; packages.fractal selects the full product with web assets, PTY and canonical completions. Temporary st/st3 reverse executable aliases and transitional package attributes remain explicit unfinished migration work, not completion evidence. The programs.smalltalk.fractalBinary.enable option is removed, including its former false setting; consumer configurations must remove that option atomically with the package pin and policy adoption. Existing service labels, bundle identifiers, state paths and historical release decoding remain unchanged."
+    "detail": "Cargo emits fractal. Current archives, native setup, macOS bundles and Home Manager-owned stable paths install physical fractal; packages.fractal selects the full product with web assets, PTY and canonical completions. Setup preserves a default canonical command symlink to its running image even when the account's login PATH omits it; named instances still install their own copies. Temporary st/st3 reverse executable aliases and transitional package attributes remain explicit unfinished migration work, not completion evidence. The programs.smalltalk.fractalBinary.enable option is removed, including its former false setting; consumer configurations must remove that option atomically with the package pin and policy adoption. Existing service labels, bundle identifiers, state paths and historical release decoding remain unchanged."
   },
   "downtime": {
     "status": "none",
