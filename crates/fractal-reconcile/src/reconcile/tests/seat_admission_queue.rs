@@ -148,20 +148,23 @@ fn controller_refresh_releases_missing_and_stale_envelopes_without_waiting() {
     fs::write(&file, payload.to_string()).unwrap();
     let config = Config { state_file: file.clone(), batch_paused_min_secs: 30 };
     let reconciler = reconciler.with_seat_admission(Some(config.clone()), status.clone());
+    reconciler.refresh_seat_admission();
     assert!(status.state().decision.queue);
     assert!(!status.admit("worker", None, None, false, now));
     payload["observedAt"] = json!(now - 121);
     fs::write(&file, payload.to_string()).unwrap();
     // Reattaching forces the same refresh path without racing the filesystem watcher.
     let reconciler = reconciler.with_seat_admission(Some(config.clone()), status.clone());
+    reconciler.refresh_seat_admission();
     assert_eq!(status.state().decision.mode, "fail-open");
     assert!(status.admit("worker", None, None, false, now));
     drop(reconciler);
     fs::remove_file(&file).unwrap();
     status.state().decision.queue = true;
     assert!(!status.admit("worker", None, None, false, now));
-    let _reconciler = Reconciler::new(store, runtime, "node".into(), Arc::new(Notify::new()))
+    let reconciler = Reconciler::new(store, runtime, "node".into(), Arc::new(Notify::new()))
         .with_seat_admission(Some(config), status.clone());
+    reconciler.refresh_seat_admission();
     assert_eq!(status.state().decision.mode, "fail-open");
     assert!(status.admit("worker", None, None, false, now));
 }

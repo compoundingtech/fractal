@@ -7501,6 +7501,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         if !self.admit_seat_start(subject, member, request)? {
             return Ok(false);
         }
+        if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
+            let mut operation = self
+                .store
+                .rollout(&subject.subject)?
+                .context("rollout start has no operation")?;
+            anyhow::ensure!(
+                operation.id == *id && operation.phase == "starting",
+                "rollout changed before start admission"
+            );
+            operation.desired_token = self
+                .store
+                .selected_desired_token(&subject.subject)?
+                .context("replacement has no desired token")?;
+            crate::rollout::phase(
+                &self.store,
+                &subject.subject,
+                &operation,
+                "start-attempted",
+                None,
+                &[],
+            )?;
+            self.signal_changed();
+        }
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
             anyhow::ensure!(
