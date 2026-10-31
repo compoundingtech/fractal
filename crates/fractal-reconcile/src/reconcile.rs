@@ -40865,6 +40865,114 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(events[0]["subject"], "github-event/repo/issue/3/closed");
     }
 
+    /// In compact mode a poller records each item's change as `vcs.item.state` alone and each
+    /// derived event as one `github.event` claim. Every look is compared with the mirror's facts,
+    /// which keep what the graph no longer records, so a comment already delivered is not
+    /// delivered again. With a dependent member of an older build, item snapshots continue.
+    #[tokio::test]
+    async fn compact_mode_records_compact_state_and_events_and_delivers_each_comment_once() {
+        struct OnePoll {
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, _: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "compact-mode",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |state: &str, comments: &[u64]| serde_json::json!({
+            "node_id": "I_orchid", "number": 1, "state": state, "title": "Orchid",
+            "url": "https://github.com/acme/garden/issues/1",
+            "comments": comments.len(),
+            "recent_comments": comments.iter().map(|id| serde_json::json!({
+                "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-30T10:0{id}:00Z"),
+            })).collect::<Vec<_>>(),
+        });
+        let listing = |state: &str, comments: &[u64]| serde_json::json!({"repository_id": 7, "issues": [issue(state, comments)]});
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let poll = |facts: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(OnePoll { facts, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let plugin = plugin.clone();
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let kinds = |subject: &str| store.claims_for(subject, None).unwrap().into_iter()
+            .map(|claim| claim.kind).collect::<Vec<_>>();
+        let delivered = || store.messages(Some("agent/example.reader"), true).unwrap().len();
+
+        // The first look is a baseline, and the mirror fills from it.
+        poll(listing("open", &[]), "c1").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+        assert_eq!(delivered(), 0);
+        let snapshots = |subject: &str| kinds(subject).iter().filter(|kind| *kind == "resource.observed").count();
+        let item = "resource/repo/issue/1";
+        let before = snapshots(item);
+
+        // A comment: compact mode records no snapshot, and the comment is delivered once.
+        poll(listing("open", &[1]), "c2").await;
+        assert_eq!(delivered(), 1);
+        assert_eq!(snapshots(item), before, "compact mode writes no item snapshot");
+        assert!(kinds(item).iter().any(|kind| kind == "vcs.item.state"));
+        // The same comment again: the mirror knew it, though the graph never recorded it.
+        poll(listing("open", &[1]), "c3").await;
+        assert_eq!(delivered(), 1, "a known comment is not delivered again");
+
+        // The close is one keyed event claim and one compact state.
+        poll(listing("closed", &[1]), "c4").await;
+        assert_eq!(store.latest_actual_value(item).unwrap().unwrap()["facts"]["state"], "closed");
+        let event = "github-event/repo/issue/1/closed";
+        assert_eq!(kinds(event), ["github.event"]);
+        assert_eq!(snapshots(item), before);
+
+        // A seat on a member that advertises no plugin, as an older build, watches the
+        // repository: its next look records snapshots again.
+        let spec = crate::graph::observer_spec(
+            &store.desired_subjects_named(&["observer/repo".into()]).unwrap()[0].desired,
+        ).unwrap();
+        let facts = listing("closed", &[1]);
+        assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts).unwrap().compact);
+        apply_source(&store, r#"version 2
+agent "example.elder" { host "elder"; workspace "/tmp"; command "true" }"#, "elder-seat");
+        store.declare_watch(&crate::github_watch::ThreadRef::parse("acme/garden#1").unwrap(), "agent/example.elder", None).unwrap();
+        assert!(crate::GithubStore::repository_dependents(&*store, "acme/garden", "resource/repo").unwrap().contains("elder"));
+        let prior = mirrored_prior(&store, &plugin, "node", &spec, &facts).unwrap();
+        assert!(!prior.compact, "a dependent without the plugin keeps snapshots on");
+        assert_eq!(prior.items[item]["state"], "closed", "the mirror still supplies the prior facts");
+    }
+
     /// Polling moves to a member without the plugin database, between two polls by the real
     /// repository provider. The issue closed and the comment written in the gap are each
     /// delivered once, and the comment from before the gap is not delivered again: the new

@@ -234,6 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn a_compact_state_reads_as_an_observation_of_its_item() {
+        let state = compact_item_state(
+            "vcs.pull-request", "observer/github/acme/garden",
+            json!({"state": "open", "head_sha": "a", "draft": true}).as_object().unwrap(),
+        ).unwrap();
+        let body = json!({"fields": state, "evidence": ["claim-1"]});
+        let observed = observed_body(ITEM_STATE, "resource/github/acme/garden/pull-request/7", &body);
+        assert_eq!(observed["fields"]["kind"], "vcs.pull-request");
+        assert_eq!(observed["fields"]["facts"], json!({"state": "open", "head_sha": "a", "draft": true, "number": 7}));
+        assert_eq!(observed["evidence"], json!(["claim-1"]));
+        let snapshot = json!({"fields": {"kind": "vcs.issue", "facts": {"state": "open"}}});
+        assert_eq!(observed_body("resource.observed", "resource/x/issue/1", &snapshot), snapshot);
+    }
+
+    #[test]
     fn an_item_state_refuses_snapshot_fields_and_an_event_needs_its_key_family() {
         let mut fields: BTreeMap<String, Value> = compact_item_state(
             "vcs.issue", "observer/github/acme/garden", json!({"state": "closed"}).as_object().unwrap(),
