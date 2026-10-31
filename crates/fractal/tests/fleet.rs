@@ -154,6 +154,15 @@ impl Node {
             ("systemctl", "#!/bin/sh\ncase \"$*\" in\n*MainPID*) cat \"$HOME/../worker.pid\";;\n*'show st3-replication.service '*) printf 'LoadState=loaded\\nActiveState=active\\nSubState=running\\n';;\n*' show '*) printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\n';;\n*) exit 1;;\nesac\n"),
             ("launchctl", "#!/bin/sh\ncase \"$*\" in\n*com.compoundingtech.st3.replication*) printf 'state = running\\npid = '; cat \"$HOME/../worker.pid\";;\n*) exit 1;;\nesac\n"),
         ] {
+            let mut script = script.to_owned();
+            if tool == "systemctl"
+                && let Ok(real) = fractal_runtime::resolve_executable(tool, &std::env::vars().collect())
+            {
+                // Preserve user-scope isolation without consulting real fleet service units.
+                script = script.replace("case \"$*\" in\n", &format!(
+                    "case \"$*\" in\n*'.scope'*|*show-environment*) exec '{}' \"$@\";;\n",
+                    real.to_string_lossy().replace('\'', "'\\''")));
+            }
             let path = root.join("bin").join(tool);
             fs::write(&path, script).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -363,6 +372,7 @@ impl Node {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = fs::remove_file(self.root.join("worker.pid"));
         let _ = fs::remove_file(self.socket());
     }
 
@@ -2942,8 +2952,7 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
-    // profiles (fish's config.fish among them) that put it on PATH.
+    // Only test-owned XDG roots, supervisor/PTY tools and login profiles remain.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2963,6 +2972,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "run",
                 "bin",
                 "bin/pty",
+                "bin/systemctl",
+                "bin/launchctl",
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
