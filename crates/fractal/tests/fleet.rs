@@ -6372,7 +6372,17 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
     assert_eq!(relayed["poller"], "host/fixture-poller");
 
-    // With the poller down, the reader answers from its graph and says why.
+    // With the poller down, the reader answers from its graph and says why. A relay does not
+    // wait for replication, so first wait for the graph to hold the pull request.
+    wait_until("the reader's graph holds pull request 12", 90, || {
+        let output = reader.st(&["--json", "trace", "show", "resource/github/fixture/app/pull-request/12"]);
+        async move {
+            String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                serde_json::from_str::<Value>(line)
+                    .is_ok_and(|claim| claim["kind"] == "resource.observed" && claim["body"]["fields"]["kind"] == "vcs.pull-request")
+            })
+        }
+    }).await;
     poller.stop();
     let fallback = gh_prs(&reader, PERSON);
     assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
