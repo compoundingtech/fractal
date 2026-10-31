@@ -427,3 +427,45 @@ async fn the_pusher_keeps_re_stamps_replicating_for_a_member_it_cannot_reach() {
         assert_eq!(host.fleet_hears_seats().unwrap(), expected, "a worker that serves the route: {expected}");
     }
 }
+
+/// A member stops counting the moment a push to it fails, though it was reached before: its
+/// re-stamps replicate again until a push reaches it again.
+#[tokio::test]
+async fn a_member_whose_pushes_start_failing_gets_replicated_re_stamps_again() {
+    let root = tempfile::tempdir().unwrap();
+    let host = Arc::new(Store::open(&root.path().join("host.db"), HOST).unwrap());
+    let cedar = declare(&host, "cedar", HOST);
+    report(&host, &cedar, "one");
+    let receiver = Arc::new(Store::open(&root.path().join("receiver.db"), RECEIVER).unwrap());
+    receiver.import_replication(HOST, &host.export_replication(0).unwrap()).unwrap();
+    advertise(&Store::open_memory(RECEIVER).unwrap(), &host, true);
+    let socket = serve(root.path(), app(receiver.clone(), RECEIVER, root.path())).await;
+    let url = worker(&socket, fractal_routes(crate::api::raw_terminal_owner_splice)).await;
+    crate::api::seat_freshness::spawn_seat_freshness_push(
+        host.clone(),
+        relay(root.path(), &[(RECEIVER, url)]),
+        HOST.into(),
+        crate::api::seat_freshness::SeatFreshnessPace {
+            coalesce: Duration::from_millis(20),
+            answer: Duration::from_secs(5),
+            retry: Duration::from_millis(100),
+            longest_retry: Duration::from_millis(200),
+        },
+    );
+    let wait_for = |expected: bool| {
+        let host = host.clone();
+        async move {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while host.fleet_hears_seats().unwrap() != expected && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            host.fleet_hears_seats().unwrap()
+        }
+    };
+    assert!(wait_for(true).await, "the first push reached the member");
+    // The member's daemon goes away: its worker answers each push with an error.
+    fs::remove_file(&socket).unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    report(&host, &cedar, "one");
+    assert!(!wait_for(false).await, "a failed push stops the member counting");
+}

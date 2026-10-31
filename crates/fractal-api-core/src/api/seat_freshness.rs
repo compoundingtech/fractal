@@ -295,7 +295,7 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
     tokio::spawn(crate::task_cpu::account("seat_freshness.push", async move {
         let _observer = observer;
         let mut pushed = SeatFreshnessPushed::default();
-        // Whether this node's last push to each member reached it; a failed push keeps the last.
+        // Whether this node's last push to each member reached it.
         let mut reached = BTreeMap::<String, bool>::new();
         let mut retry: Option<Duration> = None;
         // The first round needs no commit: what this node heard before it started is owed.
@@ -318,7 +318,9 @@ pub fn spawn_seat_freshness_push(store: Arc<Store>, relay: ClientRelay, node: St
                     for member in &round.reached {
                         reached.insert(member.clone(), true);
                     }
-                    for member in &round.unreachable {
+                    // A member no push reaches, or whose push failed, cannot hear this node's seats
+                    // until a push reaches it again.
+                    for member in round.unreachable.iter().chain(&round.failed) {
                         reached.insert(member.clone(), false);
                     }
                     !round.failed.is_empty() || !round.owed.is_empty()
