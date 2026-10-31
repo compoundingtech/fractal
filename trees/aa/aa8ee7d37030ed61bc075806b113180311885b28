@@ -5,3 +5,4 @@ record 4afd9ca7568203918f0539c93bf1a6f89398f995 linux-gate 0 host/forge 2026-10-
 record 12536427680ffef06a982eb0d9a0537280a49b7d rust-tests 0 host/forge 2026-10-31T09:05:12Z
 record b5d67aa0ea524cd3716f43abfba3409cad0fc85e rust-tests 0 host/forge 2026-10-31T09:05:12Z
 record d4f119d7261fec9514ba7795c3f7b4146809bbc9 rust-tests 0 host/forge 2026-10-31T09:05:05Z
+record 4d8fdc5462f647053f2773f097ea9fd86ecbf80b linux-clippy 0 host/forge 2026-10-31T09:55:20Z
