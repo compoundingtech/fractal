@@ -430,6 +430,58 @@ pub struct RuntimeObservation {
     pub incarnation_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RuntimeStopCaller {
+    Reconcile,
+    RevokedStartCleanup,
+}
+
+/// Reconcile evidence is not a fresh registry read; native retirement owns that guard.
+struct RuntimeStopEvidence<'a> {
+    caller: RuntimeStopCaller,
+    subject: &'a str,
+    runtime_id: &'a str,
+    terminal: bool,
+    operation_id: Option<&'a str>,
+    expected_incarnation: Option<&'a str>,
+    observation: Option<&'a RuntimeObservation>,
+}
+
+impl RuntimeStopEvidence<'_> {
+    fn record(&self, action: &str, guard_decision: &str, destructive: bool) {
+        macro_rules! record {
+            ($level:ident) => {
+                tracing::$level!(
+                    caller = ?self.caller,
+                    subject = self.subject,
+                    runtime_id = self.runtime_id,
+                    terminal = self.terminal,
+                    operation_id = self.operation_id.unwrap_or("unavailable"),
+                    expected_incarnation = self.expected_incarnation.unwrap_or("unavailable"),
+                    observed_incarnation = self.observation.and_then(|o| o.incarnation_id.as_deref()).unwrap_or("unavailable"),
+                    observation_source = "existing_reconcile_observation",
+                    fresh_observed_incarnation = "unavailable_at_reconcile_boundary",
+                    registry_status = self.observation.map_or("unavailable", |o| o.status.as_str()),
+                    registry_exit_code = ?self.observation.and_then(|o| o.exit_code),
+                    registry_pid = "unavailable_at_reconcile_boundary",
+                    registry_created_at = "unavailable_at_reconcile_boundary",
+                    recorded_scope = "unavailable_at_reconcile_boundary",
+                    tagged_scope = "unavailable_at_reconcile_boundary",
+                    spawn_lock = "not_applicable_at_reconcile_boundary",
+                    action,
+                    guard_decision,
+                    "reconcile runtime stop boundary"
+                );
+            };
+        }
+        if destructive {
+            record!(info);
+        } else {
+            record!(debug);
+        }
+    }
+}
+
 /// Read-only pass evidence; provenance is keyed by the exact observed incarnation.
 #[derive(Default)]
 pub struct PtyRegistrySnapshot {
@@ -5771,6 +5823,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         let messages = self.store.work_wake_messages_for_reconcile(agent)?;
         let work = self.store.work_for_reconcile(agent)?;
         let harness = self.store.current_harness(agent)?;
+        // When this host last heard the seat: an unchanged working re-stamp stays in its local log.
+        let heard_at = match &harness {
+            Some(harness) => self
+                .store
+                .local_harness_observed_at(agent, &harness.incarnation_id)?
+                .map_or(harness.observed_at_unix_ms, |local| local.max(harness.observed_at_unix_ms)),
+            None => 0,
+        };
         let now = now_ms();
         for step in &work {
             if let Some(due) = crate::incremental::step_due(step, now) {
@@ -5800,7 +5860,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             harness.as_ref().is_some_and(|harness| {
                                 step.status == "ready"
                                     && harness.state == "working"
-                                    && harness.observed_at_unix_ms >= requested
+                                    && heard_at >= requested
                             })
                         })
                     });
@@ -6937,6 +6997,24 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             false
         };
+        RuntimeStopEvidence {
+            caller: RuntimeStopCaller::Reconcile,
+            subject,
+            runtime_id,
+            terminal,
+            operation_id: operation.as_ref().map(|o| o.id.as_str()),
+            expected_incarnation: incarnation,
+            observation,
+        }
+        .record(
+            "select_retirement",
+            if retirement {
+                "retirement_provenance_matched"
+            } else {
+                "retirement_not_authorized_use_normal_stop"
+            },
+            false,
+        );
         self.reconcile_runtime_stop_inner(
             subject,
             runtime_id,
@@ -6948,6 +7026,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .as_ref()
                 .filter(|_| retirement)
                 .map(|o| o.id.as_str()),
+            RuntimeStopCaller::Reconcile,
+            operation.as_ref().map(|o| o.id.as_str()),
         )
     }
 
@@ -6961,16 +7041,29 @@ impl<R: RuntimeControl> Reconciler<R> {
         timeout_ms: u64,
         observation: Option<&RuntimeObservation>,
         retirement_operation: Option<&str>,
+        caller: RuntimeStopCaller,
+        operation_id: Option<&str>,
     ) -> Result<bool> {
+        let evidence = RuntimeStopEvidence {
+            caller,
+            subject,
+            runtime_id,
+            terminal,
+            operation_id,
+            expected_incarnation: incarnation,
+            observation,
+        };
         self.revoke_start(subject)?;
         if observation.is_none() && self.store.runtime_start_for(subject)?.is_some() {
             // Absence during launch is not verified stop. Completion/observation wakes this path.
+            evidence.record("stop", "skip_absent_during_launch", false);
             return Ok(false);
         }
         // A runtime whose state could not be read may still run. Wait for a readable observation.
         if observation.is_some_and(|observation| {
             matches!(observation.status.as_str(), "unknown" | "indeterminate")
         }) {
+            evidence.record("stop", "skip_unreadable_observation", false);
             let now = now_ms();
             let (due, report, episode_started_at) = {
                 let mut retries = self
@@ -7040,10 +7133,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A root's primary process has ended, but its tasks are its processes too: it is
             // not stopped while one still runs. Their own stops report the failure.
             if !self.running_root_tasks(subject)?.is_empty() {
+                evidence.record("end_leftovers", "skip_running_root_tasks", false);
                 return Ok(false);
             }
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
+            evidence.record("end_leftovers", "allow_nonrunning_without_retirement", false);
             self.runtime.end_leftovers(runtime_id, terminal);
             let desired = self.store.selected_desired_token(subject)?;
             let stop = match &desired {
@@ -7117,6 +7212,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("stop:{subject}"),
                 deadline.min(now_ms().saturating_add(100)),
             );
+            evidence.record(
+                if retirement_operation.is_some() {
+                    "stop_with_retirement_proof"
+                } else {
+                    "stop"
+                },
+                "allow_terminate_request",
+                true,
+            );
             let stopped = if retirement_operation.is_some() {
                 self.runtime
                     .stop_with_retirement_proof(runtime_id, terminal, incarnation)
@@ -7144,6 +7248,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
             };
             if verified {
+                evidence.record("apply_retirement", "allow_native_retirement_verified", true);
                 let operation =
                     retirement_operation.context("retirement proof has no operation")?;
                 anyhow::ensure!(
@@ -7157,6 +7262,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.start_changed(subject);
                 return Ok(true);
             }
+            evidence.record("stop", "await_stop_verification", false);
             return Ok(false);
         };
         let deadline = request
@@ -7170,6 +7276,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .saturating_add(timeout_ms as u128),
             );
         if now_ms() < deadline {
+            evidence.record("kill", "skip_shutdown_deadline_pending", false);
             self.arm_restart(&format!("stop:{subject}"), deadline);
             return Ok(false);
         }
@@ -7198,6 +7305,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     == Some(deadline_key.as_str())
             })
         {
+            evidence.record("kill", "skip_already_recorded_kill", false);
             let report_survivor = {
                 let mut reported = self
                     .reported_kill_survivors
@@ -7245,6 +7353,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             return Ok(false);
         }
+        evidence.record("kill", "allow_shutdown_deadline_reached", true);
         self.runtime.kill(runtime_id, terminal, Some(incarnation))?;
         self.store.append_claim(&ClaimInput {
             subject: subject.into(),
@@ -8175,7 +8284,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 // Recover the suspended incarnation's durable path, not the current launch's
                 // latest binding. The snapshot's existing native ID remains the resume fence.
-                if let (Some(incarnation), Some(harness)) =
+                // A path recorded on another host names that host's file: a moved seat resumes
+                // from the inventory its snapshot restored here, by native ID.
+                let moved = suspension
+                    .source_host
+                    .as_deref()
+                    .is_some_and(|source| source != self.host);
+                if moved {
+                    crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
+                } else if let (Some(incarnation), Some(harness)) =
                     (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
                 {
                     match suspended::bound_session_path(
@@ -47841,6 +47958,59 @@ mission "gated" state="ready" {
                 )
                 .map(|_| ())
         }
+    }
+
+    /// Step 2b: once every member can ask the seat's host, an unchanged working re-stamp stays in
+    /// the host's local log. A wake into a turn that was already working is still taken up by the
+    /// next working report after it was sent, which the host hears locally.
+    #[test]
+    fn a_working_re_stamp_that_stays_local_still_takes_up_a_wake() {
+        let seat = SeatQueueFixture::new();
+        seat.store.set_fleet_hears_seats(true).unwrap();
+        let working = |key: &str| {
+            seat.store
+                .append_claim(&ClaimInput {
+                    subject: SEAT.into(),
+                    kind: "harness.observed".into(),
+                    actor: Some(SEAT.into()),
+                    fields: BTreeMap::from([
+                        ("state".into(), Value::String("working".into())),
+                        ("driver".into(), Value::String("codex".into())),
+                        ("incarnation_id".into(), Value::String("seat-one".into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(key.into()),
+                })
+                .unwrap();
+        };
+        working("seat-one-working");
+        seat.start("queued", "local-re-stamp-wake-run");
+        let wake = seat.store.messages(Some(SEAT), false).unwrap().remove(0);
+        seat.store
+            .append_claim(&ClaimInput {
+                subject: wake.subject.clone(),
+                kind: "message.delivered".into(),
+                actor: Some(SEAT.into()),
+                fields: BTreeMap::from([("status".into(), Value::String("delivered".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("local-re-stamp-wake-delivered".into()),
+            })
+            .unwrap();
+        let index = seat.store.index().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        working("seat-one-working-again");
+        assert_eq!(seat.store.index().unwrap(), index, "the unchanged working re-stamp stayed local");
+        seat.reconciler.reconcile_once().unwrap();
+        let after = seat
+            .store
+            .messages(Some(SEAT), true)
+            .unwrap()
+            .into_iter()
+            .find(|message| message.subject == wake.subject)
+            .unwrap();
+        assert_eq!(after.status, "closed", "the local working report took up the wake");
     }
 
     #[test]

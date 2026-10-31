@@ -8197,8 +8197,9 @@ fn a_harness_state_replicates_only_when_it_changes() {
 #[test]
 fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
     let minute = 60_000_u128;
-    let count = |native: bool| {
+    let count = |native: bool, fleet_hears: bool| {
         let store = Store::open_memory("node").unwrap();
+        store.set_fleet_hears_seats(fleet_hears).unwrap();
         let subject = "agent/node.worker";
         store
             .append_claim(&ClaimInput {
@@ -8220,6 +8221,7 @@ fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
             let begin = store.claims_for(subject, Some("harness.observed")).unwrap().len();
             for stamp in 0..=12 {
                 let at = start + if state == "idle" { 0 } else { 61 * minute } + stamp * 5 * minute;
+                store.set_write_clock_at(at).unwrap();
                 append_latest_observation_publication(
                     &store.graph,
                     &harness_state(subject, state, at as u64),
@@ -8233,8 +8235,12 @@ fn a_resting_native_harness_replicates_its_state_once_not_every_re_stamp() {
         assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 26, "the local log keeps every re-stamp");
         claims
     };
-    assert_eq!(count(true), [1, 13], "a native harness at rest replicates its transition only");
-    assert_eq!(count(false), [13, 13], "a legacy report keeps its heartbeat");
+    // While some member cannot ask the seat's host, re-stamps five minutes apart replicate.
+    assert_eq!(count(true, false), [1, 13], "a native harness at rest replicates its transition only");
+    assert_eq!(count(false, false), [13, 13], "a legacy report keeps its heartbeat");
+    // Once every member can ask, every seat replicates its transitions only.
+    assert_eq!(count(true, true), [1, 1]);
+    assert_eq!(count(false, true), [1, 1], "a legacy report needs no heartbeat either");
 }
 
 /// A resting native harness's re-stamp no longer replicates, but it still carries out the usage
@@ -12299,6 +12305,78 @@ fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
     // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
     assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
     assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
+}
+
+/// Step 2b of the claims-store breakup: an unchanged harness report stays in the local log once
+/// every other member can ask the seat's host how recently it heard the seat. Until then one
+/// replicates every five minutes, for members whose freshness and down rule read report ages:
+/// fifteen minutes of a working seat re-stamping every minute replicate 4 claims, not 16.
+#[test]
+fn unchanged_harness_reports_stay_local_once_every_member_can_ask_the_seats_host() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let count = || store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    let report = |state: &str, at: u128| {
+        let mut input = harness_state(subject, state, at as u64);
+        input.idempotency_key = Some(format!("{state}-{at}"));
+        store.set_write_clock_at(at).unwrap();
+        store.append_latest_observation(&input, at).unwrap();
+    };
+    for n in 0..=15 {
+        report("working", start + n * minute);
+    }
+    assert_eq!(count(), 4, "the first report, then one every five minutes: minutes 0, 5, 10 and 15");
+    store.set_fleet_hears_seats(true).unwrap();
+    for n in 16..=45 {
+        report("working", start + n * minute);
+    }
+    assert_eq!(count(), 4, "re-stamps stay local once every member can ask");
+    report("idle", start + 46 * minute);
+    assert_eq!(count(), 5, "a transition replicates");
+    for n in 47..=60 {
+        report("idle", start + n * minute);
+    }
+    assert_eq!(count(), 5);
+    // A member that cannot ask joins: the fallback resumes.
+    store.set_fleet_hears_seats(false).unwrap();
+    for n in 61..=65 {
+        report("idle", start + n * minute);
+    }
+    assert_eq!(count(), 6, "the first re-stamp past five minutes replicates, the rest wait");
+    assert_eq!(
+        store.local_observations_after(0, 200).unwrap().iter().filter(|row| row.kind == "harness.observed").count(),
+        66,
+        "the local log keeps every report"
+    );
+}
+
+/// A roster's freshness read takes every seat's newest local report in one statement: 12 seats
+/// cost what 2 do, and a seat with no local report adds nothing.
+#[test]
+fn the_newest_local_harness_report_of_many_seats_is_one_read() {
+    let measure = |reported: usize, silent: usize| {
+        let store = Store::open_memory("node").unwrap();
+        let subjects = (0..reported + silent).map(|seat| format!("agent/node.worker-{seat}")).collect::<Vec<_>>();
+        let start = now_ms();
+        for subject in subjects.iter().take(reported) {
+            store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+        }
+        let names = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let newest = store.local_harness_newest_many(&names).unwrap();
+        let work = scope.finish();
+        assert_eq!(newest.len(), reported);
+        for subject in subjects.iter().take(reported) {
+            assert_eq!(newest[subject], ("inc-1".to_owned(), start), "{subject}");
+            assert_eq!(store.local_harness_newest(subject).unwrap(), Some(newest[subject].clone()));
+        }
+        work.statements
+    };
+    let two = measure(2, 0);
+    assert_eq!(measure(12, 0), two, "12 seats cost what 2 do");
+    assert_eq!(measure(2, 10), two, "and 10 seats with no local report add nothing");
 }
 
 /// `daemon.diagnostic` is observability only, so it stays in the node's local observation log,

@@ -72,6 +72,13 @@ impl SeatStatusStore for Store {
                 .min(accepted);
             observed = observed.max(at);
         }
+        // On another member, the seat's host's latest answer about when it heard the seat.
+        if let Some(at) = self
+            .extension::<fractal_store::store::RelayedFreshness>()
+            .heard_at(subject, &harness.incarnation_id)
+        {
+            observed = observed.max(at);
+        }
         Ok(if now.saturating_sub(observed) > HARNESS_OBSERVATION_FRESHNESS.as_millis() {
             "stale"
         } else {
