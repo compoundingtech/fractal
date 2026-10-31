@@ -3428,6 +3428,7 @@ export type TimelineContentBody = {
   attachment_id?: Id;
   blocks?: Array<TimelineBlock>;
   media_type: string;
+  message_id?: string;
   text?: string;
 } & (unknown | unknown);
 

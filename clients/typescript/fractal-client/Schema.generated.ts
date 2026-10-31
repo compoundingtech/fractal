@@ -4169,6 +4169,7 @@ export const TimelineContentBody = /*#__PURE__*/ (() => Schema.Struct({
   "attachment_id": optionalKey(Id),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "media_type": Schema.String,
+  "message_id": optionalKey(Schema.String),
   "text": optionalKey(Schema.String)
 }).check(Schema.makeFilter((o: object) => ("text" in o) || ("attachment_id" in o), { expected: "fields [\"text\"] or [\"attachment_id\"]" })).annotate({ identifier: "TimelineContentBody" }))()
 export type TimelineContentBody = typeof TimelineContentBody.Type
