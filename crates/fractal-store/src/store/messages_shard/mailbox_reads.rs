@@ -122,14 +122,17 @@ pub fn changed_subjects(
     Ok(subjects)
 }
 
-/// At most `limit` stream items admitted, and lifecycle records made, after `after`, as
-/// (subject, recipient), with the position they reach and whether more remain. The mailbox
-/// wake dispatcher routes these, as it routes the graph's new claims.
+/// Stream items to wake, as (subject, recipient), with the position they reach and whether
+/// more remain.
+pub type WakeBatch = (StreamPosition, Vec<(String, String)>, bool);
+
+/// At most `limit` stream items admitted, and lifecycle records made, after `after`. The
+/// mailbox wake dispatcher routes these, as it routes the graph's new claims.
 pub fn wake_batch(
     graph: &crate::store::Store,
     after: StreamPosition,
     limit: usize,
-) -> anyhow::Result<(StreamPosition, Vec<(String, String)>, bool)> {
+) -> anyhow::Result<WakeBatch> {
     let Some(shard) = shard(graph) else {
         return Ok((after, Vec::new(), false));
     };

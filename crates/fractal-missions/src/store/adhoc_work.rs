@@ -164,6 +164,23 @@ pub fn validate_retry(
     Ok(())
 }
 
+/// Whether the step's current handoff note is this message, to this recipient.
+fn names_current_handoff(
+    connection: &Connection,
+    subject: &str,
+    input: &WorkAcknowledgeRequest,
+) -> Result<bool, St3Error> {
+    let Some(view) = person_work::step(connection, subject).map_err(internal)? else {
+        return Ok(false);
+    };
+    let Some(handoff) = latest_handoff(connection, &view, now_ms())? else {
+        return Ok(false);
+    };
+    Ok(handoff.body["fields"]["handoff_message"] == input.message
+        && handoff.body["fields"]["handoff_to"] == input.actor
+        && view.assigned_to.as_deref() == Some(&input.actor))
+}
+
 /// The recipient's receipt for a handoff note that is a stream item: the read or close it
 /// already recorded, or a read recorded now. It names the step, as a stream receipt does.
 fn stream_note_read(store: &Store, note: &str, actor: &str) -> Result<String, St3Error> {
@@ -269,13 +286,13 @@ impl AdhocWorkStore for Store {
         // A note in the messages shard is a stream item: its read is this member's record there.
         // Its recipient's read is recorded before the graph's writer is taken: the shard's
         // admission can seal graph batches under the shard's writer, so the graph's writer must
-        // never wait on the shard's. Reading mail addressed to you needs no handoff to be current;
-        // were the acknowledgment refused below, the note stays read, which it is.
+        // never wait on the shard's. The note is read only when it is this step's current handoff
+        // to the reader; the transaction below checks that again under the writer.
         let stream_receipt = match self.message(&input.message).map_err(internal)? {
             Some(note) if crate::store::messages_shard::mailbox_reads::is_stream_item(&note) => {
-                Some((note.to == input.actor)
-                    .then(|| stream_note_read(self, &input.message, &input.actor))
-                    .transpose()?)
+                let current = note.to == input.actor
+                    && names_current_handoff(&self.readers.get(), &subject, input)?;
+                Some(current.then(|| stream_note_read(self, &input.message, &input.actor)).transpose()?)
             }
             _ => None,
         };

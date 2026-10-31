@@ -287,8 +287,10 @@ fn record_lifecycle_checked(
         .unwrap_or(0);
     // A successor records its own custody read of mail its predecessor already read, once.
     let custody_reread = checked && rank == 3 && current == 3 && fields.contains_key("acting_for");
-    // A replayed or earlier step settles to what is recorded, as a graph receipt does.
-    if rank <= current && !custody_reread {
+    // A replayed or earlier step settles to what is recorded, as a graph receipt does. An
+    // admitted step is recorded wherever the item stands, as the graph appends its claim, so the
+    // receipt it names exists.
+    if checked && rank <= current && !custody_reread {
         return Ok(false);
     }
     // Forward steps follow the graph's message transitions, so a stream item moves as the same
@@ -327,10 +329,19 @@ fn record_lifecycle_checked(
     if inserted == 0 && custody_reread {
         // A retried custody read for the same predecessor settles, as its graph claim would by
         // its idempotency key; a read of this mail for another predecessor is refused.
-        let same = lifecycle_records(&shard, subject)
-            .map_err(internal)?
-            .iter()
-            .any(|(kind, recorded)| kind == "message.read" && recorded.get("acting_for") == acting_for.as_ref());
+        let recorded: Option<String> = shard
+            .readers
+            .get()
+            .query_row(
+                "SELECT fields FROM stream_lifecycle WHERE subject=?1 AND kind='message.read' AND actor=?2",
+                rusqlite::params![subject, actor.unwrap_or("")],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| internal(error.into()))?;
+        let same = recorded
+            .and_then(|fields| serde_json::from_str::<Value>(&fields).ok())
+            .is_some_and(|recorded| recorded.get("acting_for") == acting_for.as_ref());
         if !same {
             return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
         }
@@ -947,6 +958,12 @@ mod tests {
         );
         assert!(record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar"), &status("read")).unwrap());
         assert_eq!(graph.message(note).unwrap().unwrap().status, "read");
+        // An admitted read is recorded once even after the item closed, so its receipt exists;
+        // the item stays closed.
+        assert!(record_lifecycle(&graph, note, "message.closed", Some("agent/cedar"), &status("closed")).unwrap());
+        assert!(record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar-next"), &status("read")).unwrap());
+        assert!(!record_admitted_lifecycle(&graph, note, "message.read", Some("agent/cedar-next"), &status("read")).unwrap());
+        assert_eq!(graph.message(note).unwrap().unwrap().status, "closed");
     }
 
     /// A page without a recipient, which a thread reads, lists every graph message and then every
