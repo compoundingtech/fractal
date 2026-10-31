@@ -194,6 +194,7 @@
         "clients/typescript/fractal-client",
         "clients/typescript/fractal-scenarios/recordings/fleet-mid-refactor-proof.script.json",
         "clients/typescript/fractal-scenarios/scripts/recording-script.schema.json",
+        "clients/typescript/fractal-views/tests/fixtures",
         "clippy.toml",
         "components",
         "crates",
@@ -219,7 +220,7 @@
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
         "scripts/ci-cargo-tools-env-test",
-        "scripts/ci-clippy-keyed",
+        "scripts/ci-clippy-result",
         "scripts/ci-install-built-hooks",
         "scripts/ci-linux",
         "scripts/ci-local",
@@ -296,18 +297,16 @@
           "by_level": {
             "host": {
               "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-clippy-keyed"
+                "python3",
+                "scripts/ci-clippy-result"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "run_command_sha256"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
@@ -320,18 +319,16 @@
             },
             "agent": {
               "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-clippy-keyed"
+                "python3",
+                "scripts/ci-clippy-result"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "run_command_sha256"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"
@@ -344,18 +341,16 @@
             },
             "queue": {
               "command": [
-                "nix",
-                "develop",
-                "-c",
-                "bash",
-                "scripts/ci-clippy-keyed"
+                "python3",
+                "scripts/ci-clippy-result"
               ],
               "required_inputs": [
                 "flake_lock_sha256",
                 "toolchain_sha256",
                 "wrapper_sha256",
                 "system",
-                "attempt"
+                "attempt",
+                "run_command_sha256"
               ],
               "bind_inputs": {
                 "flake_lock_sha256": "flake.lock"

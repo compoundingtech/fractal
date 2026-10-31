@@ -416,9 +416,6 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
         transaction
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
             .execute(/* sqlite-large-value: allow-for-now lv-h2851fd201348 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
-        if authoritative {
-            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5601e378d957 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h857dc7d68cf2 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
-        }
     }
     for envelope in envelopes {
         if authoritative {

@@ -569,6 +569,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.build = true;
     ui.live = true;
     ui.glasses = super::glass::Glasses::open(space, super::glass_store::path(&person));
+    ui.prune_place_history();
     // A space opens where this device left it.
     ui.show_focused();
     if std::env::args().any(|arg| arg == "--old") {
@@ -581,6 +582,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
     }
     let _guard = Guard::enter(true)?;
+    ui.keyboard_enhanced = _guard.enhanced;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
     if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
@@ -2904,7 +2906,7 @@ async fn perform(
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
-            // downloads (ST3_DOWNLOADS or their download directory) where it has none.
+            // downloads (FRACTAL_DOWNLOADS, ST3_DOWNLOADS or their download directory) where it has none.
             let bytes = client.blob(&image.sha256, Some(&image.message)).await?;
             let dir = super::attach::dir()
                 .ok_or_else(|| anyhow::anyhow!("No place to keep the image (HOME is not set)"))?;
@@ -2912,11 +2914,11 @@ async fn perform(
             if super::attach::show(&kept) {
                 return Ok((format!("Opened {}", image.name.as_deref().unwrap_or("the image")), None));
             }
-            let downloads = super::attach::downloads()
+            let downloads = super::attach::downloads()?
                 .ok_or_else(|| anyhow::anyhow!("No place to save the image (HOME is not set)"))?;
             let path = super::attach::save(&downloads, &image, &bytes)?;
             Ok((
-                format!("Saved to {} · ST3_DOWNLOADS chooses where", path.display()),
+                format!("Saved to {} · FRACTAL_DOWNLOADS chooses where (ST3_DOWNLOADS also works)", path.display()),
                 None,
             ))
         }

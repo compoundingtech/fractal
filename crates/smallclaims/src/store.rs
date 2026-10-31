@@ -844,6 +844,12 @@ pub struct Store {
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
     trim_local: AtomicBool,
+    /// The most claims a local trim deletes in a day (`[trim] daily_claims`); see
+    /// `trim_locally_at_most`.
+    trim_daily_claims: AtomicU64,
+    /// The day, in days since the epoch, that a local trim's deletions count against: each
+    /// checkpoint step sets it from its own clock.
+    pub(crate) trim_day: AtomicU64,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -1259,6 +1265,8 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
+            trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
+            trim_day: AtomicU64::new(0),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
@@ -2065,11 +2073,18 @@ pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Res
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
                  COALESCE((SELECT sequence FROM writer_heads WHERE writer=?1), 0),
                  COALESCE((SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1), 0),
-                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0),
-                 COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
-             ) + 1",
+                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0)
+             ), MAX(0, COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0))",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h2721e765a782 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1fe81cd46767 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| {
+            let high_water: u64 = row.get(0)?;
+            let floor: u64 = row.get(1)?;
+            let (sequence, _) = crate::writer_chain::writer_continuation(high_water, floor, None::<()>);
+            // SQLite sequences must remain representable as signed integers.
+            i64::try_from(sequence)
+                .map(|sequence| sequence as u64)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, high_water as i64))
+        })
         .map_err(Into::into)
 }
 
@@ -2084,8 +2099,12 @@ pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Resul
                  UNION ALL SELECT sequence, hash FROM writer_heads WHERE writer=?1
              ) ORDER BY sequence DESC LIMIT 1",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-ha390580f8e24 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h6aafdfff5bb3 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| {
+            let hash: String = row.get(0)?;
+            Ok(crate::writer_chain::writer_continuation(0, 0, Some(hash)).1)
+        })
         .optional()
+        .map(|head| head.flatten())
         .map_err(Into::into)
 }
 
@@ -9085,6 +9104,17 @@ impl Store {
 
     pub fn trims_locally(&self) -> bool {
         self.trim_local.load(Ordering::Relaxed)
+    }
+
+    /// The most claims a member that trims locally deletes in one day, `[trim] daily_claims`. A
+    /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
+    /// next cut begins, so a large backlog drains over several days rather than in one long trim.
+    pub fn trim_locally_at_most(&self, claims: u64) {
+        self.trim_daily_claims.store(claims, Ordering::Relaxed);
+    }
+
+    pub fn local_trim_daily_claims(&self) -> u64 {
+        self.trim_daily_claims.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.

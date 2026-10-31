@@ -54,7 +54,7 @@ pub(super) struct Terminal<'a> {
     pub fallback: bool,
 }
 
-pub(super) const RESTARTED: &str = "the terminal restarted; Ctrl+] attaches the new one";
+pub(super) const RESTARTED: &str = "the terminal restarted; Enter attaches the new one";
 
 pub(super) async fn open(client: &Client, terminal: &Terminal<'_>) -> Result<Opened, String> {
     if client.is_local_socket() {
@@ -493,9 +493,10 @@ mod tests {
         let subject = std::env::var("STUI_PROBE_SUBJECT").expect("STUI_PROBE_SUBJECT");
         let person = std::env::var("STUI_PROBE_PERSON").expect("STUI_PROBE_PERSON");
         let runtime = std::env::var("STUI_PROBE_RUNTIME").expect("STUI_PROBE_RUNTIME");
-        let socket =
-            fractal_client::discover_unix_endpoint(std::env::var_os("ST3_ENDPOINT").map(PathBuf::from))
-                .unwrap();
+        let endpoint = crate::environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")
+            .unwrap()
+            .map(PathBuf::from);
+        let socket = fractal_client::discover_unix_endpoint(endpoint).unwrap();
         let client = Client::unix_as(&socket, person);
         let started = Instant::now();
         // Fractal TUI's own feed already holds an agent's incarnation and host, so a real attach reads

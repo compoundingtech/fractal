@@ -822,6 +822,88 @@ proptest! {
     }
 }
 
+/// A seat's current harness view, from one incarnation's observations (state, credential report,
+/// whether it is a transition), before and after deleting what the harness rule drops.
+fn harness_view_full_and_kept(observations: &[(&str, Option<bool>, bool)]) -> (String, String) {
+    let store = Store::open_memory("alder").unwrap();
+    store
+        .append_claim(&input(AGENT, "runtime.observed", None, json!({"status": "running", "incarnation_id": "inc-1"}), "runtime"))
+        .unwrap();
+    for (n, (state, provider_auth, transition)) in observations.iter().enumerate() {
+        let mut fields = json!({"state": state, "driver": "codex", "incarnation_id": "inc-1",
+            "observed_at_ms": n + 1, "status_transition": transition});
+        if let Some(provider_auth) = provider_auth {
+            fields["provider_auth"] = json!(provider_auth);
+        }
+        store.append_claim(&input(AGENT, "harness.observed", Some(AGENT), fields, &format!("harness-{n}"))).unwrap();
+    }
+    // The current harness, the newest turn or end, and the newest `working` (when the last turn
+    // began, and whether the seat worked after a given time).
+    let view = |store: &Store| {
+        let connection = store.readers.get();
+        let worked: Option<(String, Option<i64>)> = connection
+            .query_row(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.observed_since_ms') FROM claims
+                 WHERE subject=?1 AND kind='harness.observed' AND json_extract(body, '$.fields.state')='working'
+                 ORDER BY store_index DESC LIMIT 1",
+                [AGENT],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        format!(
+            "{:?} {:?} {worked:?}",
+            current_harness_at(&connection, AGENT, None).unwrap(),
+            super::attention_snapshot::last_turn_or_end(&connection, AGENT).unwrap(),
+        )
+    };
+    let full = view(&store);
+    let claims = claims_of_kind_in_order(&store.readers.get(), AGENT, "harness.observed").unwrap();
+    let keep = checkpoint_rules::harness_keep(&claims.iter().collect::<Vec<_>>());
+    for (_, claim) in claims.iter().enumerate().filter(|(position, _)| !keep.contains(position)) {
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h7a6efe0439c2 owner=fractal_store::store::checkpoint_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&claim.id]).unwrap();
+    }
+    (full, view(&store))
+}
+
+/// A turn, then the seat at rest: the newest `working` stays, so readers of the last turn
+/// (when it began, whether the seat worked after a nudge) answer as from every observation.
+#[test]
+fn harness_rule_keeps_the_last_turn_after_the_seat_comes_to_rest() {
+    let (full, kept) = harness_view_full_and_kept(&[("ready", None, true), ("working", None, true), ("idle", None, true), ("ready", None, true)]);
+    assert!(full.contains("\"working\""), "{full}");
+    assert_eq!(full, kept);
+}
+
+/// A credential refusal, a report that restored it, and the refusal again: the seat needs a
+/// login since the second refusal, and the rule keeps the restoring report that says so (#4237).
+#[test]
+fn harness_rule_keeps_where_the_current_needs_login_began() {
+    let (full, kept) = harness_view_full_and_kept(&[("ready", Some(false), true), ("starting", Some(true), true), ("ready", Some(false), true)]);
+    assert!(full.contains("needs-login") && full.contains("since_unix_ms: 3"), "{full}");
+    assert_eq!(full, kept);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Whatever an incarnation reports, its current harness view (state, since, reason and the
+    /// claim it shows), its newest turn or end and its newest `working` are the same from the
+    /// kept observations as from all of them.
+    #[test]
+    fn the_current_harness_view_is_the_same_from_the_kept_observations(
+        observations in proptest::collection::vec(
+            (prop_oneof![Just("starting"), Just("ready"), Just("idle"), Just("working"), Just("blocked"), Just("ended")],
+             prop_oneof![2 => Just(None), 1 => Just(Some(true)), 1 => Just(Some(false))],
+             any::<bool>()),
+            1..14,
+        ),
+    ) {
+        let (full, kept) = harness_view_full_and_kept(&observations);
+        prop_assert_eq!(full, kept);
+    }
+}
+
 #[test]
 fn loop_rule_keeps_the_ends_of_each_round_and_the_first_items() {
     let mut sealed = Sealed::default();
@@ -2211,7 +2293,7 @@ fn status_history_checkpoint_keeps_last_200_recent_transitions_across_incarnatio
 fn status_history_checkpoint_drops_old_transitions_but_keeps_current_state_start() {
     let mut sealed = Sealed::default();
     let mut ids = Vec::new();
-    for index in 0..5 {
+    for index in 0..7 {
         ids.push(sealed.add(
             "cedar",
             T + index,
@@ -2219,20 +2301,21 @@ fn status_history_checkpoint_drops_old_transitions_but_keeps_current_state_start
                 "harness.observed",
                 "agent/cedar",
                 json!({
-                    "incarnation_id":"one", "state":if index == 1 { "working" } else { "idle" },
-                    "status_transition": index <= 2
+                    "incarnation_id":"one", "state":if index == 1 || index == 3 { "working" } else { "idle" },
+                    "status_transition": index <= 4
                 }),
             ),
         ));
     }
     let set = sealed.build();
     let gone = dropped(&plan_drops(&set));
-    assert!(!gone.contains(&ids[2]), "current idle state began here");
+    assert!(!gone.contains(&ids[4]), "current idle state began here");
     assert!(
-        gone.contains(&ids[1]),
-        "older transition is outside the history window"
+        gone.contains(&ids[1]) && gone.contains(&ids[2]),
+        "older transitions are outside the history window"
     );
-    assert!(gone.contains(&ids[3]), "repeated idle adds no history");
+    assert!(!gone.contains(&ids[3]), "the last turn stays");
+    assert!(gone.contains(&ids[5]), "repeated idle adds no history");
 }
 
 #[test]
@@ -2467,7 +2550,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 23);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 25);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2486,6 +2569,7 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                 ),
             )
             .replace("mission-run-input,", "mission-run-input,request-discovery,")
+            .replace("current-native-auth-run-start", "current-native-auth-run-start-and-the-report-ending-the-run-before,newest-working,newest-ended")
             .replace(
                 "resource.observed actor=null observer=set slot=subject keep=newest",
                 "resource.observed actor=null observer=set slot=subject keep=newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts",
