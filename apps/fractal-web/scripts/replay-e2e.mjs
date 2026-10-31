@@ -182,8 +182,10 @@ try {
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
     await page.clock.runFor(offset - elapsed)
   }
+  // The wait starts before the page loads and the pane's module is served only when the dev server
+  // reaches it, so a loaded build host needs far more than the 10s default the other steps share.
   const paneResponse = page.waitForResponse(response =>
-    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
+    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'), { timeout: 120_000 })
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   await roster.waitFor({ state: 'visible' })
   const replayStartedAt = await page.evaluate(() => Date.now())
