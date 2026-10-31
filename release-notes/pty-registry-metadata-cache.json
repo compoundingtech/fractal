@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reduce daemon CPU when listing many PTY sessions by reusing unchanged registry metadata",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "The registry metadata cache is process-local and reads existing JSON records without migration. The bundled PTY producer also gains an optional retention.lost-at bookkeeping tag when opt-in finished-record retention is enabled."},
+  "rules": {"status": "none", "detail": "Session liveness and runtime ownership checks remain unchanged."},
+  "compatibility": {"status": "changed", "detail": "Repeated PTY snapshots share cached light metadata across runtime clones. Changed and removed registry entries are reflected on the next listing; liveness is still observed on every call. All PTY dependencies and the bundled binary advance together from 79d526d1 to merged main 0a13ed02, also including settle writer-release race handling, recorded-exit lifecycle waits and opt-in PTY_RETAIN_FINISHED retention (default off). Older 063ff7f JSON records remain readable; missing boot identity remains Unknown under the existing ownership policy."},
+  "downtime": {"status": "none", "detail": "The optimization takes effect on daemon restart without migration."},
+  "manual": {"status": "changed", "detail": "Merge waits until the authorized host PTY upgrade: STOP 9accbcc7, planned 11-03..11-10, requires 4630c5ea or newer; bundled revision 0a13ed02 satisfies that requirement."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}
