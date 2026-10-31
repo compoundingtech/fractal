@@ -994,6 +994,9 @@ impl TerminalStream {
     }
 }
 
+/// The error a daemon's empty 404 decodes to: it has no such route.
+const MISSING_ROUTE: &str = "HTTP 404 with no body: the daemon has no such route";
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("st client API error {0:?}: {1}")]
@@ -1007,6 +1010,13 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    /// Whether the daemon has no such route: it answered 404 with no error body, as a daemon
+    /// from before the route does. A typed refusal, another status, or a malformed answer to a
+    /// route that exists is not this.
+    pub fn is_missing_route(&self) -> bool {
+        matches!(self, Self::Protocol(message) if message == MISSING_ROUTE)
+    }
+
     /// What st said of whether it applied the request, when it said: `"none"` (nothing was queued;
     /// a fresh request is safe) or `"unknown"` (it may still complete; send the identical request,
     /// with the same key, again). Any other answer, or none, says nothing.
@@ -3746,7 +3756,14 @@ impl Client {
     /// The fleet's membership as this host's daemon holds it, for finding a host's Fabric node.
     /// A read of the local store; only a Unix socket serves it.
     pub async fn fleet_membership(&self) -> Result<serde_json::Value, ClientError> {
-        self.get("/v1/internal/fleet/membership").await
+        // Internal routes refuse seat callers; a daemon from before the public route answers
+        // only the internal one.
+        match self.get("/v1/fleet/membership").await {
+            Err(error) if error.is_missing_route() => {
+                self.get("/v1/internal/fleet/membership").await
+            }
+            result => result,
+        }
     }
 
     /// Where `subject`'s running terminal lives, read from this host's daemon without any graph
@@ -4431,6 +4448,11 @@ impl Client {
                     error.message.clone(),
                     Box::new(error),
                 ));
+            }
+            // Any other route an older daemon does not have answers Axum's empty 404: say so
+            // distinctly, so a caller can fall back without mistaking a broken answer for it.
+            if status == 404 && bytes.is_empty() {
+                return Err(ClientError::Protocol(MISSING_ROUTE.into()));
             }
             let error: ErrorEnvelope = serde_json::from_slice(&bytes)
                 .or_else(|decode| core_api_error(&bytes).ok_or(decode))

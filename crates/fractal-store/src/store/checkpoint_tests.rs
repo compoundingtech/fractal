@@ -1921,17 +1921,17 @@ fn plan_a_copy_of_a_real_store() {
 #[test]
 fn an_observed_item_keeps_its_latest_state_and_every_version_still_read_by_id() {
     let mut sealed = Sealed::default();
-    let item = "resource/github/acme/garden/pull-request/7";
+    let item = "resource/github/acme/garden/issue/7";
     let observed = |head: &str| {
         draft(
             "resource.observed",
             item,
             json!({
-                "kind": "vcs.pull-request",
-                "facts": {"number": 7, "head_sha": head, "state": "open"},
+                "kind": "vcs.issue",
+                "facts": {"number": 7, "title": head, "state": "open"},
                 "observer": "observer/run/garden/repository",
                 "baseline": false,
-                "changed_fields": ["head_sha"],
+                "changed_fields": ["title"],
             }),
         )
     };
@@ -1978,6 +1978,131 @@ fn an_observed_item_keeps_its_latest_state_and_every_version_still_read_by_id() 
     let plan = plan_drops(&sealed.build());
     assert_eq!(dropped(&plan), ids([&replaced]));
     let _ = (requested, latest, authored);
+}
+
+/// A mission request names the observation that discovered it in `discovery`, and the reconciler
+/// reads that observation by its ID, even when the request cites other evidence or none. A later
+/// observation of the item does not replace it.
+#[test]
+fn an_observation_a_mission_request_names_as_its_discovery_stays() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/issue/7";
+    let observed = |head: &str| {
+        draft(
+            "resource.observed",
+            item,
+            json!({
+                "kind": "vcs.issue",
+                "facts": {"number": 7, "title": head, "state": "open"},
+                "observer": "observer/run/garden/repository",
+                "baseline": false,
+                "changed_fields": ["title"],
+            }),
+        )
+    };
+    let replaced = sealed.add("alder", T + 1, observed("aaaa"));
+    let discovery = sealed.add("alder", T + 2, observed("bbbb"));
+    sealed.add(
+        "birch",
+        T + 3,
+        draft(
+            "subscription.mission-requested",
+            "subscription/run/garden/reviews",
+            json!({"mission": "mission/review", "resource": item, "resource_input": "source",
+                "workspace": ".", "discovery": discovery}),
+        ),
+    );
+    let latest = sealed.add("alder", T + 4, observed("cccc"));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&replaced]), "the discovery stays while its request names it");
+    let _ = latest;
+}
+
+/// An observer's observation of `subject` with `facts`, and more fields.
+fn observation<'a>(subject: &'a str, facts: Value, more: Value) -> Draft<'a> {
+    let mut fields = json!({"kind": "vcs.pull-request", "facts": facts, "observer": "observer/run/garden/repository"});
+    fields.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+    draft("resource.observed", subject, fields)
+}
+
+/// A pull request's observations stay from the newest back to the newest one a merge-queue
+/// check stops at: here the one that saw it queued. The open observations before it go.
+#[test]
+fn a_pull_request_keeps_its_observations_back_to_the_merge_queue() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/pull-request/7";
+    let open = |head: &str| json!({"number": 7, "state": "open", "head_sha": head, "merge_queue": null});
+    let before = sealed.add("alder", T + 1, observation(item, open("a"), json!({})));
+    let queued = sealed.add("alder", T + 2, observation(item, json!({"number": 7, "state": "open", "head_sha": "b",
+        "merge_queue": {"state": "QUEUED", "position": 1}}), json!({})));
+    // Accepted with the queued observation, so a check could read either first, though it comes
+    // first in canonical order. Its writer's newest envelope is a later one.
+    let tied = sealed.add("abel", T + 2, observation(item, open("b"), json!({})));
+    sealed.add("abel", T + 5, draft("harness.todo.observed", "agent/sample.seat", json!({"items": []})));
+    let after = [
+        sealed.add("alder", T + 3, observation(item, open("b"), json!({}))),
+        sealed.add("alder", T + 4, observation(item, open("c"), json!({}))),
+    ];
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&before]));
+    let _ = (queued, tied, after);
+
+    // A merged pull request is not open: the check stops at its newest observation.
+    let mut sealed = Sealed::default();
+    let older = [
+        sealed.add("alder", T + 1, observation(item, open("a"), json!({}))),
+        sealed.add("alder", T + 2, observation(item, json!({"number": 7, "state": "open", "head_sha": "b",
+            "merge_queue": {"state": "QUEUED", "position": 1}}), json!({}))),
+    ];
+    let merged = sealed.add("alder", T + 3, observation(item, json!({"number": 7, "state": "closed", "merged": true,
+        "head_sha": "b", "merge_queue": null}), json!({})));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&older[0], &older[1]]));
+    let _ = merged;
+}
+
+/// A pull request that was never seen outside "open and out of the queue" keeps the newest
+/// observations a check reads, and no more.
+#[test]
+fn a_pull_request_always_open_outside_the_queue_keeps_what_a_check_reads() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/pull-request/7";
+    let scan = fractal_github_base::github_watch::THREAD_SCAN as usize;
+    let observed = (0..scan + 3)
+        .map(|index| sealed.add("alder", T + 1 + index as u128,
+            observation(item, json!({"number": 7, "state": "open", "head_sha": format!("h{index}")}), json!({}))))
+        .collect::<Vec<_>>();
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), observed[..3].iter().cloned().collect::<BTreeSet<_>>());
+}
+
+/// The projection reads the newest full observation over a newer receipt, and the earliest that
+/// names an opener; a resource described in flat facts keeps every observation.
+#[test]
+fn an_observed_resource_keeps_its_newest_full_observation_its_opener_and_flat_history() {
+    let mut sealed = Sealed::default();
+    let item = "resource/github/acme/garden/issue/8";
+    let issue = |title: &str| json!({"number": 8, "state": "open", "title": title});
+    let opener = sealed.add("alder", T + 1, observation(item, json!({"number": 8, "state": "open", "title": "a",
+        "opened_by": "agent/sample.seat"}), json!({"kind": "vcs.issue"})));
+    let replaced = sealed.add("alder", T + 2, observation(item, issue("b"), json!({"kind": "vcs.issue"})));
+    let full = sealed.add("alder", T + 3, observation(item, issue("c"), json!({"kind": "vcs.issue"})));
+    let receipt = sealed.add("alder", T + 4, observation(item, issue("c"),
+        json!({"kind": "vcs.issue", "attribution_only": true})));
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), ids([&replaced]));
+    let _ = (opener, full, receipt);
+
+    let mut sealed = Sealed::default();
+    let flat = [
+        sealed.add("alder", T + 1, draft("resource.observed", item,
+            json!({"kind": "vcs.issue", "observer": "observer/run/garden/repository", "state": "open", "title": "a"}))),
+        sealed.add("alder", T + 2, observation(item, issue("b"), json!({"kind": "vcs.issue"}))),
+        sealed.add("alder", T + 3, observation(item, issue("c"), json!({"kind": "vcs.issue"}))),
+    ];
+    let plan = plan_drops(&sealed.build());
+    assert_eq!(dropped(&plan), BTreeSet::new(), "a fold merges flat facts field by field");
+    let _ = flat;
 }
 
 #[test]
@@ -2342,7 +2467,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 21);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 23);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2359,6 +2484,11 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                      slo.breach-transition slot=subject keep=episode-event-fences-and-conflicts-after-recovery-7d\n\
                      harness-question.observed slot=subject {questions}\n"
                 ),
+            )
+            .replace("mission-run-input,", "mission-run-input,request-discovery,")
+            .replace(
+                "resource.observed actor=null observer=set slot=subject keep=newest",
+                "resource.observed actor=null observer=set slot=subject keep=newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts",
             )
             .replace(
                 "\nguards=",
@@ -2588,7 +2718,7 @@ fn legacy_slot_of(claim: &ClaimRecord) -> Option<(&'static str, Vec<String>)> {
             if claim.actor.is_none()
                 && fields(claim).is_some_and(|fields| fields.contains_key("observer")) =>
         {
-            Some(("newest", slot(&[])))
+            Some(("resource", slot(&[])))
         }
         "harness.usage" => match field_str(claim, "semantics")? {
             "response_rollup" => Some((
@@ -2620,6 +2750,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         Rule::AccountLimits => "limits",
         Rule::QuestionLifecycle => "question",
         Rule::SloEventFences => "slo",
+        Rule::ResourceObserved => "resource",
     };
     let field_sets = [
         json!({}),

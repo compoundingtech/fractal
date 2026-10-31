@@ -8276,7 +8276,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 // Recover the suspended incarnation's durable path, not the current launch's
                 // latest binding. The snapshot's existing native ID remains the resume fence.
-                if let (Some(incarnation), Some(harness)) =
+                // A path recorded on another host names that host's file: a moved seat resumes
+                // from the inventory its snapshot restored here, by native ID.
+                let moved = suspension
+                    .source_host
+                    .as_deref()
+                    .is_some_and(|source| source != self.host);
+                if moved {
+                    crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
+                } else if let (Some(incarnation), Some(harness)) =
                     (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
                 {
                     match suspended::bound_session_path(
