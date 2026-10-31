@@ -1122,6 +1122,9 @@ struct FleetMigrateArgs {
 struct UpArgs {
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Enroll a foreground replication worker before listening; unavailable for service daemons.
+    #[arg(long)]
+    replication_worker_pid: Option<u32>,
     #[arg(long)]
     node: Option<String>,
     #[arg(long)]
@@ -6727,6 +6730,7 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
 }
 
 async fn run_up(args: UpArgs) -> Result<()> {
+    let worker_observer = fractal_daemon::api::worker_observer(args.replication_worker_pid)?;
     let started_at = Instant::now();
     let mut phase_finished_at = started_at;
     let mut phase_elapsed_ms = || {
@@ -7243,7 +7247,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                router(state.clone()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer).layer(web_status.clone()),
                 Some(state.store.clone()),
                 ready
             ),
