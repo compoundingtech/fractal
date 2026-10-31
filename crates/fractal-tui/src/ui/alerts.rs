@@ -1476,6 +1476,7 @@ mod tests {
     fn prompt(id: &str, answers: &[&str], text: &str) -> Attention {
         Attention {
             deadline: None,
+            requested_at: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: "builder is waiting for permission".into(),
@@ -2373,6 +2374,7 @@ mod tests {
         let request: fractal_client::StructuredRequest = serde_json::from_value(value).unwrap();
         Attention {
             deadline: None,
+            requested_at: None,
             id: "attention/release".into(),
             tier: Tier::Stopped,
             title: "How far does the release go?".into(),

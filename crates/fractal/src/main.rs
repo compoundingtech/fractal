@@ -6848,6 +6848,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store
         .extension::<smallclaims::answers::AnswersCache>()
         .set_readers(Arc::new(fractal_store::store::answers_check::fold_reader_answers));
+    store.extension::<smallclaims::answers::AnswersCache>()
+        .set_reader_movement(Arc::new(fractal_store::store::answers_check::slot_reader_movement));
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
