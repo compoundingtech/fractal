@@ -301,22 +301,37 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     preparation::flush(transaction)
 }
 
-/// Whether `subject`'s newest record is a compact state newer than its newest snapshot: what
-/// the graph holds of its facts outside the compact and delivery sets may then be behind.
+/// Whether `subject` changed in compact facts since its newest snapshot: its newest compact
+/// state differs from that snapshot's facts in compact form. What the graph holds of its facts
+/// outside the compact and delivery sets may then be behind. A state written beside a snapshot,
+/// as every look outside compact mode writes one, does not differ from it, whatever the clock.
 pub fn compact_newer(connection: &Connection, subject: &str) -> Result<bool> {
-    let Some((_, _, state_at)) = newest_item_state(connection, subject)? else {
+    let Some((_, state, _)) = newest_item_state(connection, subject)? else {
         return Ok(false);
     };
-    let snapshot_at: Option<String> = connection
+    let snapshot: Option<String> = connection
         .query_row(
-            "SELECT MAX(CAST(accepted_at_unix_ms AS INTEGER)) FROM claims WHERE subject=?1 AND kind='resource.observed'",
+            /* sqlite-large-value: allow-for-now lv-h394f408ad47f owner=fractal_store::store::resources TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT json_extract(body, '$.fields') FROM claims WHERE subject=?1 AND kind='resource.observed'
+                 AND NOT EXISTS (SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
+                 ORDER BY COALESCE(json_extract(body, '$.fields.attribution_only'), 0), CANONICAL_DESC(claims) LIMIT 1",
+            ),
             [subject],
-            |row| row.get::<_, Option<i64>>(0),
-        )?
-        .map(|at| at.to_string());
-    Ok(snapshot_at.is_none_or(|snapshot_at| {
-        state_at.parse::<u128>().unwrap_or_default() > snapshot_at.parse::<u128>().unwrap_or_default()
-    }))
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(snapshot) = snapshot.and_then(|fields| serde_json::from_str::<Value>(&fields).ok()) else {
+        return Ok(true);
+    };
+    let observer = state.get("observer").and_then(Value::as_str).unwrap_or_default();
+    let compacted = snapshot.get("kind").and_then(Value::as_str)
+        .zip(snapshot.get("facts").and_then(Value::as_object))
+        .and_then(|(kind, facts)| fractal_schema::github_plugin::compact_item_state(kind, observer, facts));
+    let unattributed = |fields: &serde_json::Map<String, Value>| {
+        fields.iter().filter(|(name, _)| *name != "observer").map(|(name, value)| (name.clone(), value.clone())).collect::<BTreeMap<_, _>>()
+    };
+    Ok(compacted.is_none_or(|compacted| unattributed(&compacted) != unattributed(&state)))
 }
 
 /// A `vcs.item.state` claim: its ID, compact fields and accepted time.
