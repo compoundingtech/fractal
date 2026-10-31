@@ -59,12 +59,14 @@ fn retained_history_case(kind: &str) {
     use smallclaims::answers::{differing_kinds, reader_answers};
         let store = Store::open_memory("alder").unwrap();
         let subject = match kind {
+            "daemon.diagnostic" => "daemon/example",
+            "harness.observed" | "harness.todo.observed" | "harness.usage" => "agent/example",
             "observer.observed" => "observer/example",
             "resource.observed" => "resource/example/issue/1502",
             _ => "host/example",
         };
         let mut ids = Vec::new();
-        for (at, writer, state) in [(100, "old", "idle"), (200, "new", "idle")] {
+        for (at, writer, state) in [(100, "old", "idle"), (150, "old", "idle"), (200, "new", "idle")] {
             let writer = if matches!(kind, "observer.observed" | "resource.observed") { writer } else { "new" };
             store.set_write_clock_at(at).unwrap();
             let mut connection = store.connection.write();
@@ -89,7 +91,10 @@ fn retained_history_case(kind: &str) {
             summary
         };
         let full = summary();
-        store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&ids[0]]).unwrap();
+        let first = usize::from(!matches!(kind, "observer.observed" | "resource.observed"));
+        store.connection.write().execute(
+            "DELETE FROM claims WHERE id IN (?1,?2)", [&ids[first], &ids[1]],
+        ).unwrap();
         let trimmed = summary();
         assert!(differing_kinds(&full, &trimmed, true).is_empty(), "{kind}");
         let update = match kind {
@@ -97,7 +102,7 @@ fn retained_history_case(kind: &str) {
             "resource.observed" => "UPDATE claims SET body=json_set(body,'$.fields.facts.state','closed') WHERE id=?1",
             _ => "UPDATE claims SET body=json_set(body,'$.fields.state','failed') WHERE id=?1",
         };
-        store.connection.write().execute(update, [&ids[1]]).unwrap();
+        store.connection.write().execute(update, [&ids[2]]).unwrap();
         assert!(!differing_kinds(&trimmed, &summary(), true).is_empty(), "{kind}");
 }
 
@@ -123,8 +128,8 @@ fn slot_readers_preserve_field_carriers_and_distinct_slots() {
     for (kind, subject, values) in [
         ("observer.observed", "observer/example", [json!({"cursor": "first"}), json!({"state": "healthy"})]),
         ("daemon.diagnostic", "daemon/example", [json!({"code": "a"}), json!({"code": "b"})]),
-        ("harness.observed", "host/example", [json!({"incarnation_id": "a"}), json!({"incarnation_id": "b"})]),
-        ("harness.usage", "host/example", [
+        ("harness.observed", "agent/example", [json!({"incarnation_id": "a"}), json!({"incarnation_id": "b"})]),
+        ("harness.usage", "agent/example", [
             json!({"semantics": "session_cumulative", "incarnation_id": "a", "total_tokens": 1}),
             json!({"semantics": "session_cumulative", "incarnation_id": "b", "total_tokens": 1}),
         ]),
