@@ -42,6 +42,17 @@ fn invalid(message: impl Into<String>) -> TaskManifestError {
     TaskManifestError(message.into())
 }
 
+/// The shared v1 blank predicate uses ECMAScript TrimString, never Rust trim.
+/// WhiteSpace + LineTerminator: 0009–000D, 0020, 00A0, 1680, 2000–200A,
+/// 2028, 2029, 202F, 205F, 3000, FEFF. In particular, 0085 is not whitespace.
+fn ecma_blank(value: &str) -> bool {
+    value.chars().all(|c| matches!(c,
+        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+        | '\u{205f}' | '\u{3000}' | '\u{feff}'
+    ))
+}
+
 /// Strictly parse and cross-validate the closed v1 manifest scope.
 /// Successful schema validation does not authenticate or confer live authority.
 pub fn parse_task_manifest_v1(input: &[u8]) -> Result<TaskManifestV1, TaskManifestError> {
