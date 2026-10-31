@@ -62,6 +62,7 @@ pub mod run_report;
 pub mod start_spacing;
 pub mod start_jobs;
 pub mod seat_admission;
+mod seat_admission_queue;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
@@ -2911,6 +2912,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 subject.kind = "stop".into();
             }
         }
+        self.cancel_invalid_admissions(&desired)?;
         // A stopped root ends every task it declared: each runs the exec's own stop below and is
         // not launched or restarted meanwhile. Starting the root again declares them again.
         let stopped_roots = desired
@@ -7495,6 +7497,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                 )?;
                 return Ok(false);
             }
+        }
+        if !self.admit_seat_start(subject, member, request)? {
+            return Ok(false);
         }
         let workspace = Path::new(&member.workspace);
         if workspace.exists() {
@@ -20407,6 +20412,7 @@ pub mod tests {
     mod run_report_tests;
     mod start_spacing_loop;
     mod start_preemption;
+    mod seat_admission_queue;
     mod terminal_step_guard;
     #[test]
     fn native_exec_and_gate_shell_resolve_the_declared_path() {
