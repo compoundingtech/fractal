@@ -7,6 +7,7 @@ use smallclaims::fleet::transport::Fabric;
 use crate::ClientError;
 
 const PROTOCOL: &str = "st3-client-v0";
+const FRACTAL_PROTOCOL: &str = "fractal-client-v0";
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A peer's native client protocol, never a proxy URL or arbitrary Fabric protocol.
@@ -25,10 +26,10 @@ impl fmt::Display for FabricEndpoint {
 
 impl FabricEndpoint {
     pub fn parse(value: &str) -> Result<Self, ClientError> {
-        let invalid = || ClientError::Protocol(format!("invalid Fabric client endpoint; expected fabric://<NodeID-or-name>/{PROTOCOL}"));
+        let invalid = || ClientError::Protocol(format!("invalid Fabric client endpoint; expected fabric://<NodeID-or-name>/{PROTOCOL} or fabric://<NodeID-or-name>/{FRACTAL_PROTOCOL}"));
         let rest = value.strip_prefix("fabric://").ok_or_else(invalid)?;
         let (target, protocol) = rest.split_once('/').ok_or_else(invalid)?;
-        if protocol != PROTOCOL
+        if ![PROTOCOL, FRACTAL_PROTOCOL].contains(&protocol)
             || target.is_empty()
             || !target.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
@@ -118,6 +119,8 @@ impl FabricEndpoint {
                 })?;
                 resolve_peer(&self.target, &peers)?.to_owned()
             };
+            // Both accepted URI names address the gateway's exposed service.
+            // Keep the legacy dial name while DEFAULT_SERVICE is st3-client-v0.
             fabric
                 .dial_socket(&node, PROTOCOL)
                 .await
@@ -159,6 +162,17 @@ mod tests {
         for target in ["DEVBOX", "dev-box.local", &"a".repeat(64)] {
             let url = format!("fabric://{target}/st3-client-v0");
             assert_eq!(FabricEndpoint::parse(&url).unwrap().to_string(), url);
+        }
+        for target in ["DEVBOX", "dev-box.local", NODE_ID] {
+            let endpoint = FabricEndpoint::parse(&format!("fabric://{target}/fractal-client-v0")).unwrap();
+            assert_eq!(endpoint.to_string(), format!("fabric://{target}/st3-client-v0"));
+        }
+        for service in [PROTOCOL, FRACTAL_PROTOCOL] {
+            for suffix in ["/", "?x", "#fragment", "\n", "\r\n", "/extra"] {
+                let value = format!("fabric://box/{service}{suffix}");
+                assert!(FabricEndpoint::parse(&value).is_err(), "{value:?}");
+            }
+            assert!(FabricEndpoint::parse(&format!("prefixfabric://box/{service}")).is_err());
         }
         for value in ["fabric:box/st3-client-v0", "fabric:///st3-client-v0", "fabric://box/st3/pty/x", "fabric://box/st3-client-v0/", "fabric://box/st3-client-v0?x", "fabric://user@box/st3-client-v0", "fabric://box:1/st3-client-v0", "fabric://%62ox/st3-client-v0"] {
             assert!(FabricEndpoint::parse(value).is_err(), "{value}");
@@ -205,6 +219,20 @@ mod tests {
         std::fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         Fabric::new(program)
+    }
+
+    #[tokio::test]
+    async fn both_uri_names_dial_the_exposed_gateway_service() {
+        let root = tempfile::tempdir().unwrap();
+        let fabric = fake_fabric(root.path(), &format!(
+            "case \"$*\" in\n'peers --json') echo '{{\"peers\":[{{\"node\":\"{NODE_ID}\",\"name\":\"Box\"}}]}}';;\n'dial {NODE_ID} st3-client-v0 --json') echo '{{\"socket\":\"/native-tunnel.sock\"}}';;\n*) exit 1;;\nesac"
+        ));
+        for service in [PROTOCOL, FRACTAL_PROTOCOL] {
+            for target in ["Box", NODE_ID] {
+                let endpoint = FabricEndpoint::parse(&format!("fabric://{target}/{service}")).unwrap();
+                assert_eq!(endpoint.dial_with(&fabric).await.unwrap(), PathBuf::from("/native-tunnel.sock"));
+            }
+        }
     }
 
     #[tokio::test]
