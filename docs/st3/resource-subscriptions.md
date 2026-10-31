@@ -28,6 +28,10 @@ latest state. The repository resource keeps only its own facts, such as `reposit
 | `reactions` | `reactions` (each reaction's count), and `last_comment.reactions` |
 | `mentions` | `mentions`: the newest mention of each GitHub login in the item's body or comments (`login`, `by`, `url`, `at`), up to 50 |
 
+The member that polls a repository also keeps each item's full facts, every head it has had and
+the keyed events of each change in its GitHub plugin mirror, which `st gh prs|pr|checks` read; a
+newer `vcs.item.state` is read over an item's observed facts. See [plugins](plugins.md).
+
 `vcs.repository`, `vcs.issue`, and `vcs.pull-request` carry optional GitHub `node_id` facts.
 Subjects keep their existing OWNER/REPO/number names. A repository rename or transfer records
 `moved_to` on the old repository; a relocated item records it on the old item, pointing to the
@@ -306,7 +310,34 @@ The daemon records that deadline as a one-shot wake. It does not run a periodic 
 
 Conditional requests use provider cursors such as an ETag. Cursors are local progress state, not resource facts.
 
-The daemon keeps each next-check deadline and cursor in local scheduler memory. A daemon restart performs one immediate observation.
+The daemon keeps each next-check deadline in local scheduler memory. A daemon restart performs one immediate observation.
+
+Each observer's cursor stays on the member that polls it, in the GitHub plugin's own database,
+`<state>/plugins/github/github.sqlite3`. That database never syncs and is not in a backup. For a
+`github.repository` observer, `observer.observed` carries only how far the observer has read:
+its `cursor` holds `items_since` and `comments_since`. The version maps, which are most of a
+cursor's bytes, stay in the plugin database. Builds before it wrote the whole cursor there.
+
+A member with no row for an observer polls from the cursor in that observer's newest
+`observer.observed` claim: the whole cursor an older build wrote, or how far another member had
+read. Once a poll there had a cursor, before or after, it keeps a row, even if a later poll ends
+without one, so it adopts a claim's cursor once per database. A member drops its row when the
+observer stops or another member declares it.
+
+A member that takes over polling, or lost its database, reads on from the claim's position. Each
+item it reads is compared with the facts the graph already recorded for it, so it delivers what
+changed in between once, such as an issue closed or a comment written in the gap, and nothing
+twice. A claim is written only when a poll changes facts, so its position can be behind the
+polling member's; reading from an earlier point only reads more again. A repository with no
+recorded facts is a baseline, which delivers nothing.
+
+A database file the daemon cannot use, damaged or from a newer build, is set aside beside it as
+`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. It does not
+start only when the directory cannot be made, the file cannot be moved aside, or no database
+opens in its place: each names the path and the cause. A read that
+fails is the observer's fault, and a later pass polls it again. An observer whose poll cannot keep
+its cursor there is `degraded` with error code `github-plugin-database`: it retries the write each
+minute and does not ask GitHub again until the database takes the cursor.
 
 The provider applies bounded retries and backoff. It records authentication, rate-limit, and transport failures on the observer subject.
 

@@ -369,6 +369,8 @@ struct SpanStat {
     cpu_ns: u64,
     sql_ns: u64,
     sql_count: u64,
+    /// This thread's reads during the span, for spans opened with `span_with_io`.
+    io: ThreadIo,
 }
 
 impl Acc {
@@ -435,6 +437,7 @@ impl Totals {
             into.cpu_ns += span.cpu_ns;
             into.sql_ns += span.sql_ns;
             into.sql_count += span.sql_count;
+            into.io.add(span.io);
         }
         for (note, count) in &acc.notes {
             *into.notes.entry(note.clone()).or_default() += count;
@@ -837,6 +840,7 @@ pub struct Span {
     cpu_started: u64,
     sql_started: u64,
     sql_count_started: u64,
+    io_started: Option<ThreadIo>,
 }
 
 pub fn span(name: &str) -> Option<Span> {
@@ -855,13 +859,25 @@ pub fn span(name: &str) -> Option<Span> {
         cpu_started: thread_cpu_ns(),
         sql_started,
         sql_count_started,
+        io_started: None,
     })
+}
+
+/// `span`, also counting the thread's reads: bytes read from disk and bytes read at all, so a
+/// stage's reads that missed the page cache show apart from those it served from memory. Reading
+/// the counters costs two reads of `/proc/thread-self/io`, so this is for a pass's stages, not
+/// for each item in them.
+pub fn span_with_io(name: &str) -> Option<Span> {
+    let mut span = span(name)?;
+    span.io_started = Some(ThreadIo::now());
+    Some(span)
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
         let wall = nanos(self.started.elapsed());
         let cpu = thread_cpu_ns().saturating_sub(self.cpu_started);
+        let io = self.io_started.map(|started| ThreadIo::now().since(started)).unwrap_or_default();
         CURRENT.with(|current| {
             let current = current.borrow();
             let Some(op) = current.as_ref() else {
@@ -877,8 +893,32 @@ impl Drop for Span {
             span.cpu_ns += cpu;
             span.sql_ns += sql;
             span.sql_count += sql_count;
+            span.io.add(io);
         });
     }
+}
+
+thread_local! {
+    /// What [`tagged`] puts in front of the key of each statement it runs on this thread.
+    static STATEMENT_TAG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `work` with `tag` in front of the key of every statement it runs on this thread, as
+/// `/* TAG */ SQL`, so the profile tells apart the callers of one query, such as which kind and
+/// which call site read a subject's whole history. In front, it survives the cut a profile makes
+/// to long statements. Free when profiling is off: `tag` is not built.
+pub fn tagged<T>(tag: impl FnOnce() -> String, work: impl FnOnce() -> T) -> T {
+    if !enabled() {
+        return work();
+    }
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STATEMENT_TAG.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(STATEMENT_TAG.with(|slot| slot.replace(Some(tag()))));
+    work()
 }
 
 /// A SQLite statement finished after `duration`.
@@ -887,7 +927,13 @@ pub fn sql(statement: &str, duration: Duration) {
         return;
     }
     let ns = nanos(duration);
-    with_acc_or_unlabeled(|acc| acc.statement(statement, ns));
+    STATEMENT_TAG.with(|tag| match &*tag.borrow() {
+        Some(tag) => {
+            let tagged = format!("/* {tag} */ {statement}");
+            with_acc_or_unlabeled(|acc| acc.statement(&tagged, ns));
+        }
+        None => with_acc_or_unlabeled(|acc| acc.statement(statement, ns)),
+    });
 }
 
 /// Before waiting for the store's writer: when, and who holds it.
@@ -1075,6 +1121,8 @@ fn spans_json(acc: &Acc) -> Vec<Value> {
                 "cpu_ms": ms(span.cpu_ns),
                 "sql_ms": ms(span.sql_ns),
                 "sql_count": span.sql_count,
+                "disk_read_mb": mb(span.io.read_bytes),
+                "io_read_mb": mb(span.io.rchar),
             })
         })
         .collect()
@@ -1766,6 +1814,94 @@ mod tests {
     #[test]
     fn compact_sql_collapses_whitespace() {
         assert_eq!(compact_sql("SELECT a\n     FROM b"), "SELECT a FROM b");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_stage_span_counts_its_reads_and_an_item_span_does_not() {
+        // Profiling is process-global, so this runs in a child with its own enabled profiler.
+        const CHILD: &str = "ST3_PROFILE_STAGE_IO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "profile::tests::a_stage_span_counts_its_reads_and_an_item_span_does_not",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated stage I/O test failed");
+            return;
+        }
+        init_from_env();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), vec![7_u8; 1 << 20]).unwrap();
+        let op = Op::start("task invented-pass", None).unwrap();
+        {
+            let _entered = op.enter();
+            {
+                let _stage = span_with_io("stage/invented");
+                assert_eq!(fs::read(file.path()).unwrap().len(), 1 << 20);
+            }
+            {
+                let _item = span("item/invented");
+                assert_eq!(fs::read(file.path()).unwrap().len(), 1 << 20);
+            }
+        }
+        let acc = op.0.acc.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(acc.spans["stage/invented"].io.rchar >= 1 << 20, "the stage read a mebibyte");
+        assert_eq!(acc.spans["item/invented"].io.rchar, 0, "an item span reads no counters");
+        let spans = spans_json(&acc);
+        let stage = spans.iter().find(|span| span["name"] == "stage/invented").unwrap();
+        assert!(stage["io_read_mb"].as_f64().unwrap() >= 1.0);
+        assert!(stage.get("disk_read_mb").is_some());
+    }
+
+    #[test]
+    fn a_tagged_statement_is_keyed_by_its_tag_and_an_untagged_one_is_not() {
+        // Profiling is process-global, so this runs in a child with its own enabled profiler.
+        const CHILD: &str = "ST3_PROFILE_STATEMENT_TAG_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "profile::tests::a_tagged_statement_is_keyed_by_its_tag_and_an_untagged_one_is_not",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated statement tag test failed");
+            return;
+        }
+        init_from_env();
+        let long = format!("SELECT {} FROM invented", "column, ".repeat(60));
+        let op = Op::start("task invented-pass", None).unwrap();
+        {
+            let _entered = op.enter();
+            sql("SELECT invented", Duration::from_millis(1));
+            tagged(|| "kind=invented at here".into(), || {
+                sql("SELECT invented", Duration::from_millis(2));
+                // Tags do not nest into each other: the inner one replaces, then restores.
+                tagged(|| "inner".into(), || sql("SELECT invented", Duration::from_millis(3)));
+                sql("SELECT invented", Duration::from_millis(4));
+            });
+            sql("SELECT invented", Duration::from_millis(5));
+            // A profile cuts a long statement, and its tag survives the cut.
+            tagged(|| "kind=invented at there".into(), || sql(&long, Duration::from_millis(6)));
+        }
+        let acc = op.0.acc.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(acc.statements["SELECT invented"].count, 2);
+        assert_eq!(acc.statements["/* kind=invented at here */ SELECT invented"].count, 2);
+        assert_eq!(acc.statements["/* inner */ SELECT invented"].count, 1);
+        let shown = top_statements(&acc, 10);
+        let cut = shown.iter().filter_map(|statement| statement["sql"].as_str()).find(|sql| sql.ends_with('…'));
+        assert_eq!(cut.map(|sql| sql.starts_with("/* kind=invented at there */ SELECT column,")), Some(true), "{shown:?}");
     }
 
     #[test]

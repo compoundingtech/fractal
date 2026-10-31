@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""scripts/dep-info-check: every repository file a keyed stage's units read is inside its check's input key."""
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import subprocess
+from contextlib import redirect_stdout
+from pathlib import Path
+import tempfile
+import unittest
+
+HERE = Path(__file__).resolve().parent
+loader = importlib.machinery.SourceFileLoader('dep_info_check', str(HERE / 'dep-info-check'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+check = importlib.util.module_from_spec(spec)
+loader.exec_module(check)
+
+
+POLICY = '.st/evidence-skip-policy.json'
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout reads only.
+def config_path(root, legacy):
+    preferred = root / legacy.replace('.st/', '.fractal/', 1)
+    try:
+        preferred.lstat()
+    except FileNotFoundError:
+        return root / legacy
+    return preferred
+
+class DepInfo(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'repo'
+        self.logs = Path(self.tmp.name) / 'logs'
+        self.deps = self.root / 'target' / 'debug' / 'deps'
+        for directory in (self.deps, self.logs, self.root / '.st'):
+            directory.mkdir(parents=True)
+        self.policy(['crates', 'Cargo.toml', 'docs/st3/invariants.md'])
+        (self.logs / 'clippy-metadata.json').write_text(json.dumps({'target_directory': str(self.root / 'target')}))
+        self.messages = []
+
+    def policy(self, inputs, other=('crates/fractal',)):
+        (self.root / '.st/evidence-skip-policy.json').write_text(json.dumps({'checks': {'linux-clippy': {'inputs': inputs},
+                                                                                       'linux-fleet-compat': {'inputs': list(other)}}}))
+
+    def unit(self, name, files, log='clippy-workspace.jsonl', reported=True):
+        """One compiled unit: its rmeta, its dep-info listing `files`, and (when reported) the compiler-artifact message for it."""
+        rmeta = self.deps / f'lib{name}-0123abcd.rmeta'
+        rmeta.write_bytes(b'')
+        (self.deps / f'{name}-0123abcd.d').write_text(f'{rmeta}: {" ".join(files)}\n\n' + ''.join(f'{f}:\n' for f in files))
+        if reported:
+            self.messages.append((log, {'reason': 'compiler-artifact', 'filenames': [str(rmeta)]}))
+        for name_, messages in {log_: [m for l, m in self.messages if l == log_] for log_, _ in self.messages}.items():
+            (self.logs / name_).write_text(''.join(json.dumps(m) + '\n' for m in messages))
+
+    def run_check(self, *extra):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = check.main(['--logs', str(self.logs), '--root', str(self.root), '--policy', str(self.root / POLICY), *extra])
+        return code, out.getvalue()
+
+    def test_a_unit_that_reads_only_declared_files_passes_and_the_summary_counts_them(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs', 'crates/alpha/src/../../../docs/st3/invariants.md', str(self.root / 'Cargo.toml')])
+        code, out = self.run_check()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=3 uncovered=0')
+
+    def test_an_include_from_outside_the_key_fails_loudly_and_names_the_file(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs', 'crates/alpha/src/../../../docs/st3/schema.md'])
+        code, out = self.run_check()
+        self.assertEqual(code, 1, out)
+        self.assertIn("::error::linux-clippy read docs/st3/schema.md, which its input key does not cover", out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=2 uncovered=1')
+        self.policy(['crates', 'docs/st3'])  # a parent directory covers it
+        self.assertEqual(self.run_check()[0], 0)
+
+    def test_generated_files_and_files_outside_the_repository_are_not_inputs(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs', str(self.root / 'target/debug/build/alpha-1/out/generated.rs'),
+                            '/nix/store/abc-rust/lib/rustlib/src/core.rs', str(Path.home() / '.cargo/registry/src/x/lib.rs')])
+        code, out = self.run_check()
+        self.assertEqual(code, 0, out)
+        self.assertIn('files=1 ', out)
+
+    def test_only_units_this_stage_reported_are_read_so_a_cached_stale_dep_info_cannot_fail_it(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs'])
+        self.unit('stale', ['old/include.txt'], reported=False)  # left in a restored target by another tree
+        self.unit('model', ['crates/model/src/lib.rs'], log='clippy-model.jsonl')  # the second clippy run's log is read too
+        code, out = self.run_check()
+        self.assertEqual(code, 0, out)
+        self.assertIn('units=2 ', out)
+
+    def test_another_check_reads_its_own_logs_and_is_judged_by_its_own_inputs_and_a_test_binary_counts(self):
+        binary = self.deps / 'integration-0123abcd'
+        binary.write_bytes(b'')
+        (self.deps / 'integration-0123abcd.d').write_text(f'{binary}: crates/fractal/tests/integration.rs crates/fractal/../../fixtures/a.json\n')
+        (self.logs / 'fleet-compat-build.jsonl').write_text(json.dumps({'reason': 'compiler-artifact', 'filenames': [str(binary)]}) + '\n')
+        self.unit('alpha', ['crates/alpha/src/lib.rs'])                          # clippy's log: not read for this check
+        code, out = self.run_check('--check', 'linux-fleet-compat', '--jsonl', 'fleet-compat-*.jsonl')
+        self.assertEqual(code, 1, out)
+        self.assertIn('::error::linux-fleet-compat read fixtures/a.json, which its input key does not cover', out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-fleet-compat units=1 files=2 uncovered=1')
+        self.policy(['crates', 'Cargo.toml'], other=('crates/fractal', 'fixtures'))
+        self.assertEqual(self.run_check('--check', 'linux-fleet-compat', '--jsonl', 'fleet-compat-*.jsonl')[0], 0)
+
+    def test_no_dep_info_at_all_fails_since_nothing_shows_what_clippy_read(self):
+        code, out = self.run_check()
+        self.assertEqual(code, 1, out)
+        self.assertIn('no dep-info found', out)
+
+    def test_a_workspace_build_script_s_declared_reads_are_judged_too_and_one_outside_the_key_fails(self):
+        # A build script's reads are in no dep-info file: the rerun-if-changed paths it printed are, relative to its package.
+        self.unit('alpha', ['crates/alpha/src/lib.rs'])
+        out_dir = self.root / 'target/debug/build/alpha-1/out'
+        out_dir.mkdir(parents=True)
+        (out_dir.parent / 'output').write_text('cargo:rerun-if-changed=build.rs\ncargo::rerun-if-changed=../../docs/vrs/requirements.md\n'
+                                               'cargo:rustc-cfg=probe\n')
+        (self.logs / 'clippy-metadata.json').write_text(json.dumps({
+            'target_directory': str(self.root / 'target'),
+            'packages': [{'id': 'alpha-id', 'manifest_path': str(self.root / 'crates/alpha/Cargo.toml')}]}))
+        with open(self.logs / 'clippy-workspace.jsonl', 'a') as log:
+            log.write(json.dumps({'reason': 'build-script-executed', 'package_id': 'alpha-id', 'out_dir': str(out_dir)}) + '\n')
+            # A dependency outside the workspace is not in the --no-deps metadata: its build script is not the tree's.
+            log.write(json.dumps({'reason': 'build-script-executed', 'package_id': 'registry-dep', 'out_dir': str(out_dir)}) + '\n')
+        code, out = self.run_check()
+        self.assertEqual(code, 1, out)
+        self.assertIn('::error::linux-clippy read docs/vrs/requirements.md, which its input key does not cover', out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=3 uncovered=1')
+        self.policy(['crates', 'Cargo.toml', 'docs/vrs'])
+        self.assertEqual(self.run_check()[0], 0)
+
+    def test_a_build_script_s_watch_of_the_git_metadata_is_not_a_tree_input(self):
+        # fractal-build-stamp watches HEAD, the index and HEAD's ref (`git rev-parse --git-path`, relative to its package). In a linked
+        # worktree they lie outside the repository; in a plain checkout (CI's) they are under .git, which is the repository's metadata,
+        # not its tree: no note's key can hold them, and clippy's result does not depend on them.
+        self.unit('alpha', ['crates/alpha/src/lib.rs'])
+        out_dir = self.root / 'target/debug/build/stamp-1/out'
+        out_dir.mkdir(parents=True)
+        (out_dir.parent / 'output').write_text('cargo:rerun-if-changed=../../.git/HEAD\ncargo:rerun-if-changed=../../.git/index\n'
+                                               'cargo:rerun-if-changed=../../.git/refs/heads/main\n')
+        (self.logs / 'clippy-metadata.json').write_text(json.dumps({
+            'target_directory': str(self.root / 'target'),
+            'packages': [{'id': 'stamp-id', 'manifest_path': str(self.root / 'crates/stamp/Cargo.toml')}]}))
+        with open(self.logs / 'clippy-workspace.jsonl', 'a') as log:
+            log.write(json.dumps({'reason': 'build-script-executed', 'package_id': 'stamp-id', 'out_dir': str(out_dir)}) + '\n')
+        code, out = self.run_check()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=1 uncovered=0')
+
+    def test_a_shadow_check_s_files_are_warnings_and_its_stage_passes_but_clippy_s_fail(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs', 'crates/alpha/src/../../../docs/st3/schema.md'])
+        code, out = self.run_check('--warn')
+        self.assertEqual(code, 0, out)
+        self.assertIn("::warning::linux-clippy read docs/st3/schema.md, which its input key does not cover", out)
+        self.assertNotIn('::error::', out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=2 uncovered=1')
+        # ci-linux passes --warn for fleet-compat only: no default local run checks it yet, so a failure would first show in the merge
+        # queue. linux-clippy is a default local check (scripts/st-test), so CI's clippy stage fails on the same files.
+        calls = [line for line in (HERE / 'ci-linux').read_text().splitlines() if line.lstrip().startswith('python3 scripts/dep-info-check')]
+        self.assertEqual(len(calls), 2, calls)
+        by_check = {('linux-fleet-compat' if '--check linux-fleet-compat' in line else 'linux-clippy'): line for line in calls}
+        self.assertIn('--warn', by_check['linux-fleet-compat'])
+        self.assertNotIn('--warn', by_check['linux-clippy'])
+
+    def test_the_committed_policy_declares_each_keyed_check_and_its_lane_lists_the_same_tree_inputs(self):
+        root = HERE.parent
+        for name in (check.CHECK, 'linux-fleet-compat'):
+            inputs = check.declared(config_path(root, POLICY).read_text(), name)
+            lane = json.loads(config_path(root, '.st/required-lanes.json').read_text())['lanes'][name]
+            for path in lane['definition_paths'] + lane['tree_inputs']:
+                self.assertTrue(check.covered(path, inputs), f'{name}: {path} is in the lane but not in the input key')
+
+
+class LinuxClippyKey(unittest.TestCase):
+    """docs/keyed-clippy.md, guard 1: for each group of linux-clippy's committed inputs, changing one file in it moves the key, and
+    changing a file outside them (a doc, an unrelated script) does not. The key is scripts/evidence-verify's own projection."""
+
+    INSIDE = {
+        'a workspace crate': 'crates/key-test/src/lib.rs',
+        "the root package's sources": 'src/key_test.rs',
+        "the root package's tests": 'tests/key_test.rs',
+        'the workspace manifest': 'Cargo.toml',
+        'the lockfile': 'Cargo.lock',
+        "cargo's config": '.cargo/config.toml',
+        'the toolchain lock': 'flake.lock',
+        'the toolchain flake': 'flake.nix',
+        'a clippy.toml, should one be added': 'clippy.toml',
+        'a .clippy.toml, should one be added': '.clippy.toml',
+        "the ratchet's baseline": '.github/clippy-baseline.json',
+        "the ratchet's splits": '.github/clippy-splits.json',
+        "the codegen check's schemas": 'docs/st3/client-v0/schemas/key-test.json',
+        "the codegen check's TypeScript output": 'clients/typescript/fractal-client/src/key-test.generated.ts',
+        "the codegen check's Swift output": 'clients/swift/FractalClient/Sources/FractalClient/KeyTest.swift',
+        "a doc a test include_str!s": 'docs/st3/invariants.md',
+        "a proc macro's wit file": 'wit/key-test.wit',
+        'the stage script': 'scripts/ci-linux',
+        "the stage's runner": 'scripts/ci-local',
+        'the ratchet': 'scripts/clippy_ratchet.py',
+        'the report reader': 'scripts/ci-clippy-result',
+        'the dep-info check': 'scripts/dep-info-check',
+    }
+    OUTSIDE = ('docs/keyed-clippy.md', 'docs/st3/key-test-notes.md', 'README.md', 'evals/key-test.txt', 'scripts/st-test',
+               'scripts/evidence-flip-ready')
+
+    def setUp(self):
+        verify_loader = importlib.machinery.SourceFileLoader('evidence_verify', str(HERE / 'evidence-verify'))
+        verify_spec = importlib.util.spec_from_loader(verify_loader.name, verify_loader)
+        self.verify = importlib.util.module_from_spec(verify_spec)
+        verify_loader.exec_module(self.verify)
+        self.inputs = check.declared((HERE.parent / POLICY).read_text())
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.git('init', '-q')
+        for path in (*self.INSIDE.values(), *self.OUTSIDE):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text('before\n')
+        self.git('add', '.')
+        self.tree = self.git('write-tree')
+
+    def git(self, *args):
+        done = subprocess.run(['git', '-C', str(self.repo), *args], capture_output=True, text=True,
+                              env=dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null'))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def changed(self, path):
+        """The tree with `path` changed, written through a scratch index (the checkout is not touched)."""
+        blob = subprocess.run(['git', '-C', str(self.repo), 'hash-object', '-w', '--stdin'], input='after\n', capture_output=True,
+                              text=True, check=True).stdout.strip()
+        index = dict(os.environ, GIT_INDEX_FILE=str(self.repo / '.git/key-test-index'))
+        for args in (['read-tree', self.tree], ['update-index', '--add', '--cacheinfo', f'100644,{blob},{path}']):
+            subprocess.run(['git', '-C', str(self.repo), *args], env=index, check=True)
+        return subprocess.run(['git', '-C', str(self.repo), 'write-tree'], env=index, capture_output=True, text=True, check=True).stdout.strip()
+
+    def key(self, tree):
+        return self.verify.project(str(self.repo), tree, self.inputs)
+
+    def test_each_input_group_moves_the_key(self):
+        before = self.key(self.tree)
+        self.assertIsNotNone(before)
+        for group, path in self.INSIDE.items():
+            with self.subTest(group=group):
+                self.assertTrue(check.covered(path, self.inputs), f'{path} ({group}) is not in linux-clippy\'s inputs')
+                self.assertNotEqual(self.key(self.changed(path)), before, f'changing {path} ({group}) left the key unchanged')
+
+    def test_a_file_outside_the_inputs_leaves_the_key_unchanged(self):
+        before = self.key(self.tree)
+        for path in self.OUTSIDE:
+            with self.subTest(path=path):
+                self.assertFalse(check.covered(path, self.inputs), f'{path} is in linux-clippy\'s inputs')
+                self.assertEqual(self.key(self.changed(path)), before, f'changing {path} moved the key')
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1055,3 +1055,63 @@ fn a_pass_snapshot_read_error_fences_member_effects_and_reports_once() {
         "a repaired snapshot permits supervision again"
     );
 }
+
+#[test]
+fn runtime_stop_evidence_distinguishes_guards_from_destructive_actions() {
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let observation = RuntimeObservation {
+        runtime_id: "runtime.evidence".into(),
+        terminal: true,
+        status: "indeterminate".into(),
+        exit_code: Some(17),
+        incarnation_id: Some("observed-incarnation".into()),
+    };
+    let evidence = RuntimeStopEvidence {
+        caller: RuntimeStopCaller::RevokedStartCleanup,
+        subject: "agent/evidence",
+        runtime_id: &observation.runtime_id,
+        terminal: true,
+        operation_id: Some("start-operation"),
+        expected_incarnation: Some("expected-incarnation"),
+        observation: Some(&observation),
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        evidence.record("stop", "skip_unreadable_observation", false);
+        evidence.record("stop_with_retirement_proof", "allow_terminate_request", true);
+    });
+    let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let skip = output.lines().find(|line| line.contains("skip_unreadable_observation")).unwrap();
+    assert!(skip.contains("DEBUG"));
+    let action = output.lines().find(|line| line.contains("allow_terminate_request")).unwrap();
+    assert!(action.contains("INFO"));
+    for line in [skip, action] {
+        assert!(line.contains("caller=RevokedStartCleanup"));
+        assert!(line.contains("operation_id=\"start-operation\""));
+        assert!(line.contains("runtime_id=\"runtime.evidence\""));
+        assert!(line.contains("expected_incarnation=\"expected-incarnation\""));
+        assert!(line.contains("observed_incarnation=\"observed-incarnation\""));
+        assert!(line.contains("registry_status=\"indeterminate\""));
+        assert!(line.contains("registry_exit_code=Some(17)"));
+        assert!(line.contains("fresh_observed_incarnation=\"unavailable_at_reconcile_boundary\""));
+        assert!(line.contains("recorded_scope=\"unavailable_at_reconcile_boundary\""));
+        assert!(line.contains("spawn_lock=\"not_applicable_at_reconcile_boundary\""));
+    }
+}

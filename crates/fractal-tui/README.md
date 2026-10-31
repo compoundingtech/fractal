@@ -60,23 +60,38 @@ close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox 
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
 
-Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
-cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
-down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
-`◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
-The existing standalone `◆` stays immediately before the agent or mission name when
-its reported state needs a person; the alert count is separate and does not replace it.
-A separate `?` marks a current question prompt from live attention, including questions
-that can only be answered in the terminal or whose client-answer window expired.
-Question identity comes from the native question kind or the exact named question
+Documents are read-only. `Ctrl+K` opens one by name (`doc/NAME` or `doc/NAME@HASH`) and the
+**Documents** list (`doc/PREFIX/` for one prefix); a `doc/…` link in a message, a mission card
+(which lists the documents the mission and its steps name) or a document opens it too. On a
+document page `b` or `Backspace` goes back along the links followed in that split, `n` and `p`
+choose a link and `Enter` opens it, and `r` reads it again; in the list `m` reads the next page.
+A document that cannot be shown says why (not found, not synced yet, the host did not answer, not
+text). Reads go through `document.get`, `documents.list` and `document-references.get`, and the
+page is `fractal_ui_model::documents`, the model the phone and web read.
+
+Agent tabs show activity directly before the title: `●` working/compacting, `○` idle
+or waiting on a person or on login, `×` down/stopped/retired, `!` fault, `~` starting/unknown.
+Mission, Inbox and other tabs have no prefix. One attention suffix follows the title:
+`?` for a live open question, otherwise `◆` for open alerts or a needs-person state.
+Only counts above one are shown (`?2`, `◆3`); loading attention has no placeholder.
+Questions include those answerable only in the terminal or whose client-answer window
+expired. Question identity comes from the native question kind or exact named question
 tool call; cached calls without an open live prompt cannot set it. Mission tabs
 aggregate their agents' current question prompts; Inbox aggregates all of them.
-Counts drop first in a narrow strip; type, activity and question markers precede the
-truncated name. Overflow markers still reach hidden tabs.
+Titles retain 26 cells. A narrow strip drops counts first, then the attention suffix,
+while keeping activity at the left, even if padding and the title no longer fit.
+Overflow markers reach hidden tabs.
+Wheel right/down over a strip browses one whole tab right; wheel left/up browses left.
+This does not select a tab. Each split keeps its own temporary view; selecting another
+tab reveals it again if necessary. `‹N` / `N›` count the tabs outside that view.
+Every nonempty strip keeps activity on its visible agent tabs, down to one cell.
+If necessary, markers, the add button and other tabs yield first. Following a
+selection keeps that tab visible; manual scrolling may still hide the active tab.
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
-`Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
-attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
+`Ctrl+E` expands tool output, `Ctrl+P` simplifies, and `Ctrl+D` shows the agent's details.
+`Ctrl+A` then `t` opens the agent's terminal from its conversation; Enter attaches a detached terminal pane.
+`Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
@@ -114,7 +129,7 @@ cargo test -p fractal-tui --locked --lib
 cargo test -p fractal --locked --test integration typed_keys
 cargo test -p fractal --locked --test integration client_only
 cargo build -p fractal --locked
-ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
+ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/fractal --ui
 ```
 
 After an intended mission-rendering change, regenerate its text, style and target golden with
@@ -142,8 +157,8 @@ never appended to or overwritten; a new file is mode 0600 on Unix.
 
 Start the installed `fractal` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
-Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
-attachment), `--demo`, or a headless test client as a conversation-render measurement.
+Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use terminal attachment,
+`--demo`, or a headless test client as a conversation-render measurement.
 
 The file has at most seven content-free JSON lines (at most 2 KiB), with monotonic `at_ms`
 from entry to `main`: `process_started`, `conversation_intent`, `converse_enqueued`,

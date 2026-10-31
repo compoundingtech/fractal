@@ -383,6 +383,7 @@ pub fn admit_prepared_envelope_tx(
                 batch_rowid,
             ])
         .map_err(internal)?;
+    let mut refused_claims = 0;
     for (position, (claim, prepared)) in batch.claims.iter().zip(claims).enumerate() {
         let position = position as u64;
         let PreparedClaim {
@@ -404,10 +405,12 @@ pub fn admit_prepared_envelope_tx(
         outcome.verify += started.elapsed();
         match classification {
             Ok(ReplicatedClaimAdmission::Valid) => {
-                // A checkpoint dropped this claim here, and another envelope carries it again.
-                // A node that still held it would ignore the copy as already stored.
-                let tombstoned = checkpoint::claim_tombstoned(transaction, &claim.id)
+                // A checkpoint dropped this claim here, or this member deleted it, and another
+                // envelope carries it again. A node that still held it would ignore the copy as
+                // already stored.
+                let tombstoned = super::retired::claim_refused(transaction, &claim.id)
                     .map_err(internal)?;
+                refused_claims += usize::from(tombstoned);
                 let inserted = if tombstoned {
                     0
                 } else {
@@ -441,28 +444,36 @@ pub fn admit_prepared_envelope_tx(
                     )
                     .map_err(internal)?;
                 }
-                transaction
-                    .prepare_cached(
-                        /* sqlite-large-value: allow-for-now lv-h0f58f2e5f02b owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
-                             record_ref, writer, sequence, envelope_hash, position, raw, state,
-                             claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
-                         ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'valid' END,
-                            claim_id=excluded.claim_id,
-                            subject_hint=excluded.subject_hint, kind_hint=excluded.kind_hint,
-                            error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
-                            error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
-                            updated_at_unix_ms=excluded.updated_at_unix_ms
-                         WHERE claim_id IS NOT excluded.claim_id
-                            OR subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT excluded.kind_hint
-                            OR (state IS NOT 'repaired' AND
-                                (state IS NOT 'valid' OR error_code IS NOT NULL OR error_message IS NOT NULL))",
-                    )
-                    .map_err(internal)?
-                    .execute(/* sqlite-large-value: allow-for-now lv-h31c9cb563400 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
-                    .map_err(internal)?;
+                // Where the retired ledger is the authority, this member deleted the claim and its
+                // record and keeps the envelope only for its other claims and for peers: the
+                // record of a claim it retired stays deleted.
+                let retired_here =
+                    tombstoned && super::retired::authoritative(transaction).map_err(internal)?;
+                if !retired_here {
+                    transaction
+                        .prepare_cached(
+                            /* sqlite-large-value: allow-for-now lv-h1693db03cced owner=smallclaims::store::prepared_envelope TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(
+                                 record_ref, writer, sequence, envelope_hash, position, raw, state,
+                                 claim_id, subject_hint, kind_hint, error_code, error_message, updated_at_unix_ms
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'valid', ?7, ?8, ?9, NULL, NULL, ?10)
+                             ON CONFLICT(record_ref) DO UPDATE SET state=CASE WHEN state='repaired' THEN state ELSE 'valid' END,
+                                claim_id=excluded.claim_id,
+                                subject_hint=excluded.subject_hint, kind_hint=excluded.kind_hint,
+                                error_code=CASE WHEN state='repaired' THEN error_code ELSE NULL END,
+                                error_message=CASE WHEN state='repaired' THEN error_message ELSE NULL END,
+                                updated_at_unix_ms=excluded.updated_at_unix_ms
+                             WHERE claim_id IS NOT excluded.claim_id
+                                OR subject_hint IS NOT excluded.subject_hint OR kind_hint IS NOT excluded.kind_hint
+                                OR (state IS NOT 'repaired' AND
+                                    (state IS NOT 'valid' OR error_code IS NOT NULL OR error_message IS NOT NULL))",
+                        )
+                        .map_err(internal)?
+                        .execute(/* sqlite-large-value: allow-for-now lv-h31c9cb563400 owner=smallclaims::store::prepared_envelope TODO=trace-statement-and-value-representation */ params![record_ref, envelope.writer, envelope.sequence, envelope.hash, position, raw, claim.id, claim.subject, claim.kind, now])
+                        .map_err(internal)?;
+                }
                 outcome.valid += 1;
-                outcome.changed |= inserted != 0 || previous_state.as_deref() != Some("valid");
+                outcome.changed |=
+                    inserted != 0 || (!retired_here && previous_state.as_deref() != Some("valid"));
             }
             Ok(
                 classification @ (ReplicatedClaimAdmission::UnknownKind
@@ -518,6 +529,15 @@ pub fn admit_prepared_envelope_tx(
                 outcome.invalid += 1;
             }
         }
+    }
+    // Where the retired ledger is the authority, an envelope that carries only retired claims is
+    // retired too, so this member never serves it to a peer that has not yet learned them.
+    if refused_claims > 0
+        && refused_claims == batch.claims.len()
+        && super::retired::authoritative(transaction).map_err(internal)?
+    {
+        super::retired::retire_envelope_tx(transaction, &envelope.writer, envelope.sequence, &envelope.hash)
+            .map_err(internal)?;
     }
     transaction
         .prepare_cached(
