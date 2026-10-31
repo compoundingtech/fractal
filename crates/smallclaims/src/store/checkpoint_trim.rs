@@ -22,12 +22,11 @@ use crate::replication::InventoryCheckpoint;
 
 /// The kinds a member that trims locally drops, each by its audited rule in
 /// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
-/// same from the full and the trimmed log. A kind joins only with such a test. One audited rule
-/// stays out because a reader reads the history it drops, which no projection digest covers:
-/// `resource.observed`, where a GitHub watch finds when a pull request left the merge queue by
-/// walking its observations back. `harness.observed` joined once its rule kept the credential
+/// same from the full and the trimmed log. A kind joins only with such a test. `resource.observed`
+/// keeps what its readers walk back through, such as a pull request's observations back to the
+/// merge queue (rules version 23). `harness.observed` joined once its rule kept the credential
 /// report where a seat's needs-login run begins (see #4237).
-pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed"];
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed", "resource.observed"];
 
 /// The kinds a local cut's capture also stages, because judging a claim of `LOCAL_TRIM_KINDS`
 /// reads them: the status-history rule folds a seat's harness observations with its runtime
