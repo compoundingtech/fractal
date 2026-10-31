@@ -564,7 +564,8 @@ pub fn timing_answers(
 
 impl Rule {
     /// The kinds the rule reads beyond its own slot: a deferral's closers, the resolutions
-    /// a question waits a day after, every seat's limit readings.
+    /// a question waits a day after, every seat's limit readings. A new cross-kind read must be
+    /// listed here, or a local cut's scoped capture can miss the kind it reads.
     pub fn reads(self) -> &'static [&'static str] {
         match self {
             Rule::Deferral => &REQUEST_CLOSERS,
