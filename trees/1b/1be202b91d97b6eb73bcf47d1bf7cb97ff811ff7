@@ -65,3 +65,4 @@ record bc677a8c85ba09509438bb4c033905c5bd738ed5 fractal-web 0 fleet/ci 2026-10-3
 record cccee07d0558a65a26c2812330e21e1fbfa2fee5 fractal-web 0 fleet/ci 2026-10-31T01:10:52Z
 record ea34b8169b3d594f7b9fc2d9fa62506152ee4df7 linux-tests-shard-4 0 fleet/ci 2026-10-31T01:05:29Z
 record f4c11ab6d0a8e5a729e190313dfba59a13a2e123 typescript-client 0 fleet/ci 2026-10-31T00:54:57Z
+record 5dc9cfc5d1c42e8d595e7614b7fd32aed34a21df rust-tests 0 host/forge 2026-10-31T02:19:01Z
