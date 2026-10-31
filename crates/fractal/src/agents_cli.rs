@@ -281,6 +281,8 @@ pub(super) async fn run_agents(
             run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
         AgentsCommand::Lane { subject } => {
+            // The client returns the envelope's value, as `/v1/health` below reads `node` from it;
+            // client_v0_cli's agent_lane_cli test runs this against a daemon for both outputs.
             let response: Value = cli_client(endpoint)
                 .get(&format!(
                     "/v1/agents/lane?agent={}",
