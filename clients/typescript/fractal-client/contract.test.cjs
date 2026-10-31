@@ -249,7 +249,7 @@ test('phone commands preserve typed bodies, full ids, reactive wait and normal e
         baseUrl: 'https://example.test', credential: () => 'phone-credential',
         fetchImpl: async (url, init) => {
             calls.push([String(url), init]);
-            return response(wire);
+            return response(String(url).endsWith('/capabilities') ? capabilityFixture : wire);
         },
     });
     assert.deepEqual(await client.deviceCommand(command), wire);
@@ -257,12 +257,13 @@ test('phone commands preserve typed bodies, full ids, reactive wait and normal e
     assert.deepEqual(await client.deviceResult(report), wire);
     assert.deepEqual(calls.map(([url, init]) => [url, init.method]), [
         ['https://example.test/v1/client/device-commands', 'POST'],
+        ['https://example.test/v1/client/capabilities', 'GET'],
         [`https://example.test/v1/client/device-commands/${encodeURIComponent(wire.value.id)}?wait=true`, 'GET'],
         ['https://example.test/v1/client/device-results', 'POST'],
     ]);
     assert.deepEqual(JSON.parse(calls[0][1].body), command);
-    assert.deepEqual(JSON.parse(calls[2][1].body), report);
-    assert.equal(calls[1][1].signal, controller.signal);
+    assert.deepEqual(JSON.parse(calls[3][1].body), report);
+    assert.equal(calls[2][1].signal, controller.signal);
     assert(calls.every(([, init]) => init.headers.Authorization === 'Bearer phone-credential'));
 });
 
