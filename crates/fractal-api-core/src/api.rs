@@ -447,6 +447,8 @@ impl ApiError {
             | "identity-retired-source"
             | "lifecycle-unavailable"
             | "retirement-upgrade-required"
+            | "retire-revision-mismatch"
+            | "retire-incarnation-mismatch"
             | "custody-pending"
             | "stale-subject"
             | "stale-fence"
