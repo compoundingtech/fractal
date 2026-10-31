@@ -249,7 +249,7 @@ mod tests {
         let running = std::env::current_exe().unwrap();
         std::os::unix::fs::symlink(&running, &canonical).unwrap();
         assert!(may_remove(&canonical));
-        assert_eq!(installed_binaries(vec![canonical.clone()]), [canonical.clone()]);
+        assert_eq!(installed_binaries(vec![canonical.clone()]), std::slice::from_ref(&canonical));
         std::fs::remove_file(&canonical).unwrap();
         std::fs::write(&canonical, b"foreign replacement").unwrap();
         assert!(!may_remove(&canonical));
