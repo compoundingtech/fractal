@@ -158,7 +158,11 @@ Inbox includes all current question prompts. Titles retain a 26-cell budget.
 Counts disappear first when space is tight, then the suffix; activity stays on the left.
 Subject membership indexes are rebuilt on observation updates, not per tab per frame.
 
-Badge chrome is not stored with the workspace.
+Each split has an independent, non-persisted tab-strip view. Wheel right/down over its
+strip moves the view one whole tab right; wheel left/up moves it left, without changing
+the active tab. The view clamps at the final full tab. Changing the active tab reveals
+it again if needed. Clickable `‹N` / `N›` markers count hidden tabs and activate the nearest
+hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace data.
 
 
 ### Now: what needs you
