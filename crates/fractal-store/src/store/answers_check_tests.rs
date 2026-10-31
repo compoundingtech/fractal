@@ -53,3 +53,51 @@ fn a_dropped_transition_changes_the_seat_readers_that_fold_it() {
     let moving = readers(&seat(&history), 3_500);
     assert!(moving.values().flatten().all(|key| key.subject != SEAT), "{moving:?}");
 }
+
+/// Independent histories can retain different superseded writers without changing a reader.
+#[test]
+fn retained_history_is_not_an_answer_difference() {
+    use smallclaims::answers::{differing_kinds, reader_answers};
+    for kind in [
+        "daemon.diagnostic", "harness.observed", "harness.todo.observed", "harness.usage",
+        "observer.observed", "resource.observed", "transport.observed",
+    ] {
+        let store = Store::open_memory("alder").unwrap();
+        let subject = match kind {
+            "observer.observed" => "observer/example",
+            "resource.observed" => "resource/example/issue/1502",
+            _ => "host/example",
+        };
+        let mut ids = Vec::new();
+        for (at, writer, state) in [(100, "old", "idle"), (200, "new", "idle")] {
+            store.set_write_clock_at(at).unwrap();
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let claim = append_claim_tx(
+                &transaction, writer, subject, kind, None,
+                &json!({"fields": {"state": state, "code": "example", "observer": "observer/example",
+                    "incarnation_id": "one", "semantics": "session_cumulative", "total_tokens": 1}}),
+                &[], None,
+            ).unwrap();
+            ids.push(claim.id);
+            transaction.commit().unwrap();
+        }
+        let summary = || {
+            let connection = store.readers.get();
+            let mut summary = smallclaims::answers::summary(&connection, 1_000).unwrap();
+            for (name, keys) in fold_reader_answers(&connection, 1_000).unwrap() {
+                let (name, answers, _) = reader_answers(&name, 1_000, keys);
+                summary.kinds.insert(name, answers);
+            }
+            summary
+        };
+        let full = summary();
+        store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&ids[0]]).unwrap();
+        let trimmed = summary();
+        assert!(differing_kinds(&full, &trimmed, true).is_empty(), "{kind}");
+        store.connection.write().execute(
+            "UPDATE claims SET body=json_set(body,'$.fields.state','failed') WHERE id=?1", [&ids[1]],
+        ).unwrap();
+        assert!(!differing_kinds(&trimmed, &summary(), true).is_empty(), "{kind}");
+    }
+}
