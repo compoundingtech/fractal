@@ -121,3 +121,60 @@ fn report_wal_bytes_per_1000_unchanged_reports() {
     assert_eq!(after, 0);
     eprintln!("1000 identical snapshot reports: before_wal_bytes={before} after_wal_bytes={after}; FULL durability; checkpoint-isolated WAL frames, not device bytes");
 }
+
+#[test]
+fn automatic_checkpoints_bound_wal_across_5000_short_lived_producers() {
+    let root = setup();
+    let connection = open(root.path()).unwrap();
+    let pages: u64 = connection.pragma_query_value(None, "wal_autocheckpoint", |row| row.get(0)).unwrap();
+    let page_size: u64 = connection.pragma_query_value(None, "page_size", |row| row.get(0)).unwrap();
+    assert_eq!(pages, 1000);
+    assert_eq!(connection.pragma_query_value(None, "synchronous", |row| row.get::<_, u64>(0)).unwrap(), 2);
+    drop(connection);
+    // The automatic threshold is checked after commit. Reserve 32 extra frames
+    // for a small report transaction crossing that threshold, including splits.
+    let bound = 32 + (pages + 32) * (page_size + 24);
+    let wal = root.path().join(format!("{DATABASE}-wal"));
+    let mut peak = 0;
+    for report in 0..5000 {
+        let body = serde_json::to_vec(&json!({"incarnation":"provider", "report":report})).unwrap();
+        write_snapshot(root.path(), "harness-todo", &body).unwrap();
+        let bytes = wal.metadata().unwrap().len();
+        assert!(bytes > 0, "producer close must retain the WAL");
+        assert!(bytes <= bound, "WAL {bytes} exceeded {bound} at report {report}");
+        peak = peak.max(bytes);
+    }
+    assert_eq!(pending(root.path(), 6000).unwrap().len(), 5001);
+    eprintln!("5000 short-lived producers: peak_wal_bytes={peak} bound={bound} autocheckpoint_pages={pages} page_size={page_size}");
+}
+
+#[test]
+fn crash_producer_helper() {
+    let Some(path) = std::env::var_os("ST_TEST_CRASH_OBSERVATION_DIR") else { return };
+    let mut connection = open(Path::new(&path)).unwrap();
+    let tx = connection.transaction().unwrap();
+    let value = json!({"incarnation":"provider", "tasks":["committed-before-exit"]});
+    let body = serde_json::to_vec(&value).unwrap();
+    tx.execute("INSERT INTO snapshots VALUES ('harness-todo',?1) ON CONFLICT(kind) DO UPDATE SET body=excluded.body",
+        [&body]).unwrap();
+    append_event(&tx, "harness-todo", &value).unwrap();
+    tx.commit().unwrap();
+    // Exit without dropping the live SQLite connection or running its close hook.
+    std::process::exit(0);
+}
+
+#[test]
+fn committed_events_replay_after_process_exit_without_sqlite_close() {
+    let root = setup();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "harness_events::churn_tests::crash_producer_helper", "--nocapture"])
+        .env("ST_TEST_CRASH_OBSERVATION_DIR", root.path()).status().unwrap();
+    assert!(status.success());
+    let events = pending(root.path(), 100).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].payload["tasks"][0], "committed-before-exit");
+    let snapshot = read_snapshot(root.path(), "harness-todo").unwrap().unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&snapshot).unwrap()["tasks"][0], "committed-before-exit");
+    acknowledge(root.path(), events[1].sequence).unwrap();
+    assert!(pending(root.path(), 100).unwrap().is_empty());
+}
