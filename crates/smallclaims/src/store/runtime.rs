@@ -198,6 +198,11 @@ pub trait Runtime: Send + Sync {
         Ok(false)
     }
 
+    /// Whether a trim's deletes left anything for `rebuild_deferred`, read without the writer.
+    fn deferred_pending(&self, _connection: &Connection) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Projections changed beneath whatever the runtime keeps in memory about them.
     fn forget_views(&self);
 

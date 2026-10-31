@@ -1117,6 +1117,10 @@ impl Store {
     /// they touched), a budget's worth per transaction with a trim's pacing, until none is left.
     /// It runs when a trim stops and at each checkpoint step, so a crash cannot strand it.
     pub(crate) fn rebuild_deferred_paced(&self) -> Result<()> {
+        // Most steps have nothing deferred: one read, and no writer.
+        if !self.runtime.deferred_pending(&self.readers.get())? {
+            return Ok(());
+        }
         let _span = crate::profile::span("trim.rebuild_deferred");
         loop {
             let mut connection = self.connection.write_background();

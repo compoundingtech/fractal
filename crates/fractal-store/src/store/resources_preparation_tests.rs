@@ -990,7 +990,7 @@ fn preparation_pending_query_benchmark() {
 fn tombstone(transaction: &Transaction<'_>, id: &str) {
     transaction
         .execute(
-            "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor,
+            /* sqlite-large-value: allow-for-now lv-h87a9ae3fc334 owner=fractal_store::store::resources_preparation_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor,
                  predecessors, operation_id, request_digest, accepted_at_unix_ms, checkpoint)
              SELECT id, 'example-writer', 1, 'example-hash', subject, kind, actor, '[]', NULL, NULL, 0,
                  'checkpoint/example' FROM claims WHERE id=?1",
@@ -1002,7 +1002,7 @@ fn tombstone(transaction: &Transaction<'_>, id: &str) {
 fn queued(transaction: &Transaction<'_>, queue: &str) -> bool {
     transaction
         .query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM local_resource_preparation_{queue} WHERE subject=?1)"),
+            /* sqlite-large-value: allow-for-now lv-h43325ce366ac owner=fractal_store::store::resources_preparation_tests TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM local_resource_preparation_{queue} WHERE subject=?1)"),
             [SUBJECTS[0]],
             |row| row.get(0),
         )
@@ -1029,7 +1029,7 @@ fn a_trim_s_delete_defers_its_subject_and_a_reader_meanwhile_gets_the_rebuilt_an
     let transaction = writer.transaction().unwrap();
     tombstone(&transaction, &middle);
     let before = snapshot(&transaction, SUBJECTS[0]);
-    transaction.execute("DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h551e460e7382 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
     assert!(queued(&transaction, "deferred"), "a planned drop is deferred");
     assert!(!queued(&transaction, "dirty"), "and not rebuilt per claim");
     // The commit's flush leaves it deferred; a reader sees the state from before the delete.
@@ -1051,7 +1051,7 @@ fn a_delete_that_no_checkpoint_recorded_rebuilds_at_once() {
     let middle = superseded_middle(&store);
     let mut writer = store.connection.write();
     let transaction = writer.transaction().unwrap();
-    transaction.execute("DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8bea701aa1f5 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
     assert!(queued(&transaction, "dirty"));
     assert!(!queued(&transaction, "deferred"));
     assert_parity(&transaction, "an ordinary delete");
@@ -1069,7 +1069,7 @@ fn a_new_claim_on_a_deferred_subject_rebuilds_it_at_once() {
         let mut writer = store.connection.write();
         let transaction = writer.transaction().unwrap();
         tombstone(&transaction, &middle);
-        transaction.execute("DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-ha4aaf70226d5 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
         flush(&transaction).unwrap();
         assert!(queued(&transaction, "deferred"));
         transaction.commit().unwrap();

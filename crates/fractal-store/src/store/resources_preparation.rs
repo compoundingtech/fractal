@@ -15,7 +15,7 @@ pub(super) static PENDING_QUERY: std::sync::LazyLock<String> = std::sync::LazyLo
     )
 });
 const PREPARATION_SCHEMA: &str =
-    /* sqlite-large-value: allow-for-now lv-hc674146d8179 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
+    /* sqlite-large-value: allow-for-now lv-hcf3bd361bb76 owner=fractal_store::store::resources_preparation TODO=chunk-or-reference-variable-columns */
     r#"
 CREATE TABLE IF NOT EXISTS local_resource_preparation (
     subject TEXT PRIMARY KEY,
@@ -286,7 +286,7 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
     // without it; its subject is deferred rather than rebuilt per claim, and the trim rebuilds
     // each deferred subject once, paced, when its day's run stops (`flush_deferred`). Any other
     // delete rebuilds at once.
-    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3429516f21c9 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS preparation_claims_dirty_DELETE; DROP TRIGGER IF EXISTS preparation_claims_dirty_delete_ranked")?;
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h3a97fb63cb60 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS preparation_claims_dirty_DELETE; DROP TRIGGER IF EXISTS preparation_claims_dirty_delete_ranked")?;
     for (event, row, name) in [("UPDATE", "OLD", "UPDATE"), ("DELETE", "OLD", "delete_deferring")] {
         let (rank_changed, own) = if event == "UPDATE" {
             ("(OLD.batch_id IS NOT NEW.batch_id OR OLD.store_index IS NOT NEW.store_index)", "")
@@ -302,7 +302,7 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
             String::new()
         } else {
             format!(
-                "INSERT INTO local_resource_preparation_deferred(subject) SELECT OLD.subject
+                /* sqlite-large-value: allow-for-now lv-h0d9e7d2f2f5e owner=fractal_store::store::resources_preparation TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT OLD.subject
              WHERE (substr(OLD.subject,1,9)='resource/' OR OLD.kind='resource.observed'
                  OR EXISTS (SELECT 1 FROM local_resource_preparation WHERE subject=OLD.subject))
              AND EXISTS (SELECT 1 FROM checkpoint_claims WHERE id=OLD.id)
@@ -311,7 +311,7 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
             )
         };
         connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-h3973d20971fd owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{name} AFTER {event} ON claims BEGIN
+            /* sqlite-large-value: allow-for-now lv-h3f78c72c5607 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{name} AFTER {event} ON claims BEGIN
              INSERT INTO local_resource_preparation_dirty(subject) SELECT {row}.subject
              WHERE (substr({row}.subject,1,9)='resource/' OR {row}.kind='resource.observed'
                  OR EXISTS (SELECT 1 FROM local_resource_preparation WHERE subject={row}.subject))
@@ -422,7 +422,7 @@ fn supported(connection: &Connection, subject: &str) -> Result<bool> {
 }
 
 pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
-    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h88cfdcaabcf6 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
+    transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h6c0132eacd9f owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "DELETE FROM local_resource_preparation;
         DELETE FROM local_resource_preparation_claims;
         DELETE FROM local_resource_preparation_pending;
         DELETE FROM local_resource_preparation_dirty;
@@ -436,7 +436,7 @@ pub fn rebuild_preparation(transaction: &Transaction<'_>) -> Result<()> {
 
 fn rebuild_subject(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
     // A rebuild from every claim present is also what a deferral waits for.
-    transaction.execute("DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h054022c6a729 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_deferred WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h59e6ed677dfb owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation WHERE subject=?1", [subject])?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h688464025ee2 owner=fractal_store::store::resources_preparation TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_resource_preparation_claims WHERE subject=?1", [subject])?;
     if !supported(transaction, subject)? {
