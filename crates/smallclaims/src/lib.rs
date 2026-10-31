@@ -15,6 +15,8 @@ pub mod error;
 pub mod fleet;
 pub mod hash;
 pub mod ivm;
+pub mod naming;
+pub mod operation_metadata;
 pub mod performance;
 pub mod prepared_cut;
 pub mod fifo;
@@ -30,6 +32,7 @@ pub mod shards;
 pub mod sqlite;
 pub mod store;
 pub mod sync;
+pub mod writer_chain;
 pub mod touched;
 /// Rolling latency windows for the daemon's targets: routes, statements, transactions, holds.
 pub mod windows;

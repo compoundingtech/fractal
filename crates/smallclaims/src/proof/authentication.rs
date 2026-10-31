@@ -21,12 +21,12 @@ impl Authentication<'_> {
             return Verdict::Held(format!("missing claim {id}"));
         };
         let claim = &record.claim;
-        let fields = &claim.body["fields"];
+        let fields = principal::facts::signature_fields(&claim.kind, &claim.body);
         let judged = Judged {
             id: &claim.id, subject: &claim.subject, kind: &claim.kind,
             actor: claim.actor.as_deref(),
             content: principal::content_digest(&claim.subject, &claim.kind, claim.actor.as_deref(), &claim.body),
-            fields,
+            fields: &fields,
         };
         let facts = ProofFacts { authentication: self, record, depth };
         let mut result = Verdict::Unsigned;
@@ -60,9 +60,20 @@ struct ProofFacts<'a, 'b> {
     depth: usize,
 }
 
-fn order(record: &Record) -> (u128, &str, u64, &str, usize, &str) {
-    let claim = &record.claim;
-    (claim.accepted_at_unix_ms, &claim.origin, record.sequence, &claim.batch_id, record.position, &claim.id)
+fn before(left: &Record, right: &Record) -> bool {
+    use principal::facts::{OrderComponent, compare_order};
+    fn components(record: &Record) -> [OrderComponent<'_>; 6] {
+        let claim = &record.claim;
+        [
+            OrderComponent::Unsigned(claim.accepted_at_unix_ms),
+            OrderComponent::Text(&claim.origin),
+            OrderComponent::Integer(i128::from(record.sequence)),
+            OrderComponent::Text(&claim.batch_id),
+            OrderComponent::Integer(record.position as i128),
+            OrderComponent::Text(&claim.id),
+        ]
+    }
+    compare_order(components(left), components(right)).is_lt()
 }
 
 impl Facts for ProofFacts<'_, '_> {
@@ -77,10 +88,11 @@ impl Facts for ProofFacts<'_, '_> {
     }
 
     fn is_root(&self, subject: &str, key: &str) -> bool {
-        subject.strip_prefix("host/").is_some_and(|writer| {
-            self.authentication.membership.incarnations().any(|incarnation| {
-                incarnation.name == writer && incarnation.member_key == key
-            })
+        principal::facts::root_eligible(subject, key, principal::facts::RootContext::Record {
+            membership: self.authentication.membership,
+            writer: &self.record.claim.origin,
+            sequence: self.record.sequence,
+            claim_id: &self.record.claim.id,
         })
     }
 
@@ -89,7 +101,7 @@ impl Facts for ProofFacts<'_, '_> {
             record.claim.kind == principal::KEY_REVOKED
                 && record.claim.subject == principal
                 && record.claim.body["fields"]["key"].as_str() == Some(key)
-                && order(record) < order(self.record)
+                && before(record, self.record)
                 && self.authentication.verdict(&record.claim.id, self.depth + 1) == Verdict::Verified
                 && record.signatures.iter().any(|signature| {
                     signature.signer == principal || principal::Family::of(&signature.signer) == Some(principal::Family::Node)
@@ -99,8 +111,15 @@ impl Facts for ProofFacts<'_, '_> {
 
     fn nonce_used_before(&self, key: &str, nonce: &str) -> bool {
         self.authentication.records.values().any(|record| {
-            order(record) < order(self.record)
-                && record.signatures.iter().any(|signature| signature.key == key && signature.nonce == nonce)
+            before(record, self.record)
+                && record.signatures.iter().any(|signature| {
+                    let claim = &record.claim;
+                    signature.key == key && signature.nonce == nonce
+                        && principal::facts::nonce_eligible(
+                            &claim.id, &claim.subject, &claim.kind, claim.actor.as_deref(),
+                            &claim.body, signature,
+                        )
+                })
         })
     }
 }
@@ -237,6 +256,9 @@ fn validate_rename_schema(claim: &ClaimRecord) -> Result<(), ProofError> {
 
 impl VerifiedHistory {
     /// Verify a claim's signature and principal delegation using only this anchored history.
+    /// Node signatures require the signer's own authenticated writer window; signatures merely
+    /// carried by another writer cannot establish that window. Nonces count only when signed
+    /// genuinely for their claim.
     pub fn verify_claim(&self, id: &str) -> Result<(), ProofError> {
         Authentication { records: &self.records, membership: &self.membership }.require(id)
     }
