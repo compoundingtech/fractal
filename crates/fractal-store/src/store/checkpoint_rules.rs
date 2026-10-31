@@ -50,7 +50,9 @@ pub use staged::plan_staged;
 /// resource described in flat facts.
 /// Version 24 keeps, for `harness.observed`, the credential report that ended the run before
 /// the current one, so a seat's needs-login `since` stays where the current run began.
-pub const RULES_VERSION: u32 = 24;
+/// Version 25 keeps each incarnation's newest `working` and newest `ended` observation, which
+/// readers of a seat's last turn ask for.
+pub const RULES_VERSION: u32 = 25;
 
 /// Usage rollups keep their hourly history for this long before the cut, so a usage period that
 /// ends within it is exact to the hour. Before it, each rollup series keeps only its newest
@@ -183,7 +185,7 @@ fn planner_rule(rule: &fractal_schema::retention::RulePolicy) -> Option<Rule> {
             Some(age) => Rule::NewestAged(age),
             None => Rule::Newest,
         },
-        "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start-and-the-report-ending-the-run-before" => {
+        "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start-and-the-report-ending-the-run-before,newest-working,newest-ended" => {
             Rule::HarnessObserved
         }
         "first-and-last-of-each-run-of-status-and-round,first-with-items" => Rule::LoopState,
@@ -342,6 +344,15 @@ pub fn harness_keep(claims: &[&ClaimRecord]) -> BTreeSet<usize> {
     for (offset, claim) in claims[after..].iter().enumerate() {
         if state(claim).as_deref() == Some("working") {
             keep.insert(after + offset);
+        }
+    }
+    // A finished turn's readers ask for the newest `working`, which a later other state no
+    // longer keeps above: when the last turn began (`ready_since_last_turn`), whether the seat
+    // worked after a nudge (`harness_worked_after`), and its newest turn or end
+    // (`last_turn_or_end`), which also reads the newest `ended`.
+    for wanted in ["working", "ended"] {
+        if let Some(position) = claims.iter().rposition(|claim| state(claim).as_deref() == Some(wanted)) {
+            keep.insert(position);
         }
     }
     // `current_harness_at` takes each optional field from the newest observation carrying it.
