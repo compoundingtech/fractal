@@ -16972,7 +16972,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 durable_changed = wrote;
                                 if spec.provider == "github.repository" {
                                     mirror_observation(
-                                        &github_plugin, &observer_subject, &spec,
+                                        &store, &github_plugin, &observer_subject, &spec,
                                         cursor.as_deref(), observation.cursor.as_deref(), &outcome.recorded_items,
                                     );
                                     // A mirror that is new, moved, restored, set aside or behind
@@ -18555,6 +18555,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 /// look. The mirror is a cache: a failure is logged and the reads it serves fall back to the
 /// graph, never failing the observer.
 fn mirror_observation(
+    store: &Store,
     plugin: &github_plugin_store::GithubPluginStore,
     observer: &str,
     spec: &crate::model::ObserverSpec,
@@ -18573,8 +18574,45 @@ fn mirror_observation(
             })
         })
         .collect::<Vec<_>>();
-    if let Err(error) = plugin.mirror(&spec.resource, observer, &spec.locator, polled_from, cursor, &items) {
-        tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+    let in_graph = |subject: &str| -> Result<bool> { Ok(store.latest_claim_id(subject)?.is_some()) };
+    let events = match plugin.mirror_checked(&spec.resource, observer, &spec.locator, polled_from, cursor, &items, &in_graph) {
+        Ok(events) => events,
+        Err(error) => {
+            tracing::warn!(observer, resource = %spec.resource, "the GitHub plugin mirror did not take an observation; reads fall back to the graph: {error:#}");
+            return;
+        }
+    };
+    // Each event is one keyed claim, written once, within the plugin's graph allowlist.
+    for event in events {
+        let Some(subject) = event["subject"].as_str() else { continue };
+        let mut fields = BTreeMap::from([
+            ("version".to_owned(), Value::from(fractal_schema::github_plugin::VERSION)),
+            ("item".to_owned(), event["item"].clone()),
+            ("event".to_owned(), event["event"].clone()),
+            ("observer".to_owned(), Value::String(observer.to_owned())),
+            ("at".to_owned(), event["at"].clone()),
+            ("detail".to_owned(), event["detail"].clone()),
+        ]);
+        if let Some(head) = event["head_sha"].as_str() {
+            fields.insert("head_sha".into(), Value::String(head.to_owned()));
+        }
+        let written = github_plugin_store::MANIFEST
+            .admit(subject, fractal_schema::github_plugin::EVENT, &fields)
+            .map_err(anyhow::Error::new)
+            .and_then(|()| {
+                store.append_claim(&ClaimInput {
+                    subject: subject.to_owned(),
+                    kind: fractal_schema::github_plugin::EVENT.into(),
+                    actor: None,
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("github-event:{subject}")),
+                }).map_err(|error| anyhow::anyhow!(error.message))
+            });
+        if let Err(error) = written {
+            tracing::warn!(observer, subject, "a GitHub event was not written to the graph; the mirror keeps it: {error:#}");
+        }
     }
 }
 

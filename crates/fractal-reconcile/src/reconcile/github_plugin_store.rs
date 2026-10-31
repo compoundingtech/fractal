@@ -346,6 +346,22 @@ impl GithubPluginStore {
         cursor: Option<&str>,
         items: &[MirrorItem],
     ) -> Result<Vec<Value>> {
+        self.mirror_checked(repository, observer, locator, polled_from, cursor, items, &|_| Ok(false))
+    }
+
+    /// [`Self::mirror`], where `in_graph` also says whether an event subject is already a
+    /// `github.event` claim, as one another poller wrote, so a key is never handed out twice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mirror_checked(
+        &self,
+        repository: &str,
+        observer: &str,
+        locator: &str,
+        polled_from: Option<&str>,
+        cursor: Option<&str>,
+        items: &[MirrorItem],
+        in_graph: &dyn Fn(&str) -> Result<bool>,
+    ) -> Result<Vec<Value>> {
         self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         let at = super::now_ms();
         let at_text = chrono::DateTime::from_timestamp_millis(at as i64)
@@ -385,7 +401,8 @@ impl GithubPluginStore {
                     Ok(transaction
                         .query_row("SELECT 1 FROM mirror_event_keys WHERE subject=?1", [&subject], |_| Ok(()))
                         .optional()?
-                        .is_some())
+                        .is_some()
+                        || in_graph(&subject)?)
                 })?;
                 let Some(subject) = fractal_schema::github_plugin::event_subject(&item.subject, &key) else {
                     continue;
