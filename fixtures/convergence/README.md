@@ -174,10 +174,20 @@ empty. Characterization used
 `cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
 (26 passed, 189.5 s).
 
+Under corpus v11 a wide audit of seeds 1–300 failed 15 seeds in `resource_observations`
+(#4426). A rebuild of the resource projection, which a replay or a checkpoint proof runs, kept
+only subjects with a `resource.observed` claim. So an item that only `vcs.item.state` claims
+describe lost its row on whichever node rebuilt. With the rebuild fixed, all 300 seeds converge.
+The 15 seeds are now fixed regression seeds: 27, 74, 106, 121, 130, 133, 179, 209, 241, 246,
+277, 281, 291, 293 and 294. Each of them trims, so the never-trim set stays empty. The audit
+used
+`CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
+(1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
+
 `claims-v12.json` is generated the same way from the declared-waits registry on top of v11's
 (`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`).
 It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
 kinds carry; nothing in v11 is removed. The simulation selects v12 and records that filename in its
-audit summary; v1 to v11 stay fixed. Seeds 21 and 34 converge without a trim, so `NEVER_TRIMS` is
-`[21, 34]`. Claim generation shares the schedule's RNG, so a registry change on main can move this
+audit summary; v1 to v11 stay fixed. Every fixed seed converges; seeds 21, 34 and 241 converge
+without a trim, so `NEVER_TRIMS` is `[21, 34, 241]`. Claim generation shares the schedule's RNG, so a registry change on main can move this
 set. The characterization run used `cargo nextest run -p fractal -E 'test(convergence)'`.
