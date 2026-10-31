@@ -262,6 +262,15 @@ The earlier binding cutover still applies: Ctrl+] no longer attaches terminals. 
 may still send attention text advertising Ctrl+] or an Attach control until they upgrade;
 use Ctrl+A then t from the conversation, or Enter on an already detached terminal pane.
 
+Ctrl+L opens the next outstanding Inbox item in the focused split, replacing only that
+split's tab and adding the replaced content to place history. Agent-blocking questions
+come first, then decisions, failures, and other items; each class is oldest first.
+Closed and snoozed items are excluded. The flash gives `n/m · reason`; after the last item,
+`all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
+goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
+While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
+flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
+
 
 ### Starting a mission
 
