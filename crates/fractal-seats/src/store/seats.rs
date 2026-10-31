@@ -1533,6 +1533,7 @@ impl SeatsStore for Store {
         let store_index = current_index(&connection)?;
         let harness = current_harness_at(&connection, subject, None)?;
         Ok(StatusResponse {
+            seat_admission: None,
             store_index,
             subjects: vec![SubjectStatus {
                 subject: subject.to_owned(),

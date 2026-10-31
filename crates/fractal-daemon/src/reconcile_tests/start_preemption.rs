@@ -196,6 +196,7 @@ let operation = fixture.assert_open();
 assert!(fixture.runtime.snapshot_ptys().unwrap().is_empty());
 let state = fixture.root.path().join("state");
 let app = crate::api::router(crate::api::AppState {
+    seat_admission: Default::default(),
     owning_person: None,
     store: fixture.store.clone(),
     notify: Arc::new(Notify::new()),

@@ -5089,6 +5089,7 @@ impl Store {
                     .collect::<Vec<_>>()
             });
             let mut merged = StatusResponse {
+                seat_admission: None,
                 store_index,
                 subjects: Vec::new(),
                 pending_actions: Vec::new(),
@@ -5216,6 +5217,7 @@ impl Store {
             subjects.push(status);
         }
         Ok(StatusResponse {
+            seat_admission: None,
             store_index,
             subjects,
             pending_actions,

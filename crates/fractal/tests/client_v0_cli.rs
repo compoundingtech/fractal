@@ -18,6 +18,7 @@ use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
     AppState {
+        seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
         notify: Arc::new(Notify::new()),

@@ -42,6 +42,24 @@ st agents start garden/worker --as person/ada
 The reason is optional. It is kept in the stop declaration (`stop "agent/garden/worker" { reason "Done for the week." }`), and
 `st agents show` and `st agents ls` print it with who stopped the agent and when.
 
+### Optional host seat admission
+
+Host seat admission is disabled by default. When enabled, an accepted new-seat
+declaration may wait in the host's admission queue instead of immediately launching
+a provider. This is **accepted-pending**, not a failed start or proof of a running
+harness. `st agents start`, `st agents show`, and `st agents ls` show the admission
+reason and queue position. Start JSON includes `seatAdmission`; agent detail/list
+JSON carries `seat_admission`. Authorized replacement starts are labelled
+`admitted: replacement`; internal gate runners do not join this queue.
+
+Inspect host admission using `st doctor --json`: `performance.seatAdmission`
+contains `mode`, `reason`, `pendingCount`, and `oldestPendingAgeSecs`, plus the
+pending seats and admitted replacements. The same host object is exposed as
+`seatAdmission` by `/v1/health` and current `/v1/status` reads. These are live,
+process-local observations, not replicated claims. Historical status and agent
+history do not acquire current admission facts; a daemon restart rebuilds the
+queue from current declarations rather than replaying presentation metadata.
+
 Native drivers check their work once a minute and renew held claims only while the claim's
 exact harness incarnation remains live, including an idle or blocked harness. Agents without
 held claims do not read full subject status for lease maintenance. Checking work before

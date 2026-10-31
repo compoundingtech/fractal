@@ -347,6 +347,7 @@ mod tests {
 
     fn state(root: &Path) -> fractal_daemon::api::AppState {
         fractal_daemon::api::AppState {
+            seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
             notify: Arc::new(tokio::sync::Notify::new()),
