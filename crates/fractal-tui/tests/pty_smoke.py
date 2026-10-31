@@ -319,7 +319,7 @@ def shifted_keys_case(binary: str) -> None:
 
 
 if __name__ == "__main__":
-    binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/st3"
+    binary = sys.argv[1] if len(sys.argv) > 1 else "target/debug/fractal"
     if "--only-entrypoint" in sys.argv[2:]:
         entrypoint_case(binary)
         sys.exit(0)

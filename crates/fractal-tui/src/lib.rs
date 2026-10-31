@@ -4,6 +4,7 @@
 mod ci_test_paths;
 
 mod connection;
+mod environment;
 mod ui;
 mod version;
 mod voice;
@@ -112,8 +113,10 @@ fn person_from_config(path: &std::path::Path) -> Result<Option<String>> {
         .map(str::to_owned))
 }
 fn configured_person() -> Result<Option<String>> {
-    if let Ok(person) = std::env::var("ST3_PERSON") {
-        return Ok(Some(person));
+    if let Some(person) = environment::read("FRACTAL_PERSON", "ST3_PERSON")? {
+        return Ok(Some(person.into_string().map_err(|_| {
+            anyhow::anyhow!("FRACTAL_PERSON or ST3_PERSON must contain valid Unicode")
+        })?));
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -824,6 +827,28 @@ impl Args {
 const CLASSIC_GONE: &str =
     "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+// Match fractal-drivers/src/contracts.rs identity selection without adding a drivers dependency:
+// an empty preferred value masks the legacy value; unequal aliases disclose neither identity.
+fn terminal_ui_request_agent(
+    preferred: Option<String>,
+    legacy: Option<String>,
+    warn: &mut dyn FnMut(&str),
+) -> Option<String> {
+    let Some(preferred) = preferred else {
+        return legacy.filter(|value| !value.is_empty());
+    };
+    if preferred.is_empty() {
+        return None;
+    }
+    if legacy.as_ref().is_some_and(|legacy| legacy != &preferred) {
+        warn("st: conflicting environment variables FRACTAL_AGENT and ST_AGENT; ignoring both identity values");
+        return None;
+    }
+    Some(preferred)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
 fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
@@ -831,14 +856,18 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
+        .context("fractal ui open needs FRACTAL_PERSON=person/NAME (ST3_PERSON also works) or person = \"person/NAME\" in the Fractal config")?;
     let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
         (true, false) => Place::Right,
         (true, true) => Place::Below,
     };
-    let from = std::env::var("ST_AGENT").ok().filter(|from| !from.is_empty());
+    let from = terminal_ui_request_agent(
+        std::env::var("FRACTAL_AGENT").ok(),
+        std::env::var("ST_AGENT").ok(),
+        &mut |message| eprintln!("{message}"),
+    );
     let id = ui::requests::enqueue(&dir, &open.subject, place, open.keep_focus, from)?;
     if open.wait == 0 {
         println!(
@@ -939,7 +968,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
+        "fractal ui needs FRACTAL_PERSON=person/NAME (ST3_PERSON also works) or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -959,11 +988,8 @@ pub fn run(mut options: Args) -> Result<()> {
             )
         }
         None => {
-            let path = fractal_client::discover_unix_endpoint(
-                options
-                    .endpoint
-                    .or_else(|| std::env::var_os("ST3_ENDPOINT").map(PathBuf::from)),
-            )?;
+            let endpoint = environment::read("FRACTAL_ENDPOINT", "ST3_ENDPOINT")?.map(PathBuf::from);
+            let path = fractal_client::discover_unix_endpoint(options.endpoint.or(endpoint))?;
             let actor = person.as_deref().unwrap_or_default();
             (
                 vec![Client::unix_as(&path, actor)],
@@ -1017,6 +1043,44 @@ pub fn run(mut options: Args) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn terminal_ui_request_agent_prefers_fractal_and_empty_masks_legacy() {
+        for (preferred, legacy, expected) in [
+            (None, None, None),
+            (Some("agent/preferred"), None, Some("agent/preferred")),
+            (None, Some("agent/legacy"), Some("agent/legacy")),
+            (Some("agent/same"), Some("agent/same"), Some("agent/same")),
+            (Some(""), Some("agent/legacy"), None),
+            (Some(""), None, None),
+            (Some(""), Some(""), None),
+            (None, Some(""), None),
+        ] {
+            let actual = terminal_ui_request_agent(
+                preferred.map(str::to_owned),
+                legacy.map(str::to_owned),
+                &mut |_| panic!("non-conflicting aliases must not warn"),
+            );
+            assert_eq!(actual.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn terminal_ui_request_agent_refuses_conflicts_without_disclosing_values() {
+        for legacy in ["agent/private-legacy", ""] {
+            let mut warnings = Vec::new();
+            let actual = terminal_ui_request_agent(
+                Some("agent/private-preferred".to_owned()),
+                Some(legacy.to_owned()),
+                &mut |message| warnings.push(message.to_owned()),
+            );
+            assert_eq!(actual, None);
+            assert_eq!(
+                warnings,
+                ["st: conflicting environment variables FRACTAL_AGENT and ST_AGENT; ignoring both identity values"]
+            );
+        }
+    }
 
     #[test]
     fn the_classic_layout_is_refused_with_what_to_run_instead() {

@@ -248,6 +248,224 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     }).count(), 0);
 }
 
+/// How many claims this member retired, and whether every one of `deleted` is among them.
+fn retired_exactly(store: &Store, deleted: &BTreeSet<String>) -> bool {
+    let connection = store.readers.get();
+    let count: usize = connection.query_row("SELECT COUNT(*) FROM retired_claim_ids", [], |row| row.get(0)).unwrap();
+    let is_retired = format!(
+        "SELECT EXISTS(SELECT 1 FROM retired_claim_ids WHERE id={})",
+        smallclaims::store::retired::identity_sql("?1")
+    );
+    let mut retired = connection.prepare(/* sqlite-large-value: allow-for-now lv-h15c5aca2ae00 owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ &is_retired).unwrap();
+    count == deleted.len() && deleted.iter().all(|id| retired.query_row(/* sqlite-large-value: allow-for-now lv-h79e3a98c6d5e owner=fractal_store::store::local_trim_tests TODO=trace-statement-and-value-representation */ [id], |row| row.get::<_, bool>(0)).unwrap())
+}
+
+fn observer_ids(store: &Store) -> BTreeSet<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT id FROM claims WHERE kind='observer.observed'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn cut_states(store: &Store) -> Vec<String> {
+    store
+        .readers
+        .get()
+        .prepare("SELECT state FROM checkpoints ORDER BY cut_unix_ms")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A cut that drops more than the day's claims stops at the cap, stays `trimming`, and goes on
+/// the next day where it stopped; only what it deleted is retired, and the readers answer the
+/// same each day.
+#[test]
+fn a_capped_local_cut_stops_at_the_day_s_claims_and_goes_on_the_next_day() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all = observer_ids(&store);
+    // Each day's clock, and what the readers answer at it from the whole log.
+    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    let before: Vec<_> = contexts.iter().map(|context| answers(&store, context.now_unix_ms)).collect();
+    for (day, deleted) in [(0_u128, 10), (1, 20), (2, 29)] {
+        let context = &contexts[day as usize];
+        let actions = kinds(&step(&store, context));
+        if day < 2 {
+            assert_eq!(actions, ["deferred"], "day {day}");
+            assert_eq!(cut_states(&store), ["trimming"], "day {day}");
+        } else {
+            assert_eq!(actions.first(), Some(&"trimmed"), "day {day}: {actions:?}");
+        }
+        let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
+        assert_eq!(gone.len(), deleted, "day {day}: ten a day, then the rest; the newest stays");
+        assert!(retired_exactly(&store, &gone), "day {day}: exactly what it deleted is retired");
+        assert_eq!(answers(&store, context.now_unix_ms), before[day as usize], "day {day}");
+        step(&store, context);
+        assert_eq!(all.difference(&observer_ids(&store)).count(), deleted, "day {day}: no more the same day");
+    }
+    assert!(orphans(&store).iter().all(|(_, count)| *count == 0), "{:?}", orphans(&store));
+}
+
+/// The next day's cut waits for the leftover of a capped one, then trims its own new claims
+/// with what the day has left: both in order, with the retired ledger exact.
+#[test]
+fn the_next_day_s_cut_follows_the_leftover_of_a_capped_one() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..16 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all_first = observer_ids(&store);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    // Observations of another observer after the first cut was recorded: the next cut's.
+    for n in 16..24 {
+        apply(&store, &Write::Observer { observer: 1, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let all: BTreeSet<_> = all_first.union(&observer_ids(&store)).cloned().collect();
+    let next_day = context(scratch.path(), 1);
+    let before = answers(&store, next_day.now_unix_ms);
+    // The leftover's five go first; then the new cut takes the five the day has left.
+    assert_eq!(kinds(&step(&store, &next_day)), ["trimmed", "deferred"]);
+    assert_eq!(cut_states(&store), ["trimmed", "trimming"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 1 + 8 - 5);
+    assert_eq!(answers(&store, next_day.now_unix_ms), before);
+    let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
+    assert!(retired_exactly(&store, &gone));
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    assert!(cut_states(&store).iter().all(|state| state == "trimmed"), "{:?}", cut_states(&store));
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+    let gone: BTreeSet<_> = all.difference(&observer_ids(&store)).cloned().collect();
+    assert_eq!(gone.len(), 22);
+    assert!(retired_exactly(&store, &gone), "every deleted claim is retired, and only those");
+    assert!(orphans(&store).iter().all(|(_, count)| *count == 0), "{:?}", orphans(&store));
+}
+
+/// A member restarted while a capped cut is `trimming` goes on from where it stopped: the walk
+/// and the day's count are durable, so the same day deletes no more, and the next days the rest.
+#[test]
+fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claims.sqlite3");
+    let open = |first: bool| {
+        let store = Store::open(&path, "node").unwrap();
+        store.bind_fleet(TEST_FLEET).unwrap();
+        if first {
+            store.import_retired_identities_paced(|_| {}).unwrap();
+        }
+        store.trim_locally(true).unwrap();
+        store.trim_locally_at_most(10);
+        store
+    };
+    let all = {
+        let store = open(true);
+        for n in 0..25 {
+            apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+        }
+        let all = observer_ids(&store);
+        assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+        all
+    };
+    let store = open(false);
+    assert_eq!(cut_states(&store), ["trimming"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 15);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 0))), ["deferred"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 15, "the same day deletes no more");
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 1))), ["deferred"]);
+    assert_eq!(claims_of(&store, "observer.observed"), 5);
+    assert_eq!(kinds(&step(&store, &context(scratch.path(), 2))).first(), Some(&"trimmed"));
+    let left = observer_ids(&store);
+    assert_eq!(left.len(), 1, "the newest stays");
+    assert!(retired_exactly(&store, &all.difference(&left).cloned().collect()));
+}
+
+/// Delete the middle of three observations of `resource` as a trim of that kind would: recorded
+/// as a tombstone first, so its preparation rebuild is deferred.
+fn defer_a_resource_delete(store: &Store, resource: u8) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    for phase in ["first", "middle", "newest"] {
+        let body = json!({"fields": {"kind": "vcs.pull-request", "state": "open", "observer": "observer/watch-0", "facts": {"phase": phase}}});
+        append_claim_tx(&transaction, &store.origin, &format!("resource/pr/{resource}"), "resource.observed", None, &body, &[], None).unwrap();
+    }
+    let middle: String = transaction
+        .query_row(
+            "SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY store_index DESC LIMIT 1 OFFSET 1",
+            [format!("resource/pr/{resource}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h4eb31bda17fb owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+             VALUES ('checkpoint/example-resource', 0, 'trimmed', 0) ON CONFLICT(id) DO NOTHING",
+            [],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h2d276ff3d187 owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor,
+                 predecessors, operation_id, request_digest, accepted_at_unix_ms, checkpoint)
+             SELECT id, 'example-writer', 1, 'example-hash', subject, kind, actor, '[]', NULL, NULL, 0,
+                 'checkpoint/example-resource' FROM claims WHERE id=?1",
+            [&middle],
+        )
+        .unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf46030d1c556 owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.commit().unwrap();
+}
+
+/// What preparation answers for `subject`, and what a rebuild from every claim present answers.
+fn prepared_and_rebuilt(store: &Store, subject: &str) -> (String, String) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let prepared = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    super::resources::rebuild_preparation(&transaction).unwrap();
+    let rebuilt = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    transaction.rollback().unwrap();
+    (prepared, rebuilt)
+}
+
+/// Over a capped cut's days, what a trim's deletes deferred is rebuilt by the end of each day's
+/// run: nothing stays deferred past it, and preparation answers what a rebuild answers.
+#[test]
+fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    for (day, context) in contexts.iter().enumerate() {
+        defer_a_resource_delete(&store, day as u8);
+        let deferred = |store: &Store| -> i64 {
+            store.readers.get().query_row("SELECT COUNT(*) FROM local_resource_preparation_deferred", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(deferred(&store), 1, "day {day}: one subject waits");
+        let before = answers(&store, context.now_unix_ms);
+        step(&store, context);
+        assert_eq!(deferred(&store), 0, "day {day}: rebuilt by the end of the day's run");
+        let (prepared, rebuilt) = prepared_and_rebuilt(&store, &format!("resource/pr/{day}"));
+        assert_eq!(prepared, rebuilt, "day {day}");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}");
+    }
+    assert_eq!(cut_states(&store).last().map(String::as_str), Some("trimmed"));
+}
+
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
 /// claim by design (see schema.md), so it is not one.
 fn orphans(store: &Store) -> Vec<(&'static str, i64)> {

@@ -3538,6 +3538,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
             ("owner_host", required_string()),
             ("declaration", required_string()),
+            ("runtime_incarnation", string()),
+            ("desired_revision", string()),
             ("successor", reference_to(&["agent"])),
             ("transfer", string()),
         ],
