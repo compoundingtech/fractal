@@ -540,6 +540,23 @@ fn subscription_failure_is_current_tx(
     Ok(declaration_stopped_tx(connection, &failure.subject)?.is_none())
 }
 
+/// Every name a stream item may address `recipient` by: its identity's names, the name itself,
+/// and its bare form, as a graph message's recipient match accepts them.
+fn recipient_names(
+    connection: &rusqlite::Connection,
+    recipient: &str,
+    bare_recipient: &str,
+) -> Result<Vec<String>> {
+    let mut names = connection
+        .prepare_cached("SELECT name FROM identity_names WHERE identity=?1")?
+        .query_map([recipient], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    names.extend([recipient.to_owned(), bare_recipient.to_owned()]);
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 #[cfg(test)]
 mod mailbox_metrics_tests {
     use super::*;
@@ -644,21 +661,4 @@ mod mailbox_metrics_tests {
             vec![("pending".into(), 1, 100)],
         );
     }
-}
-
-/// Every name a stream item may address `recipient` by: its identity's names, the name itself,
-/// and its bare form, as a graph message's recipient match accepts them.
-fn recipient_names(
-    connection: &rusqlite::Connection,
-    recipient: &str,
-    bare_recipient: &str,
-) -> Result<Vec<String>> {
-    let mut names = connection
-        .prepare_cached("SELECT name FROM identity_names WHERE identity=?1")?
-        .query_map([recipient], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    names.extend([recipient.to_owned(), bare_recipient.to_owned()]);
-    names.sort();
-    names.dedup();
-    Ok(names)
 }
