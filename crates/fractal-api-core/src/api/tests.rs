@@ -7567,10 +7567,8 @@ async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
         idempotency_key: Some("custody-api-send".into()),
     }).unwrap();
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    let retirement = state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-api-retire", &[], Some("agent/example/new"),
-    ).unwrap().0;
+    let retirement = state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-api-retire", &[], Some("agent/example/new"), None).unwrap().0;
     let app = router(state.clone());
     let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -7615,10 +7613,8 @@ fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
     let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
     assert!(old.get("mail_custody").is_none());
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-card-retire", &[], Some("agent/example/new"),
-    ).unwrap();
+    state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-card-retire", &[], Some("agent/example/new"), None).unwrap();
     let after_index = state.store.index().unwrap();
     let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
     let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();

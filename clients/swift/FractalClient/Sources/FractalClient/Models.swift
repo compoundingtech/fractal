@@ -143,6 +143,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case identityUnknown
     case lifecycleUnavailable
     case retirementUpgradeRequired
+    case retireRevisionMismatch
+    case retireIncarnationMismatch
     case invalidCustodySuccessor
     case custodyPending
     case notFound
@@ -229,6 +231,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "identity-unknown": .identityUnknown
         case "lifecycle-unavailable": .lifecycleUnavailable
         case "retirement-upgrade-required": .retirementUpgradeRequired
+        case "retire-revision-mismatch": .retireRevisionMismatch
+        case "retire-incarnation-mismatch": .retireIncarnationMismatch
         case "invalid-custody-successor": .invalidCustodySuccessor
         case "custody-pending": .custodyPending
         case "agents-publication-row-too-large": .agentsPublicationRowTooLarge
@@ -317,6 +321,8 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .identityUnknown: "identity-unknown"
         case .lifecycleUnavailable: "lifecycle-unavailable"
         case .retirementUpgradeRequired: "retirement-upgrade-required"
+        case .retireRevisionMismatch: "retire-revision-mismatch"
+        case .retireIncarnationMismatch: "retire-incarnation-mismatch"
         case .invalidCustodySuccessor: "invalid-custody-successor"
         case .custodyPending: "custody-pending"
         case .agentsPublicationRowTooLarge: "agents-publication-row-too-large"
@@ -1056,7 +1062,7 @@ public struct AskDefaultAnswer: Codable, Sendable { public let id, label: String
 public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor, resolvedBy: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", resolvedBy = "resolved_by", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
-public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public init(agent: String, reason: String, successor: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor } }
+public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public var expectRevision: String?; public init(agent: String, reason: String, successor: String? = nil, expectRevision: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor; self.expectRevision = expectRevision }; enum CodingKeys: String, CodingKey { case agent, reason, successor; case expectRevision = "expect_revision" } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
 public struct AgentStartParameters: Codable, Sendable { public var agent: String; public init(agent: String) { self.agent = agent } }
 public struct AgentSuspendParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
