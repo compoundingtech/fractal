@@ -1066,6 +1066,23 @@ Cargo builds use the host's four-job limit. Workspace test shards explicitly use
 threads, with the host's 14 GiB per-job memory limit. The repository variable `CI1_MIN_IDLE`
 can override admission; keep it at four when preserving CPU capacity for reserved lanes.
 
+### Debug information
+
+The workspace `dev` and `test` profiles keep `debug = 1` for workspace crates and
+`debug = 0` for dependencies, with `split-debuginfo = "unpacked"`. On Linux this
+keeps workspace DWARF in `.dwo` sidecars instead of duplicating it in every linked
+test executable. Keep those sidecars with the build tree for file:line backtraces.
+The existing `fractal-daemon` test-profile override still disables its debug info.
+
+The nextest `ci` profile changes test selection and execution, not Cargo's compiler
+profile. Hosted CI and `scripts/ci-local` explicitly set
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0`; the hosted build also
+disables incremental compilation. Those overrides still take precedence, so
+ordinary local workspace builds and hosted CI have different debug-info budgets.
+Do not strip debug information from the default local profiles: panic messages
+retain their own source location after stripping, but caller backtrace frames lose
+file:line. Release profiles are unchanged.
+
 ### Debug assertions
 
 The workspace `dev` and `test` profiles build with `debug-assertions = false` and
