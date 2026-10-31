@@ -117,6 +117,9 @@ with negotiated enhanced keyboard input. Legacy Ctrl+5 (0x1D) goes forward, neve
 Inside an attached program these keys pass through. Ctrl+\ then [ or ] navigates back or
 forward across spaces on every terminal; these leader aliases do not switch tabs.
 Tab navigation remains [ and ] (when not typing), and Ctrl+PageUp/PageDown.
+Ctrl+L triages outstanding Inbox items only outside attached programs; inside, it remains
+the program's clear-screen chord. Ctrl+\ then l visits the previous triage item without
+sending either leader key to the program. Enhanced Ctrl+Shift+L is the detached equivalent.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception
