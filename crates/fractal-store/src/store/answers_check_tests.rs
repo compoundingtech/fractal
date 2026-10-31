@@ -69,17 +69,23 @@ fn retained_history_case(kind: &str) {
         for (at, writer, state) in [(100, "old", "idle"), (150, "old", "idle"), (200, "new", "idle")] {
             let writer = if matches!(kind, "observer.observed" | "resource.observed") { writer } else { "new" };
             store.set_write_clock_at(at).unwrap();
+            let fields = match kind {
+                "daemon.diagnostic" => json!({"severity":"error","code":"example","reason":"example"}),
+                "harness.observed" => json!({"state":state,"driver":"codex","incarnation_id":"one"}),
+                "harness.todo.observed" => json!({"harness":"omp","session_id":"session","incarnation_id":"one",
+                    "observed_at":"2026-10-03T14:00:00Z","source_op":"hydrate","phases":[],"truncated":false,
+                    "totals":{"pending":0,"in_progress":0,"completed":0,"blocked":0}}),
+                "harness.usage" => json!({"semantics":"session_cumulative","driver":"codex","incarnation_id":"one","total_tokens":1}),
+                "observer.observed" => json!({"status":state}),
+                "resource.observed" => json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}),
+                "transport.observed" => json!({"status":"up"}),
+                _ => unreachable!(),
+            };
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
             let claim = append_claim_tx(
                 &transaction, writer, subject, kind, None,
-                &json!({"fields": {"state": state, "code": "example", "observer": "observer/example",
-                    "incarnation_id": "one", "semantics": "session_cumulative", "total_tokens": 1,
-                    "driver": "codex", "kind": "vcs.issue", "facts": {"state": "open"},
-                    "severity": "error", "reason": "example", "status": "up",
-                    "harness": "omp", "session_id": "session", "observed_at": "2026-10-03T14:00:00Z",
-                    "source_op": "hydrate", "phases": [], "truncated": false,
-                    "totals": {"pending": 0, "in_progress": 0, "completed": 0, "blocked": 0}}}),
+                &json!({"fields": fields}),
                 &[], None,
             ).unwrap();
             ids.push(claim.id);
@@ -114,7 +120,7 @@ fn retained_history_case(kind: &str) {
         assert!(differing_kinds(&full, &trimmed, true).is_empty(), "{kind}");
         let update = match kind {
             "resource.observed" => "UPDATE claims SET body=json_set(body,'$.fields.facts.state','closed') WHERE id=?1",
-            _ => "UPDATE claims SET body=json_set(body,'$.fields.state','failed') WHERE id=?1",
+            _ => "UPDATE claims SET body=json_set(body,'$.fields.status','failed') WHERE id=?1",
         };
         store.connection.write().execute(update, [&ids[2]]).unwrap();
         assert!(!differing_kinds(&trimmed, &summary(), true).is_empty(), "{kind}");
@@ -139,7 +145,7 @@ fn retained_history_transport() { retained_history_case("transport.observed"); }
 fn observer_reader_preserves_field_carriers() {
     let store = Store::open_memory("alder").unwrap();
     let original = observation(&store, "observer/example", "observer.observed", "alder", 100, json!({"cursor":"first"}));
-    observation(&store, "observer/example", "observer.observed", "alder", 200, json!({"state":"healthy"}));
+    observation(&store, "observer/example", "observer.observed", "alder", 200, json!({"status":"healthy"}));
     let full = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
     store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
     assert_ne!(full, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
@@ -261,7 +267,7 @@ fn observer_reader_covers_newest_cursor_not_only_merged_fields() {
     for cursor in [None, Some("first")] {
         let store = Store::open_memory("alder").unwrap();
         observation(&store, "observer/example", "observer.observed", "alder", 100, json!({"cursor":"first"}));
-        let mut fields = json!({"state":"healthy"});
+        let mut fields = json!({"status":"healthy"});
         if let Some(cursor) = cursor { fields["cursor"] = json!(cursor); }
         observation(&store, "observer/example", "observer.observed", "alder", 200, fields);
         assert_eq!(store.claimed_observer_cursor("observer/example").unwrap().as_deref(), cursor);
@@ -276,7 +282,7 @@ fn conservative_usage_inventory_keeps_required_hourly_boundaries_visible() {
     let mut ids = Vec::new();
     for hour in 1..=3u128 {
         ids.push(observation(&store, "agent/example", "harness.usage", "alder", hour * 3_600_000,
-            json!({"semantics":"response_rollup","incarnation_id":"one","model":"example","total_tokens":hour * 10})));
+            json!({"semantics":"response_rollup","driver":"codex","incarnation_id":"one","model":"example","total_tokens":hour * 10})));
     }
     let full = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
     store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&ids[1]]).unwrap();
