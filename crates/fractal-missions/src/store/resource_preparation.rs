@@ -156,33 +156,35 @@ pub fn read_inputs(
                 fractal_store::store::resources::preparation_observation(transaction, &subject)
                     .map_err(internal)?;
             let graph = observation.actual.and_then(|actual| actual.get("facts").cloned());
-            // A filled mirror holds what the poller last saw of the item, including what compact
-            // mode no longer records in the graph.
-            let recorded = match mirrored {
-                Some(mirrored) => mirrored.items.get(&subject).cloned().or(graph),
-                // Without it, after compact-only changes, the graph is exact only for the compact
-                // and delivery facts. Compare those, and take the rest as this look found them, so
-                // the facts that drifted are a baseline and deliver nothing.
-                None if fractal_store::store::resources::compact_newer(transaction, &subject).map_err(internal)? => {
-                    graph.map(|graph| {
-                        let mut baseline = super::item_facts(resource, field, number, Some(&graph), item);
-                        let exact = fractal_schema::github_plugin::COMPACT_FACTS.iter()
-                            .chain(fractal_schema::github_plugin::DELIVERY_FACTS);
-                        for name in exact {
-                            match graph.get(*name) {
-                                Some(value) => baseline.insert((*name).into(), value.clone()),
-                                None => baseline.remove(*name),
-                            };
-                        }
-                        if let Some(execution) = graph.pointer("/required_checks/execution")
-                            && let Some(required) = baseline.get_mut("required_checks").and_then(Value::as_object_mut)
-                        {
-                            required.insert("execution".into(), execution.clone());
-                        }
-                        Value::Object(baseline)
-                    })
+            // The graph is exact for every compact fact and every fact a wake or a delivery reads:
+            // each change to one is recorded, whatever the mode. A look's prior takes those from
+            // the graph, so a mirror that missed a look cannot make a delivered comment new again.
+            let exact = |mut base: serde_json::Map<String, Value>, graph: &Value| {
+                for name in fractal_schema::github_plugin::COMPACT_FACTS.iter()
+                    .chain(fractal_schema::github_plugin::DELIVERY_FACTS)
+                {
+                    match graph.get(*name) {
+                        Some(value) => base.insert((*name).into(), value.clone()),
+                        None => base.remove(*name),
+                    };
                 }
-                None => graph,
+                if let Some(execution) = graph.pointer("/required_checks/execution")
+                    && let Some(required) = base.get_mut("required_checks").and_then(Value::as_object_mut)
+                {
+                    required.insert("execution".into(), execution.clone());
+                }
+                Value::Object(base)
+            };
+            let recorded = match (mirrored.and_then(|mirrored| mirrored.items.get(&subject)), graph) {
+                // The mirror supplies what compact mode no longer records, such as the title.
+                (Some(Value::Object(mirror)), Some(graph)) => Some(exact(mirror.clone(), &graph)),
+                (Some(mirror), None) => Some(mirror.clone()),
+                // Without the mirror, after compact-only changes, take the rest as this look found
+                // it: the facts that drifted are a baseline and deliver nothing.
+                (_, Some(graph)) if fractal_store::store::resources::compact_newer(transaction, &subject).map_err(internal)? => {
+                    Some(exact(super::item_facts(resource, field, number, Some(&graph), item), &graph))
+                }
+                (_, graph) => graph,
             };
             let observed_at = observation.observed_at;
             recorded_items.insert(subject, recorded.map(|facts| (facts, observed_at)));

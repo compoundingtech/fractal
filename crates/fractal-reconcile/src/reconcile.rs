@@ -40988,6 +40988,15 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let facts = listing("closed", "Orchid, renamed", &[1]);
         assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c4")).is_some());
         assert!(mirrored_prior(&store, &plugin, "node", &spec, &facts, Some("c9")).is_none(), "behind the cursor");
+
+        // The graph moves on while this mirror and its cursor stay at the earlier look, as when
+        // the daemon stops between the graph write and the mirror write. The look from that
+        // cursor sees a comment the graph already delivered: it is not delivered again.
+        let comments = delivered();
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing("closed", "Orchid, renamed", &[1, 2]), "c6").await;
+        assert_eq!(delivered(), comments + 1, "the second comment is delivered");
+        poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1, 2]), "c7").await;
+        assert_eq!(delivered(), comments + 1, "a mirror behind the graph delivers it nothing twice");
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real

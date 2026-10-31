@@ -313,8 +313,10 @@ impl GithubPluginStore {
     }
 
     /// Whether `repository`'s mirror is filled and followed every look up to `cursor`, the cursor
-    /// the next look starts from. A mirror that missed a look, as when its write failed or the
-    /// daemon stopped after the graph write, is behind the graph and is not a look's prior.
+    /// the next look starts from. A mirror whose write failed while the daemon kept running is
+    /// behind that cursor. One the daemon stopped before writing has the same cursor as the
+    /// plugin database and may be behind the graph: a look's prior then still takes every
+    /// compact and delivery fact from the graph, which records each change to them.
     pub fn current(&self, repository: &str, cursor: Option<&str>) -> Result<bool> {
         let followed: Option<(Option<String>, bool)> = self
             .connection
