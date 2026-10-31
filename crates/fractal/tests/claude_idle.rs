@@ -11,6 +11,7 @@ fn unscoped_claude_channel_serves_mcp_until_eof_without_a_daemon_or_state() {
     }
     let root = tempfile::tempdir().unwrap();
     let mut child = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3"))
+        .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
         .env("XDG_STATE_HOME", root.path().join("state")).env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")

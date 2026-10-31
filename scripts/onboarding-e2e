@@ -240,7 +240,7 @@ def onboarding_history(view):
 
 def restart_requested(result,subject):
     waiting=f"st: `{subject}` restarted and is waiting for your input; attach with `st terminals attach {subject}`"
-    return result["exit"]==0 or (result["exit"]==2 and result["stderr"].strip()==waiting)
+    return result["exit"]==0 or (result["exit"]==2 and waiting in result["stderr"].splitlines())
 
 def cache_state_matches(state,override):
     fields={"pid","unit_cache_kib","daemon_cache_kib","unit_has_cache_directive"}
