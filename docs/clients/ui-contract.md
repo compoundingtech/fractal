@@ -142,19 +142,27 @@ The phone tabs are Now, Resources, Fleet, and Spaces.
 
 Terminal workspace tabs derive presentation identity from their existing pane keys,
 like the web strip's `data-tab-kind` (never from the displayed or custom title).
-`A`, `M`, and `I` identify agent, mission, and Inbox/alert panes. Agent tabs show
-reported activity (`>` working/compacting, `-` idle, `x` down/stopped/retired,
-`◆` needs a person or a login, `!` fault, `~` starting/unknown). `◆N` is the number of
-open alerts in that subject's attention window, excluding informational updates and
-recently closed items; zero is omitted, and an unavailable window shows `◆?`.
-A separate `?` means live attention reports an open question prompt. Native question
-kind or an exact question-tool call identity establishes its type, independently of
-available client-answer actions (whose submission window can expire). Cached calls
-without an open live prompt never establish that a question is still pending.
+Agent tabs have one activity glyph immediately before the title: `●` working/compacting,
+`○` idle or awaiting a person or login, `×` down/stopped/retired, `!` fault, and `~`
+starting/unknown. Other tabs have no activity prefix; kind letters are not shown.
+One mauve attention suffix follows the title: `?` when an open item is a live question,
+otherwise `◆` when alerts or the subject's needs-person projection need attention.
+The suffix carries the open-alert count only above one (`?2`, `◆3`); zero and one
+have no digit, and a loading attention window has no count or placeholder.
+Counts exclude informational updates and recently closed items.
+Native question kind or an exact question-tool call identity establishes its type,
+independently of available client-answer actions (whose submission window can expire).
+Cached calls without an open live prompt never establish that a question is still pending.
 Mission tabs include current question prompts of agents assigned to that mission;
-Inbox includes all current question prompts. Counts disappear before
-type/activity/question identity when space is tight. Subject membership indexes are
-rebuilt on observation updates, not per tab per frame; none of this chrome is persisted.
+Inbox includes all current question prompts. Titles retain a 26-cell budget.
+Counts disappear first when space is tight, then the suffix; activity stays on the left.
+Subject membership indexes are rebuilt on observation updates, not per tab per frame.
+
+Each split has an independent, non-persisted tab-strip view. Wheel right/down over its
+strip moves the view one whole tab right; wheel left/up moves it left, without changing
+the active tab. The view clamps at the final full tab. Changing the active tab reveals
+it again if needed. Clickable `‹N` / `N›` markers count hidden tabs and activate the nearest
+hidden tab; `+` opens a new tab. Neither badges nor strip offsets are workspace data.
 
 
 ### Now: what needs you

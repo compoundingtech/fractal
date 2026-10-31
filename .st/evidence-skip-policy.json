@@ -7,7 +7,8 @@
       ],
       "enforce": true,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "inputs": [
@@ -103,7 +104,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": "tree"
             },
@@ -130,7 +132,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -171,7 +174,8 @@
       ],
       "enforce": false,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "inputs": [
@@ -309,7 +313,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": "tree"
             },
@@ -332,7 +337,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -369,7 +375,8 @@
       ],
       "enforce": false,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "inputs": [
@@ -544,7 +551,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": "tree"
             },
@@ -567,7 +575,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -604,7 +613,8 @@
       ],
       "enforce": true,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "inputs": [
@@ -680,7 +690,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ]
             },
             "agent": {
@@ -704,7 +715,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -744,7 +756,8 @@
       ],
       "enforce": true,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "kinds": {
@@ -802,7 +815,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ]
             },
             "agent": {
@@ -825,7 +839,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -864,7 +879,8 @@
       ],
       "enforce": true,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "inputs": [
@@ -945,7 +961,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ]
             },
             "agent": {
@@ -968,7 +985,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -1007,7 +1025,8 @@
       ],
       "enforce": true,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "inputs": [
@@ -1131,7 +1150,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": "tree"
             },
@@ -1161,7 +1181,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },
@@ -1205,7 +1226,8 @@
       ],
       "enforce": true,
       "events": [
-        "pull_request"
+        "pull_request",
+        "merge_group"
       ],
       "sample_one_in": 1,
       "kinds": {
@@ -1262,7 +1284,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": "tree"
             },
@@ -1290,7 +1313,8 @@
                 "flake_lock_sha256": "flake.lock"
               },
               "events": [
-                "pull_request"
+                "pull_request",
+                "merge_group"
               ],
               "lane": true
             },

@@ -1,7 +1,7 @@
 === Now ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  I ◆1 Inbox   +
+ / Filter:                          +New│  Inbox ◆   +
  ▾ Everything else 7                    │   somebody is stopped on you  │ ╭─ UNPLACED · WAITING 1M ─────────────────╮
  ▾ Agents 4                             │ ▌ ? unplaced Worker typech…   │ │                                         │
    Atlas Builder                        │ ▌   waited 1m                 │ │ Worker typecheck fails after the rename │
@@ -17,12 +17,12 @@
                                         │                               │ │ presented it yet. Answer it with        │
                                         │                               │ │ fractal alerts.                         │
                                         │                               │ │                                         │
-                                        │                               │ │  c Reply with fields                    │
+                                        │                               │ │  c  Reply with fields                   │
                                         │                               │ │                                         │
                                         │                               │ │ related ─────────────────────────────── │
                                         │                               │ │ agent     agent/example/atlas/builder   │
                                         │                               │ │                                         │
-                                        │                               │ │  t Chat about this    g Go to the mission
+                                        │                               │ │  t  Chat about this    g  Go to the missi
                                         │                               │ │                                         │
                                         │                               │ ╰─────────────────────────────────────────╯
                                         │                               │
@@ -69,7 +69,7 @@
 === Mission ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  M ◆1 example/atlas · Rename fet…  +
+ / Filter:                          +New│  example/atlas · Rename fe… ◆   +
  ▾ Everything else 7                    │  ▲ stalled   example/atlas · Rename fetchUser to loadUser   1m              ┃
  ▾ Agents 4                             │  mission/example/atlas/load-user-rename  ·  a step has an owner who is not m┃
    Atlas Builder                        │                                                                             ┃
@@ -77,7 +77,7 @@
    Atlas Migrator                       │ ┃                                                                          ┃┃
    Atlas Reviewer                       │ ┃ ▱ step-5 is ready                                                        ┃┃
  ▾ Missions 1                           │ ┃                                                                          ┃┃
-   example/atlas · Rename fetchUser to l│ ┃  r Retry the step    X Cancel this run                                   ┃┃
+   example/atlas · Rename fetchUser to l│ ┃  r  Retry the step    X  Cancel this run                                 ┃┃
  ▾ Machines 2                           │ ┃                                                                          ┃┃
    foundry                              │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┃
    meadow                               │ ╭─ STEPS ──────────────────────────────────────────────────────────────────╮┃
@@ -187,9 +187,9 @@
                                         │ ╰──────────────────────────────────────────────────────────────────────────╯
                                         │ ╭─ YOUR DEVICES ───────────────────────────────────────────────────────────╮
                                         │ │ ● Review phone          read                    expires 2030-01-02T12:00:0
-                                        │ │   Revoke                                                                 │
+                                        │ │    Revoke                                                                │
                                         │ │ ● Fleet tablet          read                    expires 2030-01-02T12:00:0
-                                        │ │   Revoke                                                                 │
+                                        │ │    Revoke                                                                │
                                         │ ╰──────────────────────────────────────────────────────────────────────────╯
                                         │
                                         │
@@ -205,7 +205,7 @@
 === Conversation ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  A~ Atlas Builder   +
+ / Filter:                          +New│  ~Atlas Builder   +
  ▾ Everything else 7                    │  ? Atlas Builder  running · older Fractal                    codex · meadow
  ▾ Agents 4                             │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-renam
    Atlas Builder                        │    mission example/atlas · Rename fetchUser to loadUser › step-3
@@ -239,7 +239,7 @@
 === Agent details ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  A~ Atlas Builder   +
+ / Filter:                          +New│  ~Atlas Builder   +
  ▾ Everything else 7                    │  i back to the conversation
  ▾ Agents 4                             │ details                                                            × close
    Atlas Builder                        │ now ──────────────────────────────────────────────────────────────────────
@@ -273,7 +273,7 @@
 === Terminal ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  A~ Atlas Builder   +
+ / Filter:                          +New│  ~Atlas Builder   +
  ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
  ▾ Agents 4                             │  Ctrl-C and Ctrl-D need a second press to reach the agent
    Atlas Builder                        │ scenario harness ready

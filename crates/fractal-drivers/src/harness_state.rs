@@ -31,6 +31,10 @@ pub const HARNESS_STATE_STALE: Duration = Duration::from_secs(15 * 60);
 /// How often a live writer re-stamps unchanged evidence it still holds. State changes
 /// publish immediately; quiet sessions retain the cadence used before the twenty-second refresh.
 pub const HARNESS_STATE_REFRESH: Duration = Duration::from_secs(5 * 60);
+/// Read-time freshness for replicated harness observations: allow one heartbeat plus
+/// thirty seconds for scheduling and replication without increasing the write cadence.
+pub const HARNESS_OBSERVATION_FRESHNESS: Duration =
+    HARNESS_STATE_REFRESH.saturating_add(Duration::from_secs(30));
 /// Maximum accepted positive difference between the writer's UTC clock and the reader's clock.
 pub const HARNESS_STATE_FUTURE_SKEW: Duration = Duration::from_secs(60);
 

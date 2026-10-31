@@ -282,7 +282,7 @@ client_relay: ClientRelay::from_config(&Config {
     ..Default::default()
 })
 .unwrap(),
-planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+planner_default: crate::model::PlannerSpec::default(), harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(),  };
 let gateway_socket = root.path().join("gateway.sock");
 let served = gateway_socket.clone();
 let gateway_server = tokio::spawn(async move {
