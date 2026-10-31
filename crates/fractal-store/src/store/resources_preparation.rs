@@ -299,16 +299,14 @@ fn create_tracking_triggers(connection: &Connection) -> Result<()> {
             )
         };
         let deferred = if event == "UPDATE" {
-            String::new()
+            ""
         } else {
-            format!(
-                /* sqlite-large-value: allow-for-now lv-h0d9e7d2f2f5e owner=fractal_store::store::resources_preparation TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT OLD.subject
+            /* sqlite-large-value: allow-for-now lv-h0d9e7d2f2f5e owner=fractal_store::store::resources_preparation TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO local_resource_preparation_deferred(subject) SELECT OLD.subject
              WHERE (substr(OLD.subject,1,9)='resource/' OR OLD.kind='resource.observed'
                  OR EXISTS (SELECT 1 FROM local_resource_preparation WHERE subject=OLD.subject))
              AND EXISTS (SELECT 1 FROM checkpoint_claims WHERE id=OLD.id)
              AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_dirty WHERE subject=OLD.subject)
              AND NOT EXISTS (SELECT 1 FROM local_resource_preparation_deferred WHERE subject=OLD.subject);"
-            )
         };
         connection.execute_batch(&format!(
             /* sqlite-large-value: allow-for-now lv-h3f78c72c5607 owner=fractal_store::store::resources_preparation TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS preparation_claims_dirty_{name} AFTER {event} ON claims BEGIN
