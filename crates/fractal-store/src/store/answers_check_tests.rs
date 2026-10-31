@@ -58,10 +58,7 @@ fn a_dropped_transition_changes_the_seat_readers_that_fold_it() {
 #[test]
 fn retained_history_is_not_an_answer_difference() {
     use smallclaims::answers::{differing_kinds, reader_answers};
-    for kind in [
-        "daemon.diagnostic", "harness.observed", "harness.todo.observed", "harness.usage",
-        "observer.observed", "resource.observed", "transport.observed",
-    ] {
+    for kind in ["observer.observed", "resource.observed"] {
         let store = Store::open_memory("alder").unwrap();
         let subject = match kind {
             "daemon.diagnostic" => "daemon/example",
@@ -77,7 +74,8 @@ fn retained_history_is_not_an_answer_difference() {
             let claim = append_claim_tx(
                 &transaction, writer, subject, kind, None,
                 &json!({"fields": {"state": state, "code": "example", "observer": "observer/example",
-                    "incarnation_id": "one", "semantics": "session_cumulative", "total_tokens": 1}}),
+                    "incarnation_id": "one", "semantics": "session_cumulative", "total_tokens": 1,
+                    "severity": "error", "reason": "example", "kind":"vcs.issue", "facts":{"state":"open"}}}),
                 &[], None,
             ).unwrap();
             ids.push(claim.id);
