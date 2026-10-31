@@ -64,7 +64,7 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
     }
 }
 
-/// Refuse before body decoding. Re-observation admits restarted workers and revokes predecessors.
+/// On Linux refuse before body decoding; re-observation admits restarts and revokes predecessors.
 pub fn worker_authenticated(app: Router, observe: Observe) -> Router {
     protect(app, observe)
 }
