@@ -265,11 +265,10 @@ impl Store {
                 fields: BTreeMap::from([
                     ("severity".into(), json!("warning")),
                     ("code".into(), json!("answers-disagreement-occurrence")),
-                    ("reason".into(), json!("The same answers disagreement remains open.")),
-                    ("failure".into(), json!(failure.id)),
-                    ("signature".into(), json!(signature)),
-                    ("peer".into(), json!(check.peer)),
-                    ("cut_unix_ms".into(), json!(check.cut_unix_ms.to_string())),
+                    ("reason".into(), json!(serde_json::to_string(&json!({
+                        "failure": failure.id, "signature": signature, "peer": check.peer,
+                        "cut_unix_ms": check.cut_unix_ms.to_string(),
+                    })).map_err(internal)?)),
                 ]),
                 evidence: Vec::new(),
                 expected_subject: None,
@@ -319,7 +318,6 @@ impl Store {
             actor: Some("daemon/runtime".into()),
             fields: BTreeMap::from([
                 ("episode".into(), json!(episode)),
-                ("signature".into(), json!(signature)),
                 ("condition".into(), json!(ANSWERS_CONDITION)),
                 ("reviewer".into(), json!(reviewer)),
                 (
@@ -341,6 +339,7 @@ impl Store {
                     json!({
                         "members": [local, peer],
                         "cut_unix_ms": check.cut_unix_ms.to_string(),
+                        "signature": signature,
                         "differences": check.differences,
                     }),
                 ),
@@ -358,7 +357,7 @@ impl Store {
     ) -> Result<Vec<OpenAnswersFailure>> {
         let connection = self.readers.get();
         let mut query = connection.prepare(
-            "SELECT id, json_extract(body,'$.fields.episode'), json_extract(body,'$.fields.signature'),
+            "SELECT id, json_extract(body,'$.fields.episode'), json_extract(body,'$.fields.reproduction.signature'),
                     json_extract(body,'$.fields.reproduction.differences'),
                     json_extract(body,'$.fields.reproduction.cut_unix_ms')
              FROM claims failure WHERE subject=?1 AND kind='operational.failure'
@@ -474,7 +473,7 @@ mod tests {
         assert_eq!(faults(&store).len(), 1);
         let occurrences = occurrences(&store);
         assert_eq!(occurrences.len(), 1);
-        let fields = &occurrences[0].body["fields"];
+        let fields: Value = serde_json::from_str(occurrences[0].body["fields"]["reason"].as_str().unwrap()).unwrap();
         assert_eq!(fields["cut_unix_ms"], "2000");
         let open = store.open_answers_failures("daemon/alder", &episode("alder", "birch"), "alder", "birch").unwrap();
         assert_eq!(fields["failure"], open[0].id);
@@ -570,6 +569,34 @@ mod tests {
         }).unwrap();
         store.record_answers_check(&check(differs(), 2_000)).unwrap();
         assert_eq!(faults(&store).len(), 1);
-        assert_eq!(occurrences(&store)[0].body["fields"]["failure"], failure.id);
+        let metadata: Value = serde_json::from_str(occurrences(&store)[0].body["fields"]["reason"].as_str().unwrap()).unwrap();
+        assert_eq!(metadata["failure"], failure.id);
+    }
+
+    #[test]
+    fn failure_and_local_occurrence_payloads_pass_real_store_admission() {
+        let store = Store::open_memory("alder").unwrap();
+        let failure = store.append_claim(&ClaimInput {
+            subject: "daemon/alder".into(), kind: "operational.failure".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("episode".into(), json!("example")),
+                ("reproduction".into(), json!({"signature":"digest","differences":differs(),"cut_unix_ms":"1000"})),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let metadata = json!({"failure":failure.id,"signature":"digest","peer":"birch","cut_unix_ms":"2000"});
+        let occurrence = store.append_claim(&ClaimInput {
+            subject: "daemon/alder".into(), kind: "daemon.diagnostic".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("severity".into(), json!("warning")),
+                ("code".into(), json!("answers-disagreement-occurrence")),
+                ("reason".into(), json!(metadata.to_string())),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(local_observation_position(&occurrence).is_some());
+        assert_eq!(serde_json::from_str::<Value>(occurrence.body["fields"]["reason"].as_str().unwrap()).unwrap(), metadata);
     }
 }
