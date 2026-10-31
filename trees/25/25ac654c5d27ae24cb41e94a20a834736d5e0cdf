@@ -1,3 +1,5 @@
 record 4944eeb5f0ddaf800be1fe5d3dad83236e18d751 typescript-client 0 host/anvil 2026-10-31T09:04:24Z
 record 421432aa671f031e131b9d3c53932a2696615ed1 genie-freshness 0 host/anvil 2026-10-31T09:05:59Z
 record c961292fd9ecfd0bbec9613cf854677d3b445279 ci-script-tests 0 host/anvil 2026-10-31T09:10:55Z
+record 0ae3d46fe8b382145e3113503af25fdda5cbfef9 linux-gate 0 host/anvil 2026-10-31T09:30:56Z
+record d2259ff2707bb7a369cfd8af8badae01079392ce linux-clippy 0 host/anvil 2026-10-31T09:31:31Z
