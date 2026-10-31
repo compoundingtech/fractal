@@ -64,6 +64,7 @@ fn retained_history_is_not_an_answer_difference() {
     ] {
         let store = Store::open_memory("alder").unwrap();
         let subject = match kind {
+            "daemon.diagnostic" => "daemon/example",
             "observer.observed" => "observer/example",
             "resource.observed" => "resource/example/issue/1502",
             _ => "host/example",
