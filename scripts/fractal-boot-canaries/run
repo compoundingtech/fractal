@@ -478,6 +478,10 @@ def forget_native_session(node, harness, session):
     if paths is None or (harness != "opencode" and not paths):
         fail(f"no {harness} transcript of {session} to remove")
     for path in paths:
+        # A staged inventory entry links to the transcript the seat's binding names; resume reads
+        # that file by its own path, so losing the transcript means losing the file too.
+        if path.is_symlink():
+            path.resolve().unlink(missing_ok=True)
         path.unlink()
 
 

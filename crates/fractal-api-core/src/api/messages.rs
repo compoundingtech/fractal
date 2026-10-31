@@ -22,7 +22,13 @@ pub async fn message_delivery(
         let message = state.store.message(&subject).map_err(ApiError::internal)?
             .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
         let claims = state.store.claims_for(&subject, Some("message.sent")).map_err(ApiError::internal)?;
-        let sent_at = claims.first().map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
+        // A stream item's sent claim is in the messages shard, not the graph.
+        let sent = match claims.into_iter().next() {
+            Some(claim) => Some(claim),
+            None => crate::store::messages_shard::mailbox_reads::sent_claim(&state.store, &subject)
+                .map_err(ApiError::internal)?,
+        };
+        let sent_at = sent.map(|claim| claim.accepted_at_unix_ms).unwrap_or_default();
         Ok(Json(json!({ "id": subject, "from": message.from, "to": message.to,
             "delivery": message_delivery_for(&state.store, &message, sent_at, client_now_ms()).map_err(ApiError::internal)? })))
     }).await
@@ -502,6 +508,43 @@ pub async fn post_message_claim(
             if let Some(runtime_id) = request.runtime_id {
                 fields.insert("runtime_id".into(), Value::String(runtime_id));
             }
+        }
+        // A stream item's lifecycle is this member's record, not a graph claim.
+        if message.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            if request.expected_subject.is_some() {
+                return Err(ApiError::bad(St3Error::new(
+                    "expected-subject-unsupported",
+                    format!("`{subject}` is a stream item: it has no graph claim to compare with"),
+                )));
+            }
+            // A successor's custody step and a delegated step pass the rules the graph applies to
+            // their claims, read against the stream item; the step itself stays this member's
+            // record, with its custody or delegation proof in its fields.
+            let input = ClaimInput {
+                subject: subject.clone(),
+                kind: kind.into(),
+                actor: Some(actor.clone()),
+                fields: fields.clone(),
+                evidence: evidence.clone(),
+                expected_subject: None,
+                idempotency_key: None,
+            };
+            crate::store::retirements::admit_mail_claim_to(&store.readers.get(), &input, &message)
+                .map_err(ApiError::bad)?;
+            if fields.contains_key("delegation") || fields.contains_key("acted_for") {
+                crate::store::delegation::validate_stream_write(
+                    &store, &subject, kind, Some(&actor), &fields, &evidence,
+                )
+                .map_err(ApiError::bad)?;
+            }
+            let appended = crate::store::messages_shard::record_lifecycle(
+                &store, &subject, kind, Some(&actor), &fields,
+            )
+            .map_err(ApiError::bad)?;
+            let record = crate::store::messages_shard::lifecycle_receipt(
+                &store.graph.origin, &subject, kind, Some(&actor), &fields,
+            );
+            return Ok((record, appended, is_work_wake(&message.tags)));
         }
         let (record, appended) = store
             .append_claim_outcome(&ClaimInput {

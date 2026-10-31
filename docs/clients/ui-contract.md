@@ -245,8 +245,32 @@ An agent with a live terminal can be opened in place from its conversation: the 
 with its colours and styles (never polled), follows the terminal's size, and says so when the
 terminal restarts. With the `terminal.input` capability the person can send a line and the keys
 Enter, Tab, Esc, Up, Down, and a confirmed Ctrl-C; every input takes a fresh terminal fence and
-refuses a changed runtime incarnation. Leaving the view detaches. Terminal UI: Ctrl+] on an agent's conversation attaches its terminal
-and Ctrl+\ returns; iOS: a Terminal button on the agent screen.
+refuses a changed runtime incarnation. Leaving the view detaches. In Fractal TUI, Ctrl+A opens
+the agent actions from its conversation, then t (Terminal) opens its terminal. Enter attaches
+an already detached terminal pane; it does not open a terminal from the conversation.
+Ctrl+\ then c returns to the conversation; iOS: a Terminal button on the agent screen.
+
+The terminal UI remembers the last 50 content destinations per device alongside its workspace.
+Opening content or changing a tab or space adds a stop; moving focus between already-visible
+splits does not. Back/forward restores the destination in its original space, split and tab,
+skipping removed destinations. Ctrl+[ and Ctrl+] navigate only with negotiated enhanced
+keyboard input; Escape is never interpreted as back. On legacy input, unambiguous Ctrl+5
+(0x1D) goes forward. Ctrl+\ then [ or ] works in either keyboard mode, including over an
+attached program. Direct navigation chords reach attached programs unchanged.
+This is a guidance correction, not a new Attach control or a keyboard binding change.
+The earlier binding cutover still applies: Ctrl+] no longer attaches terminals. Older daemons
+may still send attention text advertising Ctrl+] or an Attach control until they upgrade;
+use Ctrl+A then t from the conversation, or Enter on an already detached terminal pane.
+
+Ctrl+L opens the next outstanding Inbox item in the focused split, replacing only that
+split's tab and adding the replaced content to place history. Agent-blocking questions
+come first, then decisions, failures, and other items; each class is oldest first.
+Closed and snoozed items are excluded. The flash gives `n/m · reason`; after the last item,
+`all clear` is a boundary, and the next command wraps. Enhanced Ctrl+Shift+L or Ctrl+\ then l
+goes backward. An attached program receives Ctrl+L unchanged; use the leader there.
+While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
+flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
+
 
 ### Starting a mission
 
@@ -709,7 +733,7 @@ Same capabilities, native idioms:
 | Drag to select and copy | Native text selection on messages |
 | Composer grows to eight lines | Growing text input above the keyboard |
 | Loading / empty / failed | The same three states, never an empty list while loading |
-| `Ctrl+]` on an agent: its terminal | Terminal button on the agent screen; keys as buttons |
+| Ctrl+A then t (Terminal) from the agent conversation; Enter on a detached terminal pane | Terminal button on the agent screen; keys as buttons |
 | New mission control | A New mission button opening a composer sheet |
 
 iOS demo screenshots use `apps/ios/demoGateway.mjs`: invented data, nothing real.

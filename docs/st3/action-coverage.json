@@ -2828,7 +2828,7 @@
     {
       "effect": "OpenTerminal",
       "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns",
+        "crates/fractal-tui/src/ui/mod.rs::attach_opens_an_agents_terminal_and_ctrl_backslash_returns",
         "crates/fractal/tests/action_coverage.rs::terminal_controls_survive_stale_screens_and_daemon_restarts"
       ],
       "verification": "UI reducer and corresponding real daemon action; local effects have no graph fence"
@@ -2844,7 +2844,7 @@
     {
       "effect": "CloseTerminal",
       "tests": [
-        "crates/fractal-tui/src/ui/mod.rs::ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns",
+        "crates/fractal-tui/src/ui/mod.rs::attach_opens_an_agents_terminal_and_ctrl_backslash_returns",
         "crates/fractal/tests/action_coverage.rs::terminal_controls_survive_stale_screens_and_daemon_restarts"
       ],
       "verification": "UI reducer and corresponding real daemon action; local effects have no graph fence"

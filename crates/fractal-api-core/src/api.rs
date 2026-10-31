@@ -830,6 +830,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(fleet::fleet_admission_residue),
         )
         .route("/v1/internal/fleet/status", get(fleet::fleet_status))
+        // Fleet views a seat may read: internal routes refuse seat callers.
+        .route("/v1/fleet/status", get(fleet::fleet_status))
+        .route("/v1/fleet/membership", get(fleet::fleet_membership_view))
+        .route("/v1/fleet/admission-residue", get(fleet::fleet_admission_residue))
+        .route("/v1/fleet/invites", get(fleet::fleet_invite_list))
         .route(
             "/v1/internal/fleet/invites",
             get(fleet::fleet_invite_list).post(fleet::fleet_invite_create),
@@ -4780,7 +4785,32 @@ fn message_delivery_value(store: &Store, to: &str, status: &str, sent_at: u128, 
     }))
 }
 
+/// The host a stream item's recipient seat runs on, when that is not this one. Its receipts are
+/// that member's local lifecycle, in its own shard, so this member cannot see how far it got.
+fn stream_item_recipient_elsewhere(store: &Store, message: &MessageView) -> anyhow::Result<Option<String>> {
+    if !crate::store::messages_shard::mailbox_reads::is_stream_item(message) {
+        return Ok(None);
+    }
+    let owners = store.desired_subjects_named(std::slice::from_ref(&message.to))?;
+    Ok(owners
+        .first()
+        .and_then(|owner| owner.member.as_ref())
+        .map(|member| member.host.clone())
+        .filter(|host| host != store.origin()))
+}
+
+/// A stream item's status is this member's own lifecycle for it, so for a seat on this host it
+/// is labelled as graph mail is. For a seat on another host it is `unknown`: that host keeps
+/// the receipts, and claiming sent or delivered here would be a guess.
 fn message_delivery_for(store: &Store, message: &MessageView, sent_at: u128, now: u128) -> anyhow::Result<Value> {
+    if let Some(host) = stream_item_recipient_elsewhere(store, message)? {
+        return Ok(json!({
+            "state": "unknown", "phase": "unknown",
+            "reason": format!("the recipient's seat runs on {host}, which keeps this message's receipts"),
+            "age_ms": now.saturating_sub(sent_at),
+            "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+        }));
+    }
     let mut delivery = message_delivery_value(store, &message.to, &message.status, sent_at, now)?;
     if !matches!(message.status.as_str(), "sent" | "staged") { return Ok(delivery); }
     let Some(runtime) = store.latest_claim(&message.to, Some("runtime.observed"))? else {
@@ -7049,6 +7079,9 @@ fn is_bound_actor(store: &Store, actor: &str, bound_identity: &str) -> Result<bo
     }
 }
 
+/// The prefix of the routes only this node's own processes call.
+pub const INTERNAL_ROUTE_PREFIX: &str = "/v1/internal/";
+
 pub async fn guard_bound_request(
     request: Request<Body>,
     bound_agent: Option<&str>,
@@ -7057,6 +7090,14 @@ pub async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
+    // Internal routes serve this node's own processes: its replication worker and its operator's
+    // CLI. A seat's harness reads fleet views through their public routes instead.
+    if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
+        )));
+    }
     if request.method() == axum::http::Method::GET
         && !client_v0::administrative_get(&request) {
         return Ok(request);

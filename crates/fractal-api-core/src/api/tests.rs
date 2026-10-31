@@ -1472,6 +1472,61 @@ fn message_delivery_exposes_preparation_fifo_blockers_and_clears_only_current_ma
         .collect::<Vec<_>>(), ["head", "later", "last"]);
 }
 
+/// A stream item's receipts are its recipient member's local lifecycle. To a seat on this host
+/// its delivery reads them as graph mail's does; to a seat on another host this member holds
+/// none, so the label is `unknown`. Graph mail to that seat keeps its ordinary label.
+#[test]
+fn a_stream_items_delivery_is_unknown_while_its_seat_runs_on_another_host() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+    let shard = crate::store::messages_shard::open(&store, root.path()).unwrap();
+    let workspace = root.path().display().to_string();
+    let source = format!(
+        "version 2\nagent \"example/near\" {{ host \"alder\"; command \"true\"; workspace {workspace:?} }}\nagent \"example/far\" {{ host \"birch\"; command \"true\"; workspace {workspace:?} }}\n"
+    );
+    let intent = crate::graph::parse_intent(&source, "alder").unwrap();
+    store.apply_internal(&intent, "stream-delivery").unwrap();
+    let message = |subject: &str, to: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some("agent/example/sender".into()),
+        fields: serde_json::from_value(json!({
+            "from": "agent/example/sender", "to": to, "content": "probe", "status": "sent"
+        }))
+        .unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let delivery = |subject: &str, sent_at: u128| {
+        let view = store.message(subject).unwrap().unwrap();
+        message_delivery_for(&store, &view, sent_at, sent_at).unwrap()
+    };
+    let (near, far) = ("message/00000000000000d1", "message/00000000000000d2");
+    let near_sent = shard.append_claim(&message(near, "agent/example/near")).unwrap().accepted_at_unix_ms;
+    let far_sent = shard.append_claim(&message(far, "agent/example/far")).unwrap().accepted_at_unix_ms;
+
+    let unknown = delivery(far, far_sent);
+    assert_eq!((&unknown["state"], &unknown["phase"]), (&json!("unknown"), &json!("unknown")), "{unknown}");
+    assert!(unknown["reason"].as_str().unwrap().contains("birch"), "{unknown}");
+
+    let status = |status: &str| BTreeMap::from([("status".to_owned(), json!(status))]);
+    let here = delivery(near, near_sent);
+    assert_eq!((&here["state"], &here["phase"]), (&json!("pending"), &json!("sent")), "{here}");
+    assert!(crate::store::messages_shard::record_lifecycle(
+        &store, near, "message.delivered", Some("agent/example/near"), &status("delivered"),
+    ).unwrap());
+    assert_eq!(delivery(near, near_sent)["phase"], "delivered");
+    assert!(crate::store::messages_shard::record_lifecycle(
+        &store, near, "message.read", Some("agent/example/near"), &status("read"),
+    ).unwrap());
+    assert_eq!(delivery(near, near_sent)["state"], "read");
+
+    let graph = store.append_claim(&message("message/00000000000000d3", "agent/example/far")).unwrap();
+    let graph_mail = delivery(&graph.subject, graph.accepted_at_unix_ms);
+    assert_eq!((&graph_mail["state"], &graph_mail["phase"]), (&json!("pending"), &json!("sent")), "{graph_mail}");
+}
+
 #[test]
 fn message_delivery_distinguishes_pending_acceptance_and_recipient_read() {
     let store = Store::open_memory("message-delivery-test").unwrap();
@@ -3460,6 +3515,125 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
     assert_eq!(status, StatusCode::OK, "{again}");
     assert_eq!(first["claim_ids"], again["claim_ids"]);
     assert!(state.store.active_mission_runs().unwrap().is_empty());
+}
+
+/// A seat freshness push names the member it came from; only the replication worker, which runs
+/// in no harness, may record one. A bound harness is refused before the handler, and nothing is
+/// recorded.
+#[tokio::test]
+async fn a_bound_harness_cannot_record_seat_freshness() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let received = crate::peer::ReceivedSeatFreshness {
+        from: "another-member".into(),
+        seats: vec![crate::peer::SeatHeard {
+            agent: "agent/another-member.seat".into(),
+            incarnation_id: "one".into(),
+            heard_at_unix_ms: 1_000,
+        }],
+    };
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(serde_json::to_vec(&received).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "foreign-agent-actor");
+    assert_eq!(
+        state.store.extension::<crate::store::RelayedFreshness>().heard_at("agent/another-member.seat", "one"),
+        None
+    );
+}
+
+/// Every internal route the daemon registers, from its router's source, so a new one is covered
+/// without editing a list.
+fn internal_routes() -> Vec<String> {
+    let source = /* sqlite-large-value: allow-for-now lv-hcb8b52f10887 owner=fractal_api_core::api::tests TODO=trace-statement-and-value-representation */ include_str!("../api.rs");
+    let mut routes = std::collections::BTreeSet::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("\"/v1/internal/") {
+        let literal = &rest[start + 1..];
+        let end = literal.find('"').unwrap();
+        routes.insert(literal[..end].to_owned());
+        rest = &literal[end..];
+    }
+    routes.insert(crate::peer::CLIENT_READ_FORWARD_PATH.to_owned());
+    routes.insert(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH.to_owned());
+    // Each path parameter (`{id}`, `{shard}`, ...) is given a concrete segment.
+    routes
+        .into_iter()
+        .map(|route| {
+            route
+                .split('/')
+                .map(|segment| if segment.starts_with('{') && segment.ends_with('}') { "example" } else { segment })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
+}
+
+/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
+/// any method, while this node's replication worker and its operator's CLI, which run in no
+/// harness, pass.
+#[tokio::test]
+async fn internal_routes_refuse_seat_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let routes = internal_routes();
+    assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
+    for route in &routes {
+        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+            let request = || {
+                Request::builder()
+                    .method(method.clone())
+                    .uri(route.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            };
+            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
+            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            assert!(
+                guard_bound_request(request(), None, &state.store).await.is_ok(),
+                "{method} {route} serves a caller in no harness"
+            );
+        }
+    }
+}
+
+/// Through the router: a seat is refused on an internal route before its handler runs, the
+/// worker is served, and a seat reads the fleet's status through its public route.
+#[tokio::test]
+async fn a_seat_reads_fleet_views_through_public_routes_only() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let call = |method: &str, route: &str, bound: bool| {
+        let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
+        if bound {
+            request = request.extension(BoundAgent("agent/own".into()));
+        }
+        app.clone().oneshot(request.body(Body::from(if method == "GET" { "" } else { "{}" })).unwrap())
+    };
+    let refused = call("POST", "/v1/internal/replication/receive", true).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+    assert_eq!(call("GET", "/v1/internal/fleet/status", true).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call("GET", "/v1/internal/fleet/status", false).await.unwrap().status(), StatusCode::OK);
+    for route in ["/v1/fleet/status", "/v1/fleet/membership", "/v1/fleet/admission-residue", "/v1/fleet/invites"] {
+        assert_eq!(call("GET", route, true).await.unwrap().status(), StatusCode::OK, "{route}");
+    }
 }
 
 #[tokio::test]
@@ -12531,6 +12705,80 @@ async fn delegated_person_work_api_preserves_identity_and_closes_person_message(
     assert_eq!(status, StatusCode::OK, "{repeated}");
 }
 
+/// A stream item to a person is closed for them by a delegated agent as graph mail is: the
+/// proof is checked against the item's sent claim in the messages shard, and the step is this
+/// member's record, carrying the proof, with nothing written to the graph.
+#[tokio::test]
+async fn a_delegated_close_of_a_stream_item_is_validated_and_recorded_locally() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    )
+    .unwrap();
+    state.store.apply_internal(&intent, "delegation-stream-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let sent = |subject: &str, from: &str, to: &str, content: &str| ClaimInput {
+        subject: subject.into(),
+        kind: "message.sent".into(),
+        actor: Some(from.into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!(from)),
+            ("to".into(), json!(to)),
+            ("content".into(), json!(content)),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: vec![],
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    let instruction = state
+        .store
+        .append_claim(&sent("message/instruction", "person/avery", &actor, "Archive the stream notice"))
+        .unwrap();
+    let notice = "message/00000000000000d1";
+    let notice_sent = shard.append_claim(&sent(notice, &actor, "person/avery", "Notice")).unwrap();
+    let (status, policy) = json_request(app.clone(), "/v1/work/delegation", json!({
+        "person":"person/avery","actor":"person/avery","actions":["close-item"],
+        "evidence":[instruction.id],"idempotency_key":"allow"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{policy}");
+    let proof = json!({"person":"person/avery","policy":policy["id"],"message":"message/instruction",
+        "quote":"Archive the stream notice","episode":notice_sent.id});
+    let path = format!("/v1/messages/{}/claims", urlencoding::encode(notice));
+    let close = |delegation: Value| json!({"lifecycle":"closed","actor":actor,"delegation":delegation,
+        "evidence":[],"idempotency_key":"close"});
+    let mut misquoted = proof.clone();
+    misquoted["quote"] = json!("Keep the stream notice");
+    let (status, refused) = json_request(app.clone(), &path, close(misquoted)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "delegation-refused");
+    let mut expected = close(proof.clone());
+    expected["expected_subject"] = json!("fixture-digest");
+    let (status, refused) = json_request(app.clone(), &path, expected).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["code"], "expected-subject-unsupported");
+    assert_eq!(state.store.message(notice).unwrap().unwrap().status, "sent");
+
+    let (status, closed) = json_request(app.clone(), &path, close(proof.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["actor"], actor);
+    assert!(closed["id"].as_str().unwrap().starts_with("offset-receipt/"), "{closed}");
+    assert_eq!(closed["body"]["fields"]["acted_for"], "person/avery");
+    assert_eq!(closed["body"]["fields"]["delegation"], proof);
+    assert_eq!(state.store.message(notice).unwrap().unwrap().status, "closed");
+    assert_eq!(
+        crate::store::messages_shard::mailbox_reads::lifecycle_step(&state.store, notice, "message.closed")
+            .unwrap()
+            .map(|(actor, _)| actor),
+        Some(actor.clone())
+    );
+    assert!(state.store.claims_for(notice, None).unwrap().is_empty(), "the close reached the graph");
+}
+
 #[tokio::test]
 async fn message_pages_are_bounded_and_stable_across_new_writes() {
     let root = tempfile::tempdir().unwrap();
@@ -13404,3 +13652,4 @@ async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_re
         }
     }
 }
+

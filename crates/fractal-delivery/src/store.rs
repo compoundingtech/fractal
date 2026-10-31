@@ -226,6 +226,8 @@ pub struct MailboxWatermark {
     local: i64,
     owner: Option<(String, i64, bool)>,
     desired: Option<String>,
+    /// The messages shard's position: its items and their local lifecycle are not graph claims.
+    stream: fractal_store::store::messages_shard::mailbox_reads::StreamPosition,
 }
 
 fn message_reminder_rank(tags: &[String]) -> Option<(&str, u64)> {

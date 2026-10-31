@@ -3,6 +3,7 @@
 use crate::DeliveryStore;
 use super::*;
 pub use fractal_store::store::mailbox_changes::*;
+use fractal_store::store::messages_shard::mailbox_reads;
 
 const MESSAGE_CHANGES: &str = "SELECT DISTINCT changed.subject FROM claims changed NOT INDEXED
                  WHERE changed.store_index>?1 AND changed.subject GLOB 'message/*'
@@ -87,7 +88,7 @@ impl MailboxChangesStore for Store {
             .strip_prefix("agent/")
             .filter(|suffix| !suffix.contains('/'))
             .unwrap_or(&recipient);
-        let messages = if fence.component == "delivery" && mark.index != previous.index {
+        let mut changed = if fence.component == "delivery" && mark.index != previous.index {
             connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-h97c53ae01bc9 owner=fractal_delivery::store::mailbox_changes TODO=trace-statement-and-value-representation */ MESSAGE_CHANGES)?
                 .query_map(
@@ -108,6 +109,13 @@ impl MailboxChangesStore for Store {
         } else {
             Vec::new()
         };
+        // A stream item and its local lifecycle are not graph claims; the shard reports its own.
+        if fence.component == "delivery" && mark.stream != previous.stream {
+            let subjects = messages.iter().map(|message| message.subject.clone()).collect::<Vec<_>>();
+            changed.extend(mailbox_reads::changed_subjects(self, &recipient, bare, &subjects, previous.stream)?);
+            changed.sort();
+            changed.dedup();
+        }
         // Binding replacement and incarnation validity are independent of message content.
         // No history fold on idle rechecks; a changed seat or owner still checks the full fence.
         if seat || mark.owner != previous.owner {
@@ -115,9 +123,13 @@ impl MailboxChangesStore for Store {
         }
         Ok(MailboxChanges {
             seat,
-            resync: resync || mark.index < previous.index || mark.local < previous.local,
+            resync: resync
+                || mark.index < previous.index
+                || mark.local < previous.local
+                || mark.stream.admitted < previous.stream.admitted
+                || mark.stream.lifecycle < previous.stream.lifecycle,
             mark,
-            messages,
+            messages: changed,
         })
     }
 
@@ -133,6 +145,7 @@ impl MailboxChangesStore for Store {
                 Some(key) => {
                     current.insert(message.subject.clone(), key);
                 }
+                None if mailbox_reads::is_stream_item(message) => {}
                 None => missing.push(&message.subject),
             }
         }
@@ -159,10 +172,12 @@ impl MailboxChangesStore for Store {
                 }
             }
         }
-        if let Some(message) = messages.iter().find(|message| !current.contains_key(&message.subject)) {
+        if let Some(message) = messages.iter().find(|message| {
+            !mailbox_reads::is_stream_item(message) && !current.contains_key(&message.subject)
+        }) {
             anyhow::bail!("mailbox message {} has no send or declaration claim", message.subject);
         }
-        messages.sort_by(|left, right| current[&left.subject].cmp(&current[&right.subject]));
+        messages.sort_by(|left, right| mailbox_reads::mail_order(&current, left, right));
         *keys = current;
         Ok(())
     }
