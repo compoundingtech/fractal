@@ -1,7 +1,7 @@
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
-import { fleetWorkflow } from './fleet.yml.genie.ts'
+import { buildFleetWorkflow } from './fleet.yml.genie.ts'
 import { defaultActionlintConfig, githubWorkflow, nixDevelopStep, plainFlakeSetupSteps } from '../../repos/effect-utils/genie/external.ts'
 import {
   buildEnv,
@@ -27,8 +27,14 @@ import {
 
 const proofId = (id: string) => `proof-${id}`
 const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
+const fleetWorkflow = buildFleetWorkflow({ topology: 'merge-group' })
+// Queue-ref cancellation and PR-only advice cannot apply to a landed main commit.
+const proofOmissions: Record<string, string> = {
+  'namespace-capacity': 'The ephemeral queue ref no longer controls landed proof.',
+  'evidence-presign-notice': 'Pre-signing advice applies only to an open PR.',
+}
 // Preserve fleet's dependency identities inside aggregate evidence JSON, while namespacing actual jobs.
-export const proofJobs = Object.fromEntries(Object.entries(fleetWorkflow.jobs).map(([id, job]) => {
+export const proofJobs = Object.fromEntries(Object.entries(fleetWorkflow.jobs).filter(([id]) => !Object.hasOwn(proofOmissions, id)).map(([id, job]) => {
   const dependencies: string[] = job.needs == null ? [] : typeof job.needs === 'string' ? [job.needs] : job.needs
   const jsonFormat = `{{${dependencies.map((name, i) => `"${name}":{${i}}`).join(',')}}}`
   const needsJson = dependencies.length

@@ -26,7 +26,7 @@ fleet_compat() {
   # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
   # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
   # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
-  # checked. --warn while linux-fleet-compat is in shadow, as for clippy.
+  # checked. --warn while linux-fleet-compat is in shadow (clippy's check fails).
   if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
     cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
     local policy
@@ -86,16 +86,22 @@ clippy_and_codegen() {
     base_args=(--base-ref "$CLIPPY_BASE_SHA")
   fi
   python3 scripts/clippy_ratchet.py --logs "$logs" "${base_args[@]}" || return
-  # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured. Only
-  # linux-clippy's own run names the skip policy (scripts/ci-clippy-keyed, CI's linux-clippy job): linux-gate runs this stage too and
-  # must not depend on the policy file (lane-definition-closure --check), so without CI_KEYED_CLIPPY_POLICY the check is not run.
-  # --warn while linux-clippy is in shadow: no default local run checks it yet, so a failure would first show in the merge queue.
+  # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured. CI's
+  # linux-clippy job names the skip policy (CI_KEYED_CLIPPY_POLICY) and checks it here. linux-gate runs this stage too and must not
+  # depend on the policy file (lane-definition-closure --check), so it never names it: a local run hands the stage's logs to
+  # scripts/ci-clippy-result instead (CI_CLIPPY_REPORT, below), which checks the same after the stage, outside linux-gate's command.
   if [ -n "${CI_KEYED_CLIPPY_POLICY:-}" ]; then
     local policy
     policy=$(keyed_policy "$CI_KEYED_CLIPPY_POLICY") || return
-    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' --warn || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' || return
   fi
-  cargo run --locked -p fractal-client-codegen -- --check
+  cargo run --locked -p fractal-client-codegen -- --check || return
+  # linux-clippy's note is signed from this stage (scripts/st-test): its cargo messages and metadata, and `passed` last, only when the
+  # whole stage passed, so a report without it says the stage did not.
+  if [ -n "${CI_CLIPPY_REPORT:-}" ]; then
+    mkdir -p "$CI_CLIPPY_REPORT" && cp "$logs"/clippy-*.jsonl "$logs/clippy-metadata.json" "$CI_CLIPPY_REPORT/" \
+      && : > "$CI_CLIPPY_REPORT/passed"
+  fi
 }
 
 conversation_model() {

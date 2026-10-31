@@ -262,7 +262,7 @@ local_codes = [
 kind = "harness.observed"
 slot = ["incarnation_id"]
 require_slot = true
-keep = "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start"
+keep = "first,first-ready,first-ready-not-provider-auth,newest,newest-not-working,every-working-after,newest-carrier-of-each-optional-field,current-native-auth-run-start-and-the-report-ending-the-run-before,newest-working,newest-ended"
 
 [[rules]]
 kind = "seat.status-history"
@@ -371,7 +371,7 @@ keep = "newest,newest-carrier-of-each-field"
 kind = "resource.observed"
 when = ["actor=null", "observer=set"]
 slot = []
-keep = "newest"
+keep = "newest,newest-of-each-attribution_only,earliest-opener,pull-request-back-to-newest-not-open-outside-merge-queue-else-thread-scan,all-if-flat-facts"
 
 [[rules]]
 kind = "render.applied"

@@ -739,6 +739,66 @@ fn preparation_rekeys_other_subjects_legacy_siblings_after_batch_and_index_chang
 }
 
 #[test]
+fn preparation_rekeys_batch_mates_of_a_deleted_claim_only_where_their_rank_moves() {
+    let keys = |connection: &Connection| {
+        connection
+            .prepare("SELECT claim_id,sort_key FROM local_resource_preparation_claims WHERE subject=?1 ORDER BY claim_id")
+            .unwrap()
+            .query_map([SUBJECTS[0]], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    // A local trim deletes an observer's poll from a batch it keeps. A mate's rank moves only
+    // when it falls back to the arrival count: a legacy mate, with no position or record, where
+    // nothing stores its position first (a proof copy drops the trigger that does).
+    for (legacy, proof_copy) in [(false, false), (true, false), (true, true)] {
+        let context = format!("legacy={legacy} proof_copy={proof_copy}");
+        let store = Store::open_memory("example-deleted-sibling").unwrap();
+        // Any claim of a subject preparation does not track stands in for the poll.
+        let mut poll = String::new();
+        change(&store, "append the poll", |transaction| {
+            let body = json!({"fields":{"severity":"error","code":"example-poll","reason":"seen"}});
+            poll = append_claim_tx(transaction, &store.origin, "daemon/example-poller", "daemon.diagnostic", None, &body, &[], None).unwrap().id;
+        });
+        let first = append_wire(&store, SUBJECTS[0], "10", "resource.observed", json!({"fields":{"kind":"custom.first","facts":{"phase":"first"}}}));
+        let second = append_wire(&store, SUBJECTS[0], "10", "resource.observed", json!({"fields":{"kind":"custom.second","facts":{"phase":"second"}}}));
+        change(&store, "one batch", |transaction| {
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-h72469d573aeb owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET batch_id=(SELECT batch_id FROM claims WHERE id=?1) WHERE id IN (?2,?3)",
+                params![poll, first, second],
+            ).unwrap();
+            if legacy {
+                for table in ["claim_positions", "replica_records"] {
+                    transaction.execute(
+                        &format!(/* sqlite-large-value: allow-for-now lv-h3d3eea798a33 owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE claim_id IN (?1,?2,?3)"),
+                        params![poll, first, second],
+                    ).unwrap();
+                }
+            }
+            if proof_copy {
+                transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h50076a3d62aa owner=fractal_store::store::resources_preparation_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER claim_positions_sibling_delete_v1").unwrap();
+            }
+        });
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        let before = keys(&transaction);
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h1814abc92c97 owner=fractal_store::store::resources_preparation_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&poll]).unwrap();
+        let dirty: bool = transaction
+            .query_row("SELECT EXISTS(SELECT 1 FROM local_resource_preparation_dirty WHERE subject=?1)", [SUBJECTS[0]], |row| row.get(0))
+            .unwrap();
+        assert_eq!(dirty, proof_copy, "{context}: the mates' subject is rebuilt only if their ranks move");
+        flush(&transaction).unwrap();
+        let incremental = keys(&transaction);
+        assert_eq!(incremental != before, proof_copy, "{context}: ranks move only on a proof copy");
+        rebuild_preparation(&transaction).unwrap();
+        assert_eq!(keys(&transaction), incremental, "{context}: incremental keys match a rebuild");
+        assert_parity(&transaction, &context);
+        transaction.commit().unwrap();
+    }
+}
+
+#[test]
 fn preparation_rebuild_subject_discovery_searches_indexes_without_scanning_claims() {
     let store = Store::open_memory("example-preparation-plan").unwrap();
     let connection = store.readers.get();
