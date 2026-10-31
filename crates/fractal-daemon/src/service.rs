@@ -1207,6 +1207,50 @@ WantedBy=default.target\n",
     )
 }
 
+/// Observe the worker through its supervisor, never through caller-supplied argv.
+pub(crate) fn replication_worker_pid() -> Result<u32> {
+    let service = lookup::native()?.replication;
+    #[cfg(target_os = "linux")]
+    let output = host_command("systemctl")
+        .args(["--user", "show", "--property=MainPID", "--value", &service.name])
+        .output()?;
+    #[cfg(target_os = "macos")]
+    let output = host_command("launchctl")
+        .args(["print", &format!("{}/{}", launch_domain(), service.name)])
+        .output()?;
+    anyhow::ensure!(output.status.success(), "cannot observe replication worker supervisor");
+    let text = std::str::from_utf8(&output.stdout)?;
+    #[cfg(target_os = "linux")]
+    let pid = text.trim().parse::<u32>()?;
+    #[cfg(target_os = "macos")]
+    let pid = text.lines().find_map(|line| line.trim().strip_prefix("pid = "))
+        .context("replication worker has no supervised PID")?.parse::<u32>()?;
+    anyhow::ensure!(pid != 0, "replication worker is not running");
+    Ok(pid)
+}
+
+pub(crate) fn daemon_is_service_managed() -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // A foreground fixture can inherit its runner's unrelated service cgroup.
+        Ok(daemon_service_cgroup(&fs::read_to_string("/proc/self/cgroup")?))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // launchd directly owns the daemon; a reparented foreground process also fails closed.
+        Ok(unsafe { libc::getppid() } == 1)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn daemon_service_cgroup(groups: &str) -> bool {
+    let old = service_name();
+    let new = old.replacen("st3", "fractal", 1);
+    groups.lines().filter_map(|line| line.splitn(3, ':').nth(2))
+        .filter_map(|path| path.trim_end_matches('/').rsplit('/').next())
+        .any(|unit| unit == old || unit == new || unit == "smalltalk.service")
+}
+
 pub fn render_launchd_plist(spec: &ServiceSpec) -> String {
     render_launchd_plist_for_label(spec, service_label())
 }
@@ -1675,4 +1719,14 @@ mod tests {
         assert_eq!(service_label(), "com.compoundingtech.st3");
         assert_eq!(replication_service_label(), "com.compoundingtech.st3.replication");
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn foreground_worker_enrollment_distinguishes_daemon_and_runner_services() {
+    assert!(daemon_service_cgroup("0::/user.slice/st3.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/fractal.service"));
+    assert!(daemon_service_cgroup("0::/user.slice/smalltalk.service"));
+    assert!(!daemon_service_cgroup("0::/system.slice/actions.runner.service"));
+    assert!(!daemon_service_cgroup("0::/user.slice/fractal-test.scope"));
 }

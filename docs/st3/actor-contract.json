@@ -1380,6 +1380,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st missions dismiss-fault": {
+        "actor": "required",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st missions ls": {
         "actor": "none",
         "accepts_person": false,

@@ -39,10 +39,10 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
-mod operation_metadata;
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
-pub use operation_metadata::OperationMetadata;
+use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
 #[cfg(test)]
@@ -124,7 +124,10 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{
+    CheckpointManifestNeed, LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
+    local_trim_capture_kinds,
+};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]

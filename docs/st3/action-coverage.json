@@ -1620,6 +1620,16 @@
       "verification": "existing CLI integration"
     },
     {
+      "command": "st missions dismiss-fault",
+      "description": "Dismiss a fault whose run has ended, with a reason, when nothing at its source can close it",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_missions_publish_cancel_outcome_retire_and_work_leases_survive_restart",
+        "crates/fractal-reconcile/src/reconcile/tests/fault_dismiss_tests.rs::a_person_or_the_fault_agent_dismisses_a_fault_on_an_ended_run_and_no_other_agent",
+        "crates/fractal-api-core/src/api/tests.rs::a_bound_harness_dismisses_a_fault_only_as_itself"
+      ],
+      "verification": "real CLI over private Unix socket; disk store reopened between actions"
+    },
+    {
       "command": "st missions ls",
       "description": "List current missions; use --all for historical terminal missions",
       "tests": [

@@ -7600,10 +7600,8 @@ async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
         idempotency_key: Some("custody-api-send".into()),
     }).unwrap();
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    let retirement = state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-api-retire", &[], Some("agent/example/new"),
-    ).unwrap().0;
+    let retirement = state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-api-retire", &[], Some("agent/example/new"), None).unwrap().0;
     let app = router(state.clone());
     let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -7648,10 +7646,8 @@ fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
     let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
     assert!(old.get("mail_custody").is_none());
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-card-retire", &[], Some("agent/example/new"),
-    ).unwrap();
+    state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-card-retire", &[], Some("agent/example/new"), None).unwrap();
     let after_index = state.store.index().unwrap();
     let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
     let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
@@ -13418,6 +13414,44 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert_eq!(resumed["cleared"], "fixture stopped again");
     assert_eq!(fault(), None);
+}
+
+#[tokio::test]
+async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let dismiss = |bound: Option<&'static str>, actor: &'static str| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/faults/dismiss")
+            .header("content-type", "application/json");
+        if let Some(agent) = bound {
+            request = request.extension(BoundAgent(agent.into()));
+        }
+        let body = json!({"source":"mission-run/ended","reason":"the run ended","actor":actor});
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            (status, envelope.get("value").cloned().unwrap_or(envelope))
+        }
+    };
+    for (bound, actor, code) in [
+        // A harness never names a person; an ordinary agent acting as itself reaches the store,
+        // which refuses it, and a person reaches the store and finds no such fault.
+        (Some("agent/helper"), "person/avery", "foreign-agent-actor"),
+        (Some("agent/helper"), "agent/helper", "fault-dismiss-forbidden"),
+        (None, "person/avery", "missing-fault"),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = dismiss(bound, actor).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], code, "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before, "{actor}");
+    }
 }
 
 async fn checkpoint_actor_request(

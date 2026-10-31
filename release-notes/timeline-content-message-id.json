@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A mailbox message's timeline content entry names its message in body.message_id, as its header does, and the web conversation pairs a stored message's header and content by that identity instead of by timestamp and sequence slot, so two messages that share a slot each keep their own header",
+  "replay": {
+    "status": "none",
+    "detail": "No graph claim, projection or cache changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No claim rule changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive client field: TimelineContentBody gains the optional message_id on mailbox content entries. Clients that do not know it ignore it. The web client pairs content without it, from an older daemon, by slot as before."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back is safe: the field disappears and the web client pairs by slot again."
+  }
+}
