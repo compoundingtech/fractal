@@ -280,6 +280,19 @@ pub(super) async fn run_agents(
         AgentsCommand::Handoff { command } => {
             run_handoff(&cli_client(endpoint), configured_person, command, json_output).await
         }
+        AgentsCommand::Lane { subject } => {
+            let response: Value = cli_client(endpoint)
+                .get(&format!(
+                    "/v1/agents/lane?agent={}",
+                    urlencoding::encode(&normalize_agent_subject(&subject))
+                ))
+                .await?;
+            if json_output {
+                return print_value(&response, true);
+            }
+            println!("{}", response["slice"].as_str().unwrap_or_default());
+            Ok(())
+        }
         AgentsCommand::Workspace { subject } => {
             let response = generated_client(endpoint, None)?
                 .agent_workspace_get(&normalize_agent_subject(&subject))
@@ -1220,6 +1233,7 @@ async fn run_agent_inspection(
         }
         AgentsCommand::New(_)
         | AgentsCommand::Workspace { .. }
+        | AgentsCommand::Lane { .. }
         | AgentsCommand::Handoff { .. }
         | AgentsCommand::Repos { .. }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
