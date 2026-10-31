@@ -569,6 +569,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.build = true;
     ui.live = true;
     ui.glasses = super::glass::Glasses::open(space, super::glass_store::path(&person));
+    ui.prune_place_history();
     // A space opens where this device left it.
     ui.show_focused();
     if std::env::args().any(|arg| arg == "--old") {
@@ -581,6 +582,7 @@ pub fn run(context: Context) -> Result<()> {
         ui.flash = Some((note, Instant::now() + Duration::from_secs(26)));
     }
     let _guard = Guard::enter(true)?;
+    ui.keyboard_enhanced = _guard.enhanced;
     // The release smoke test's probe: the terminal is restored after a panic too.
     #[cfg(debug_assertions)]
     if std::env::var_os("STUI_TEST_PANIC_AFTER_ENTER").is_some() {
