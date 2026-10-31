@@ -2695,6 +2695,17 @@ fn push_unrecognized(
         json!({"raw": value}),
         &label,
     );
+    if matches!(driver, "omp" | "pi")
+        && let Some((kind, view, visibility)) = crate::native_views::omp_record_view(value)
+        && let Some(item) = items.last_mut()
+    {
+        let block = &mut item["body"]["blocks"][0];
+        block["kind"] = json!(kind);
+        block["view"] = view;
+        if let Some(visibility) = visibility {
+            block["visibility"] = json!(visibility);
+        }
+    }
 }
 
 /// Native bodies stay owner-local. HTTP negotiation adds size bounds and owner fetch refs;
@@ -3068,6 +3079,8 @@ fn normalize_omp(
     let timestamp = native_timestamp(value.get("timestamp"))
         .or_else(|| native_timestamp(value.pointer("/message/timestamp")))
         .unwrap_or_else(|| fallback_timestamp.to_owned());
+    let record_view = crate::native_views::omp_record_view(value);
+    let first_item = items.len();
     match value.get("type").and_then(Value::as_str) {
         Some("message") => {}
         Some(kind @ ("compaction" | "branch_summary")) => {
@@ -3092,6 +3105,17 @@ fn normalize_omp(
                     value,
                 );
             }
+            if let Some((kind, view, visibility)) = record_view
+                && let Some(item) = items.last_mut()
+            {
+                let block = &mut item["body"]["blocks"][0];
+                block["kind"] = json!(kind);
+                block["payload"] = json!({"raw":value});
+                block["view"] = view;
+                if let Some(visibility) = visibility {
+                    block["visibility"] = json!(visibility);
+                }
+            }
             return;
         }
         Some("custom_message") => {
@@ -3105,6 +3129,31 @@ fn normalize_omp(
                     &timestamp,
                     "system",
                 );
+                if let Some((kind, view, visibility)) = record_view {
+                    for item in &mut items[first_item..] {
+                        if let Some(blocks) = item["body"]["blocks"].as_array_mut() {
+                            for block in blocks {
+                                block["kind"] = json!(kind);
+                                block["payload"] = json!({"raw":value});
+                                block["view"] = view.clone();
+                                if let Some(visibility) = visibility {
+                                    block["visibility"] = json!(visibility);
+                                }
+                            }
+                        }
+                    }
+                    if items.len() == first_item {
+                        push_unrecognized(
+                            items,
+                            sequence,
+                            &timestamp,
+                            label,
+                            "entry",
+                            Some("custom_message"),
+                            value,
+                        );
+                    }
+                }
             }
             return;
         }
@@ -3159,6 +3208,21 @@ fn normalize_omp(
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             );
+            if let Some(item) = items.last_mut() {
+                item["body"]["blocks"][0]["view"] = crate::native_views::tool_output_view(
+                    message
+                        .get("toolName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("tool"),
+                    message["toolCallId"].as_str().unwrap_or_default(),
+                    message
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    message.get("details"),
+                );
+                item["body"]["blocks"][0]["payload"] = json!({"body_ref":true,"raw":value});
+            }
             return;
         }
         // A shell command the person ran with `!`: shown as the harness recorded it, without
@@ -3191,6 +3255,7 @@ fn normalize_omp(
         }
         _ => {}
     }
+    let first_content = items.len();
     push_omp_content(
         driver,
         items,
@@ -3199,6 +3264,29 @@ fn normalize_omp(
         &timestamp,
         role,
     );
+    if let Some(metadata) = crate::native_views::assistant_metadata(message) {
+        for item in &mut items[first_content..] {
+            if let Some(blocks) = item["body"]["blocks"].as_array_mut() {
+                for block in blocks {
+                    if matches!(block["kind"].as_str(), Some("text" | "reasoning")) {
+                        if let Some(existing) =
+                            block.get_mut("metadata").and_then(Value::as_object_mut)
+                        {
+                            if let Some(additions) = metadata.as_object() {
+                                existing.extend(
+                                    additions
+                                        .iter()
+                                        .map(|(key, value)| (key.clone(), value.clone())),
+                                );
+                            }
+                        } else {
+                            block["metadata"] = metadata.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn push_omp_content(
@@ -3226,27 +3314,56 @@ fn push_omp_content(
                             part["text"].as_str().unwrap_or_default(),
                         );
                     }
-                    Some("toolCall" | "tool_call") => push_tool_call(
-                        items,
-                        item_sequence,
-                        &timestamp,
-                        part.get("id")
-                            .or_else(|| part.get("toolCallId"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("native-call"),
-                        part.get("name").and_then(Value::as_str).unwrap_or("tool"),
-                        part.get("arguments").cloned().unwrap_or_else(|| json!({})),
-                    ),
-                    Some("toolResult" | "tool_result") => push_tool_result(
-                        items,
-                        item_sequence,
-                        &timestamp,
-                        part.get("toolCallId")
+                    Some("toolCall" | "tool_call") => {
+                        let tool = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        push_tool_call(
+                            items,
+                            item_sequence,
+                            &timestamp,
+                            part.get("id")
+                                .or_else(|| part.get("toolCallId"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("native-call"),
+                            tool,
+                            part.get("arguments").cloned().unwrap_or_else(|| json!({})),
+                        );
+                        if let Some(item) = items.last_mut() {
+                            item["body"]["blocks"][0]["view"] = crate::native_views::tool_call_view(
+                                tool,
+                                &item["body"]["arguments"],
+                            );
+                        }
+                    }
+                    Some("toolResult" | "tool_result") => {
+                        let call_id = part
+                            .get("toolCallId")
                             .or_else(|| part.get("call_id"))
                             .and_then(Value::as_str)
-                            .unwrap_or("native-call"),
-                        part.get("content").cloned().unwrap_or(Value::Null),
-                    ),
+                            .unwrap_or("native-call");
+                        push_tool_result(
+                            items,
+                            item_sequence,
+                            &timestamp,
+                            call_id,
+                            part.get("content").cloned().unwrap_or(Value::Null),
+                        );
+                        if let Some(item) = items.last_mut() {
+                            item["body"]["blocks"][0]["view"] =
+                                crate::native_views::tool_output_view(
+                                    part.get("toolName")
+                                        .or_else(|| part.get("name"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("tool"),
+                                    call_id,
+                                    part.get("isError")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false),
+                                    part.get("details"),
+                                );
+                            item["body"]["blocks"][0]["payload"] =
+                                json!({"body_ref":true,"raw":part});
+                        }
+                    }
                     Some(kind) if REASONING_BLOCKS.contains(&kind) => {
                         push_reasoning(items, item_sequence, &timestamp, role, part);
                     }
@@ -3487,6 +3604,115 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omp_parity_fixture_projects_all_views_without_losing_native_payloads() {
+        for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {
+            let mut items = Vec::new();
+            for (index, line) in include_str!("../fixtures/native-records/omp-parity.jsonl")
+                .lines()
+                .enumerate()
+            {
+                let record: Value = serde_json::from_str(line).unwrap();
+                let first = items.len();
+                normalize_omp(
+                    driver,
+                    &record,
+                    index as u64 * 100,
+                    "2026-10-06T00:00:00Z",
+                    &mut items,
+                );
+                if let Some((_, view, _)) = crate::native_views::omp_record_view(&record) {
+                    let block = &items[first]["body"]["blocks"][0];
+                    assert_eq!(block["payload"]["raw"], record);
+                    assert_eq!(block["view"], view);
+                }
+                if record.pointer("/message/role").and_then(Value::as_str) == Some("toolResult") {
+                    assert_eq!(
+                        items.last().unwrap()["body"]["content"],
+                        record["message"]["content"]
+                    );
+                    assert_eq!(
+                        items.last().unwrap()["body"]["blocks"][0]["payload"]["raw"],
+                        record
+                    );
+                }
+                if let Some(parts) = record.pointer("/message/content").and_then(Value::as_array) {
+                    for part in parts.iter().filter(|part| part["type"] == "toolCall") {
+                        let call = items[first..]
+                            .iter()
+                            .find(|item| item["type"] == "tool_call")
+                            .unwrap();
+                        assert_eq!(call["body"]["arguments"], part["arguments"]);
+                    }
+                }
+            }
+            let pairs: std::collections::BTreeSet<_> = items
+                .iter()
+                .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+                .filter_map(|block| {
+                    Some((block["kind"].as_str()?, block["view"]["type"].as_str()?))
+                })
+                .collect();
+            for expected in [
+                ("tool_call", "bash"),
+                ("tool_call", "edit"),
+                ("tool_call", "write"),
+                ("tool_call", "read"),
+                ("tool_call", "search"),
+                ("tool_call", "todo"),
+                ("tool_call", "ask"),
+                ("tool_call", "task"),
+                ("tool_call", "hub"),
+                ("tool_call", "eval"),
+                ("tool_call", "generic"),
+                ("tool_output", "bash"),
+                ("tool_output", "edit"),
+                ("tool_output", "todo"),
+                ("tool_output", "ask"),
+                ("tool_output", "task"),
+                ("tool_output", "hub"),
+                ("tool_output", "generic"),
+                ("irc", "irc"),
+                ("job", "job"),
+                ("status", "skill"),
+                ("status", "compaction"),
+                ("status", "model_change"),
+                ("status", "thinking_level"),
+                ("status", "title"),
+                ("status", "session_exit"),
+                ("status", "tool_start"),
+            ] {
+                assert!(
+                    pairs.contains(&expected),
+                    "missing {expected:?} for {driver:?}"
+                );
+            }
+            let blocks: Vec<_> = items
+                .iter()
+                .flat_map(|item| item["body"]["blocks"].as_array().into_iter().flatten())
+                .collect();
+            assert!(
+                blocks
+                    .iter()
+                    .any(|block| block["view"]["type"] == "tool_start"
+                        && block["visibility"] == "internal")
+            );
+            for kind in ["text", "reasoning"] {
+                assert!(blocks.iter().any(|block| block["kind"] == kind
+                    && block["metadata"]["context_tokens"] == 23
+                    && block["metadata"]["usage"]["cost_usd"] == 0.01));
+            }
+            assert!(items.iter().any(|item| item["body"]["text"]
+                == "Synthetic extension fallback"
+                && item["body"]["blocks"][0]["kind"] == "text"));
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item["body"]["text"] == "Synthetic hidden extension")
+            );
+        }
+    }
 
     #[test]
     fn metadata_cache_refreshes_after_a_transcript_changes() {
