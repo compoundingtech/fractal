@@ -245,31 +245,31 @@ impl Store {
                 // request in the seat's conversation.
                 detail: if answerable && harness["driver"] == "codex" {
                     format!(
-                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.",
+                        "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered.",
                         codex_approval_words(prompt)
                     )
                 } else if harness["driver"] == "codex" && prompt == "waitingOnApproval" {
-                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Codex waits on an approval st did not see requested, so st cannot answer it: answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable && subagent_prompt(&harness) {
                     format!(
-                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
+                        "A subagent of this seat asks to use {}; its call is in the subagent's own conversation, not this one. Deny it here, or answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane), where Claude shows it. This alert clears when the prompt is gone, however it was answered.",
                         prompt.trim_start_matches(fractal_drivers::claude_prompts::SUBAGENT_PREFIX)
                     )
                 } else if answerable && plan_approval(&harness) {
-                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Claude asks you to approve its plan; the plan is the pending ExitPlanMode call in the seat's conversation. Approve it here to let Claude proceed, deny it to have Claude keep planning, or answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable && ask == "question" {
-                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered.".into()
+                    "Claude asks you a question; its questions and their options are the pending AskUserQuestion call in the seat's conversation. Answer it here, or in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered.".into()
                 } else if answerable {
                     format!(
-                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "Claude asks to use {prompt}; the call it would make is the pending one in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else if answerable_kind(&harness) {
                     format!(
-                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "Claude asks to use {prompt}. It has waited longer than st can answer it from here: answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 } else {
                     format!(
-                        "{prompt}\n\nAnswer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                        "{prompt}\n\nAnswer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                     )
                 },
                 request: None,
@@ -1769,7 +1769,7 @@ impl Store {
             Some(reason) => (
                 Vec::new(),
                 format!(
-                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone."
+                    "{headline}: st did not finish pressing your answer into the dialog ({reason}), so it may now sit on a different option. Answer it in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone."
                 ),
             ),
             None => (
@@ -1778,7 +1778,7 @@ impl Store {
                     .map(|(answer, _)| (*answer).to_owned())
                     .collect(),
                 format!(
-                    "{ask} here, or in the seat's terminal (Ctrl+] in Fractal TUI). This alert clears when the prompt is gone, however it was answered."
+                    "{ask} here, or in the seat's terminal (use Attach in Fractal TUI, or Enter on a detached terminal pane). This alert clears when the prompt is gone, however it was answered."
                 ),
             ),
         };
