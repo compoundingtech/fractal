@@ -450,6 +450,7 @@ impl Store {
         // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
         let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
+        staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
         #[cfg(any(test, feature = "test-support"))]
         let plan = super::checkpoint_staging::without_reference_plan(|| self.plan_staged_checkpoint(&staged))?;
