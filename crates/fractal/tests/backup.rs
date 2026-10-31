@@ -32,8 +32,9 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
     .unwrap();
     let store = Arc::new(Store::open(&root.path().join("source.db"), "alder").unwrap());
     for index in 0..1100 {
+        // Plain replicated claims: diagnostics as an older build wrote them.
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/alder".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,

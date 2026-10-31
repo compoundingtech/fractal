@@ -1801,6 +1801,15 @@ tree already held, `fractal-test` removes the least recently used trees and thei
 (`~/.cache/st-test`) fits, never one in use, and says on stderr what it removed. The per-target guard (below) stays. A run can exceed the cap by its own growth (one run's tests, clippy and fleet-compat builds end near 60 GB with incremental
 compilation, which the checks now turn off as CI does), so size `ST_TEST_POOL_MAX_GB` as the disk a host can spare minus about 60. Where cargo's
 `build-dir` points elsewhere (for example `/srv/build/cargo/<hash of the workspace path>`), the intermediates live there, not in the pool, and the cap does not count them.
+A run's `TMPDIR` (and `TMP` and `TEMP`), for `fractal-test` itself and every check it starts, is a directory of its own on disk,
+`/var/tmp/st-test.XXXXXXXX` (in `ST_TEST_TMP` when set), removed when the run ends (`--keep` keeps it and says where; no later run removes
+a kept one). A host's `/tmp` can be a small tmpfs that swaps, and `nix develop -c` never removes the `nix-shell.*` directory it makes its
+command's `TMPDIR`, so every check left one there, with whatever its tests wrote (about 370 a day on one build host, 2026-10-30), as did
+evidence-wrap's key file. The run holds an flock on its directory while it lives: a killed run's directory is removed by the next run, once
+it is ten minutes old and nobody holds its lock (only `st-test.*` directories this account owns are judged). It is not under `~/.cache`
+because tests bind Unix sockets a few levels below a `nix-shell.XXXXXX` in it, and a socket path is limited to 108 bytes: under
+`~/.cache/st-test/tmp/XXXXXXXX` the Watchman socket of `scripts/ci-local-web-test` took 114. `scripts/ci-local` and `scripts/ci-local-web`
+still give their stages a `TMPDIR` of their own (below).
 `scripts/ci-local` (what the Linux gate stages run through) measures and prints every time: the setup before the stages, each stage's start,
 end and seconds, and the time it spent waiting in the build admission queue (the shim's `cargo: waiting in order` / `got build slot` lines
 get a UTC stamp, and the waits are counted and added up per stage), in a table at the end. Each stage's output is also kept in
