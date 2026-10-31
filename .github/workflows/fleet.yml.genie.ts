@@ -33,6 +33,7 @@ import {
   evidenceStepSteps,
   nixEvidenceSteps,
   linuxStageRunner,
+  lowPriorityStageRunner,
   linuxStageRunsOn,
   pickRunnerJob,
   pickRunnerJobId,
@@ -395,7 +396,7 @@ export const fleetWorkflow = scopeLinuxNixSandbox(withQueueWatch(readyPRJobs(aud
   // actionlint must know the Namespace shape label the stage jobs use.
   actionlint: {
     ...defaultActionlintConfig,
-    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner],
+    selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), ...linuxRunner, ...linuxStageRunner, ...lowPriorityStageRunner],
   },
   jobs: wireEvidenceSkips({
     [pickRunnerJobId]: pickRunnerJob,
