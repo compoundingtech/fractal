@@ -2997,6 +2997,9 @@ pub struct TimelineContentBody {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<String>,
+    /// A mailbox message's content names its message, as its message entry does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
 }

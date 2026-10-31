@@ -827,6 +827,28 @@ impl Args {
 const CLASSIC_GONE: &str =
     "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
 
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+// Match fractal-drivers/src/contracts.rs identity selection without adding a drivers dependency:
+// an empty preferred value masks the legacy value; unequal aliases disclose neither identity.
+fn terminal_ui_request_agent(
+    preferred: Option<String>,
+    legacy: Option<String>,
+    warn: &mut dyn FnMut(&str),
+) -> Option<String> {
+    let Some(preferred) = preferred else {
+        return legacy.filter(|value| !value.is_empty());
+    };
+    if preferred.is_empty() {
+        return None;
+    }
+    if legacy.as_ref().is_some_and(|legacy| legacy != &preferred) {
+        warn("st: conflicting environment variables FRACTAL_AGENT and ST_AGENT; ignoring both identity values");
+        return None;
+    }
+    Some(preferred)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
 fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
@@ -841,7 +863,11 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
         (true, false) => Place::Right,
         (true, true) => Place::Below,
     };
-    let from = std::env::var("ST_AGENT").ok().filter(|from| !from.is_empty());
+    let from = terminal_ui_request_agent(
+        std::env::var("FRACTAL_AGENT").ok(),
+        std::env::var("ST_AGENT").ok(),
+        &mut |message| eprintln!("{message}"),
+    );
     let id = ui::requests::enqueue(&dir, &open.subject, place, open.keep_focus, from)?;
     if open.wait == 0 {
         println!(
@@ -1017,6 +1043,44 @@ pub fn run(mut options: Args) -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn terminal_ui_request_agent_prefers_fractal_and_empty_masks_legacy() {
+        for (preferred, legacy, expected) in [
+            (None, None, None),
+            (Some("agent/preferred"), None, Some("agent/preferred")),
+            (None, Some("agent/legacy"), Some("agent/legacy")),
+            (Some("agent/same"), Some("agent/same"), Some("agent/same")),
+            (Some(""), Some("agent/legacy"), None),
+            (Some(""), None, None),
+            (Some(""), Some(""), None),
+            (None, Some(""), None),
+        ] {
+            let actual = terminal_ui_request_agent(
+                preferred.map(str::to_owned),
+                legacy.map(str::to_owned),
+                &mut |_| panic!("non-conflicting aliases must not warn"),
+            );
+            assert_eq!(actual.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn terminal_ui_request_agent_refuses_conflicts_without_disclosing_values() {
+        for legacy in ["agent/private-legacy", ""] {
+            let mut warnings = Vec::new();
+            let actual = terminal_ui_request_agent(
+                Some("agent/private-preferred".to_owned()),
+                Some(legacy.to_owned()),
+                &mut |message| warnings.push(message.to_owned()),
+            );
+            assert_eq!(actual, None);
+            assert_eq!(
+                warnings,
+                ["st: conflicting environment variables FRACTAL_AGENT and ST_AGENT; ignoring both identity values"]
+            );
+        }
+    }
 
     #[test]
     fn the_classic_layout_is_refused_with_what_to_run_instead() {
