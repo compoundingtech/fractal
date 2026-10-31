@@ -1434,7 +1434,9 @@ Each day such a member trims its own due cut (the day before yesterday, as for a
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
 checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
 what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
-same operation, the protections naming those claims, each writer's newest envelope, and the claims
+same operation, the same for every runtime reset and harness diagnostic (`LOCAL_TRIM_CONTEXT_KINDS`:
+the status-history rule judges a seat's harness observations with them, and keeps a transition a
+reset or a restored prompt depends on), the protections naming those claims, each writer's newest envelope, and the claims
 citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
 each cut first reads the claims that arrived since the last, in arrival order, committing each page
 with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
