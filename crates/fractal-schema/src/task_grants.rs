@@ -2,6 +2,28 @@
 //! Optional members remain absent; interpreting a default never rewrites the document.
 use serde::{Deserialize, Serialize};
 
+mod browser;
+mod locator;
+pub use browser::{
+    TaskBrowserStepV1, TaskClickEffectV1, TaskHumanKindV1, TaskRevealSourceKindV1,
+    TaskRevealTriggerV1, TaskTextNodeV1,
+};
+pub use locator::{AriaRole, TaskLocatorV1, TaskNonFrameLocatorV1};
+
+/// Closed Manifest v1 document. Parsing types does not establish live authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskManifestV1 {
+    pub version: u64,
+    pub title: String,
+    pub requester: TaskRequesterV1,
+    pub window: TaskWindowV1,
+    pub provider: TaskProviderV1,
+    pub browser_steps: Vec<TaskBrowserStepV1>,
+    pub writes: Vec<TaskWriteV1>,
+    pub readers: Vec<TaskReaderV1>,
+}
+
 /// Largest integer exactly representable by both manifest consumers.
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
