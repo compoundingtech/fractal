@@ -234,9 +234,9 @@ impl Store {
             .collect::<Vec<_>>();
         let reason = format!(
             "{local} and {peer} answer differently from the claims before {cut} in {}. Each \
-             member counts, per kind, the newest claim of every subject and writer, which no \
-             trim deletes, so one of them holds a claim the other lacks or has deleted one it \
-             needs: turn each key into a failing test, then fix it. The reproduction names every \
+             member compares folded reader values where both support them, otherwise claim \
+             inventories. A differing inventory alone does not prove a differing reader answer. \
+             Turn each key into a failing test, then fix the cause. The reproduction names every \
              kind and key. Nothing repairs it from a peer.",
             named.join("; ")
         );
