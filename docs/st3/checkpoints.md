@@ -200,7 +200,7 @@ agree on a checkpoint only when they run the same rules. In summary:
 
 | Kind | Slot | Kept |
 |---|---|---|
-| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode |
+| `harness.observed` | subject, incarnation | the first claim; the first `ready`, `working` or `idle`, and the first of those that is not a credential state; the newest; the newest non-`working` claim and every `working` claim after it; the newest carrier of each optional field; the start of the current native credential episode and the credential report that ended the one before (rules version 24) |
 | observed seat status history (`harness.observed` transitions and runtime resets) | seat | the last 200 transitions and runtime resets within seven days before the cut, ignoring stamped heartbeats; for each incarnation the transition before its first visible one, even when older; the start of the current state |
 | `harness.timeline` | subject, incarnation | the newest; only claims dated at least five days before the cut go |
 | `loop.state` | subject | the first and last claim of each run of equal (status, round); the first claim carrying the loop's items |
