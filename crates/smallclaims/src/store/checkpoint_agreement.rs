@@ -904,6 +904,8 @@ impl Store {
         if rows > 0 {
             actions.push(CheckpointAction::SweptTrimmedClaimRows { rows });
         }
+        // What a trim deferred and a crash left before its rebuild.
+        self.rebuild_deferred_paced()?;
         if self.replication_catching_up() {
             return Ok(actions);
         }

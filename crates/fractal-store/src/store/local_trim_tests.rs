@@ -392,6 +392,80 @@ fn a_restart_during_a_capped_cut_goes_on_where_it_stopped() {
     assert!(retired_exactly(&store, &all.difference(&left).cloned().collect()));
 }
 
+/// Delete the middle of three observations of `resource` as a trim of that kind would: recorded
+/// as a tombstone first, so its preparation rebuild is deferred.
+fn defer_a_resource_delete(store: &Store, resource: u8) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    for phase in ["first", "middle", "newest"] {
+        let body = json!({"fields": {"kind": "vcs.pull-request", "state": "open", "observer": "observer/watch-0", "facts": {"phase": phase}}});
+        append_claim_tx(&transaction, &store.origin, &format!("resource/pr/{resource}"), "resource.observed", None, &body, &[], None).unwrap();
+    }
+    let middle: String = transaction
+        .query_row(
+            "SELECT id FROM claims WHERE subject=?1 AND kind='resource.observed' ORDER BY store_index DESC LIMIT 1 OFFSET 1",
+            [format!("resource/pr/{resource}")],
+            |row| row.get(0),
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h4eb31bda17fb owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoints(id, cut_unix_ms, state, updated_at_unix_ms)
+             VALUES ('checkpoint/example-resource', 0, 'trimmed', 0) ON CONFLICT(id) DO NOTHING",
+            [],
+        )
+        .unwrap();
+    transaction
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h2d276ff3d187 owner=fractal_store::store::local_trim_tests TODO=stage-generation-and-keyed-reclamation */ "INSERT INTO checkpoint_claims(id, writer, sequence, envelope_hash, subject, kind, actor,
+                 predecessors, operation_id, request_digest, accepted_at_unix_ms, checkpoint)
+             SELECT id, 'example-writer', 1, 'example-hash', subject, kind, actor, '[]', NULL, NULL, 0,
+                 'checkpoint/example-resource' FROM claims WHERE id=?1",
+            [&middle],
+        )
+        .unwrap();
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hf46030d1c556 owner=fractal_store::store::local_trim_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&middle]).unwrap();
+    transaction.commit().unwrap();
+}
+
+/// What preparation answers for `subject`, and what a rebuild from every claim present answers.
+fn prepared_and_rebuilt(store: &Store, subject: &str) -> (String, String) {
+    let mut writer = store.connection.write();
+    let transaction = writer.transaction().unwrap();
+    let prepared = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    super::resources::rebuild_preparation(&transaction).unwrap();
+    let rebuilt = format!("{:?}", super::resources::preparation_observation(&transaction, subject).unwrap());
+    transaction.rollback().unwrap();
+    (prepared, rebuilt)
+}
+
+/// Over a capped cut's days, what a trim's deletes deferred is rebuilt by the end of each day's
+/// run: nothing stays deferred past it, and preparation answers what a rebuild answers.
+#[test]
+fn a_capped_cut_s_days_each_rebuild_what_their_deletes_deferred() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = local_member("alder");
+    store.trim_locally_at_most(10);
+    for n in 0..30 {
+        apply(&store, &Write::Observer { observer: 0, status: (n % 3) as u8, cursor: None }, n);
+    }
+    let contexts: Vec<_> = (0..3).map(|day| context(scratch.path(), day)).collect();
+    for (day, context) in contexts.iter().enumerate() {
+        defer_a_resource_delete(&store, day as u8);
+        let deferred = |store: &Store| -> i64 {
+            store.readers.get().query_row("SELECT COUNT(*) FROM local_resource_preparation_deferred", [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(deferred(&store), 1, "day {day}: one subject waits");
+        let before = answers(&store, context.now_unix_ms);
+        step(&store, context);
+        assert_eq!(deferred(&store), 0, "day {day}: rebuilt by the end of the day's run");
+        let (prepared, rebuilt) = prepared_and_rebuilt(&store, &format!("resource/pr/{day}"));
+        assert_eq!(prepared, rebuilt, "day {day}");
+        assert_eq!(answers(&store, context.now_unix_ms), before, "day {day}");
+    }
+    assert_eq!(cut_states(&store).last().map(String::as_str), Some("trimmed"));
+}
+
 /// Rows this member holds for a claim it no longer has. A `claim_positions` row outlives its
 /// claim by design (see schema.md), so it is not one.
 fn orphans(store: &Store) -> Vec<(&'static str, i64)> {
@@ -760,6 +834,11 @@ enum Step {
     /// Two observations of one observer in one batch: the older is not the newest of its slot
     /// yet sits in the writer's newest observer envelope, so the writer's-newest guard decides it.
     Twice(u8),
+    /// One source of a seat's status history: a harness transition (`kind` 0), observed inside
+    /// the seven-day history window or (`old`) nine days back, outside it; a runtime reset to an
+    /// incarnation (1); or a restored provider prompt (2), both dated by acceptance, inside it.
+    /// The status-history rule reads all three to judge a harness observation.
+    Seat { kind: u8, seat: u8, incarnation: u8, state: u8, old: bool },
 }
 
 fn step_strategy() -> impl Strategy<Value = Step> {
@@ -770,6 +849,8 @@ fn step_strategy() -> impl Strategy<Value = Step> {
         1 => (any::<u8>(), any::<bool>()).prop_map(|(nth, by_claim)| Step::Repair(nth, by_claim)),
         1 => (0..3u8).prop_map(Step::Shared),
         1 => (0..3u8).prop_map(Step::Twice),
+        6 => (0..3u8, 0..2u8, 0..3u8, 0..6u8, any::<bool>())
+            .prop_map(|(kind, seat, incarnation, state, old)| Step::Seat { kind, seat, incarnation, state, old }),
         1 => any::<bool>().prop_map(Step::Tombstone),
         1 => any::<u8>().prop_map(Step::PeerCite),
         1 => any::<bool>().prop_map(Step::CatchUp),
@@ -966,6 +1047,48 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
                 )
                 .unwrap();
         }
+        Step::Seat { kind, seat, incarnation, state, old } => {
+            let seat = SEATS[usize::from(*seat)];
+            let incarnation = format!("{seat}-{incarnation}");
+            let observed_at = now_ms() - if *old { 9 * smallclaims::store::checkpoint::DAY_MS } else { 0 };
+            let (kind, fields) = match kind {
+                0 => ("harness.observed", BTreeMap::from([
+                    ("state".into(), json!(STATES[usize::from(*state)])),
+                    ("driver".into(), json!("codex")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("status_transition".into(), json!(true)),
+                ])),
+                1 => ("runtime.observed", BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("runtime_id".into(), json!(seat.trim_start_matches("agent/"))),
+                    ("incarnation_id".into(), json!(incarnation)),
+                ])),
+                _ => ("harness.diagnostic", BTreeMap::from([
+                    ("code".into(), json!("provider-auth-restored")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("driver".into(), json!("codex")),
+                    ("reason".into(), json!("fixture")),
+                    ("severity".into(), json!("warning")),
+                ])),
+            };
+            let mut fields = fields;
+            // Only a harness observation carries its own observation time; the others are dated
+            // by acceptance, inside the window.
+            if kind == "harness.observed" {
+                fields.insert("observed_at_ms".into(), json!(observed_at as u64));
+            }
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: kind.into(),
+                    actor: Some(seat.into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("seat-{n}")),
+                })
+                .unwrap();
+        }
         Step::Twice(observer) => {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
@@ -1019,7 +1142,8 @@ fn take_step(store: &Store, peer: &Store, step: &Step, n: usize) {
 /// Stage `store` at `cut` as a local cut does, fully or scoped, and plan it.
 fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> (Vec<String>, Vec<String>, Vec<String>) {
     let kinds = smallclaims::store::LOCAL_TRIM_KINDS;
-    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(kinds)).unwrap();
+    let capture = smallclaims::store::local_trim_capture_kinds();
+    let staged = store.checkpoint_staged_set_scoped(cut, None, dir, scoped.then_some(capture.as_slice())).unwrap();
     staged.protect_all_but(kinds).unwrap();
     staged.split_envelopes().unwrap();
     smallclaims::store::checkpoint_staging::without_reference_plan(|| store.plan_staged_checkpoint(&staged)).unwrap();
@@ -1031,6 +1155,54 @@ fn local_plan(store: &Store, cut: u128, dir: &std::path::Path, scoped: bool) -> 
         .map(|envelope| format!("{}/{}/{}", envelope.writer, envelope.sequence, envelope.envelope_hash))
         .collect();
     (claims, envelopes, staged.guard_answers(kinds).unwrap())
+}
+
+/// A seat whose harness transitions are all old, with a provider prompt raised and restored
+/// inside the history window between them: the status-history rule keeps the transition before
+/// the prompt (its predecessor, and what the restored prompt exposes), which only the
+/// diagnostics show and no harness rule keeps. A capture that left them out would drop it, and
+/// the seat's status history would change.
+#[test]
+fn a_scoped_capture_keeps_the_transition_a_seat_s_restored_prompt_depends_on() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let seat = SEATS[0];
+    let old = (now_ms() - 9 * smallclaims::store::checkpoint::DAY_MS) as u64;
+    let mut n = 0;
+    let mut append = |kind: &str, fields: Value| -> String {
+        n += 1;
+        store
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
+                kind: kind.into(),
+                actor: Some(seat.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("prompt-{n}")),
+            })
+            .unwrap()
+            .id
+    };
+    let harness = |state: &str, at: u64| json!({"state": state, "driver": "codex", "incarnation_id": "one", "observed_at_ms": at});
+    let diagnostic = |code: &str| json!({"incarnation_id": "one", "code": code, "driver": "codex", "reason": "fixture", "severity": "warning"});
+    append("harness.observed", harness("ready", old));
+    append("harness.observed", harness("working", old + 1));
+    let before_prompt = append("harness.observed", harness("idle", old + 2));
+    append("harness.diagnostic", diagnostic("provider-auth-expired"));
+    append("harness.diagnostic", diagnostic("provider-auth-restored"));
+    // Later transitions the harness rule keeps instead: the newest that is not working, and the
+    // working run the seat is in now.
+    append("harness.observed", harness("ready", old + 3));
+    append("harness.observed", harness("working", old + 4));
+    store.seal_local_batches().unwrap();
+    let cut = smallclaims::store::checkpoint::newest_due_cut(context.now_unix_ms);
+    let full = local_plan(&store, cut, &scratch.path().join("full"), false);
+    let scoped = local_plan(&store, cut, &scratch.path().join("scoped"), true);
+    assert!(!full.0.contains(&before_prompt), "the whole capture keeps it");
+    assert_eq!(scoped.0, full.0, "and so does the scoped one");
+    assert_eq!(scoped.1, full.1);
 }
 
 proptest! {

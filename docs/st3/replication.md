@@ -40,8 +40,11 @@ transport, and rejects a carrier absent from the list. An already-first carrier
 is a no-op, including no service restart. Changes are locked, saved atomically,
 and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
-Installed services restart automatically; otherwise restart both `st3 daemon` and
-`st3 replication-worker` as instructed, including when using `--no-service`.
+Installed services restart automatically. Without services, start
+`fractal replication-worker` first, retain its PID, then start
+`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
+generation before listening; this option is refused for service-managed daemons. A manual
+worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
 preference and enabled transports unchanged.
@@ -61,6 +64,20 @@ An ended member is not authorized for ordinary replication or owner RPC, even if
 a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
+
+On Linux the daemon observes worker-only routes (`/v1/internal/replication/*`,
+`/v1/internal/seat-freshness`, `/v1/internal/seat-snapshot` and
+`/v1/internal/client-read/forward`) against the Unix connector's process
+generation. Services use the supervisor-observed worker; foreground operation
+uses the explicitly enrolled process. This preparatory observation logs
+would-refuse requests without changing route admission. On macOS no socket-bound
+process-generation witness is available: these routes retain existing admission
+and emit `unverified-platform`, not an authentication success. The unbound local
+caller authority gap remains open on macOS. `LOCAL_PEERPID` and `LOCAL_PEERTOKEN`
+resolve through a live numeric PID; after PID reuse they can attribute a surviving
+socket to the wrong worker. Operator fleet routes retain their existing local
+authority boundary.
+
 
 Adapters that retain a departing member's transport must instead make their
 decision from one `GET /v1/internal/fleet/leave-state` response:
@@ -1417,7 +1434,9 @@ Each day such a member trims its own due cut (the day before yesterday, as for a
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
 checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
 what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
-same operation, the protections naming those claims, each writer's newest envelope, and the claims
+same operation, the same for every runtime reset and harness diagnostic (`LOCAL_TRIM_CONTEXT_KINDS`:
+the status-history rule judges a seat's harness observations with them, and keeps a transition a
+reset or a restored prompt depends on), the protections naming those claims, each writer's newest envelope, and the claims
 citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
 each cut first reads the claims that arrived since the last, in arrival order, committing each page
 with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and

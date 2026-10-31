@@ -272,13 +272,19 @@ While attention is loading, triage flashes `loading attention…`; an unsuccessf
 flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
 
 The recent-place switcher uses that same history across all spaces, de-duplicated by content.
-Rows show the content title and space name. On every terminal type, Ctrl+^
+Rows show the content title, live state/attention marks and the space name. On every terminal type, Ctrl+^
 (legacy Ctrl+6, 0x1E) opens the popup when detached, with the previous place selected.
 Ctrl+\ then r opens it even over an attached program. Up/Down selects a destination;
-Enter opens it in its recorded location and Escape cancels. Ctrl+^ then Enter
-flips between the last two places. Direct Ctrl+^ reaches attached programs unchanged.
-While the popup is open, mouse input and paste are swallowed rather than sent to the
-underlying terminal. The child loses input focus until the popup closes. The selected
+Enter opens it in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
+flips between the last two places. Enhanced Ctrl+Tab cycles forward and Ctrl+Shift+Tab backward.
+Once this terminal has actually reported a Control modifier release, releasing Control commits
+that cycling selection; until then Ctrl+Tab uses the explicit Enter/Escape popup.
+Ctrl+^ and Ctrl+Tab both reach attached programs unchanged. Tabs retain [ ], Ctrl+PageUp
+and Ctrl+PageDown.
+While the popup is open, the first line of pasted text filters its rows and mouse input never
+reaches the underlying terminal. Typing or pasting switches hold cycling to explicit Enter/Escape
+commit. Live state/attention labels refresh while the popup is open.
+The child loses input focus until the popup closes. The selected
 destination remains visible even at the minimum supported viewport.
 
 
