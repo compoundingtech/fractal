@@ -966,6 +966,16 @@ pub fn claim(
     claim_locked(&writer, token)
 }
 
+/// Serialize lifecycle reconciliation with provider takeover without granting ownership
+/// to the caller. The action must inspect the current evidence before its own decision.
+pub fn with_record_lock<T>(
+    agent_dir: &Path,
+    action: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _lock = lock_exclusive(&agent_dir.join(LOCK_NAME))?;
+    action()
+}
+
 /// Run `action` only while `incarnation` and `seq` are the exact current owner of an agent's
 /// harness record. The record lock stays held through the action so a successor cannot claim
 /// between the ownership check and the caller's related publication.

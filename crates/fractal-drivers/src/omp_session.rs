@@ -280,6 +280,30 @@ pub(crate) fn has_confirmed_channel_binding(
         .is_some_and(|binding| binding.ready && binding.runtime_incarnation == runtime_incarnation))
 }
 
+/// Lifecycle proof for an observed ask. A witnessed successor retires the predecessor
+/// before readiness; missing/unreadable evidence remains indeterminate, not replacement.
+pub fn native_question_session_current(
+    state_dir: &Path,
+    agent: &str,
+    runtime_id: &str,
+    runtime_incarnation: &str,
+    native_session_id: &str,
+) -> Result<bool> {
+    let pending = load_pending_binding(state_dir, agent, runtime_id)?;
+    let ready = load_binding(state_dir, agent, runtime_id)?;
+    if pending.iter().chain(ready.iter()).any(|binding| {
+        binding.runtime_incarnation == runtime_incarnation
+            && binding.native_session_id != native_session_id
+    }) {
+        return Ok(false);
+    }
+    anyhow::ensure!(ready.is_some_and(|binding| {
+        binding.ready && binding.runtime_incarnation == runtime_incarnation
+            && binding.native_session_id == native_session_id
+    }), "question native session evidence is unavailable");
+    Ok(true)
+}
+
 /// Current, ready native session for an owner read. A pending switch is not a read authority.
 pub fn bound_native_session(
     state_dir: &Path,
