@@ -6,9 +6,29 @@ pub async fn fleet_publish_endpoints(
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let written = blocking_store(move || {
-        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"))
+        if request.clear_fabric_rekey {
+            store.publish_fleet_endpoints_clearing_fabric_rekey(
+                &request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"),
+            )
+        } else {
+            store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"))
+        }
     })
     .await?;
+    if written {
+        signal_changed(&state);
+    }
+    Ok(Json(json!({ "published": written })))
+}
+
+pub async fn fleet_fabric_rekey(
+    State(state): State<AppState>,
+    Json(request): Json<FabricRekeyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let store = state.store.clone();
+    let written = blocking_store(move || {
+        store.fabric_rekey(&request, env!("CARGO_PKG_VERSION"))
+    }).await?;
     if written {
         signal_changed(&state);
     }
@@ -338,4 +358,59 @@ pub async fn fleet_admission_residue(
     blocking_store(move || store.fleet_admission_residue())
         .await
         .map(Json)
+}
+
+#[cfg(test)]
+mod rekey_tests {
+    use super::*;
+    use crate::api::tests_shared::state;
+    use crate::api::tests_shared_client_v0_tests::json_request;
+
+    #[tokio::test]
+    async fn signed_rekey_route_commits_preserves_refresh_and_rolls_back() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+        let public = key.public().to_owned();
+        state.store.bind_fleet("rekey-api-test").unwrap();
+        state.store.pin_fleet_anchor(&public).unwrap();
+        state.store.set_member_key(Some(Arc::new(key))).unwrap();
+        state.store.admit_fleet_anchor("rekey-api-test", &public, "listening").unwrap();
+        state.store.publish_fleet_endpoints("listening", &[json!({
+            "transport":"fabric","node":"a".repeat(64),"protocol":"st3/fleet/rekey-api-test"
+        })], "test").unwrap();
+        let deadline = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 500;
+        let mut request = json!({"action":"prepare","old_node":"a".repeat(64),
+            "next_node":"b".repeat(64),"deadline":deadline});
+        let path = "/v1/internal/fleet/fabric-rekey";
+        let (status, body) = json_request(router(state.clone()), path, request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["published"], true);
+        let (status, body) = json_request(router(state.clone()), path, request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["published"], false);
+        request["action"] = json!("commit");
+        let (status, body) = json_request(router(state.clone()), path, request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = json_request(router(state.clone()), "/v1/internal/fleet/endpoints", json!({
+            "mode":"listening", "endpoints":[{"transport":"fabric","node":"a".repeat(64),
+                "protocol":"st3/fleet/rekey-api-test"}]
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let view = state.store.fleet_view_sealed().unwrap();
+        assert!(view.members[0].endpoints.iter().any(|entry| entry["transport"] == "fabric" && entry["node"] == "b".repeat(64)));
+        request["action"] = json!("abort");
+        let (status, body) = json_request(router(state.clone()), path, request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let view = state.store.fleet_view_sealed().unwrap();
+        assert!(view.members[0].endpoints.iter().any(|entry| entry["state"] == "aborted"));
+        let (status, body) = json_request(router(state.clone()), "/v1/internal/fleet/endpoints", json!({
+            "mode":"listening", "endpoints":[], "clear_fabric_rekey":true
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state.store.fleet_view_sealed().unwrap().members[0].endpoints.is_empty());
+        request["action"] = json!("commit");
+        let (status, _) = json_request(router(state), path, request).await;
+        assert!(!status.is_success());
+    }
 }

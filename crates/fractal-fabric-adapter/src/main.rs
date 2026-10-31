@@ -239,6 +239,9 @@ async fn poll(
             &retained(&snapshot, now_ms()),
         )
         .await?;
+        if last.state == "applied" {
+            reconcile::acknowledge(client, socket, fleet, own, &snapshot.membership).await?;
+        }
         if last.state == "applied"
             && snapshot
                 .members

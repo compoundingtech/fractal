@@ -1057,6 +1057,11 @@ struct FleetModeArgs {
 
 #[derive(Subcommand)]
 enum FleetTransportsCommand {
+    /// Re-key this member in place after peers install its prepared Fabric identity.
+    Rekey {
+        #[arg(value_parser = ["fabric"])]
+        transport: String,
+    },
     /// Expose Fabric, then announce it. Requires a listening member with a port.
     Add {
         #[arg(value_parser = ["fabric"])]

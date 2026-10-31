@@ -284,6 +284,46 @@ The worker exposes its loopback listener with
 the exposure. The adapter maintains trust and grants; Fractal does not edit
 `peers.toml`.
 
+#### Re-key an existing Fabric member
+
+Run this on the machine whose Fabric identity must change:
+
+```sh
+fractal fleet transports rekey fabric
+```
+
+Use Fabric's identity lifecycle and runtime expiry APIs (v0.9.4), a running
+Fractal daemon and replication worker, and a running `st-fabric-adapter` on
+the other members. At least one other current member must confirm both policy
+phases before the original ten-minute deadline. A single-member or disconnected
+fleet cannot complete a re-key.
+
+The command asks Fabric to prepare a key without changing its live identity.
+Fractal publishes a signed rotation announcement under the same member key over
+the old route. Peers temporarily grant the prepared NodeID until the immutable
+deadline, keeping the old NodeID permanent. Their adapters publish signed receipts
+only after checking the installed Fabric policy. After one receipt, Fractal
+publishes the committed endpoint; peers make the new NodeID permanent and expire
+the old NodeID at the original deadline. Fractal waits for a committed receipt
+before asking Fabric to activate the prepared identity. Fabric never serves two
+local identities at once. Adapter policy changes are revision-checked atomic
+batches and do not grant terminal access.
+
+The command persists progress in `fleet/fabric-rekey.json` under the Fractal state
+directory. After an interruption, run the same command: it resumes the original
+deadline, or retries the same guarded activation after the activation decision.
+Do not delete the journal, edit Fabric's private keys, or run `fabric identity
+activate` separately. An uncertain activation response is not a rollback.
+
+If no peer confirms before the deadline, Fractal publishes an abort and leaves
+the old local identity active. A stopped adapter cannot extend staged access:
+Fabric enforces the installed expiry even while the adapter is down. Abort
+withdrawal and restoration still require claim delivery and reconciliation.
+An offline peer may miss the cutover and must learn current signed membership
+through another reachable fleet member before it can authorize the new NodeID.
+Static and other-owner rights are not revoked: remove them at their source if
+complete retirement of the old NodeID is required.
+
 #### Adapter helper boundary
 
 The CLI discovers `st-fabric-adapter` beside its executable or on `PATH`;
