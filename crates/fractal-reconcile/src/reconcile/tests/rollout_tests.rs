@@ -1487,6 +1487,14 @@ fn stopped_rollout_waits_before_start_attempt_and_releases_fifo_after_admission(
     status.state().decision = fractal_runtime::seat_admission::Decision {
         mode: "enforce".into(), reason: "test pressure".into(), queue: true, observed_at: None,
     };
+    for _ in 0..8 {
+        let observed = seat.runtime.observation.lock().unwrap().clone();
+        assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
+        if !status.state().pending.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(seat.operation().phase, "starting");
     for _ in 0..4 {
         let observed = seat.runtime.observation.lock().unwrap().clone();
         assert!(reconciler.reconcile_rollout(&desired, observed.as_ref(), None).unwrap());
