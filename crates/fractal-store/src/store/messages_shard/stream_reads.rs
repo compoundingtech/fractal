@@ -7,14 +7,22 @@ use super::*;
 /// outside the replicated log and every digest. One host-local order then sorts graph and stream
 /// entries together. A shard trigger cannot see the graph's index, so the daemon writes it as it
 /// admits items, and a reader that finds an item without one writes it then.
-pub(super) const LOCAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h80316a30a7db owner=fractal_store::store::messages_shard::stream_reads TODO=chunk-or-reference-variable-columns */ "
+///
+/// `shown_at_unix_ms` is the time a timeline shows for the item: its accepted time, or one
+/// millisecond past the item recorded before it at the same graph index, whichever is later.
+/// Items that share a graph index share timeline sequences, so a shared millisecond would sort
+/// both message entries before both content entries; a client that pairs a message with the
+/// content entry that follows it, as phones already installed do, would then pair them wrongly.
+pub(super) const LOCAL_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hfdd2de5042cd owner=fractal_store::store::messages_shard::stream_reads TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_arrivals (
     subject TEXT PRIMARY KEY,
     store_index INTEGER NOT NULL,
     graph_index INTEGER NOT NULL,
-    arrived_at_unix_ms INTEGER NOT NULL
+    arrived_at_unix_ms INTEGER NOT NULL,
+    shown_at_unix_ms INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS stream_arrivals_store_index ON stream_arrivals(store_index);
+CREATE INDEX IF NOT EXISTS stream_arrivals_shown ON stream_arrivals(graph_index, shown_at_unix_ms);
 ";
 
 /// The stream's store index on this member, or `None` when it holds no messages shard.
@@ -24,19 +32,40 @@ pub fn stream_index(graph: &super::super::Store) -> anyhow::Result<Option<u64>> 
 
 /// Record, at the graph's current index, every stream item that has no arrival yet. The daemon
 /// calls it after the shard admits items; a reader that finds an item without one calls it too.
-/// Returns how many items it recorded.
+/// Returns how many items it recorded. Each takes its shown time here, once, in store order.
 pub fn record_arrivals(graph: &super::super::Store) -> anyhow::Result<usize> {
     let Some(shard) = shard(graph) else {
         return Ok(0);
     };
     let at = graph.index()?;
-    let connection = shard.connection.write();
-    Ok(connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hd6f1369f787d owner=fractal_store::store::messages_shard::stream_reads TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_arrivals(subject, store_index, graph_index, arrived_at_unix_ms)
-         SELECT subject, store_index, ?1, ?2 FROM stream_messages
-         WHERE store_index > COALESCE((SELECT MAX(store_index) FROM stream_arrivals), 0)",
-        rusqlite::params![at as i64, smallclaims::store::now_ms() as i64],
-    )?)
+    let mut connection = shard.connection.write();
+    let transaction = connection.transaction()?;
+    let unrecorded = transaction
+        .prepare_cached(
+            "SELECT stream_messages.subject, stream_messages.store_index, claims.accepted_at_unix_ms
+             FROM stream_messages JOIN claims ON claims.store_index=stream_messages.store_index
+             WHERE stream_messages.store_index > COALESCE((SELECT MAX(store_index) FROM stream_arrivals), 0)
+             ORDER BY stream_messages.store_index",
+        )?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut shown = transaction
+        .prepare_cached("SELECT MAX(shown_at_unix_ms) FROM stream_arrivals WHERE graph_index=?1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h7d4a5fcca7d0 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ rusqlite::params![at as i64], |row| row.get::<_, Option<i64>>(0))?;
+    let arrived = smallclaims::store::now_ms() as i64;
+    for (subject, store_index, accepted) in &unrecorded {
+        let accepted = accepted.parse::<i64>().unwrap_or_default();
+        let at_ms = shown.map_or(accepted, |before| accepted.max(before.saturating_add(1)));
+        transaction.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h0c4f7d0d1e18 owner=fractal_store::store::messages_shard::stream_reads TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_arrivals(subject, store_index, graph_index, arrived_at_unix_ms, shown_at_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?.execute(/* sqlite-large-value: allow-for-now lv-hd2347a335f03 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ rusqlite::params![subject, store_index, at as i64, arrived, at_ms])?;
+        shown = Some(at_ms);
+    }
+    transaction.commit()?;
+    Ok(unrecorded.len())
 }
 
 /// The graph index at which `subject`, a stream item, arrived on this member, as recorded. It
@@ -153,7 +182,8 @@ pub fn conversation_position(graph: &super::super::Store) -> anyhow::Result<u64>
 
 /// The stream items to or from any of `names` after `after`, newest first, each with the graph
 /// index it arrived at. Its claim's `store_index` is its `created_index`, past every graph
-/// index, as a message page lists it. `limit` bounds a delta; without one the read keeps the
+/// index, as a message page lists it, and its `accepted_at_unix_ms` is the time its timeline
+/// entries show (`stream_arrivals.shown_at_unix_ms`). `limit` bounds a delta; without one the read keeps the
 /// newest 10,000 stream items, as the graph's conversation read keeps its newest 10,000 sends.
 pub fn conversation_items(
     graph: &super::super::Store,
@@ -180,14 +210,14 @@ pub fn conversation_items(
         StreamAfter::Position(position) => (position.max(floor), 0),
         StreamAfter::Arrival(arrival) => (floor, arrival),
     };
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5999c6143f53 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hf2c0f457d435 owner=fractal_store::store::messages_shard::stream_reads TODO=trace-statement-and-value-representation */ &format!(
         "WITH selected AS (
             SELECT store_index, subject FROM stream_messages INDEXED BY stream_messages_recipient
             WHERE recipient IN (SELECT value FROM json_each(?1)) AND store_index>?2
             UNION
             SELECT store_index, subject FROM stream_messages INDEXED BY stream_messages_sender
             WHERE sender IN (SELECT value FROM json_each(?1)) AND store_index>?2
-         ) SELECT {}, arrivals.graph_index FROM selected
+         ) SELECT {}, arrivals.graph_index, arrivals.shown_at_unix_ms FROM selected
            JOIN stream_arrivals arrivals ON arrivals.subject=selected.subject
            JOIN claims ON claims.store_index=selected.store_index
            WHERE arrivals.graph_index>?3 AND claims.kind='message.sent'
@@ -205,6 +235,7 @@ pub fn conversation_items(
             |row| {
                 let mut claim = smallclaims::store::claim_from_row(row)?;
                 claim.store_index += STREAM_INDEX_BASE;
+                claim.accepted_at_unix_ms = row.get::<_, i64>(11)?.max(0) as u128;
                 Ok((claim, row.get::<_, i64>(10)?.max(0) as u64))
             },
         )?
@@ -237,8 +268,9 @@ pub fn conversation_changed(
 /// The first of a message's two timeline sequences, the message entry's; its content entry takes
 /// the next. A graph message's is its index times four. A stream item has no graph index, so it
 /// takes two past the graph index it arrived at on this member: it sorts after the graph claim
-/// it arrived behind and before the next, and two items that arrived together tie, which the
-/// entry ID breaks. The sequence orders entries; it never identifies one.
+/// it arrived behind and before the next. Items that arrived at the same graph index share
+/// sequences, and their shown times differ (`stream_arrivals`), so each item's message and
+/// content entries sort together. The sequence orders entries; it never identifies one.
 pub fn timeline_base(graph: &super::super::Store, claim: &ClaimRecord) -> anyhow::Result<u64> {
     if claim.store_index < STREAM_INDEX_BASE {
         return Ok(claim.store_index.saturating_mul(4));

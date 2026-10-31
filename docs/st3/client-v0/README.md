@@ -1187,6 +1187,10 @@ native-source high-water sequence. A cursor without the stream position (from an
 has read none of the stream. A stream item's message and content entries take sequences
 `g*4+2` and `g*4+3`, where `g` is the graph index it arrived at on this member, so they sort
 after the graph claim they arrived behind; a graph message keeps `index*4` and `index*4+1`.
+Items that arrived at the same `g` share those sequences, so each shows a distinct millisecond: its
+accepted time, or one past the item recorded before it at that `g`. A message and its content
+entry then sort next to each other, which a client that pairs a message with the content entry
+after it relies on.
 Its native mark is the source's newest native sequence, not just the latest display window's, so
 graph-only windows cannot rewind it: when the 200-entry window is truncated, the gateway reads
 the newest native entries by sequence beside it (at most one window more). A change omitted by

@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "The messages shard (shards/messages/claims.sqlite3) gains the local table stream_arrivals, created with IF NOT EXISTS when the shard opens: the graph index at which each stream item arrived on this member. It is outside the replicated log and every digest, and it is filled for existing items the first time a reader needs them. The graph database and its storage version are unchanged."
+    "detail": "The messages shard (shards/messages/claims.sqlite3) gains the local table stream_arrivals, created with IF NOT EXISTS when the shard opens: the graph index at which each stream item arrived on this member, and the time its timeline entries show (its accepted time, or one millisecond past the item recorded before it at the same graph index, so that two items that share a graph index never share a millisecond and each message stays next to its content entry for phones already installed). It is outside the replicated log and every digest, and it is filled for existing items the first time a reader needs them. The graph database and its storage version are unchanged."
   },
   "rules": {
     "status": "none",

@@ -18794,6 +18794,73 @@ mission "example/zero-run" state="ready" {
         assert_eq!(position.stream_position, 0);
     }
 
+    /// Two stream items that arrive at the same graph index in the same millisecond share
+    /// sequences. Their shown times differ, so each item's message and content entries sort
+    /// together and a phone that pairs a message with the next content entry pairs them right.
+    /// `fixtures/clients/stream-timeline-pairs-v1.json` holds this page for the TypeScript views,
+    /// which read it with the phone's unchanged `conversationEntries`.
+    #[tokio::test]
+    async fn stream_items_that_share_a_graph_index_and_a_millisecond_keep_their_entries_together() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "stream-pairs");
+        let shard = crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+        let owner = "agent/stream-pairs";
+        let incarnation = "stream-pairs-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: serde_json::from_value(json!({"status":"running", "runtime_id":"stream-pairs-runtime", "incarnation_id":incarnation})).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let graph = state.store.index().unwrap();
+        shard.set_write_clock_at(1_790_000_000_000).unwrap();
+        for (subject, from, text) in [
+            ("message/00000000000000d1", "agent/birch", "first"),
+            ("message/00000000000000d2", "agent/cedar", "second"),
+        ] {
+            shard.append_claim(&ClaimInput {
+                subject: subject.into(), kind: "message.sent".into(), actor: Some(from.into()),
+                fields: serde_json::from_value(json!({"from":from, "to":owner, "session_id":session_id,
+                    "status":"sent", "title":text, "content":text})).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        crate::store::messages_shard::stream_reads::record_arrivals(&state.store).unwrap();
+        assert_eq!(state.store.index().unwrap(), graph, "both arrive at one graph index");
+
+        let (_, page) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+        let mut items = page["items"].as_array().unwrap().iter()
+            .filter(|item| item["sequence"].as_u64().is_some_and(|sequence| sequence / 4 == graph)
+                && matches!(item["type"].as_str(), Some("message" | "content")))
+            .cloned().collect::<Vec<_>>();
+        assert_eq!(items.len(), 4, "{page}");
+        // The page's order, which every phone's sort keeps: time, then sequence, then ID.
+        let key = |item: &Value| (item["timestamp"].as_str().unwrap().to_owned(),
+            item["sequence"].as_u64().unwrap(), item["id"].as_str().unwrap().to_owned());
+        items.sort_by_key(key);
+        let shown = items.iter().map(|item| (item["type"].as_str().unwrap(),
+            item["body"]["message_id"].as_str().or(item["body"]["text"].as_str()).unwrap())).collect::<Vec<_>>();
+        assert_eq!(shown, [("message", "message/00000000000000d1"), ("content", "first"),
+            ("message", "message/00000000000000d2"), ("content", "second")]);
+        assert_eq!(items[0]["timestamp"], "2026-09-21T14:13:20.000Z");
+        assert_eq!(items[2]["timestamp"], "2026-09-21T14:13:20.001Z");
+
+        // The fixture names entries by their order, which is all the views' sort reads of an ID.
+        let mut ids = items.iter().map(|item| item["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        ids.sort();
+        let fixture = items.iter().map(|item| {
+            let mut item = item.clone();
+            let rank = ids.iter().position(|id| item["id"] == *id).unwrap();
+            item["id"] = json!(format!("timeline-entry/stream-pairs/{rank}"));
+            item["sequence"] = json!(item["sequence"].as_u64().unwrap() - graph * 4);
+            item
+        }).collect::<Vec<_>>();
+        let path = test_env!("CARGO_MANIFEST_DIR", "/../../fixtures/clients/stream-timeline-pairs-v1.json");
+        let expected: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(json!(fixture), expected["items"], "{}", serde_json::to_string_pretty(&json!({"items": fixture})).unwrap());
+    }
+
     #[tokio::test]
     async fn conversation_open_replays_local_rows_that_follow_a_newer_graph_cut() {
         let root = tempfile::tempdir().unwrap();
