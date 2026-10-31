@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod browser;
 mod locator;
+mod strict;
 pub use browser::{
     TaskBrowserStepV1, TaskClickEffectV1, TaskHumanKindV1, TaskRevealSourceKindV1,
     TaskRevealTriggerV1, TaskTextNodeV1,
@@ -22,6 +23,33 @@ pub struct TaskManifestV1 {
     pub browser_steps: Vec<TaskBrowserStepV1>,
     pub writes: Vec<TaskWriteV1>,
     pub readers: Vec<TaskReaderV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskManifestError(pub String);
+
+impl std::fmt::Display for TaskManifestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TaskManifestError {}
+
+fn invalid(message: impl Into<String>) -> TaskManifestError {
+    TaskManifestError(message.into())
+}
+
+/// Parse closed wire shapes without losing duplicate keys or integer spelling.
+/// This checks the JSON boundary, not authentication or live grant authority.
+pub fn parse_task_manifest_v1(input: &[u8]) -> Result<TaskManifestV1, TaskManifestError> {
+    let value = strict::parse_json(input).map_err(|error| invalid(error.to_string()))?;
+    let manifest: TaskManifestV1 =
+        serde_json::from_value(value).map_err(|error| invalid(error.to_string()))?;
+    if manifest.version != 1 {
+        return Err(invalid("manifest version must be 1"));
+    }
+    Ok(manifest)
 }
 
 /// Largest integer exactly representable by both manifest consumers.
