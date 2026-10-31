@@ -61,7 +61,7 @@ fn real_agent_twice_rename_exports_every_alias_and_exact_historical_revision() {
         verify_rename_proof(&proof, member.public(), Some(&first.naming_revision)).unwrap();
         let old = store.export_rename_proof(IdentityKind::Agent, name, Some(&first.naming_revision)).unwrap();
         assert_eq!(old.canonical_id, RENAMED);
-        assert_eq!(old.chain, [first.claim_id.clone()]);
+        assert_eq!(old.chain.as_slice(), std::slice::from_ref(&first.claim_id));
         verify_rename_proof(&old, member.public(), None).unwrap();
     }
     let error = store.export_rename_proof(IdentityKind::Agent, ORIGINAL, Some("not-a-revision")).unwrap_err();
