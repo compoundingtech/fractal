@@ -6810,16 +6810,15 @@ mod tests {
     }
 
     #[test]
-    fn details_are_per_agent_and_ctrl_chords_work_where_option_types() {
+    fn details_are_global_and_ctrl_chords_work_where_option_types() {
         let mut ui = glass();
         let atlas = "agent/example/atlas/builder".to_owned();
         ui.open_in_glass(Pane::Agent(Some(atlas.clone())), Open::Tab);
-        // Nathan, 2026-10-03: hiding one agent's details hid every agent's.
         ctrl(&mut ui, 'd');
         assert!(!ui.editing, "a chord, not typing");
-        assert!(ui.details_hidden.contains(&atlas));
+        assert!(!ui.agent_details);
         ui.open_in_glass(Pane::Agent(Some("agent/example/cos".into())), Open::Tab);
-        assert!(!ui.details_hidden.contains("agent/example/cos"));
+        assert!(!ui.agent_details);
         // Ctrl+P is the simplified view and Ctrl+E opens the tool calls, on a Mac too.
         ui.open_in_glass(Pane::Agent(Some(atlas.clone())), Open::Here);
         let simple = ui.simple;
