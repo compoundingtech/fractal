@@ -218,17 +218,38 @@ pub fn record_lifecycle(
     if matches!(kind, "message.read" | "message.closed") && actor.is_none() {
         return Err(St3Error::new("missing-message-actor", format!("`{kind}` needs an actor")));
     }
-    if stream_item(&shard, subject).map_err(internal)?.is_none() {
+    let Some((sent, _)) = stream_item(&shard, subject).map_err(internal)? else {
         return Err(St3Error::new("missing-message", format!("no stream item `{subject}`")));
-    }
+    };
     let current = lifecycle_records(&shard, subject)
         .map_err(internal)?
         .iter()
         .filter_map(|(kind, _)| lifecycle_rank(kind))
         .max()
         .unwrap_or(0);
+    // A replayed or earlier step settles to what is recorded, as a graph receipt does.
     if rank <= current {
         return Ok(false);
+    }
+    // Forward steps follow the graph's message transitions, so a stream item moves as the same
+    // mail would through the graph.
+    let recipient = sent.body.pointer("/fields/to").and_then(Value::as_str);
+    let valid = matches!((current, rank), (0, 1) | (1, 2) | (0, 2) | (2, 3) | (3, 4))
+        // A person's displayed message has no harness handoff; their read is its delivery.
+        || (rank == 3 && current <= 1 && actor.is_some_and(|actor| actor.starts_with("person/")) && actor == recipient)
+        || (rank == 3 && current <= 1 && fields.contains_key("acting_for"))
+        || (rank == 4 && current <= 1 && actor == Some("daemon/runtime"))
+        || (rank == 4 && fields.contains_key("delegation"));
+    if !valid {
+        const STATUS: [&str; 5] = ["sent", "staged", "delivered", "read", "closed"];
+        return Err(St3Error::new(
+            "invalid-message-transition",
+            format!(
+                "message `{subject}` cannot move from `{}` to `{}`",
+                STATUS[usize::from(current)],
+                STATUS[usize::from(rank)]
+            ),
+        ));
     }
     let fields = serde_json::to_string(fields).map_err(|error| internal(error.into()))?;
     let connection = shard.connection.write();
@@ -783,6 +804,12 @@ mod tests {
             record_lifecycle(&graph, subject, "message.read", None, &status("read")).unwrap_err().code,
             "missing-message-actor"
         );
+        // Forward steps follow the graph's transitions: an agent reads before it closes.
+        assert_eq!(
+            record_lifecycle(&graph, subject, "message.closed", Some("agent/cedar"), &status("closed")).unwrap_err().code,
+            "invalid-message-transition"
+        );
+        assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar"), &status("read")).unwrap());
         assert!(record_lifecycle(&graph, subject, "message.closed", Some("agent/cedar"), &status("closed")).unwrap());
         let (page, _) = graph
             .messages_page_inner(Some("agent/cedar"), false, None, through, 10, false)
