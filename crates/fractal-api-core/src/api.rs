@@ -6852,13 +6852,7 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }
-    #[cfg(target_os = "macos")]
-    {
-        fractal_runtime::PeerProcessIdentity::capture_native(
-            local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?,
-        )
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = stream;
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
