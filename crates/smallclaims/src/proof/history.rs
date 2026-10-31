@@ -5,21 +5,16 @@ use sha2::{Digest as _, Sha256};
 use crate::claim::{ClaimRecord, ReplicaEnvelope, ReplicaEnvelopePayload};
 use crate::fleet::{FleetClaim, Membership, envelope_signature_message, verify_signature};
 use crate::hash::{claim_id_is_content_hash, replica_envelope_hash, verify_replica_batch_header};
-use crate::principal::ClaimSignature;
 use super::{ProofError, chain_error, malformed};
 
 pub(super) struct Record {
     pub(super) claim: ClaimRecord,
-    pub(super) sequence: u64,
-    pub(super) position: usize,
-    pub(super) signatures: Vec<ClaimSignature>,
 }
 
 /// Authenticated sealed claims and membership at the supplied historical horizons.
 /// Fields are private so consumers cannot construct or modify verified evidence.
 pub struct VerifiedHistory {
     pub(super) records: BTreeMap<String, Record>,
-    pub(super) membership: Membership,
 }
 
 impl VerifiedHistory {
@@ -69,7 +64,7 @@ pub fn verify_sealed_history(
                 return Err(ProofError::new("invalid-signature", "blob content hash mismatch"));
             }
         }
-        for (position, claim) in batch.claims.iter().enumerate() {
+        for claim in &batch.claims {
             if claim.batch_id != batch.id || claim.origin != batch.origin || claim.accepted_at_unix_ms != batch.accepted_at_unix_ms || !claim_id_is_content_hash(claim).map_err(|error| malformed(error.to_string()))? {
                 return Err(ProofError::new("invalid-signature", "claim identity or batch metadata mismatch"));
             }
@@ -81,8 +76,7 @@ pub fn verify_sealed_history(
                     signers: BTreeSet::from([key.clone()]),
                 });
             }
-            let signatures = payload.claim_signatures.get(&claim.id).cloned().into_iter().collect();
-            if records.insert(claim.id.clone(), Record { claim: claim.clone(), sequence: batch.replica_sequence, position, signatures }).is_some() {
+            if records.insert(claim.id.clone(), Record { claim: claim.clone() }).is_some() {
                 return Err(malformed("duplicate claim ID"));
             }
         }
@@ -127,7 +121,7 @@ pub fn verify_sealed_history(
             previous = batch_hashes.get(&(envelope.writer.as_str(), envelope.sequence)).map(String::as_str);
         }
     }
-    Ok(VerifiedHistory { records, membership })
+    Ok(VerifiedHistory { records })
 }
 
 #[cfg(test)]
