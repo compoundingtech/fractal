@@ -69,13 +69,16 @@ fn retained_history_is_not_an_answer_difference() {
         let mut ids = Vec::new();
         for (at, writer, state) in [(100, "old", "idle"), (200, "new", "idle")] {
             store.set_write_clock_at(at).unwrap();
+            let fields = if kind == "observer.observed" {
+                json!({"status":state})
+            } else {
+                json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}})
+            };
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
             let claim = append_claim_tx(
                 &transaction, writer, subject, kind, None,
-                &json!({"fields": {"state": state, "code": "example", "observer": "observer/example",
-                    "incarnation_id": "one", "semantics": "session_cumulative", "total_tokens": 1,
-                    "severity": "error", "reason": "example", "kind":"vcs.issue", "facts":{"state":"open"}}}),
+                &json!({"fields":fields}),
                 &[], None,
             ).unwrap();
             ids.push(claim.id);
