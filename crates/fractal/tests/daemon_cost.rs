@@ -141,6 +141,18 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/fleet/anchor",
+        "one fleet metadata key lookup, independent of claim history; fleet::rename_proofs_export_over_cli_and_verify_without_daemon_or_config covers the real public API read through the CLI",
+    ),
+    (
+        "POST /v1/agents/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests covers real signed agent exports; evidence export intentionally reads the complete proven declaration, rename, actor and membership history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/missions/rename-id/proof/export",
+        "requires genuinely signed member envelopes and an admitted fleet trust root, absent from generated cost stores; store::rename_proof_tests::real_mission_rename_proves_published_declaration covers signed mission export; complete proof-history growth is not measured here",
+    ),
+    (
         "GET /v1/client/private-notes/{*uri}",
         "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
     ),
