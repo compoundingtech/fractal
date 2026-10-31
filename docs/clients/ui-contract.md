@@ -265,6 +265,14 @@ goes backward. An attached program receives Ctrl+L unchanged; use the leader the
 While attention is loading, triage flashes `loading attention…`; an unsuccessful fetch
 flashes `attention unavailable`. Neither state means `all clear` or advances the pass.
 
+The recent-place switcher uses that same history across all spaces, de-duplicated by content.
+Rows show the content title and space name. On every terminal type, Ctrl+^
+(legacy Ctrl+6, 0x1E) opens the popup when detached, with the previous place selected.
+Ctrl+\ then r opens it even over an attached program. Enter opens the selected destination
+in its recorded location, Escape cancels, and typing filters. Ctrl+^ then Enter
+flips between the last two places. Direct Ctrl+^ reaches attached programs unchanged.
+
+
 
 ### Starting a mission
 
