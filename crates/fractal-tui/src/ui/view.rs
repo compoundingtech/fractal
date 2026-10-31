@@ -179,6 +179,9 @@ pub struct Attention {
     /// Who is waiting, e.g. "Atlas Builder on harbor".
     pub waiting: Option<String>,
     pub age: String,
+    /// Exact opening time for chronological navigation, absent on an invalid server timestamp.
+    #[serde(skip)]
+    pub requested_at: Option<chrono::DateTime<chrono::FixedOffset>>,
     /// When an ask resolves by itself and what then applies, e.g. `answer within 3h, or “Hold”
     /// applies`. None on an item with no deadline.
     pub deadline: Option<String>,

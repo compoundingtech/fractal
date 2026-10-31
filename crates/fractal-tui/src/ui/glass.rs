@@ -4400,10 +4400,11 @@ impl Ui {
     }
 
     /// What the leader (Ctrl+\) offers, in the order its list shows: the key and what it does.
-    const LEADER_KEYS: [(&'static str, &'static str); 14] = [
+    const LEADER_KEYS: [(&'static str, &'static str); 15] = [
         ("\\", "close this tab"),
         ("c", "the conversation (leave the terminal)"),
         ("t", "a new tab"),
+        ("l", "previous item needing you"),
         ("v", "split right"),
         ("x", "split below"),
         ("[ ]", "back, forward in place history"),
@@ -4453,6 +4454,7 @@ impl Ui {
                     glasses.zoomed = !glasses.zoomed && glasses.glass().layout.groups().len() > 1;
                 }
                 '[' | ']' => self.navigate_history(letter == ']'),
+                'l' => self.triage_next(false),
                 _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
             },
             _ => self.flash("Not a leader key · Ctrl+\\ lists them"),
@@ -4537,6 +4539,28 @@ impl Ui {
     pub(crate) fn swap_focused_pane(&mut self, pane: Pane) {
         let focus = self.glasses.glass().focus;
         self.swap_shown_pane(focus, pane);
+    }
+
+    /// Triage replaces only this split's content, even when another split shows the target.
+    pub(super) fn replace_focused_pane(&mut self, pane: Pane) {
+        let before = self.current_place();
+        self.glasses.home = false;
+        self.glasses.palette = None;
+        self.glasses.sidebar.focused = false;
+        let glass = self.glasses.glass_mut();
+        let group = glass.layout.group_mut(glass.focus).unwrap();
+        if group.tabs.is_empty() {
+            group.tabs.push(Tab::pane(pane.key()));
+            group.current = 0;
+        } else {
+            let tab = &mut group.tabs[group.current];
+            tab.pane = pane.key();
+            tab.title = None;
+        }
+        let id = glass.id.clone();
+        self.glass_changed(&id);
+        self.show_focused();
+        self.record_place_change(before);
     }
 
     /// Show `pane` in place of what the split `group` shows.
@@ -5619,6 +5643,7 @@ mod tests {
     fn alert_prompt(id: &str, agent: &str) -> Attention {
         Attention {
             deadline: None,
+            requested_at: None,
             id: id.into(),
             tier: Tier::Stopped,
             title: format!("{agent} is waiting for a permission"),
