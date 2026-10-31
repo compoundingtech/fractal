@@ -4,8 +4,10 @@
   review-risk BASE HEAD     the risk of git diff BASE...HEAD by named rules, no model involved
 
 Prints JSON: {"level": "low"|"medium"|"high", "reasons": [{"rule", "level", "paths": [...], "lines": [...]}], "changed_files": N,
-"changed_lines": N}. The level is the highest of the reasons' levels. A review's final risk is the higher of this and the reviewing
-model's own score: the model may raise the risk above this floor and never lower it.
+"changed_lines": N, "factory_read": [{"area", "paths", "lines"}], "needs_factory_read": bool}. The level is the highest of the reasons'
+levels. A review's final risk is the higher of this and the reviewing model's own score: the model may raise the risk above this floor
+and never lower it. `factory_read` lists the areas (rules "factory_read") that the change touches; it never changes the level.
+`needs_factory_read` is true when the level is medium and an area is touched: such a change is read by Factory before it is queued.
 
 The rules (review-risk.json), risky classes (risky-classes.json) and engine (scripts/classify-risk)
 are read from BASE, never from the head under review, so a change cannot lower its own floor by editing them. If BASE does not hold
@@ -267,6 +269,30 @@ def score(rules, paths, lines, risky_classes, engine):
     return reasons
 
 
+def factory_read_areas(rules, paths, lines, engine):
+    """The areas of RULES["factory_read"] that the change touches, each with the paths and added lines that put it there. They never
+    change the level: a MEDIUM change in one of them is queued only after Factory has read it."""
+    areas = []
+    for area in rules.get("factory_read", []):
+        exclude = area.get("exclude", [])
+        by_path = sorted(path for path in paths if engine.matches(area.get("globs", []), path) and not engine.matches(exclude, path))
+        by_line = []
+        for content in area.get("content", []):
+            pattern = re.compile(content["pattern"])
+            only = content.get("only")
+            for path in sorted(paths):
+                if not engine.matches(content["globs"], path) or engine.matches(content.get("exclude", []), path):
+                    continue
+                for marker, text in lines.get(path, []):
+                    if only == "added" and marker != "+" or only == "removed" and marker != "-":
+                        continue
+                    if pattern.search(text):
+                        by_line.append(f"{path}: {marker}{text.strip()}")
+        if by_path or by_line:
+            areas.append({"area": area["name"], "paths": sorted(set(by_path) | {line.split(": ", 1)[0] for line in by_line}), "lines": by_line[:20]})
+    return areas
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("base")
@@ -280,13 +306,15 @@ def main():
             raise SystemExit(f"{RULES}: unsupported version")
         paths, lines, changed = read_diff(args.repo, args.base, args.head)
         reasons = score(rules, paths, lines, risky, engine)
+        areas = factory_read_areas(rules, paths, lines, engine)
     large = rules.get("large")
     if large and changed >= large["changed_lines"]:
         reasons.append({"rule": "large-change", "level": large["level"], "paths": [], "lines": [f"{changed} changed lines (at least {large['changed_lines']})"]})
     level = "low"
     for reason in reasons:
         level = higher(level, reason["level"])
-    print(json.dumps({"level": level, "reasons": reasons, "changed_files": len(paths), "changed_lines": changed}, indent=2))
+    print(json.dumps({"level": level, "reasons": reasons, "factory_read": areas, "needs_factory_read": level == "medium" and bool(areas),
+                      "changed_files": len(paths), "changed_lines": changed}, indent=2))
     return 0
 
 

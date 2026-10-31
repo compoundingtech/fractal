@@ -1056,6 +1056,14 @@ pub fn is_missing_route(error: &anyhow::Error) -> bool {
         .is_some_and(|error| error.status == 404)
 }
 
+/// Exactly the answer a daemon without the route gives: Axum's 404 with no body. A 404 that says
+/// anything, malformed or not, is an answer from a route that exists.
+pub fn is_absent_route(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<UnexpectedResponse>()
+        .is_some_and(|error| error.status == 404 && error.empty)
+}
+
 /// The HTTP status an API call failed with, including an answer without an error body.
 pub fn http_status(error: &anyhow::Error) -> Option<u16> {
     error
@@ -1135,6 +1143,8 @@ impl std::error::Error for ApiResponseError {}
 struct UnexpectedResponse {
     status: u16,
     body: String,
+    /// Whether the answer had no bytes at all; `body` is trimmed for display.
+    empty: bool,
 }
 
 impl fmt::Display for UnexpectedResponse {
@@ -1715,6 +1725,7 @@ fn api_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     UnexpectedResponse {
         status,
         body: String::from_utf8_lossy(bytes).trim().to_owned(),
+        empty: bytes.is_empty(),
     }
     .into()
 }
@@ -3012,4 +3023,23 @@ mod tests {
             "a session the registry did not name must receive nothing"
         );
     }
+}
+
+#[cfg(test)]
+mod absent_route_tests {
+    use super::*;
+
+    /// Only Axum's empty 404 says a route is absent; a 404 with any body comes from a route that
+    /// exists, and another status is not about routes.
+    #[test]
+    fn only_an_empty_404_is_an_absent_route() {
+        // Through the decoder that builds the error from the answer's bytes.
+        let answer = |status, body: &[u8]| api_error(status, body);
+        assert!(is_absent_route(&answer(404, b"")));
+        assert!(!is_absent_route(&answer(404, b"not json")));
+        assert!(!is_absent_route(&answer(404, b"  \n")), "a body of whitespace is still a body");
+        assert!(!is_absent_route(&answer(500, b"")));
+        assert!(!is_absent_route(&anyhow::anyhow!("another failure")));
+    }
+
 }

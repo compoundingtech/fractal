@@ -78,19 +78,24 @@ impl Daemon {
         self.root.join("api.sock")
     }
     async fn start(&mut self) {
-        let state = AppState { owning_person: None,
-        store: self.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "example".into(),
-        state_dir: self.root.clone(),
-        pty_root: self.root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = AppState {
+            owning_person: None,
+            store: self.store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: "example".into(),
+            state_dir: self.root.clone(),
+            pty_root: self.root.join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = self.socket();
         self.server = Some(tokio::spawn(async move {
             fractal_daemon::api::serve_unix(&socket, fractal_daemon::api::router(state))

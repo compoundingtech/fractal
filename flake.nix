@@ -1306,6 +1306,8 @@
             }).config;
             consumer = phase: (mkHmModuleEval {
               fractalMigration.phase = phase;
+              package = pkgs.writeShellScriptBin "st3" "exit 1";
+              ptyPackage = null;
               stateDir = "/home/example/.local/state/st3/store";
               ptyRoot = "/home/example/.local/state/st3/pty";
               forceLegacyConfig = true;
@@ -1315,6 +1317,21 @@
                 enabled = false
               '';
             }).config;
+            # Read the stage command from the emitted plist, not a launchd agent:
+            # stage intentionally installs a disabled file without defining an agent.
+            consumerStagePlist =
+              (consumer "stage").home.file."Library/LaunchAgents/com.compoundingtech.fractal.plist".text;
+            consumerStageCommand = builtins.match
+              ".*<key>ProgramArguments</key>[[:space:]]*<array>[[:space:]]*<string>(/nix/store/[^<]+-fractal-daemon)</string>[[:space:]]*</array>.*"
+              consumerStagePlist;
+            consumerDarwinArgs = phase:
+              if phase == "stage" then
+                assert pkgs.lib.assertMsg (consumerStageCommand != null)
+                  "Darwin stage plist must select exactly one fractal-daemon wrapper";
+                # Regex captures must retain the plist's derivation dependencies.
+                [ (builtins.appendContext (builtins.head consumerStageCommand)
+                    (builtins.getContext consumerStagePlist)) ]
+              else (consumer phase).launchd.agents.fractal.config.ProgramArguments;
             receipt = "/home/example/.local/state/fractal/.fractal-migration-completed";
             preflight = rendered.home.activation.fractalMigrationPreflight;
             legacyPreflight = unstaged.home.activation.fractalMigrationPreflight;
@@ -1387,11 +1404,18 @@
               && pkgs.lib.hasInfix (if phase == "completed"
                 then ''state_dir = "/home/example/.local/state/fractal/store"''
                 else ''state_dir = "/home/example/.local/state/st3/store"'') file.text
-              && (phase == "legacy" || (
+              && (phase == "legacy" || (if pkgs.stdenv.hostPlatform.isLinux then
                 pkgs.lib.hasInfix "/home/example/.local/state/fractal/store/bin/fractal"
                   evaluated.systemd.user.services.fractal.Service.ExecStart
                 && pkgs.lib.hasInfix "/home/example/.local/state/fractal/pty"
                   evaluated.systemd.user.services.fractal.Service.ExecStart
+              else
+                # Eval proves command selection/shape; the builder below proves
+                # executable and PTY arguments in those actual generated scripts.
+                let args = consumerDarwinArgs phase;
+                in builtins.length args == 1
+                  && builtins.match "/nix/store/[^/]+-fractal-daemon" (builtins.head args) != null
+                  && args == consumerDarwinArgs "stage"
               ))
           ) [ "legacy" "stage" "completed" ];
           assert builtins.all (stateDir:
@@ -1533,7 +1557,73 @@
               if FAKE_STATE=unknown ${pkgs.runtimeShell} guard; then
                 echo 'unknown service-manager state passed migration guard' >&2; exit 1
               fi
-            '' + "touch $out"
+            '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin (''
+              # Check the entire wrapper's straight-line shape, not just an exec
+              # substring: the unconditional migration guard must precede exec.
+              check_darwin_wrapper() {
+                lineNumber=0
+                while IFS= read -r line || test -n "$line"; do
+                  lineNumber=$((lineNumber + 1))
+                  case "$lineNumber" in
+                    1) test "$line" = '#!${pkgs.runtimeShell}' || return 1 ;;
+                    2) test "$line" = 'set -eu' || return 1 ;;
+                    3)
+                      printf '%s\n' "$line" | ${pkgs.gnugrep}/bin/grep -Ex \
+                        '/nix/store/[a-z0-9]{32}-fractal-migration-ready' >/dev/null || return 1
+                      ;;
+                    4)
+                      case "$line" in
+                        ${pkgs.lib.escapeShellArg
+                          "exec ${pkgs.lib.escapeShellArgs [ "/home/example/.local/state/fractal/store/bin/fractal" ]} "
+                        }*) ;;
+                        *) return 1 ;;
+                      esac
+                      printf '%s\n' "$line" | ${pkgs.gnugrep}/bin/grep -F -- ${pkgs.lib.escapeShellArg
+                        ((pkgs.lib.escapeShellArgs [ "--pty-root" "/home/example/.local/state/fractal/pty" ]) + " ")
+                      } >/dev/null || return 1
+                      ;;
+                    # writeShellScript adds a newline after its supplied text.
+                    *) test -z "$line" || return 1 ;;
+                  esac
+                done < "$1"
+                test "$lineNumber" -ge 4
+              }
+            '' + pkgs.lib.concatMapStrings (phase:
+              let wrapper = builtins.head (consumerDarwinArgs phase);
+              in ''
+                # Inspect the actual selected output; never execute its guard,
+                # launchctl, or daemon. Fail explicitly on wrong paths or order.
+                check_darwin_wrapper ${pkgs.lib.escapeShellArg wrapper} || {
+                  echo '${phase}: invalid Darwin guard/executable/PTY wrapper' >&2; exit 1
+                }
+                # Mutate that same output to prove the checker rejects removed
+                # or late guards and independently wrong executable/PTY paths.
+                for mutation in removed-guard late-guard wrong-executable wrong-pty; do
+                  lineNumber=0
+                  while IFS= read -r line; do
+                    lineNumber=$((lineNumber + 1))
+                    case "$lineNumber:$mutation" in
+                      3:removed-guard) continue ;;
+                      3:late-guard) savedGuard=$line; continue ;;
+                      4:late-guard) printf '%s\n' "$line" "$savedGuard"; continue ;;
+                      4:wrong-executable)
+                        printf '%s\n' ${pkgs.lib.escapeShellArg
+                          "exec ${pkgs.lib.escapeShellArgs [ "/wrong/bin/fractal" "--pty-root" "/home/example/.local/state/fractal/pty" "--web-listen" "off" ]}"
+                        }; continue ;;
+                      4:wrong-pty)
+                        printf '%s\n' ${pkgs.lib.escapeShellArg
+                          "exec ${pkgs.lib.escapeShellArgs [ "/home/example/.local/state/fractal/store/bin/fractal" "--pty-root" "/wrong/pty" ]}"
+                        }; continue ;;
+                    esac
+                    printf '%s\n' "$line"
+                  done < ${pkgs.lib.escapeShellArg wrapper} > "${phase}-$mutation"
+                  if check_darwin_wrapper "${phase}-$mutation"; then
+                    echo "${phase}: accepted $mutation wrapper" >&2; exit 1
+                  fi
+                done
+              ''
+            ) [ "stage" "completed" ]
+            ) + "touch $out"
           );
         checks.fractal-aliases =
           let

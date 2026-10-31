@@ -292,8 +292,11 @@ pub async fn list_claims(
     }
     let store = state.store.clone();
     blocking_store(move || {
+        let subject = query.subject.as_deref().map(|subject| {
+            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+        }).transpose()?;
         store.claims_page(
-            query.subject.as_deref(),
+            subject.as_deref(),
             query.owner_run.as_deref(),
             query.after_index,
             query.before_index,

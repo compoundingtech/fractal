@@ -28,6 +28,10 @@ latest state. The repository resource keeps only its own facts, such as `reposit
 | `reactions` | `reactions` (each reaction's count), and `last_comment.reactions` |
 | `mentions` | `mentions`: the newest mention of each GitHub login in the item's body or comments (`login`, `by`, `url`, `at`), up to 50 |
 
+The member that polls a repository also keeps each item's full facts, every head it has had and
+the keyed events of each change in its GitHub plugin mirror, which `st gh prs|pr|checks` read; a
+newer `vcs.item.state` is read over an item's observed facts. See [plugins](plugins.md).
+
 `vcs.repository`, `vcs.issue`, and `vcs.pull-request` carry optional GitHub `node_id` facts.
 Subjects keep their existing OWNER/REPO/number names. A repository rename or transfer records
 `moved_to` on the old repository; a relocated item records it on the old item, pointing to the
