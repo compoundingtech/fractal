@@ -158,17 +158,42 @@ pub fn item_state_updates(
         .map(|name| (*name, state.get(*name).filter(|value| !value.is_null())))
 }
 
+/// The value a compact fact takes over an item's `prior` value of it. `required_checks` is a
+/// summary: its state, source and failed names replace those of the prior object, and the rest
+/// (the checks it counts, their execution) stays. Every other compact fact replaces its prior.
+pub fn compact_fact_over(name: &str, prior: Option<&Value>, compact: &Value) -> Value {
+    match (name, prior.and_then(Value::as_object), compact.as_object()) {
+        ("required_checks", Some(prior), Some(summary)) => {
+            let mut merged = prior.clone();
+            for field in ["state", "source", "failed"] {
+                match summary.get(field) {
+                    Some(value) => merged.insert(field.into(), value.clone()),
+                    None => merged.remove(field),
+                };
+            }
+            Value::Object(merged)
+        }
+        _ => compact.clone(),
+    }
+}
+
 /// Lay a `vcs.item.state`'s compact fields over an item's facts: each compact fact replaces the
-/// fact of that name, and a null removes it. Facts it does not carry (title, comments) stay.
+/// fact of that name (see [`compact_fact_over`]), and a null removes it. Facts it does not carry
+/// (title, comments) stay.
 pub fn overlay_item_state(
     facts: &mut serde_json::Map<String, Value>,
     state: &serde_json::Map<String, Value>,
 ) {
     for (name, value) in item_state_updates(state) {
         match value {
-            None => facts.remove(name),
-            Some(value) => facts.insert(name.into(), value.clone()),
-        };
+            None => {
+                facts.remove(name);
+            }
+            Some(value) => {
+                let value = compact_fact_over(name, facts.get(name), value);
+                facts.insert(name.into(), value);
+            }
+        }
     }
 }
 
@@ -251,6 +276,12 @@ mod tests {
         assert_eq!(older["head_sha"], "abc");
         assert_eq!(older["title"], "Garden paths");
         assert!(older.get("merge_queue").is_none());
+        let mut checked = json!({"required_checks": {"state": "pending", "checks": ["build"], "execution": {"run": 4}}});
+        let mut passing = compact.clone();
+        passing.insert("required_checks".into(), json!({"state": "pass", "source": "rules"}));
+        overlay_item_state(checked.as_object_mut().unwrap(), &passing);
+        assert_eq!(checked["required_checks"], json!({"state": "pass", "source": "rules", "checks": ["build"], "execution": {"run": 4}}),
+            "the summary keeps the snapshot's checks and execution");
         assert!(compact_item_state("vcs.repository", "observer/x", &serde_json::Map::new()).is_none());
     }
 

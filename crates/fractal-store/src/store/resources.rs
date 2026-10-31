@@ -264,9 +264,14 @@ pub fn refresh(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
         {
             for (name, value) in fractal_schema::github_plugin::item_state_updates(state) {
                 match value {
-                    None => facts.remove(name),
-                    Some(value) => facts.insert(name.into(), value.clone()),
-                };
+                    None => {
+                        facts.remove(name);
+                    }
+                    Some(value) => {
+                        let value = fractal_schema::github_plugin::compact_fact_over(name, facts.get(name), value);
+                        facts.insert(name.into(), value);
+                    }
+                }
             }
             if kind.is_empty() {
                 kind = state.get("item_kind").and_then(Value::as_str).unwrap_or_default().to_owned();
