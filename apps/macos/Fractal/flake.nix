@@ -60,7 +60,7 @@
         default = tray;
         attention-tray = tray;
       };
-      devShells.${system}.default = pkgs.mkShell {
+      devShells.${system}.default = pkgs.mkShellNoCC {
         FRACTAL_CLIENT_PATH = clientPath;
       };
     };

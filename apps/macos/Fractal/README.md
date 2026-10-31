@@ -14,6 +14,10 @@ SDK. SwiftPM consumes the exact locked Fractal Swift client via
 `FRACTAL_CLIENT_PATH`; builds use two Swift jobs. The root tray input follows
 the root Fractal source; the standalone flake pins the same revision.
 
+Run tests with `nix develop ./flakes/attention-tray -c /usr/bin/swift test`.
+The compiler-free shell avoids nixpkgs' xcrun stub; explicit `/usr/bin/swift`
+uses Apple's host toolchain, consistent with the package build.
+
 Standalone launches require three explicit environment variables:
 `ATTENTION_FRACTAL_ENDPOINT`, `ATTENTION_FRACTAL_CREDENTIAL`, `ATTENTION_FRACTAL_URL`.
 There are no endpoint, localhost, or Boss fallbacks. The application itself
