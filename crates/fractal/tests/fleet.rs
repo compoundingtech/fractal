@@ -6000,13 +6000,17 @@ async fn action_coverage_github_plugin_reads_answer_on_the_poller_and_relay_from
     assert_eq!(relayed["pull"]["facts"]["head_sha"], "a".repeat(40), "{relayed}");
     assert_eq!(relayed["poller"], "host/fixture-poller");
 
-    // With the poller down, the reader answers from its graph and says why.
+    // With the poller down, the reader answers from its graph and says why. Relayed reads need no
+    // replication, so first wait for the pull request's claims to reach the reader.
+    wait_until("the reader's graph holds the pull request", 90, || async {
+        reader.claims().await.iter().any(|claim| claim["subject"] == "resource/github/fixture/app/pull-request/12")
+    }).await;
     poller.stop();
     let fallback = gh_prs(&reader, PERSON);
     assert_eq!(fallback["source"]["kind"], "graph", "{fallback}");
     assert_eq!(fallback["source"]["host"], "host/fixture-reader");
     assert!(fallback["source"]["reason"].as_str().unwrap().contains("did not answer"), "{fallback}");
-    assert_eq!(fallback["pulls"][0]["number"], 12);
+    assert_eq!(fallback["pulls"][0]["number"], 12, "{fallback}");
     let checks = reader.st_json(&["gh", "checks", "fixture/app#12", "--as", PERSON]);
     assert!(checks["checks"]["heads"].is_null(), "the graph keeps no head history: {checks}");
     let human = reader.st_ok(&["gh", "prs", "fixture/app", "--as", PERSON]);
