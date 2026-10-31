@@ -2,3 +2,4 @@ record 36cb1300fcf732e36ce10e0234e7e0b61b71961c genie-freshness 0 fleet/ci 2026-
 record 4968ed6cd30da872f7f18f4c955002e5e9de7217 linux-fleet-compat 0 fleet/ci 2026-10-29T07:35:33Z
 record 6a9250f81a4070a7f4dd508e00b35dbcb2d4056e linux-clippy 0 fleet/ci 2026-10-29T07:34:26Z
 record aa6532ab497a2415e3efa111ed75a69409115fff linux-gate 1 fleet/ci 2026-10-29T07:38:41Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

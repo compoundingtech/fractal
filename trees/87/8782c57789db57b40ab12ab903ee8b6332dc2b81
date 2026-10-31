@@ -65,3 +65,4 @@ record b63581343b4c17ee830a9e3b92c29bc6b9d6c679 fractal-web 0 fleet/ci 2026-10-2
 record befb3d3ff25ebb495619407bc107ffe0cd0c0c56 linux-gate 0 fleet/ci 2026-10-27T12:47:09Z
 record ea6bb14ca336eb3a946e4d15cc89dfad95d53b9b linux-tests-shard-3 0 fleet/ci 2026-10-27T12:38:11Z
 record f8510fa7f6e492e353e7726dcc4ca01d1301ced3 fractal-web 0 fleet/ci 2026-10-27T12:36:56Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

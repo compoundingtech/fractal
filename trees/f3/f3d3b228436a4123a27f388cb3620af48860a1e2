@@ -65,3 +65,4 @@ record c5b58cd2766e782ced2b031c0cc418e5ebcd9587 linux-tests-shard-3 0 fleet/ci 2
 record d36b6e3e78ab93410d108b62b25c5d8dc76fcd26 fractal-web 0 fleet/ci 2026-10-27T07:24:32Z
 record e7f576e48acee49372d36fc8a2d535616b717eeb linux-clippy 0 fleet/ci 2026-10-27T07:04:46Z
 record eab993f2947ef79ee026c5585764045c14247f4d linux-tests-shard-2 0 fleet/ci 2026-10-27T07:11:09Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

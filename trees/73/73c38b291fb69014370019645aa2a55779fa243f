@@ -6,3 +6,4 @@ record 7554fbf3adcf1a4d57f07f28a0e6b233ba19b921 linux-tests-shard-2 0 fleet/ci 2
 record 8293a93c18b725ad6d58b0bf0ead4b179d0c1815 ci-script-tests 0 fleet/ci 2026-10-29T17:42:01Z
 record 985cd296ad9d021109325f77de67a249718961ff linux-fleet-compat 0 fleet/ci 2026-10-29T17:41:16Z
 record c73a5b5cfe254826789155399eb1b134ee54c0d5 linux-tests 0 fleet/ci 2026-10-29T17:49:15Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

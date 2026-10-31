@@ -7,3 +7,4 @@ record af06f6e9061a05f6ac729b1245224a18acd929c9 ci-script-tests 0 fleet/ci 2026-
 record b38c2bc2acd458bc1983a1b1d74d1dea985adbfc fractal-web 0 fleet/ci 2026-10-29T17:52:22Z
 record b767cb9534d92a10e95d68a7ec5a6aa85615abf5 linux-fleet-compat 0 fleet/ci 2026-10-29T17:47:57Z
 record f1f984aec9dcdef1e865db3c2b9d2e9685018a7a linux-clippy 1 fleet/ci 2026-10-29T17:42:53Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

@@ -65,3 +65,4 @@ record b361ca95f9fdb9d58f233f448164b07706685e04 fractal-web 0 fleet/ci 2026-10-2
 record d7412c0c796146a481d84ab221d544a9b5dd01e5 linux-fleet-compat 0 fleet/ci 2026-10-27T17:40:19Z
 record f04ed8ea76ff41f0dc31cb89a28c027221dccc97 linux-clippy 0 fleet/ci 2026-10-27T17:40:23Z
 record f5c10b6142a4dec1c1798bbe889a05130035ac8d linux-tests-shard-4 0 fleet/ci 2026-10-27T17:50:28Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

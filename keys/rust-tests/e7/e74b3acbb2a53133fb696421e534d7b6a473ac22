@@ -11,3 +11,4 @@ record 3c4a2813d591b2c41450a77c6562ed3326704dfd rust-tests 0 fleet/ci 2026-10-29
 record 4af0336b6e41fc7b2f11c80fe6cc7beea81ac31e rust-tests 0 host/spindle 2026-10-29T07:57:46Z
 record 20907bf3470059ccfb388152764597ae60375c8d rust-tests 0 fleet/ci 2026-10-29T08:17:30Z
 record 22134bb5612e8baef88cc8bd93e0eb43a376e8b3 rust-tests 0 host/spindle 2026-10-29T08:20:33Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

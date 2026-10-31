@@ -65,3 +65,4 @@ record cb648dc0cbb29c0fac7e16020bfff88498eda0ef linux-gate 0 fleet/ci 2026-10-27
 record d81e0cbe05c652631c263faf952d5a34b649c612 genie-freshness 0 fleet/ci 2026-10-27T08:43:25Z
 record da077d6fbd999bbbc8ce9c7992c35b155041f37e ci-script-tests 0 fleet/ci 2026-10-27T08:46:29Z
 record dcb306f419162ac9448f6371f82bd3b776956f29 typescript-client 0 fleet/ci 2026-10-27T08:46:56Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a

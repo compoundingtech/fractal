@@ -65,3 +65,4 @@ record efda1b89e6055af85a1e1e1fd7a43013d763a0f5 rust-tests 0 fleet/ci 2026-10-27
 record f2a201927b175ddb9a177897dc8497f22c4e2646 linux-tests-shard-3 0 fleet/ci 2026-10-27T15:33:14Z
 record f68c7731baedf3fe0c5794366adb41dd1a04e890 rust-tests 0 fleet/ci 2026-10-27T15:36:50Z
 record f9631da43d3356660811cfaf627a3e29f6f5d39a rust-tests 0 fleet/ci 2026-10-27T15:36:35Z
+gc 2026-10-31T03:55:14+00:00 bfabf77fb8c2e8011c7235d746aa2b4c895e503d51350ba653fdaef51b3ad13a
