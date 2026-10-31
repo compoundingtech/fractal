@@ -781,6 +781,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/checkpoint/excuse", post(replication::checkpoint_excuse))
         .route("/v1/checkpoint/resume", post(replication::checkpoint_resume))
         .route("/v1/signatures/resume", post(replication::signature_resume))
+        .route("/v1/faults/dismiss", post(records::dismiss_fault))
         .route(
             "/v1/internal/replication/export",
             post(replication::replication_export).layer(DefaultBodyLimit::max(crate::peer::MAX_EXCHANGE_BYTES)),
@@ -7114,6 +7115,7 @@ pub async fn guard_bound_request(
         "/v1/rules/",
         "/v1/repair",
         "/v1/signatures/",
+        "/v1/faults/",
         "/v1/checkpoint/",
     ]
     .iter()
@@ -7430,7 +7432,7 @@ fn stale_attention_check(items: &[crate::model::AttentionItemView], now: u128) -
         name: "attention-age".into(),
         status: "warn".into(),
         message: format!(
-            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source: {}",
+            "{} alerts and faults have been open for more than a day; `st alerts ls --as PERSON` shows how to close a person's alert, and a fault closes at its source, or with `st missions dismiss-fault` once its run has ended: {}",
             stale.len(),
             listed.join("; ")
         ),

@@ -711,7 +711,7 @@ impl Store {
         detail.push(' ');
         detail.push_str(&remedy);
         detail.push_str(
-            " This item closes when the loop runs again or its run is revised or cancelled.",
+            " This item closes when the loop runs again or its run is revised or cancelled; once the run has ended, a person or the fleet's fault agent dismisses it with `st missions dismiss-fault RUN --reason \"...\"`.",
         );
         let (title, reviewer, severity) = match &loop_spec.exhaustion_attention {
             Some(attention) => (
