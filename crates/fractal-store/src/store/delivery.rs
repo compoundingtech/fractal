@@ -167,7 +167,9 @@ impl Store {
         mut keep: impl FnMut(&MessageView) -> bool,
     ) -> Result<(Vec<MessageView>, bool)> {
         let mut after = after.saturating_sub(super::messages_shard::STREAM_INDEX_BASE);
-        let batch = limit.saturating_add(1);
+        // Filters can drop most rows, so a batch never shrinks to the page: a full graph page
+        // asks only whether one more item follows, and that must not cost a query per row.
+        let batch = limit.saturating_add(1).max(64);
         let mut output = Vec::new();
         loop {
             let rows = super::messages_shard::page(self, recipients, senders, after, batch)?;

@@ -313,19 +313,29 @@ fn record_lifecycle_checked(
             ),
         ));
     }
+    let acting_for = fields.get("acting_for").cloned();
     let fields = serde_json::to_string(fields).map_err(|error| internal(error.into()))?;
-    let connection = shard.connection.write();
-    connection
+    let inserted = shard
+        .connection
+        .write()
         .execute(
             /* sqlite-large-value: allow-for-now lv-h2314176b1be8 owner=fractal_store::store::messages_shard TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO stream_lifecycle(subject, kind, actor, fields, recorded_at_unix_ms)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![subject, kind, actor.unwrap_or(""), fields, smallclaims::store::now_ms() as i64],
         )
-        .map_err(|error| internal(error.into()))
-        .and_then(|inserted| match inserted {
-            0 if custody_reread => Err(St3Error::new("invalid-message-transition", "custody read is already recorded")),
-            inserted => Ok(inserted > 0),
-        })
+        .map_err(|error| internal(error.into()))?;
+    if inserted == 0 && custody_reread {
+        // A retried custody read for the same predecessor settles, as its graph claim would by
+        // its idempotency key; a read of this mail for another predecessor is refused.
+        let same = lifecycle_records(&shard, subject)
+            .map_err(internal)?
+            .iter()
+            .any(|(kind, recorded)| kind == "message.read" && recorded.get("acting_for") == acting_for.as_ref());
+        if !same {
+            return Err(St3Error::new("invalid-message-transition", "custody read is already recorded"));
+        }
+    }
+    Ok(inserted > 0)
 }
 
 /// The graph, as the shard's fleet authority. It is held weakly: the daemon owns the graph,
@@ -900,10 +910,10 @@ mod tests {
         assert_eq!(receipt.id, lifecycle_receipt("alder", subject, "message.read", Some("agent/cedar"), &status("read")).id);
     }
 
-    /// A successor's custody read of mail its predecessor read is recorded once; a step its
+    /// A successor's custody read of mail its predecessor read is recorded once and a retry settles; a step its
     /// caller admitted skips the transitions, as the graph's internal appends do.
     #[test]
-    fn a_custody_reread_is_recorded_once_and_an_admitted_read_skips_delivery() {
+    fn a_custody_reread_settles_on_retry_and_an_admitted_read_skips_delivery() {
         let root = tempfile::tempdir().unwrap();
         let graph = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
         let shard = open(&graph, root.path()).unwrap();
@@ -921,8 +931,12 @@ mod tests {
         let mut custody = status("read");
         custody.insert("acting_for".into(), json!("agent/cedar"));
         assert!(record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap());
+        // A retry settles; the same successor reading for another predecessor is refused.
+        assert!(!record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap());
+        let mut other = custody.clone();
+        other.insert("acting_for".into(), json!("agent/cedar-other"));
         assert_eq!(
-            record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &custody).unwrap_err().code,
+            record_lifecycle(&graph, subject, "message.read", Some("agent/cedar-next"), &other).unwrap_err().code,
             "invalid-message-transition"
         );
 

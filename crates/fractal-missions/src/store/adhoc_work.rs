@@ -267,10 +267,18 @@ impl AdhocWorkStore for Store {
         ) -> Result<StepRunView, St3Error> {
         let subject = normalize_step_run(subject);
         // A note in the messages shard is a stream item: its read is this member's record there.
-        let stream_note = self
-            .message(&input.message)
-            .map_err(internal)?
-            .is_some_and(|note| crate::store::messages_shard::mailbox_reads::is_stream_item(&note));
+        // Its recipient's read is recorded before the graph's writer is taken: the shard's
+        // admission can seal graph batches under the shard's writer, so the graph's writer must
+        // never wait on the shard's. Reading mail addressed to you needs no handoff to be current;
+        // were the acknowledgment refused below, the note stays read, which it is.
+        let stream_receipt = match self.message(&input.message).map_err(internal)? {
+            Some(note) if crate::store::messages_shard::mailbox_reads::is_stream_item(&note) => {
+                Some((note.to == input.actor)
+                    .then(|| stream_note_read(self, &input.message, &input.actor))
+                    .transpose()?)
+            }
+            _ => None,
+        };
         self.connection.batched(|tx| {
             let mut view = person_work::step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the handed-off step is missing"))?;
             let handoff = latest_handoff(tx, &view, now_ms())?.ok_or_else(|| St3Error::new("missing-handoff", "this attempt has no handoff note"))?;
@@ -284,11 +292,12 @@ impl AdhocWorkStore for Store {
             if view.status != "ready" || step_owner_is_terminal_tx(tx, &subject)? {
                 return Err(St3Error::new("stale-handoff", "this handoff is no longer waiting for acknowledgment"));
             }
-            let (receipt, predecessors) = if stream_note {
-                // The read is recorded in the shard before the progress claim commits; were that
-                // claim to fail, the note stays read and a repeated acknowledgment finds it so.
-                // The receipt is not a graph claim, so the progress cites it without following it.
-                (stream_note_read(self, &input.message, &input.actor)?, vec![handoff.id])
+            let (receipt, predecessors) = if let Some(receipt) = &stream_receipt {
+                // Were the progress claim to fail, the note stays read and a repeated
+                // acknowledgment finds it so. The receipt is not a graph claim, so the progress
+                // cites it without following it.
+                let receipt = receipt.clone().ok_or_else(|| St3Error::new("stale-handoff", "only the note's recipient can acknowledge it"))?;
+                (receipt, vec![handoff.id])
             } else {
                 let seen: Option<String> = tx.query_row(/* sqlite-large-value: allow-for-now lv-h21741300df1e owner=fractal_missions::store::adhoc_work TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id FROM claims WHERE subject=?1 AND actor=?2 AND kind IN ('message.read','message.closed') ORDER BY CANONICAL_ASC(claims) LIMIT 1"), params![input.message, input.actor], |row| row.get(0)).optional().map_err(internal)?;
                 let receipt = match seen {
