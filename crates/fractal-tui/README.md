@@ -87,8 +87,9 @@ tab reveals it again if necessary. `‹N` / `N›` count the tabs outside that v
 Overflow budgets keep a cell for activity, showing fewer whole tabs when needed.
 
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
-`Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
-attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
+`Ctrl+E` expands tool output, `Ctrl+P` simplifies, and `Ctrl+D` shows the agent's details.
+The Attach button opens the agent's terminal; Enter attaches a detached terminal pane.
+`Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
@@ -154,8 +155,8 @@ never appended to or overwritten; a new file is mode 0600 on Unix.
 
 Start the installed `fractal` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
-Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
-attachment), `--demo`, or a headless test client as a conversation-render measurement.
+Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use terminal attachment,
+`--demo`, or a headless test client as a conversation-render measurement.
 
 The file has at most seven content-free JSON lines (at most 2 KiB), with monotonic `at_ms`
 from entry to `main`: `process_started`, `conversation_intent`, `converse_enqueued`,
