@@ -2820,13 +2820,17 @@ enum IdentityRenameCommand {
 
 #[derive(Subcommand)]
 enum RenameProofCommand {
-    /// Export sealed evidence from the daemon; revision is an exact claim-ID token.
+    /// Export fleet-internal evidence; contains complete co-batched claims and blobs.
+    /// Do not publish the bundle or attach it to public issues.
     Export {
         name: String,
         #[arg(long)]
         revision: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Consent to disclosing complete co-batched claims and blobs to fleet tooling.
+        #[arg(long)]
+        include_co_batched_claims: bool,
     },
     /// Verify a portable proof offline, trusting only the supplied fleet anchor.
     Verify {
@@ -2894,7 +2898,8 @@ fn offline_rename_proof_arguments(arguments: &[std::ffi::OsString]) -> Option<Ex
     if !arguments.iter().any(|argument| argument == "rename-id") {
         return None;
     }
-    let cli = Cli::try_parse_from(arguments).ok()?;
+    let matches = cli_command().try_get_matches_from_mut(arguments).ok()?;
+    let cli = Cli::from_arg_matches(&matches).ok()?;
     offline_rename_proof(&cli.command)
 }
 
@@ -2905,11 +2910,13 @@ async fn run_identity_rename(
     json_output: bool,
 ) -> Result<()> {
     if let Some(IdentityRenameCommand::Proof { command }) = args.command {
-        let RenameProofCommand::Export { name, revision, out } = command else {
+        let RenameProofCommand::Export { name, revision, out, include_co_batched_claims } = command else {
             anyhow::bail!("proof verification must be dispatched offline");
         };
+        anyhow::ensure!(include_co_batched_claims,
+            "rename proof export requires --include-co-batched-claims: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues");
         let client = generated_client(endpoint, None)?;
-        let request = fractal_client::RenameProofExportRequest { name, revision };
+        let request = fractal_client::RenameProofExportRequest { name, revision, include_co_batched_claims };
         let bundle = if agent {
             client.agent_rename_proof_export(&request).await?
         } else {

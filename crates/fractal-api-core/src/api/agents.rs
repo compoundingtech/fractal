@@ -505,6 +505,8 @@ pub struct RenameProofExportRequest {
     name: String,
     #[serde(default)]
     revision: Option<String>,
+    #[serde(default)]
+    include_co_batched_claims: bool,
 }
 
 pub async fn export_agent_rename_proof(
@@ -526,6 +528,10 @@ async fn export_identity_rename_proof(
     kind: crate::store::identities::IdentityKind,
     request: RenameProofExportRequest,
 ) -> Result<Json<smallclaims::proof::RenameProofBundle>, ApiError> {
+    if !request.include_co_batched_claims {
+        return Err(ApiError::bad(St3Error::new("rename-proof-disclosure-consent-required",
+            "export requires include_co_batched_claims=true: this fleet-internal bundle contains complete co-batched claims and blobs; do not publish or attach it to public issues")));
+    }
     let store = state.store.clone();
     blocking_action(move || {
         store.export_rename_proof(kind, &request.name, request.revision.as_deref())

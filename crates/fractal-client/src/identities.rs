@@ -50,6 +50,8 @@ pub struct RenameProofExportRequest {
     pub name: String,
     #[serde(default)]
     pub revision: Option<String>,
+    #[serde(default)]
+    pub include_co_batched_claims: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -112,6 +114,7 @@ mod tests {
             "revision": "claim/exact-revision",
         })).unwrap();
         assert_eq!(request.revision.as_deref(), Some("claim/exact-revision"));
+        assert!(!request.include_co_batched_claims);
         assert_eq!(serde_json::to_value(&request).unwrap()["name"], "agent/example-storage");
         let response: NativeValue<serde_json::Value> = serde_json::from_value(serde_json::json!({
             "api_version": "st3.v1",

@@ -8666,6 +8666,7 @@ fn rename_proof_commands_parse_without_mutation_arguments() {
         let cli = Cli::try_parse_from([
             "st", kind, "rename-id", "proof", "export", "agent/example",
             "--revision", "claim/exact-revision", "--out", "proof.json",
+            "--include-co-batched-claims",
         ]).unwrap();
         let args = match cli.command {
             Command::Agents { command: AgentsCommand::RenameId(args) }
@@ -8674,11 +8675,12 @@ fn rename_proof_commands_parse_without_mutation_arguments() {
         };
         assert!(args.actor.is_none());
         let Some(IdentityRenameCommand::Proof {
-            command: RenameProofCommand::Export { name, revision, out },
+            command: RenameProofCommand::Export { name, revision, out, include_co_batched_claims },
         }) = args.command else { panic!("expected proof export") };
         assert_eq!(name, "agent/example");
         assert_eq!(revision.as_deref(), Some("claim/exact-revision"));
         assert_eq!(out, Some(PathBuf::from("proof.json")));
+        assert!(include_co_batched_claims);
 
         let cli = Cli::try_parse_from([
             "st", kind, "rename-id", "proof", "verify", "proof.json",
