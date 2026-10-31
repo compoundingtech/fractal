@@ -47,6 +47,7 @@ pub mod pane;
 pub mod playback;
 mod drafts_store;
 mod prefs;
+mod recent;
 mod resource_sidebar;
 mod arrangement_keys;
 mod observed_resources;
@@ -395,6 +396,7 @@ pub struct Ui {
     /// Negotiated by the terminal guard, never inferred from an ambiguous Escape byte.
     pub(super) keyboard_enhanced: bool,
     triage: triage::Cursor,
+    recent: recent::RecentState,
     /// Each list's selection, by the section it lists (Now, Agents, Missions, Fleet, Usage,
     /// Worktrees). Which list has the keys is never stored: `tab()` reads it off the screen.
     selected: [usize; 6],
@@ -780,6 +782,7 @@ impl Ui {
             selected: [0; 6],
             keyboard_enhanced: false,
             triage: triage::Cursor::default(),
+            recent: recent::RecentState::default(),
             list_top: RefCell::new([0; 6]),
             list_follows: RefCell::new([None; 6]),
             conversation_state: fractal_conversation_ui::State::default(),
@@ -1510,6 +1513,10 @@ impl Ui {
     /// included, so a paste never sends anything by itself. A pasted path to an image, such as a
     /// file dropped on the terminal, attaches that image to a message to an agent.
     pub fn paste(&mut self, text: String) {
+        // The recent popup is modal over an attached program: a paste filters it instead.
+        if self.recent_paste(&text) {
+            return;
+        }
         if self.terminal_focused()
             && let Some(native) = self.native_terminal()
         {
@@ -1863,6 +1870,7 @@ impl Ui {
         if self.help {
             self.draw_help(buf, area);
         }
+        self.draw_recent(buf, area);
         if self.leader {
             self.draw_leader(buf, area);
         }
@@ -3794,6 +3802,18 @@ impl Ui {
                 ),
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
+                (
+                    "ctrl+^",
+                    "recent places when detached; Enter opens, typing filters",
+                ),
+                (
+                    "ctrl+\\ r",
+                    "recent places, including over an attached program",
+                ),
+                (
+                    "ctrl+tab",
+                    "recent cycle (enhanced); release Ctrl if supported",
+                ),
                 ("q", "quit"),
             ],
         );
@@ -4136,7 +4156,8 @@ impl Ui {
         if let Event::Mouse(mouse) = event
             && mouse.kind == MouseEventKind::Moved
         {
-            return self.mouse_moved(mouse);
+            // Motion under the modal recent popup never reaches hover or an attached program.
+            return !self.recent_open() && self.mouse_moved(mouse);
         }
         if event == Event::FocusLost {
             self.hover.clear();
@@ -4179,6 +4200,7 @@ impl Ui {
 
     fn input_terminal(&self) -> Option<String> {
         (self.terminal_focused()
+            && !self.recent_open()
             && !self.palette_open()
             && !self.help
             && self.popover.is_none()
@@ -4254,6 +4276,9 @@ impl Ui {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
+        if self.observe_recent_key(key) {
+            return;
+        }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
             if ctrl_t && key.kind != KeyEventKind::Press {
@@ -4268,6 +4293,13 @@ impl Ui {
                     self.terminal_key(held);
                 }
             }
+        }
+        if !self.leader
+            && !matches!(key.code, KeyCode::Char('\\' | '4') if key.modifiers.contains(KeyModifiers::CONTROL))
+            && (self.recent_open() || !self.terminal_focused())
+            && self.recent_key(key)
+        {
+            return;
         }
         if self.leader {
             if key.kind == KeyEventKind::Press {
@@ -4306,6 +4338,9 @@ impl Ui {
             && matches!(key.code, KeyCode::Char('\\' | '4'))
         {
             self.terminal_hold = None;
+            if self.recent_open() {
+                self.recent_key(KeyCode::Esc.into());
+            }
             self.leader = true;
             return;
         }
@@ -5870,6 +5905,10 @@ impl Ui {
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) {
+        // The recent popup is modal: nothing behind it, an attached program included, gets the mouse.
+        if self.recent_open() {
+            return;
+        }
         if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
             && self.frame.borrow().hits.iter().rev().any(|(rect, hit)| {
                 contains(*rect, mouse.column, mouse.row) && matches!(hit, Hit::ResourceRow(_) | Hit::ResourceFilter)
