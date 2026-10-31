@@ -31,7 +31,7 @@ pub fn sync(nodes: &[&Store]) {
 pub fn observe(store: &Store, n: usize) {
     for index in 0..n {
         store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: format!("daemon/{}", store.origin),
                 kind: "daemon.diagnostic".into(),
                 actor: None,

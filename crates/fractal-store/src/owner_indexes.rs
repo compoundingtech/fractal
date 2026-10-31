@@ -46,7 +46,7 @@ fn expected_definitions() -> Result<Vec<Option<String>>> {
 pub fn prepare(store: &Path, output: &mut impl Write) -> Result<()> {
     let store = store.canonicalize().context("resolve explicit existing store path")?;
     let parent = store.parent().context("store has no parent directory")?;
-    let _state_lock = crate::node_identity::lock(parent)
+    let _directory_lock = crate::node_identity::lock_directory(parent)
         .context("stop all daemon writers before preparing owner indexes")?;
     let mut connection = Connection::open_with_flags(&store, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(Duration::ZERO)?;
