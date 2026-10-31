@@ -200,7 +200,7 @@ pub fn conversation_items(
             ],
             |row| {
                 let mut claim = smallclaims::store::claim_from_row(row)?;
-                claim.store_index = STREAM_INDEX_BASE + claim.store_index;
+                claim.store_index += STREAM_INDEX_BASE;
                 Ok((claim, row.get::<_, i64>(10)?.max(0) as u64))
             },
         )?
