@@ -3802,10 +3802,7 @@ impl Ui {
                 ),
                 ("ctrl+l", "next Inbox item needing you (not in a terminal)"),
                 ("ctrl+\\ l", "previous triage item, including in terminals"),
-                (
-                    "ctrl+^",
-                    "recent places when detached; Enter opens",
-                ),
+                ("ctrl+^", "recent places when detached; Enter opens"),
                 (
                     "ctrl+\\ r",
                     "recent places, including over an attached program",

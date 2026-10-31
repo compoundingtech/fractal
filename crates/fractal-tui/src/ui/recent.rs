@@ -255,7 +255,11 @@ mod tests {
         assert!(spaces.len() > 1);
         ui.recent_key(key(KeyCode::Esc));
         assert!(!ui.recent_open());
-        assert_eq!(ui.recent_places().len(), history.len(), "Esc changes nothing");
+        assert_eq!(
+            ui.recent_places().len(),
+            history.len(),
+            "Esc changes nothing"
+        );
     }
 
     #[test]
