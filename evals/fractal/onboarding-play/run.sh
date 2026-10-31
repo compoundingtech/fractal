@@ -4,7 +4,7 @@
 # fixtures and prints the plan. A paid run needs --paid and a run cap:
 #
 #   evals/fractal/onboarding-play/run.sh --paid --max-runs 2 --harness claude \
-#     --claude-config-dir /path/to/a/login/you/made --st-bin target/debug/st3
+#     --claude-config-dir /path/to/a/login/you/made --st-bin target/debug/fractal
 #
 # Each run starts a throwaway st (own HOME, own daemon, no service) from the candidate binary,
 # lets the Assistant play the onboarding with a person who never types (the `silent` variant) or
