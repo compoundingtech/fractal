@@ -1,4 +1,6 @@
 //! Read-only host envelope observation; request paths never wait for admission.
+//! Startup admits until the blocking reconcile pass reads state. Cached observations
+//! expire independently of periodic file reads, so stale pressure cannot hold work.
 use super::*;
 use fractal_runtime::seat_admission::{Config, Decision, local_host, read};
 use fractal_runtime::seat_admission_status::Status;
@@ -13,6 +15,7 @@ pub struct Controller {
 }
 
 impl<R: RuntimeControl> Reconciler<R> {
+    /// Configure observation without reading the state file on the async startup path.
     pub fn with_seat_admission(mut self, config: Option<Config>, status: Arc<Status>) -> Self {
         let dirty = Arc::new(AtomicBool::new(true));
         let watcher = config.as_ref().and_then(|config| {
@@ -34,22 +37,42 @@ impl<R: RuntimeControl> Reconciler<R> {
         if config.is_some() && watcher.is_none() {
             tracing::warn!("seat admission file watcher unavailable; using periodic observation");
         }
+        if config.is_some() {
+            status.state().decision = Decision {
+                mode: "fail-open".into(), reason: "seat admission initializing; admitting until first observation".into(),
+                queue: false, observed_at: None,
+            };
+        }
         self.seat_admission = Controller { config, status, dirty, checked: Mutex::new(None), _watcher: watcher };
-        self.refresh_seat_admission();
         self
     }
 
     pub(super) fn refresh_seat_admission(&self) {
+        self.refresh_seat_admission_at(u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX));
+    }
+
+    fn refresh_seat_admission_at(&self, now: u64) {
         let admission = &self.seat_admission;
         let Some(config) = &admission.config else { return };
-        let now = u64::try_from(now_ms() / 1000).unwrap_or(u64::MAX);
         let mut checked = admission.checked.lock().unwrap_or_else(PoisonError::into_inner);
         let due = checked.is_none_or(|at| now.saturating_sub(at) >= 30 || now < at);
-        if admission.dirty.swap(false, Ordering::AcqRel) || due {
+        let decision = if admission.dirty.swap(false, Ordering::AcqRel) || due {
             let decision = local_host().map_or_else(
                 |error| Decision { mode: "fail-open".into(), reason: format!("local hostname unavailable: {error}"), queue: false, observed_at: None },
                 |host| read(config, &host, now),
             );
+            *checked = Some(now);
+            Some(decision)
+        } else {
+            // Expiry is a cached-state transition, not a reason to open the file.
+            admission.status.state().decision.observed_at
+                .filter(|at| now.saturating_sub(*at) > 120)
+                .map(|_| Decision {
+                    mode: "fail-open".into(), reason: "admission state is stale".into(),
+                    queue: false, observed_at: None,
+                })
+        };
+        if let Some(decision) = decision {
             let mut state = admission.status.state();
             if state.decision != decision {
                 if state.decision.mode != decision.mode || state.decision.reason != decision.reason {
@@ -59,7 +82,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 self.incremental.touch("seat-admission");
                 self.signal_changed();
             }
-            *checked = Some(now);
         }
         let state = admission.status.state();
         let expiry = state.decision.observed_at.map(|at| at.saturating_add(121));
@@ -69,3 +91,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::reconcile_telemetry::WakeCause::Other);
     }
 }
+
+#[cfg(test)]
+mod tests;
