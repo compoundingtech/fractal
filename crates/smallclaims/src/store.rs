@@ -2065,11 +2065,18 @@ pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Res
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
                  COALESCE((SELECT sequence FROM writer_heads WHERE writer=?1), 0),
                  COALESCE((SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1), 0),
-                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0),
-                 COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
-             ) + 1",
+                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0)
+             ), MAX(0, COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0))",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h2721e765a782 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1fe81cd46767 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| {
+            let high_water: u64 = row.get(0)?;
+            let floor: u64 = row.get(1)?;
+            let (sequence, _) = crate::writer_chain::writer_continuation(high_water, floor, None::<()>);
+            // SQLite sequences must remain representable as signed integers.
+            i64::try_from(sequence)
+                .map(|sequence| sequence as u64)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, high_water as i64))
+        })
         .map_err(Into::into)
 }
 
@@ -2084,8 +2091,12 @@ pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Resul
                  UNION ALL SELECT sequence, hash FROM writer_heads WHERE writer=?1
              ) ORDER BY sequence DESC LIMIT 1",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-ha390580f8e24 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h6aafdfff5bb3 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| {
+            let hash: String = row.get(0)?;
+            Ok(crate::writer_chain::writer_continuation(0, 0, Some(hash)).1)
+        })
         .optional()
+        .map(|head| head.flatten())
         .map_err(Into::into)
 }
 
