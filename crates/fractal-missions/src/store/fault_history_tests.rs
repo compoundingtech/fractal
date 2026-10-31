@@ -446,6 +446,7 @@ fn fault_snapshot_reference_preserves_effective_readiness_after_lease_expiry() {
         "claim",
         &WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("worker-current".into()),
             summary: None,
@@ -640,6 +641,7 @@ fn fault_snapshot_reference_invalidates_exhausted_wake_after_real_reassignment()
         &step.subject, "claim",
         &WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("worker-current".into()),
             summary: None,

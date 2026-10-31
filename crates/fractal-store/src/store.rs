@@ -230,6 +230,8 @@ pub use slo_breaches::{PreparedSloMission, Check as SloCheck, Observation as Slo
 pub mod reconcile_work_context;
 pub mod work_summaries_ivm;
 pub mod subagents;
+pub mod declared_waits;
+pub use declared_waits::{WORK_WAIT_ENDED_KIND, WaitTarget, WaitWake, describe_wait};
 pub mod idle_mail;
 /// The claim recorded on a step each time its holder is nudged.
 pub const WORK_NUDGED_KIND: &str = "work.nudged";
@@ -6664,6 +6666,7 @@ impl Store {
                 | "work.renewed"
                 | "work.progress"
                 | "work.nudged"
+                | "work.wait-ended"
                 | "work.submitted"
                 | "work.failed"
                 | "work.released"
@@ -17224,9 +17227,9 @@ pub fn project_mission_run_update(
     transaction: &Transaction<'_>,
     claim: &ClaimRecord,
 ) -> Result<(), St3Error> {
-    // Nudges are retained events, never work-state transitions. This also matches
-    // full replay for historical bodies that bypassed today's field admission.
-    if claim.kind == WORK_NUDGED_KIND {
+    // Nudges and ended waits are retained events, never work-state transitions. This also
+    // matches full replay for historical bodies that bypassed today's field admission.
+    if claim.kind == WORK_NUDGED_KIND || claim.kind == WORK_WAIT_ENDED_KIND {
         return Ok(());
     }
     let fields = claim.body.get("fields").unwrap_or(&claim.body);
@@ -18922,6 +18925,7 @@ pub fn step_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StepRunVie
         blockers: Vec::new(),
         not_before_unix_ms: not_before.and_then(|value| value.parse().ok()),
         nudged_at_unix_ms: None,
+        waiting_on: None,
         created_at_unix_ms: created.parse().unwrap_or(0),
         updated_at_unix_ms: updated.parse().unwrap_or(0),
         person_answers: Vec::new(),
@@ -18994,6 +18998,7 @@ pub fn enrich_step_queue_cached(
         step_timeout_extension_at(connection, &view.subject, view.attempt, snapshot_unix_ms)?;
     enrich_step_summaries_at(connection, view, snapshot_unix_ms)?;
     enrich_step_nudge_at(connection, view, snapshot_unix_ms)?;
+    declared_waits::enrich_declared_wait_at(connection, view, snapshot_unix_ms)?;
     enrich_step_wake_at(connection, view, snapshot_unix_ms)?;
     enrich_step_definition_cached(connection, view, definitions)?;
     adhoc_work::enrich_handoff(connection, view, snapshot_unix_ms)?;
@@ -19521,7 +19526,7 @@ pub fn step_execution_clock_at(
 
 /// The claim kinds a step's execution timing folds. The cache key and the fold read the same set.
 const STEP_TIMING_KINDS: &str = "'step-run.state','step-run.carried','work.claimed','work.renewed',\
-    'work.progress','work.submitted','work.failed','work.released','work.extended',\
+    'work.progress','work.wait-ended','work.submitted','work.failed','work.released','work.extended',\
     'work.person-asked','work.person-done','work.person-cancelled'";
 
 /// A step's step and work events in canonical order, as its execution timing folds them.
@@ -19834,6 +19839,11 @@ pub fn fold_step_clock_open(
                     .get("claim_expires_at_unix_ms")
                     .and_then(Value::as_u64)
                     .map(u128::from);
+            }
+            // The target of a declared wait moved: the clock runs again.
+            "work.wait-ended" if paused_until.is_some() => {
+                end_wait(&mut waited, &mut pause_started, &mut paused_until, accepted);
+                started = Some(accepted);
             }
             "work.submitted" | "work.failed" | "work.released" => {
                 if let Some(interval_start) = started {

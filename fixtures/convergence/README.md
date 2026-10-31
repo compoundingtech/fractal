@@ -183,3 +183,11 @@ The 15 seeds are now fixed regression seeds: 27, 74, 106, 121, 130, 133, 179, 20
 used
 `CONVERGENCE_START=1 CONVERGENCE_RUNS=300 CONVERGENCE_WORKERS=4 cargo nextest run -p fractal -E 'test(=convergence::fixed_sweep)' --run-ignored only`
 (1363 s); the 14 seeds of 1–300 that did not trim are not fixed seeds.
+
+`claims-v12.json` is generated the same way from the declared-waits registry on top of v11's
+(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v12.json`).
+It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
+kinds carry; nothing in v11 is removed. The simulation selects v12 and records that filename in its
+audit summary; v1 to v11 stay fixed. Every fixed seed converges; seeds 21, 34 and 241 converge
+without a trim, so `NEVER_TRIMS` is `[21, 34, 241]`. Claim generation shares the schedule's RNG, so a registry change on main can move this
+set. The characterization run used `cargo nextest run -p fractal -E 'test(convergence)'`.

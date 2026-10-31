@@ -128,6 +128,7 @@ mission "orchid" state="ready" {
                 action,
                 &crate::model::WorkRequest {
                     wait_ms: None,
+                    wait_on: None,
                     actor: Some(actor),
                     incarnation: Some(format!("{}-one", member.runtime_id)),
                     summary: Some("The work is done.".into()),

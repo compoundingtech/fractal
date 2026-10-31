@@ -3500,6 +3500,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     "claim",
                     &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: None,
@@ -3516,6 +3517,7 @@ async fn step_states_in_every_client_projection_belong_to_the_contract() {
                     "progress",
                     &fractal_daemon::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: step.assigned_to.clone(),
                         incarnation: Some("builder-one".into()),
                         summary: Some("Building the release".into()),
@@ -3646,6 +3648,7 @@ mission "ios-proof" state="ready" {
     state.store.set_step_state(&subject, "ready", None).unwrap();
     let request = |key: &str, reason: Option<&str>| fractal_daemon::model::WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/client-v0-baseline.ios-owner".into()),
         incarnation: Some("ios-owner-one".into()),
         summary: None,
@@ -3766,6 +3769,7 @@ mission "release-proof" state="ready" {
             "claim",
             &fractal_daemon::model::WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some(actor.into()),
                 incarnation: Some("release-owner-one".into()),
                 summary: None,
@@ -4648,6 +4652,7 @@ mission "timing/run" state="ready" {
     state.store.set_step_state(held, "ready", None).unwrap();
     state.store.work_action(held, "claim", &fractal_daemon::model::WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/timing/worker".into()),
         incarnation: Some("timing-worker-one".into()),
         summary: None,

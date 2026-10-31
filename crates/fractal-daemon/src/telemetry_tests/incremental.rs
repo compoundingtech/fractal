@@ -319,6 +319,7 @@ fn work_handoff_invalidates_a_new_recipient_without_previous_steps() {
                 actor: Some(alder.into()),
                 incarnation: Some(format!("{alder}-one")),
                 wait_ms: None,
+                wait_on: None,
                 summary: None,
                 reason: None,
                 evidence: vec![],

@@ -75,7 +75,7 @@ fn fact_state(store: &Store, episode: &str) -> String {
 
 fn request(key: &str) -> WorkRequest {
     WorkRequest { actor: Some(DEFAULT_OWNER.into()), incarnation: Some("prefix-control".into()),
-        summary: None, reason: None, evidence: vec![], wait_ms: None, idempotency_key: key.into() }
+        summary: None, reason: None, evidence: vec![], wait_ms: None, wait_on: None, idempotency_key: key.into() }
 }
 
 

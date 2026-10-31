@@ -73,6 +73,7 @@ pub fn publish_carry(store: &Store, source: &str, key: &str) -> MissionSpec {
 pub fn carry_request(incarnation: &str, key: &str) -> WorkRequest {
     WorkRequest {
         wait_ms: None,
+        wait_on: None,
         actor: Some("agent/node.worker".into()),
         incarnation: Some(incarnation.into()),
         summary: None,

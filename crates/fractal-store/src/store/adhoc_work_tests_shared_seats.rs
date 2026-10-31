@@ -6,6 +6,7 @@ use crate::store::adhoc_work::*;
 pub fn request(actor: &str, key: &str) -> WorkRequest {
         WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some(actor.into()),
             incarnation: Some(format!("{actor}-one")),
             summary: None,

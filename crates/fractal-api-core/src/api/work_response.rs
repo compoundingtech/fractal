@@ -339,6 +339,7 @@ mod tests {
             .unwrap();
         let request = |key: &str| WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some("current".into()),
             summary: None,
@@ -422,6 +423,7 @@ mod tests {
             .unwrap();
         let request = |key: &str, incarnation: &str| WorkRequest {
             wait_ms: None,
+            wait_on: None,
             actor: Some("agent/node.worker".into()),
             incarnation: Some(incarnation.into()),
             summary: None,

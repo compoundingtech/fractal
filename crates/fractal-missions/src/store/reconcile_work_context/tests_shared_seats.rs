@@ -39,6 +39,7 @@ pub fn claim_for_handoff(store: &Store, subject: &str) {
             "claim",
             &WorkRequest {
                 wait_ms: None,
+                wait_on: None,
                 actor: Some(ACTOR.into()),
                 incarnation: Some("support-worker-one".into()),
                 summary: None,
