@@ -1468,7 +1468,12 @@ The capture is admitted by the same disk guard as a shared one, which skips and 
 disk cannot hold.
 Deleting a cut walks only that cut's own tombstones, recorded after every earlier checkpoint's,
 and keeps its place in `meta` so a restart goes on from it; a cut that dropped nothing is trimmed
-at once.
+at once. A member deletes at most `[trim] daily_claims` claims a day (100,000 unless set; about
+1.7 h of paced deletion on a 53 GB member). A cut that drops more stops at that count, stays
+`trimming`, and goes on the next day where it stopped; the next cut begins only after it finishes,
+with what the day has left, so a large first cut drains over several days instead of one long
+trim. The day's count is kept in `meta` (`local_trim_day`) in the deleting transaction, so a
+restart neither repeats nor exceeds it.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges

@@ -422,6 +422,13 @@ pub enum CheckpointAction {
     TrimGraphChanged {
         checkpoint: String,
     },
+    /// A local trim deleted the day's claims (`[trim] daily_claims`) and stopped; the cut stays
+    /// `trimming` and goes on the next day. The counts are this step's.
+    TrimDeferred {
+        checkpoint: String,
+        envelopes: usize,
+        claims: usize,
+    },
     /// Signature and verdict rows of claims an earlier build's trim dropped were deleted.
     SweptTrimmedClaimRows {
         rows: usize,
@@ -903,6 +910,10 @@ impl Store {
         // A member that trims locally takes no part in checkpoints: it finishes a trim it had
         // already committed, then trims its own due cut.
         if self.trims_locally() {
+            self.trim_day.store(
+                u64::try_from(context.now_unix_ms / super::checkpoint::DAY_MS)?,
+                std::sync::atomic::Ordering::Relaxed,
+            );
             self.finish_interrupted_trims(&mut actions)?;
             self.trim_local_cut(context, &mut actions)?;
             return Ok(actions);
