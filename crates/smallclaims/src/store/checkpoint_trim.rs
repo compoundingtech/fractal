@@ -1060,12 +1060,35 @@ impl Store {
             transaction.commit()?;
         }
         self.replica_rows_changed();
+        self.rebuild_deferred_paced()?;
         actions.push(CheckpointAction::Trimmed {
             checkpoint: checkpoint.to_owned(),
             envelopes: deleted_envelopes,
             claims: deleted_claims,
         });
         Ok(())
+    }
+}
+
+impl Store {
+    /// Rebuild what this member's trims deferred (the runtime's derived state of the subjects
+    /// they touched), a budget's worth per transaction with a trim's pacing, until none is left.
+    /// It runs when a trim stops and at each checkpoint step, so a crash cannot strand it.
+    pub(crate) fn rebuild_deferred_paced(&self) -> Result<()> {
+        let _span = crate::profile::span("trim.rebuild_deferred");
+        loop {
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
+            let transaction = connection.transaction()?;
+            let more = self.runtime.rebuild_deferred(&transaction, TRIM_CHUNK_BUDGET)?;
+            transaction.commit()?;
+            let held = held_since.elapsed();
+            drop(connection);
+            if !more {
+                return Ok(());
+            }
+            self.pause_trim_chunk(held);
+        }
     }
 }
 
