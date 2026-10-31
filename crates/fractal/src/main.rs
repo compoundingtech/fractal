@@ -1025,7 +1025,7 @@ fn instance_removals(root: &Path, work: &Path) -> Vec<PathBuf> {
         })
         .unwrap_or_default();
     // An instance owns its directory, but a foreign replacement of the new program name
-    // does not become ours. Plan bin entries separately so deletion rechecks its symlink.
+    // does not become ours. Plan bin entries separately so deletion rechecks ownership.
     let bin = root.join("bin");
     if fs::symlink_metadata(bin.join("fractal")).is_ok()
         && let Some(index) = removals.iter().position(|path| path == &bin)
@@ -2760,6 +2760,9 @@ enum AgentsCommand {
     },
     /// Print one agent's declared workspace directory on its owning host, even when stopped.
     Workspace { subject: String },
+    /// Print the systemd slice of one agent's lane, as this daemon names it (docs/st3/seat-lanes.md).
+    /// It names where the lane is when the agent has one; the cgroup tree shows whether it exists.
+    Lane { subject: String },
     /// Write or read the handoff an agent leaves for the session that follows it.
     Handoff {
         #[command(subcommand)]
@@ -5830,9 +5833,9 @@ async fn run(cli: Cli) -> Result<()> {
                 .context("clap_complete lacks a built-in shell")?
                 .write_registration(
                     "COMPLETE",
-                    "st",
-                    "st",
-                    "st",
+                    "fractal",
+                    "fractal",
+                    "fractal",
                     &mut cli_output::stdout(),
                 )?;
             Ok(())

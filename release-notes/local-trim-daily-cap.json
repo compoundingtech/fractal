@@ -7,5 +7,5 @@
   "compatibility": {"status": "changed", "detail": "A config that sets [trim] daily_claims is refused by an older build, which knows no such key; set it only once the member runs this build. Without it the default of 100,000 applies. A cut stopped at the cap stays trimming, which an older build finishes in one go."},
   "downtime": {"status": "none", "detail": "None. On a member that trims locally, a cut that drops more than the day's claims goes on the next day."},
   "manual": {"status": "none", "detail": "No manual step."},
-  "recovery": {"status": "none", "detail": "Revert the build: an older build finishes a cut stopped at the cap in one trim."}
+  "recovery": {"status": "none", "detail": "Revert the build: an older build finishes a cut stopped at the cap in one trim. Before rolling back, remove [trim] daily_claims from the daemon's config if it is set: an older build refuses the key and will not start."}
 }
