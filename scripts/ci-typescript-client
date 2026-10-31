@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Client, shared-view and iOS checks over the root workspace's frozen installation
+# Client, declarations, shared-view and iOS checks over the root workspace's frozen installation
 # (`pnpm install --frozen-lockfile`).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -13,6 +13,8 @@ fi
 
 pnpm --filter @fractal/client test
 pnpm --filter @fractal/client typecheck
+pnpm --filter @fractal/declarations test
+pnpm --filter @fractal/declarations typecheck
 pnpm --filter @fractal/views test
 pnpm --filter @fractal/views typecheck
 pnpm --filter fractal-ios-starter exec tsc --noEmit -p .

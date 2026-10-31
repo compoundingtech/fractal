@@ -1384,6 +1384,33 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertEqual(rules['tree_inputs'], declared, lane)  # what the lane tests is what the policy declares as inputs
         self.assertEqual(set(json.loads(text)['lanes']), set(module.LOCAL))
 
+    def test_typescript_client_keys_include_declarations_and_their_codegen_template(self):
+        inputs = self.rules('typescript-client')['inputs']
+        lanes = (ROOT / '.st/required-lanes.json').read_text()
+        rules = evidence_verify.lane_rules(lanes, 'typescript-client')
+        self.assertEqual(rules['tree_inputs'], inputs)
+        self.assertIn('clients/typescript/fractal-declarations/package.json', rules['definition_paths'])
+        f = Fixture()
+        self.addCleanup(f.tmp.cleanup)
+        paths = ('clients/typescript/fractal-declarations/index.ts',
+                 'clients/typescript/fractal-declarations/contract.test.cjs',
+                 'clients/typescript/fractal-declarations/package.json',
+                 'crates/fractal-client-codegen/templates/declarations.ts.in')
+        for path in paths:
+            target = f.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f'{path}\n')
+        f.git('add', '-A')
+        base = evidence_verify.project(f.repo, f.git('write-tree'), inputs)
+        self.assertIsNotNone(base)
+        for path in paths:
+            with self.subTest(path=path):
+                target = f.repo / path
+                target.write_text(f'{path} changed\n')
+                f.git('add', '-A')
+                self.assertNotEqual(evidence_verify.project(f.repo, f.git('write-tree'), inputs), base)
+                target.write_text(f'{path}\n')
+
     def test_every_absent_path_of_the_committed_lanes_is_refused_when_it_appears_in_a_tree(self):
         """The mutation control: add one file at each path a lane looks for and does not find; the lane must be refused for that tree."""
         doc = json.loads(root_config('required-lanes.json').read_text())
@@ -1434,7 +1461,8 @@ class CommittedPolicy(unittest.TestCase):
             'slo', 'src', 'templates', 'tests', 'vendor', 'wit']), 'typescript-client': sorted([
             'apps/fractal-web/package.json', 'packages/fractal-sdk/package.json',
             'apps/fractal-web/src/folders/core.mts', 'apps/ios',  # core.mts: found by the lane trace (docs: Lane definitions)
-            'clients/typescript', 'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
+            'clients/typescript', 'crates/fractal-client-codegen/templates/declarations.ts.in',
+            'crates/fractal-tui/tests/fixtures/quality-hour.json', 'docs/st3/client-v0/fixtures',
             'fixtures/clients', 'flake.lock', 'flake.nix', 'package.json', 'packages/fractal-ui/package.json',
             'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts/ci-typescript-client']), 'fractal-web': sorted([
             # The web lane detector's paths (scripts/ci-fractal-web-changes, PATTERNS and KIT_PATTERNS, as files that exist)...

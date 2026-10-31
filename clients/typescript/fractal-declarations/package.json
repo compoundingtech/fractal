@@ -1,0 +1,17 @@
+{
+  "name": "@fractal/declarations",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --test contract.test.cjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "exports": {
+    ".": "./index.ts"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}
