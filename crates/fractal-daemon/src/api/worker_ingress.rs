@@ -1,6 +1,7 @@
 //! Worker authority uses process generations, not transferable same-uid secrets.
+//! Same-UID service-manager takeover and ptrace of the trusted worker are not covered.
 use super::*;
-use axum::{body::Body, extract::Request, middleware::{Next, from_fn}};
+use axum::{body::Body, extract::Request, middleware::{Next, from_fn}, response::IntoResponse};
 use std::sync::Arc;
 
 type Observe = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
@@ -34,7 +35,9 @@ fn protect(app: Router, observe: Observe) -> Router {
                 let peer = request.extensions().get::<LocalPeer>().cloned();
                 let admitted = tokio::task::spawn_blocking(move || authorize(peer.as_ref(), &*observe)).await;
                 if !matches!(admitted, Ok(Ok(()))) {
-                    eprintln!("fractal: worker authority observation would refuse {}", request.uri().path());
+                    return (axum::http::StatusCode::FORBIDDEN,
+                        axum::Json(serde_json::json!({"code":"worker-authentication-required",
+                            "message":"this route requires the authenticated replication worker"}))).into_response();
                 }
             }
             next.run(request).await
@@ -61,7 +64,7 @@ pub fn worker_observer(pid: Option<u32>) -> anyhow::Result<Observe> {
     }
 }
 
-/// Observe before body decoding. This preparatory layer does not yet refuse requests.
+/// On Linux refuse before body decoding; re-observation admits restarts and revokes predecessors.
 pub fn worker_authenticated(app: Router, observe: Observe) -> Router {
     protect(app, observe)
 }
@@ -100,11 +103,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_ingress_observation_does_not_change_admission() {
+    async fn worker_ingress_refuses_unbound_before_body_and_accepts_pinned_worker() {
+        let (connector, _) = tokio::net::UnixStream::pair().unwrap();
+        let peer = LocalPeer { pid: std::process::id(), ancestor: None,
+            peer_process: Some(local_peer_process(&connector).unwrap()) };
+        let observed = Arc::new(AtomicU32::new(0));
+        let current = observed.clone();
         let app = protect(Router::new().route("/v1/internal/replication/receive",
-            axum::routing::post(|| async { "accepted" })), Arc::new(|| Ok(0)));
-        let response = app.oneshot(Request::post("/v1/internal/replication/receive")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(response.status(), 200);
+            axum::routing::post(|_: axum::body::Bytes| async { "accepted" })),
+            Arc::new(move || Ok(current.load(Ordering::SeqCst))));
+        let request = |body| {
+            let mut request = Request::post("/v1/internal/replication/receive").body(body).unwrap();
+            request.extensions_mut().insert(peer.clone());
+            request
+        };
+        let unread = Body::from_stream(futures_util::stream::poll_fn::<
+            Result<axum::body::Bytes, std::io::Error>, _>(|_| panic!("unauthenticated body polled")));
+        assert_eq!(app.clone().oneshot(request(unread)).await.unwrap().status(), 403);
+        observed.store(peer.pid, Ordering::SeqCst);
+        assert_eq!(app.clone().oneshot(request(Body::from("[]"))).await.unwrap().status(), 200);
+        observed.store(0, Ordering::SeqCst);
+        assert_eq!(app.oneshot(request(Body::empty())).await.unwrap().status(), 403);
     }
 }

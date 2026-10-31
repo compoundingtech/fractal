@@ -20275,6 +20275,7 @@ pub mod tests {
 
     mod channel_recovery;
     mod differential;
+    mod fault_dismiss_tests;
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
