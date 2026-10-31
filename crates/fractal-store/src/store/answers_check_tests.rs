@@ -55,6 +55,7 @@ fn a_dropped_transition_changes_the_seat_readers_that_fold_it() {
 }
 
 /// Independent histories can retain different superseded writers without changing a reader.
+// SQL mutations in these regressions touch only explicitly constructed, bounded in-memory fixtures.
 fn retained_history_case(kind: &str) {
     use smallclaims::answers::{differing_kinds, reader_answers};
         let store = Store::open_memory("alder").unwrap();
@@ -109,7 +110,7 @@ fn retained_history_case(kind: &str) {
         let full = summary();
         let first = usize::from(!matches!(kind, "observer.observed" | "resource.observed"));
         store.connection.write().execute(
-            "DELETE FROM claims WHERE id IN (?1,?2)", [&ids[first], &ids[1]],
+            /* sqlite-large-value: allow-for-now lv-h82b449284c39 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id IN (?1,?2)", [&ids[first], &ids[1]],
         ).unwrap();
         let trimmed = summary();
         if !matches!(kind, "observer.observed" | "resource.observed") {
@@ -119,10 +120,10 @@ fn retained_history_case(kind: &str) {
         }
         assert!(differing_kinds(&full, &trimmed, true).is_empty(), "{kind}");
         let update = match kind {
-            "resource.observed" => "UPDATE claims SET body=json_set(body,'$.fields.facts.state','closed') WHERE id=?1",
-            _ => "UPDATE claims SET body=json_set(body,'$.fields.status','failed') WHERE id=?1",
+            "resource.observed" => /* sqlite-large-value: allow-for-now lv-h72b484fa5067 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.facts.state','closed') WHERE id=?1",
+            _ => /* sqlite-large-value: allow-for-now lv-h02c49cdc0193 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=json_set(body,'$.fields.status','failed') WHERE id=?1",
         };
-        store.connection.write().execute(update, [&ids[2]]).unwrap();
+        store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hea7a342bde64 owner=fractal_store::store::answers_check_tests TODO=trace-statement-and-value-representation */ update, [&ids[2]]).unwrap();
         assert!(!differing_kinds(&trimmed, &summary(), true).is_empty(), "{kind}");
 }
 
@@ -147,7 +148,7 @@ fn observer_reader_preserves_field_carriers() {
     let original = observation(&store, "observer/example", "observer.observed", "alder", 100, json!({"cursor":"first"}));
     observation(&store, "observer/example", "observer.observed", "alder", 200, json!({"status":"healthy"}));
     let full = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
-    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h67e53372c4b6 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original]).unwrap();
     assert_ne!(full, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
 }
 
@@ -186,11 +187,11 @@ fn slot_readers_exclude_repaired_originals() {
     let subject = "resource/example/issue/1502";
     let original = observation(&store, subject, "resource.observed", "alder", 100,
         json!({"kind":"vcs.issue","observer":"observer/example","facts":{"state":"open"}}));
-    store.connection.write().execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&original]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h4a2ed0ed1e0c owner=fractal_store::store::answers_check_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&original]).unwrap();
     // The production repair projection excludes the original; only its admitted row remains.
-    store.connection.write().execute("DELETE FROM resource_observations WHERE subject=?1", [subject]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h50cf7c6643ae owner=fractal_store::store::answers_check_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM resource_observations WHERE subject=?1", [subject]).unwrap();
     let retained = slot_reader_answers(&store.readers.get(), 1_000).unwrap();
-    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&original]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb78dff70f153 owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&original]).unwrap();
     assert_eq!(retained, slot_reader_answers(&store.readers.get(), 1_000).unwrap());
 }
 
@@ -285,7 +286,7 @@ fn conservative_usage_inventory_keeps_required_hourly_boundaries_visible() {
             json!({"semantics":"response_rollup","driver":"codex","incarnation_id":"one","model":"example","total_tokens":hour * 10})));
     }
     let full = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
-    store.connection.write().execute("DELETE FROM claims WHERE id=?1", [&ids[1]]).unwrap();
+    store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-h8d443b1840fc owner=fractal_store::store::answers_check_tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&ids[1]]).unwrap();
     let missing = smallclaims::answers::summary(&store.readers.get(), 20_000_000).unwrap();
     assert!(smallclaims::answers::differing_kinds(&full, &missing, true).iter()
         .any(|difference| difference.kind == "harness.usage"));

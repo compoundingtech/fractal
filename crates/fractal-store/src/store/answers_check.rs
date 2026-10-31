@@ -47,8 +47,9 @@ static ACTUAL_MOVED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| f
 ));
 
 fn actual_moved(connection: &Connection, subject: &str, cut: u128) -> Result<bool> {
-    Ok(connection.prepare_cached(&ACTUAL_MOVED)?
-        .query_row(params![subject, i64::try_from(cut)?], |row| row.get(0))?)
+    // Bounded subject/cut keys; the result is one EXISTS boolean, never claim JSON.
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hba6a871032cc owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ &ACTUAL_MOVED)?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h5cede5425453 owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ params![subject, i64::try_from(cut)?], |row| row.get(0))?)
 }
 
 /// Only slots touched by post-cut claims move; another writer must not hide a stable slot.
@@ -64,8 +65,9 @@ pub fn slot_reader_movement(
         let kind = if subject.starts_with("resource/") { "resource.observed" }
             else if subject.starts_with("observer/") { "observer.observed" }
             else { continue };
+        // Bounded subject/cut keys and a single EXISTS boolean.
         let cursor_moved: bool = kind == "observer.observed" && cursor.query_row(
-            params![subject, i64::try_from(cut)?], |row| row.get(0),
+            /* sqlite-large-value: allow-for-now lv-h4bf037bf5361 owner=fractal_store::store::answers_check TODO=trace-statement-and-value-representation */ params![subject, i64::try_from(cut)?], |row| row.get(0),
         )?;
         if actual_moved(connection, subject, cut)? || cursor_moved {
             moved.entry(format!("reader/slots/{kind}")).or_default()
