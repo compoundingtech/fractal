@@ -123,6 +123,14 @@ impl TaskManifestV1 {
             }
             last_index = Some(index);
             match step {
+                TaskBrowserStepV1::Navigate { locator: Some(locator), .. }
+                | TaskBrowserStepV1::Click { locator, .. }
+                | TaskBrowserStepV1::Fill { locator, .. }
+                | TaskBrowserStepV1::FillSecret { locator, .. } => locator.validate()?,
+                TaskBrowserStepV1::RevealOnce { .. } => super::reveal::validate(step, &self.provider)?,
+                _ => {}
+            }
+            match step {
                 TaskBrowserStepV1::Navigate { literal, .. } => { declared_url(literal, &self.provider, true)?; }
                 TaskBrowserStepV1::Click { effect, target, .. } => {
                     if effect.is_some() != target.is_some() { return Err(invalid("delete effect requires target and vice versa")); }
