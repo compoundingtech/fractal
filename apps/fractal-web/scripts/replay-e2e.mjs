@@ -182,6 +182,11 @@ try {
     assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
     await page.clock.runFor(offset - elapsed)
   }
+  // The pane's module is requested while the page loads, before any step below, so this wait has to
+  // start here. Its 10s default would run from this line through every replay step to the await, so it
+  // has no limit of its own: the script's 90-second deadline is the one bound on the whole run.
+  const paneResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'), { timeout: 0 })
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
   await roster.waitFor({ state: 'visible' })
   const replayStartedAt = await page.evaluate(() => Date.now())
@@ -198,10 +203,6 @@ try {
   await noUserFolders()
   await agentInProject()
   await advanceReplayTo(Math.floor((2000 + threadCreated.at_ms) / 2))
-  // Selecting the agent is what requests the pane's module, so its wait starts here with the action
-  // and does not spend its timeout on the page load and replay steps before it.
-  const paneResponse = page.waitForResponse(response =>
-    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
