@@ -277,6 +277,28 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/worker-status",
         "updates host-local worker memory; no store read or graph write",
     ),
+    // The messages shard: nothing writes to it before the stream writer, so a generated store
+    // holds an empty shard. The writer's change measures export, receive and wake.
+    (
+        "GET /v1/internal/replication/shard/{shard}/peers",
+        "one indexed daemon.started lookup per member or configured peer; grows with the fleet, not the store",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/export",
+        "pages the messages shard like the graph export; the shard stays empty until the stream writer",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/receive",
+        "admits a peer's messages shard exchange; the shard stays empty until the stream writer",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/peer-failure",
+        "records a transport failure; no store read",
+    ),
+    (
+        "POST /v1/internal/replication/shard/{shard}/wake",
+        "drains the messages shard backlog; the shard stays empty until the stream writer",
+    ),
     // Checkpoints: the trim is measured directly, per deleted row.
     (
         "POST /v1/checkpoint/plan",
@@ -2224,7 +2246,9 @@ fn routes_in(router: &str) -> BTreeSet<String> {
     }
     // The router's last section nests test-only routes in its own tests module.
     routes.retain(|route| {
-        !route.contains("/v1/client/probes") && !route.contains("/v1/client/earlier")
+        !route.contains("/v1/client/probes")
+            && !route.contains("/v1/client/earlier")
+            && !route.contains("/v1/internal/test/")
     });
     routes
 }
