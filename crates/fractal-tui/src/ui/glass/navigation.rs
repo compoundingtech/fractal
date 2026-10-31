@@ -286,7 +286,26 @@ impl Ui {
             };
             pane
         };
-        format!("{} · {}", self.pane_title(&pane), space)
+        let tab = Tab {
+            id: String::new(),
+            title: None,
+            pane: place.pane.clone(),
+        };
+        let badge = self.tab_badge(&tab, Some(&pane));
+        let attention = if badge.ask {
+            "?"
+        } else if badge.needs_person {
+            "◆"
+        } else {
+            ""
+        };
+        format!(
+            "{} {}{} · {}",
+            badge.activity,
+            self.pane_title(&pane),
+            attention,
+            space
+        )
     }
 }
 
