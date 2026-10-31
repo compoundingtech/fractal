@@ -1168,6 +1168,11 @@
               rendered.systemd.user.services.smalltalk.Service.ExecStart
             else
               builtins.concatStringsSep " " rendered.launchd.agents.smalltalk.config.ProgramArguments;
+            fixturePackage = pkgs.writeShellScriptBin "fractal" "echo fixture-fractal";
+            fixtureActivation = (mkHmModuleEval {
+              package = fixturePackage;
+              ptyPackage = null;
+            }).config.home.activation.smalltalkBinary.data;
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
@@ -1215,7 +1220,77 @@
             rendered.launchd.agents.smalltalk-apply.config.ProgramArguments) true;
           assert (!pkgs.stdenv.hostPlatform.isLinux)
             || rendered.systemd.user.services.smalltalk.Service.MemoryMax == "8G";
-          pkgs.runCommand "fractal-hm-module-eval" { } "touch $out";
+          pkgs.runCommand "fractal-hm-module-eval" { } ''
+            # Run the emitted activation against a disposable state directory,
+            # without building the product or contacting a service manager.
+            substitute ${pkgs.writeText "binary-activation" fixtureActivation} activate \
+              --replace-fail '/home/example/.local/state/st3' "$PWD/state"
+            binDir=$PWD/state/bin
+            target=$binDir/fractal
+            source=${fixturePackage}/bin/fractal
+            export DRY_RUN_CMD=
+            for kind in regular same-bytes symlink dangling directory; do
+              rm -rf state
+              mkdir -p "$binDir"
+              printf 'foreign bytes\n' > original
+              case "$kind" in
+                regular) cp original "$target"; chmod +x "$target" ;;
+                same-bytes) cp "$source" "$target"; chmod +x "$target" ;;
+                symlink) cp original "$binDir/foreign"; ln -s foreign "$target" ;;
+                dangling) ln -s missing "$target" ;;
+                directory) mkdir "$target"; cp original "$target/sentinel" ;;
+              esac
+              before=$(stat -c '%i:%f:%s' "$target")
+              if ${pkgs.runtimeShell} activate; then
+                echo "activation adopted foreign canonical: $kind" >&2; exit 1
+              fi
+              test "$(stat -c '%i:%f:%s' "$target")" = "$before"
+              case "$kind" in
+                regular) cmp original "$target" ;;
+                same-bytes) cmp "$source" "$target" ;;
+                symlink) test "$(readlink "$target")" = foreign; cmp original "$binDir/foreign" ;;
+                dangling) test "$(readlink "$target")" = missing; test ! -e "$target" ;;
+                directory) cmp original "$target/sentinel" ;;
+              esac
+              test ! -e "$binDir/st" && test ! -L "$binDir/st"
+              test ! -e "$binDir/st3" && test ! -L "$binDir/st3"
+              test "$(find "$binDir" -name '.fractal.*' | wc -l)" -eq 0
+            done
+            # A managed physical layout supports mixed exact reverse aliases.
+            rm -rf state
+            mkdir -p "$binDir"
+            printf 'older managed bytes\n' > "$target"
+            chmod +x "$target"
+            ln -s fractal "$binDir/st"
+            ln -s "$target" "$binDir/st3"
+            # Keep the old inode alive so replacement cannot reuse its number.
+            ln "$target" old-executable
+            before=$(stat -c %i "$target")
+            ${pkgs.runtimeShell} activate
+            test ! -L "$target" && test -x "$target"
+            cmp "$source" "$target"
+            test "$(stat -c %i "$target")" != "$before"
+            cmp old-executable <(printf 'older managed bytes\n')
+            test "$(readlink "$binDir/st")" = fractal
+            test "$(readlink "$binDir/st3")" = fractal
+            before=$(stat -c %i "$target")
+            ${pkgs.runtimeShell} activate
+            test "$(stat -c %i "$target")" = "$before"
+            # Both historical raw forward-alias targets remain owned.
+            for link in st3 "$binDir/st3"; do
+              rm -rf state
+              mkdir -p "$binDir"
+              printf 'older managed bytes\n' > "$binDir/st3"
+              chmod +x "$binDir/st3"
+              ln -s "$link" "$target"
+              ${pkgs.runtimeShell} activate
+              test ! -L "$target" && test -x "$target"
+              cmp "$source" "$target"
+              test "$(readlink "$binDir/st")" = fractal
+              test "$(readlink "$binDir/st3")" = fractal
+            done
+            touch $out
+          '';
         checks.hm-module-fractal-prestage-eval =
           let
             rendered = (mkHmModuleEval { fractalMigration.phase = "stage"; }).config;

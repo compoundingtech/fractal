@@ -347,6 +347,29 @@ in
             binDir=${lib.escapeShellArg binDir}
             source=${lib.escapeShellArg "${effectivePackage}/bin/fractal"}
             target=${lib.escapeShellArg executable}
+            # Adopt only the historical forward alias or a physical executable
+            # with both reverse aliases; matching payload bytes are not ownership.
+            if [[ -e "$target" || -L "$target" ]]; then
+              owned=false
+              if [[ -L "$target" ]]; then
+                case "$(${pkgs.coreutils}/bin/readlink "$target")" in
+                  st3|"$binDir/st3") owned=true ;;
+                esac
+              elif [[ -f "$target" && -x "$target" ]]; then
+                owned=true
+                for name in st st3; do
+                  if [[ ! -L "$binDir/$name" ]]; then owned=false; break; fi
+                  case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
+                    fractal|"$target") ;;
+                    *) owned=false; break ;;
+                  esac
+                done
+              fi
+              if ! "$owned"; then
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
+            fi
             ${pkgs.coreutils}/bin/mkdir -p "$binDir"
             # Preserve the inode on no-op activation; replace symlinks even if bytes match.
             if [[ -L "$target" ]] || ! ${pkgs.diffutils}/bin/cmp -s "$source" "$target"; then
