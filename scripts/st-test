@@ -168,6 +168,15 @@ TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
 POOL_WAIT_SECONDS = 1  # how often a waiter looks at the tree queue again
+# The version of the tree queue's rules this copy follows, written in its ticket: raise it with any change to tree_queue's order or to who tries a
+# tree in acquire_tree. A waiter defers only to tickets of its own rules or newer; an older copy's ticket (or one with none) gets no deference and the
+# tree's flock decides between them, so a waiter left on old rules cannot stall the new ones (2026-10-30: a run that started before the two-hour
+# rule merged waited 13.2 h, deferring to the new waiters' rank-3 tickets while they deferred to its overdue one).
+QUEUE_RULES = 2
+QUEUE_FOLLOW_SECONDS = 600  # while a run waits for a tree, how often it fetches the base to see whether main's st-test changed (then it continues in that copy)
+HANDOVER_TICKET, HANDOVER_STARTED = 'ST_TEST_HANDOVER_TICKET', 'ST_TEST_HANDOVER_STARTED'
+HANDOVER = {}  # what a waiting run handed to main's newer copy when it executed it: its ticket and start time (read before the seat scrub drops every ST_* name)
+RUN_STARTED = []  # the wall-clock start of this run, as the summary and runs.jsonl count it, for a handover
 TREE_FREE_FALLBACK_SECONDS = 60  # a tree this waiter has seen free this long, untaken by the ticket ahead of it, may be tried by it: the flock decides (liveness: waiters run different copies of this order, so the best ticket of one may defer to another that defers back)
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
@@ -537,6 +546,27 @@ def run_base_copy(argv):
     path.chmod(0o700)
     print(f"fractal-test: running the base's st-test ({base} at {commit[:12]}), not this branch's copy", file=sys.stderr, flush=True)
     os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
+
+
+def hand_over(handover, argv):
+    """Continue a run that was waiting for a pool tree in the base's newer st-test (Handover), in this process: the same pid, so the copy takes
+    the ticket over and keeps the run's place, its start and its name in the host's admission order. The ST_TEST_* settings the seat scrub
+    dropped go along again; the copy this one ran from is removed first, as nothing removes it once this process is replaced."""
+    scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
+    path = scratch / 'st-test'
+    path.write_bytes(handover.source)
+    path.chmod(0o700)
+    if os.environ.get(REEXEC) and Path(__file__).parent.name.startswith('st-test-base-'):
+        shutil.rmtree(Path(__file__).parent, ignore_errors=True)
+    environment = dict(os.environ, **POOL_SETTINGS, **{REEXEC: handover.commit})
+    if RUN_STARTED:
+        environment[HANDOVER_STARTED] = repr(RUN_STARTED[0])
+    if handover.keeps_ticket:
+        environment[HANDOVER_TICKET] = str(handover.ticket)
+    place = 'with its place in the tree queue' if handover.keeps_ticket else 'with a new ticket, as that copy cannot take one over'
+    print(f"fractal-test: the base's st-test changed while this run waited for a pool tree; continuing in {handover.commit[:12]}'s copy, {place}",
+          file=sys.stderr, flush=True)
+    os.execve(sys.executable, [sys.executable, str(path), *argv], environment)
 
 
 FETCH_LOCK_TRIES, FETCH_LOCK_BACKOFF = 3, 2.0  # seconds before the second try, twice that before the third
@@ -1141,11 +1171,12 @@ def process_started_ns(pid):
         return None
 
 
-def tree_queue(queue, now_ns):
+def tree_queue(queue, now_ns, rules=None, own=None):
     """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival, except that a
     ticket past PRIORITY_MAX_WAIT_SECONDS goes before all the others, oldest first (a limit on starvation, which ranks under the floor would otherwise cause). A ticket
     whose process is gone is removed, and so is one whose pid now names a process that started after the ticket was taken (a waiter killed
-    with SIGKILL leaves its ticket; a reused pid must not keep its place)."""
+    with SIGKILL leaves its ticket; a reused pid must not keep its place). With `rules`, a ticket written under older rules than those (ticket_rules)
+    is left out, except `own`: this waiter does not defer to it."""
     found = []
     for name in os.listdir(queue):
         try:
@@ -1165,6 +1196,8 @@ def tree_queue(queue, now_ns):
             with contextlib.suppress(OSError):
                 os.unlink(queue / name)
             continue
+        if rules is not None and name != own and ticket_rules(queue / name) < rules:
+            continue
         effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
         if now_ns - nanos >= PRIORITY_MAX_WAIT_SECONDS * 10**9:
             effective = -1  # past the maximum wait: ahead of every ticket that has not, and the overdue ones among themselves by arrival
@@ -1172,7 +1205,68 @@ def tree_queue(queue, now_ns):
     return sorted(found)
 
 
-def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
+def ticket_rules(path):
+    """The QUEUE_RULES a ticket was written under: 0 for a ticket of a copy older than versioned tickets (an empty file), or one that is unreadable."""
+    try:
+        found = re.fullmatch(r'rules (\d+)\n?', path.read_text())
+    except OSError:
+        return 0
+    return int(found.group(1)) if found else 0
+
+
+def write_ticket(ticket):
+    """Write this copy's rules into its ticket whole (staged under a dot name, which tree_queue never parses), so no waiter reads it half written."""
+    staged = ticket.with_name('.' + ticket.name)
+    staged.write_text(f'rules {QUEUE_RULES}\n')
+    os.replace(staged, ticket)
+
+
+class Handover(BaseException):
+    """Raised by a run waiting for a pool tree when the base's scripts/st-test changed: it unwinds the run (its scratch, its TMPDIR) and keeps its
+    ticket, and the entry point executes the new copy in the same process (hand_over), which takes the ticket over, since its name holds the pid,
+    and with it the run's place. A BaseException, so that no handler for errors takes it for one."""
+
+    def __init__(self, source, commit, ticket, keeps_ticket):
+        super().__init__(f"the base's st-test changed at {commit[:12]}")
+        self.source, self.commit, self.ticket, self.keeps_ticket = source, commit, ticket, keeps_ticket
+
+
+def base_copy_follower(base, own=None):
+    """For acquire_tree's `follow`: a function that every QUEUE_FOLLOW_SECONDS fetches the base and gives (source, commit) when the base's own
+    scripts/st-test differs from the copy running here (`own`, default this file), else None. Only the base's blob, never a branch's: the copy
+    run_base_copy would run if the run started now. A fetch that fails leaves the run waiting on this copy."""
+    own = Path(__file__).read_bytes() if own is None else own
+    last = [time.monotonic()]
+
+    def follow():
+        if time.monotonic() - last[0] < QUEUE_FOLLOW_SECONDS:
+            return None
+        last[0] = time.monotonic()
+        try:
+            commit = fetch_base(base)
+        except Failure:
+            return None
+        shown = git('show', f'{commit}:scripts/st-test', check=False)
+        if shown.returncode or not shown.stdout or shown.stdout == own:
+            return None
+        return shown.stdout, commit
+    return follow
+
+
+def handed_ticket(queue):
+    """The ticket the copy before this one handed over (HANDOVER), when it is this process's and still in `queue`, else None."""
+    handed = HANDOVER.pop('ticket', '')
+    if not handed:
+        return None
+    ticket = Path(handed)
+    try:
+        ours = ticket.name.split('.')[2] == str(os.getpid()) and os.path.samefile(ticket.parent, queue) and ticket.is_file()
+    except (IndexError, OSError):
+        ours = False
+    return ticket if ours else None
+
+
+def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None):
     """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
     Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
     rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees. `size` is the
@@ -1181,14 +1275,19 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
     With `slot_ready` (a function giving (ready, why): build_slot_ready, for a run that builds) a free tree is taken only when it says a build
     could start now, or once TREE_SLOT_WAIT_LIMIT seconds of a free tree left for want of a slot have passed (slot first, above). A waiter that is not first
     still tries a tree it has seen free for TREE_FREE_FALLBACK_SECONDS (liveness against waiters running different copies of the order). `waits`, a
-    dict, is given the seconds spent: 'tree_wait_s' in all, and 'slot_wait_s' of them while a free tree waited for a build slot."""
+    dict, is given the seconds spent: 'tree_wait_s' in all, and 'slot_wait_s' of them while a free tree waited for a build slot.
+    A waiter defers only to tickets of its own QUEUE_RULES or newer. With `follow` (base_copy_follower), called on every pass while no tree is held,
+    a run whose base's st-test changed raises Handover to continue in that copy with the same ticket: every waiter follows main's current rules."""
     root.mkdir(parents=True, exist_ok=True)
     queue = root / 'queue'
     queue.mkdir(exist_ok=True)
-    ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
-    ticket.touch()
-    waited, told = False, set()
-    began, slot_waited, slot_seen, slot_told = time.monotonic(), 0.0, None, False
+    ticket = handed_ticket(queue)
+    if ticket is None:
+        ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
+    write_ticket(ticket)
+    waited, told, handing = False, set(), False
+    began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
+    slot_waited, slot_seen, slot_told = 0.0, None, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
 
     def taken(n, lock):
@@ -1198,7 +1297,12 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
 
     try:
         while True:
-            order = tree_queue(queue, time.time_ns())
+            newer = follow() if follow is not None else None
+            if newer:
+                source, commit = newer
+                handing = HANDOVER_TICKET.encode() in source  # a copy that cannot take the ticket over gets none: no ticket outlives its waiter's place
+                raise Handover(source, commit, ticket, handing)
+            order = tree_queue(queue, time.time_ns(), rules=QUEUE_RULES, own=ticket.name)
             ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
             trees = size() if callable(size) else size
             free_tree = False
@@ -1270,8 +1374,9 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
                     waited = True
             time.sleep(POOL_WAIT_SECONDS)
     finally:
-        with contextlib.suppress(OSError):
-            ticket.unlink()
+        if not handing:
+            with contextlib.suppress(OSError):
+                ticket.unlink()
 
 
 def tree_users(directory):
@@ -2335,11 +2440,16 @@ def run_main(argv, cleanup):
     CLAIMED.clear()
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
+    HANDOVER.clear()
+    HANDOVER.update({key: os.environ.pop(name) for key, name in (('ticket', HANDOVER_TICKET), ('started', HANDOVER_STARTED)) if name in os.environ})
+    if 'started' in HANDOVER:
+        main_started = time.monotonic() - max(0.0, time.time() - float(HANDOVER['started']))
     scrub_git_environment()
     scrub_seat_environment()
     # The build host's finish-first admission order: every stage of this run carries one run name and start time, so once
     # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
-    os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
+    if not (HANDOVER and os.environ.get('ADMISSION_RUN')):  # a handed-over run keeps its place in the host's order too
+        os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
@@ -2395,6 +2505,10 @@ def run_main(argv, cleanup):
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
+    if 'started' in HANDOVER:  # the copy before this one began the run: its times count from that start
+        started_wall = float(HANDOVER['started'])
+        started = time.monotonic() - max(0.0, time.time() - started_wall)
+    RUN_STARTED[:] = [started_wall]
     remote = base_remote(args.base)
     base_commit = fetch_base(args.base)
     if args.status:
@@ -2431,7 +2545,8 @@ def run_main(argv, cleanup):
                 root = pool_root()
                 target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
                 # The slots can change while the run waits; a free tree is taken only when the run's build could start (slot first).
-                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, slot_ready=build_slot_ready, waits=tree_waits)
+                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, slot_ready=build_slot_ready, waits=tree_waits,
+                                            follow=base_copy_follower(args.base))
                 tree_taken = time.monotonic()
                 # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
                 # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
@@ -2736,3 +2851,5 @@ if __name__ == '__main__':
     except Failure as error:
         print(f'fractal-test: {error}', file=sys.stderr)
         sys.exit(2)
+    except Handover as handover:
+        hand_over(handover, sys.argv[1:])

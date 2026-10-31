@@ -1218,6 +1218,51 @@ class StTest(unittest.TestCase):
         self.assertTrue(new.exists())
         self.assertTrue(other.exists())  # not a run's: only st-test.* directories are judged
 
+    def test_a_waiting_run_continues_in_the_bases_newer_st_test_with_its_ticket(self):
+        """main's st-test changed while the run waited for a tree: the run unwinds (its TMPDIR is gone), keeps its ticket, and the newer copy,
+        given the ticket, takes it over and runs to the end with the queue empty after."""
+        newer = '# main\'s newer copy\n# takes over ST_TEST_HANDOVER_TICKET\n'
+        self.main_moves('scripts/st-test', newer)
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'QUEUE_FOLLOW_SECONDS', 0), self.assertRaises(st_test.Handover) as caught:
+            self.run_st_test('--check', 'demo')
+        handover = caught.exception
+        self.assertEqual(handover.source.decode(), newer)
+        self.assertEqual(handover.commit, git(self.work, 'rev-parse', 'origin/main'))
+        self.assertTrue(handover.keeps_ticket)
+        self.assertEqual(handover.ticket.parent, self.pool() / 'queue')
+        self.assertEqual(handover.ticket.read_text(), f'rules {st_test.QUEUE_RULES}\n')
+        self.assertEqual(list(self.run_tmp.iterdir()), [])  # the run unwound before the handover
+        started = time.time() - 300
+        code, _, _ = self.run_st_test('--check', 'demo', extra_env={st_test.HANDOVER_TICKET: str(handover.ticket),
+                                                                    st_test.HANDOVER_STARTED: repr(started)})
+        self.assertEqual(code, 0)
+        self.assertEqual(os.listdir(self.pool() / 'queue'), [])
+        self.assertEqual(st_test.RUN_STARTED, [started])  # the run's times count from the first copy's start
+
+    def test_a_bases_copy_that_cannot_take_a_ticket_over_is_handed_none(self):
+        self.main_moves('scripts/st-test', '# an older copy, from before handovers\n')
+        self.commit('b.txt', 'two')
+        with mock.patch.object(st_test, 'QUEUE_FOLLOW_SECONDS', 0), self.assertRaises(st_test.Handover) as caught:
+            self.run_st_test('--check', 'demo')
+        self.assertFalse(caught.exception.keeps_ticket)
+        self.assertEqual(os.listdir(self.pool() / 'queue'), [])  # no ticket outlives its place
+
+    def test_the_follower_names_only_a_changed_copy_of_the_bases_own(self):
+        self.main_moves('scripts/st-test', 'one\n')
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.dict(os.environ, GIT_ENV), contextlib.redirect_stderr(io.StringIO()):
+                with mock.patch.object(st_test, 'QUEUE_FOLLOW_SECONDS', 0):
+                    self.assertIsNone(st_test.base_copy_follower('origin/main', own=b'one\n')())  # the copy running here
+                    self.assertEqual(st_test.base_copy_follower('origin/main', own=b'other\n')(),
+                                     (b'one\n', git(self.work, 'rev-parse', 'origin/main')))
+                    self.assertIsNone(st_test.base_copy_follower('nowhere/main', own=b'other\n')())  # a fetch that fails: keep waiting
+                self.assertIsNone(st_test.base_copy_follower('origin/main', own=b'other\n')())  # not before QUEUE_FOLLOW_SECONDS
+        finally:
+            os.chdir(cwd)
+
     def test_every_run_reuses_the_same_tree_path_and_finds_it_clean(self):
         self.commit('b.txt', 'two')
         seen = Path(self.tmp.name) / 'seen'
@@ -2635,6 +2680,44 @@ if os.environ.get('CI_TEST_FLAKY'):
 """
 
 
+class HandOver(unittest.TestCase):
+    def test_hand_over_executes_the_new_copy_in_this_process_with_the_ticket_the_start_and_the_settings(self):
+        """hand_over replaces the process (the same pid, so the ticket stays this waiter's), passes the ticket, the run's start, the base commit and
+        the ST_TEST_* settings the seat scrub dropped, and removes the base copy it ran from, which nothing would remove after the exec."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        old = tmp / 'st-test-base-old'
+        old.mkdir()
+        shutil.copy(ROOT / 'scripts/st-test', old / 'st-test')
+        report = tmp / 'report.json'
+        newer = (f'import json, os, sys\njson.dump({{"pid": os.getpid(), "argv": sys.argv[1:], "env": dict(os.environ)}}, open({str(report)!r}, "w"))\n'
+                 '# ST_TEST_HANDOVER_TICKET\n')
+        driver = textwrap.dedent(f"""
+            import importlib.machinery, importlib.util, os, sys
+            from pathlib import Path
+            loader = importlib.machinery.SourceFileLoader('st_test', {str(old / 'st-test')!r})
+            st_test = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(st_test)
+            st_test.POOL_SETTINGS['ST_TEST_POOL_MAX_GB'] = '170'
+            st_test.RUN_STARTED[:] = [1234.5]
+            os.environ[st_test.REEXEC] = 'oldbase'
+            print(os.getpid(), flush=True)
+            st_test.hand_over(st_test.Handover({newer.encode()!r}, 'c' * 40, Path('/q/050.1.' + str(os.getpid())), True), ['--check', 'demo'])
+        """)
+        done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, env=dict(os.environ, TMPDIR=str(tmp)), timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        seen = json.loads(report.read_text())
+        pid = int(done.stdout.split()[0])
+        self.assertEqual(seen['pid'], pid)
+        self.assertEqual(seen['argv'], ['--check', 'demo'])
+        self.assertEqual(seen['env']['ST_TEST_HANDOVER_TICKET'], f'/q/050.1.{pid}')
+        self.assertEqual(seen['env']['ST_TEST_HANDOVER_STARTED'], '1234.5')
+        self.assertEqual(seen['env']['ST_TEST_REEXEC'], 'c' * 40)
+        self.assertEqual(seen['env']['ST_TEST_POOL_MAX_GB'], '170')
+        self.assertFalse(old.exists())
+        self.assertIn("continuing in cccccccccccc's copy, with its place in the tree queue", done.stderr)
+
+
 class PoolQueue(unittest.TestCase):
     """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT or CARGO_PRIORITY_CALLER, aged as the shim ages it, then arrival), not by a race."""
     def setUp(self):
@@ -2675,7 +2758,7 @@ class PoolQueue(unittest.TestCase):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
         better = queue / f'003.{time.time_ns():019d}.{os.getpid()}'          # a rank-3 waiter between two of its looks at the trees
-        better.touch()
+        st_test.write_ticket(better)  # a waiter of this copy's rules
         got = []
         with contextlib.redirect_stderr(io.StringIO()):
             worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
@@ -2687,11 +2770,71 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 0)
         got[0][1].close()
 
+    def test_an_older_copys_ticket_gets_no_deference(self):
+        """A ticket written by a copy of st-test older than versioned tickets (an empty file) is not waited for, however good its rank: it may be
+        a waiter that defers back to this one forever (2026-10-30, 13.2 h). The tree's flock decides between them, at once, not after the fallback."""
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        older = queue / f'003.{time.time_ns():019d}.{os.getpid()}'
+        older.touch()
+        got = []
+        began = time.monotonic()
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 30), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            worse.join(5)
+        self.assertEqual(got[0][0], 0)
+        self.assertLess(time.monotonic() - began, 5)
+        self.assertTrue(older.exists())  # not this waiter's to remove: its own waiter is alive
+        got[0][1].close()
+
+    def test_a_newer_copys_ticket_is_still_deferred_to(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        newer = queue / f'003.{time.time_ns():019d}.{os.getpid()}'
+        newer.write_text(f'rules {st_test.QUEUE_RULES + 1}\n')
+        got = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])
+            newer.unlink()
+            worse.join(5)
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+
+    def test_a_handed_over_ticket_keeps_its_place_and_its_wait(self):
+        """The copy a waiting run handed over to takes the ticket over (its name holds this pid): no new ticket, and the wait counts from the first."""
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        ticket = queue / f'050.{time.time_ns() - 100 * 10**9:019d}.{os.getpid()}'
+        ticket.touch()  # as the copy before wrote it
+        waits = {}
+        with mock.patch.dict(st_test.HANDOVER, {'ticket': str(ticket)}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 1, rank=50, waits=waits)
+            self.assertNotIn('ticket', st_test.HANDOVER)
+        lock.close()
+        self.assertEqual(n, 0)
+        self.assertGreaterEqual(waits['tree_wait_s'], 100)
+        self.assertEqual(os.listdir(queue), [])
+
+    def test_a_handed_ticket_that_is_not_this_processs_is_not_taken_over(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        other = queue / f'050.{time.time_ns():019d}.{os.getppid()}'  # alive, another process's, of older rules
+        other.touch()
+        with mock.patch.dict(st_test.HANDOVER, {'ticket': str(other)}, clear=True), contextlib.redirect_stderr(io.StringIO()):
+            n, lock = st_test.acquire_tree(self.root, 1, rank=50)
+        lock.close()
+        self.assertEqual(os.listdir(queue), [other.name])  # taken over, it would have been removed with this waiter's own ticket
+        self.assertEqual(other.read_text(), '')  # nor rewritten with this copy's rules
+
     def test_a_best_ticket_that_never_takes_the_free_tree_does_not_stop_the_next_waiter(self):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
-        stuck = queue / f'003.{time.time_ns():019d}.{os.getpid()}'            # alive, best in this waiter's order, and never going to try a tree (an old copy deferring to us)
-        stuck.touch()
+        stuck = queue / f'003.{time.time_ns():019d}.{os.getpid()}'            # alive, best in this waiter's order, of this copy's rules, and never going to try a tree
+        st_test.write_ticket(stuck)  # a waiter of this copy's rules
         got = []
         began = time.monotonic()
         with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 1.5), contextlib.redirect_stderr(io.StringIO()):
@@ -2708,7 +2851,7 @@ class PoolQueue(unittest.TestCase):
     def test_the_fallback_never_takes_a_tree_that_is_in_use(self):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
-        (queue / f'003.{time.time_ns():019d}.{os.getpid()}').touch()
+        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # a waiter of this copy's rules
         holder = open(self.root / 'tree-0.lock', 'w')
         fcntl.flock(holder, fcntl.LOCK_EX)
         self.addCleanup(holder.close)
@@ -2726,7 +2869,7 @@ class PoolQueue(unittest.TestCase):
     def test_the_fallback_waits_for_a_build_slot_like_the_head_does(self):
         queue = self.root / 'queue'
         queue.mkdir(parents=True)
-        (queue / f'003.{time.time_ns():019d}.{os.getpid()}').touch()
+        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # a waiter of this copy's rules
         ready = [False]
         got = []
         with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
