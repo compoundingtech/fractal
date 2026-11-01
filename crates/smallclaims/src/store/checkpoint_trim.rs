@@ -22,12 +22,22 @@ use crate::replication::InventoryCheckpoint;
 
 /// The kinds a member that trims locally drops, each by its audited rule in
 /// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
-/// same from the full and the trimmed log. A kind joins only with such a test. One audited rule
-/// stays out because a reader reads the history it drops, which no projection digest covers:
-/// `resource.observed`, where a GitHub watch finds when a pull request left the merge queue by
-/// walking its observations back. `harness.observed` joined once its rule kept the credential
+/// same from the full and the trimmed log. A kind joins only with such a test. `resource.observed`
+/// keeps what its readers walk back through, such as a pull request's observations back to the
+/// merge queue (rules version 23). `harness.observed` joined once its rule kept the credential
 /// report where a seat's needs-login run begins (see #4237).
-pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed"];
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed", "resource.observed"];
+
+/// The kinds a local cut's capture also stages, because judging a claim of `LOCAL_TRIM_KINDS`
+/// reads them: the status-history rule folds a seat's harness observations with its runtime
+/// resets and harness diagnostics, and keeps a transition a reset or a restored prompt depends
+/// on. They are staged as context and protected like every other kind, never dropped.
+pub const LOCAL_TRIM_CONTEXT_KINDS: &[&str] = &["runtime.observed", "harness.diagnostic"];
+
+/// What a local cut's capture stages: the kinds it drops and the kinds judging them reads.
+pub fn local_trim_capture_kinds() -> Vec<&'static str> {
+    LOCAL_TRIM_KINDS.iter().chain(LOCAL_TRIM_CONTEXT_KINDS).copied().collect()
+}
 
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
@@ -52,6 +62,45 @@ pub const TRIM_CHUNK_BUDGET: std::time::Duration = std::time::Duration::from_mil
 // four times the acquired-loan work for other traffic. A slow statement can still exceed the
 // chunk budget; this pacing is not a hard statement or request-latency bound.
 pub(super) const TRIM_MIN_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// A trim chunk that holds the writer longer than this logs one line saying what it did.
+pub const LOGGED_TRIM_CHUNK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Log one line for a trim chunk held over `LOGGED_TRIM_CHUNK`: its phase, the envelopes and
+/// claims it took, the bytes of the claim bodies it deleted, and its hold split into the steps
+/// and the commit, so a member attributes its own outliers.
+fn log_if_slow_trim_chunk(
+    phase: &str,
+    held: std::time::Duration,
+    commit: std::time::Duration,
+    envelopes: usize,
+    claims: usize,
+    body_bytes: u64,
+) {
+    if held <= LOGGED_TRIM_CHUNK {
+        return;
+    }
+    tracing::warn!(
+        phase,
+        held_ms = held.as_millis() as u64,
+        step_ms = held.saturating_sub(commit).as_millis() as u64,
+        commit_ms = commit.as_millis() as u64,
+        envelopes,
+        claims,
+        body_bytes,
+        "a trim chunk held the store's writer over 1 s",
+    );
+}
+
+/// The bytes of the bodies of `claims` that this store still holds.
+fn claim_body_bytes(transaction: &Transaction<'_>, claims: &[ClaimTombstone]) -> Result<u64> {
+    claims.iter().try_fold(0, |bytes, claim| {
+        let body: Option<i64> = transaction
+            .query_row("SELECT LENGTH(body) FROM claims WHERE id=?1", params![claim.id], |row| row.get(0))
+            .optional()?;
+        Ok(bytes + body.map_or(0, |body| u64::try_from(body).unwrap_or(0)))
+    })
+}
 
 /// A condition a test injects into a trim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -467,7 +516,7 @@ impl Store {
         }
         let _completion = super::checkpoint_completion::Completion::outer();
         // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
-        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
+        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(&local_trim_capture_kinds()))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
         staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
@@ -891,6 +940,7 @@ impl Store {
                 let held_since = std::time::Instant::now();
                 let transaction = connection.transaction()?;
                 let started = std::time::Instant::now();
+                let (envelope_before, claim_before) = (envelope, claim);
                 while started.elapsed() < TRIM_CHUNK_BUDGET
                     && (!envelope_page.is_empty() || (envelope >= envelope_count && !claim_page.is_empty()))
                 {
@@ -904,8 +954,10 @@ impl Store {
                     self.pause_for_trim_row_cost();
                 }
 
+                let committing = std::time::Instant::now();
                 transaction.commit()?;
                 let held = held_since.elapsed();
+                log_if_slow_trim_chunk("record", held, committing.elapsed(), envelope - envelope_before, claim - claim_before, 0);
                 drop(connection);
                 chunks += 1;
                 self.stop_for_trim_fault(TrimFault::AfterTombstoneChunk(chunks))?;
@@ -1011,6 +1063,7 @@ impl Store {
             transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h4ccfc8269d7a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ "SAVEPOINT trim_chunk")?;
             let mut envelopes = Vec::new();
             let mut claims = Vec::new();
+            let mut body_bytes = 0;
             let mut steps = 0;
             // Only an empty lookup proves exhaustion. Even if transaction setup spent the
             // budget, make one lookup so a zero-step chunk cannot falsely finish the trim.
@@ -1021,6 +1074,7 @@ impl Store {
                 let Some((envelope, envelope_claims)) = next_trim_rows(&transaction, &mut cursor)? else {
                     break;
                 };
+                body_bytes += claim_body_bytes(&transaction, &envelope_claims)?;
                 delete_dropped_rows_tx(&transaction, envelope.as_slice(), &envelope_claims)?;
                 self.pause_for_trim_row_cost();
                 envelopes.extend(envelope);
@@ -1067,8 +1121,11 @@ impl Store {
                     .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4d909c3fd602 owner=smallclaims::store::checkpoint_trim TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)")?
                     .execute(/* sqlite-large-value: allow-for-now lv-h5ece9b814a1a owner=smallclaims::store::checkpoint_trim TODO=trace-statement-and-value-representation */ params![LOCAL_TRIM_DAY, format!("{day} {today}")])?;
             }
+            let committing = std::time::Instant::now();
             transaction.commit()?;
             let held = held_since.elapsed();
+            let phase = if envelopes.is_empty() { "claims" } else { "envelopes" };
+            log_if_slow_trim_chunk(phase, held, committing.elapsed(), envelopes.len(), claims.len(), body_bytes);
             drop(connection);
             // A cursor-only chunk inspected already-absent rows. All chunks that actually
             // delete keep the original invalidation; this does not coalesce mutations.
@@ -1127,8 +1184,10 @@ impl Store {
             let held_since = std::time::Instant::now();
             let transaction = connection.transaction()?;
             let more = self.runtime.rebuild_deferred(&transaction, TRIM_CHUNK_BUDGET)?;
+            let committing = std::time::Instant::now();
             transaction.commit()?;
             let held = held_since.elapsed();
+            log_if_slow_trim_chunk("rebuild", held, committing.elapsed(), 0, 0, 0);
             drop(connection);
             if !more {
                 return Ok(());

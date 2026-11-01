@@ -1249,6 +1249,16 @@ pub struct ResourceObservationOutcome {
     pub recorded_items: Vec<RecordedItem>,
 }
 
+/// What a GitHub repository's poller lays beside one look it records, from its plugin mirror:
+/// each item's facts as the mirror holds them, which replace the graph's as what the look is
+/// compared and merged with, and whether the repository is in compact mode, where an item's
+/// change is recorded as `vcs.item.state` alone instead of a `resource.observed` snapshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MirroredPrior {
+    pub compact: bool,
+    pub items: std::collections::HashMap<String, Value>,
+}
+
 /// One item resource an observation recorded: its subject, item kind, facts and claim.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RecordedItem {
@@ -1979,6 +1989,28 @@ pub struct FaultView {
     pub owner: Option<String>,
     #[serde(flatten)]
     pub item: AttentionItemView,
+}
+
+/// A request to dismiss a current fault whose run has ended, so nothing at its source can close
+/// it. `source` is the fault's subject or its run; `episode` picks one fault when the source has
+/// several.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FaultDismissRequest {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub episode: Option<String>,
+    pub reason: String,
+    pub actor: String,
+}
+
+/// The fault a dismissal closed: it stays closed until its source raises a new episode.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FaultDismissal {
+    pub subject: String,
+    pub episode: String,
+    pub title: String,
+    pub actor: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

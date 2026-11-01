@@ -166,19 +166,24 @@ agent "garden/worker" {{
             .expect("native start completes")
             .unwrap()
     });
-    for _ in 0..1000 {
-        if store
-            .latest_claim(subject, Some("harness.session-file"))
-            .unwrap()
-            .is_some()
-        {
-            break;
-        }
+    // Wait for the event, not a fixed time: the driver writes its admission record before it claims
+    // the seat and publishes the binding, and a loaded host can take longer than any fixed poll.
+    // The driver exiting first, within its own 30 s bound, ends the wait too.
+    while store
+        .latest_claim(subject, Some("harness.session-file"))
+        .unwrap()
+        .is_none()
+        && !completion.is_finished()
+    {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let binding = store
         .latest_claim(subject, Some("harness.session-file"))
         .unwrap();
+    if binding.is_none() {
+        let output = completion.await.unwrap();
+        panic!("the driver exited without publishing its native binding: {output:?}");
+    }
     let admission_records = std::fs::read_dir(drivers.join("sessions/harness-admission"))
         .unwrap()
         .filter_map(Result::ok)

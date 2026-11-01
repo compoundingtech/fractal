@@ -39,6 +39,7 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
 use crate::operation_metadata::OperationMetadata;
@@ -123,7 +124,10 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{
+    CheckpointManifestNeed, LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
+    local_trim_capture_kinds,
+};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]
@@ -2497,6 +2501,25 @@ impl Store {
         Ok(membership)
     }
 
+    /// Read only already-sealed membership; never seed or judge local batches on a cache miss.
+    pub fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.fleet_membership_sealed();
+        }
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let current = fleet_generation(&connection)?;
+            if let Some((folded_at, membership)) = self.membership_cache.lock()
+                .unwrap_or_else(PoisonError::into_inner).as_ref()
+                && *folded_at == current
+            {
+                return Ok(membership.clone());
+            }
+            // Do not populate the sealing path's cache with a fold that can omit local batches.
+            fleet_membership_tx(&connection)
+        })
+    }
+
     /// Whether transport observations about `peer` belong in the graph. A dial-out member is
     /// never dialed and never reports on others, so neither side records one.
     pub fn observes_transport_to(&self, peer: &str) -> Result<bool> {
@@ -3325,6 +3348,7 @@ pub trait FleetAuthority: Send + Sync {
     /// Advances whenever the default store's membership may have changed.
     fn fleet_generation(&self) -> Result<i64>;
     fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership>;
     /// Whether this is a default store that takes its fleet from no other store.
     fn is_default_store(&self) -> Result<bool>;
 }
@@ -3340,6 +3364,10 @@ impl FleetAuthority for Store {
 
     fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
         Store::fleet_membership(self)
+    }
+
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        Store::fleet_membership_sealed(self)
     }
 
     fn is_default_store(&self) -> Result<bool> {
