@@ -20082,12 +20082,17 @@ fn observed_field_value(actual: &Value, subject: &str, path: &str) -> Option<Val
             .and_then(|content| serde_json::from_str::<Value>(content).ok())
             .and_then(|content| owned_field(content, path))
     } else {
-        let actual = if subject.starts_with("resource/") {
-            actual.get("facts").unwrap_or(actual)
-        } else {
-            actual
-        };
-        actual_field(actual, path).cloned()
+        // A pinned resource's value is its claim body, an unpinned one's its folded actual.
+        // Either reads a path in its facts first, then in the whole observation, so `state` and
+        // `facts.state` read the same on both (#4557).
+        let facts = subject
+            .starts_with("resource/")
+            .then(|| actual.get("fields").unwrap_or(actual).get("facts"))
+            .flatten();
+        facts
+            .and_then(|facts| actual_field(facts, path))
+            .or_else(|| actual_field(actual, path))
+            .cloned()
     }
 }
 
@@ -21598,6 +21603,65 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         tokio::time::timeout(Duration::from_secs(10), notify.notified())
             .await
             .expect("a long gate still gets a pass every minute");
+    }
+
+    /// A field gate on a GitHub item reads `state` and `facts.state` alike, whether its subject
+    /// is pinned to a full observation, pinned to a compact item state, or not pinned (#4557).
+    #[test]
+    fn a_field_gate_on_an_item_reads_one_path_pinned_or_not() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        );
+        let item = "resource/github/acme/garden/pull-request/12";
+        let facts = serde_json::json!({"number": 12, "state": "closed", "merged": true, "title": "Moss"});
+        let append = |kind: &str, fields: Value| store.append_claim(&ClaimInput {
+            subject: item.into(),
+            kind: kind.into(),
+            actor: None,
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap().id;
+        let observed = append("resource.observed", serde_json::json!({
+            "kind": "vcs.pull-request", "facts": facts, "observer": "observer/repo",
+            "baseline": false, "changed_fields": ["state"],
+        }));
+        let state = append(
+            fractal_schema::github_plugin::ITEM_STATE,
+            Value::Object(fractal_schema::github_plugin::compact_item_state(
+                "vcs.pull-request", "observer/repo", facts.as_object().unwrap(),
+            ).unwrap()),
+        );
+        let stage = GateContext {
+            subject: "step-run/garden/wait".into(),
+            name: "wait".into(),
+            started_at_unix_ms: 0,
+            attempt: 1,
+            run: "mission-run/garden".into(),
+            generation: "run-generation/garden".into(),
+            eval: false,
+        };
+        let outcome = |subject: &str, path: &str| {
+            let gate = GateSpec::Field {
+                name: "closed".into(),
+                path: path.into(),
+                subject: subject.into(),
+                operator: "is".into(),
+                value: serde_json::json!("closed"),
+            };
+            match reconciler.evaluate_gate(&stage, &gate).unwrap() {
+                GateOutcome::Pass => "pass",
+                GateOutcome::Pending => "pending",
+                _ => "other",
+            }
+        };
+        for subject in [item.to_owned(), format!("{item}@{observed}"), format!("{item}@{state}")] {
+            assert_eq!(outcome(&subject, "state"), "pass", "{subject}");
+            assert_eq!(outcome(&subject, "facts.state"), "pass", "{subject}");
+            assert_eq!(outcome(&subject, "status"), "pending", "{subject}");
+        }
     }
 
     #[test]
