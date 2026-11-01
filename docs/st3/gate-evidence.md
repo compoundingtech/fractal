@@ -38,8 +38,9 @@ supplies the policy via `CI_KEYED_CLIPPY_POLICY` and feeds linux-gate. An explic
 policy path remains explicit; malformed or unreadable preferred configuration
 never selects the legacy file. The generated workflow environment is a bridge
 site documented here because its comments come from generator output.
-The newly keyed `linux-fleet-compat` workflow and `scripts/ci-fleet-compat-keyed`
-use the same `auto:` bridge through `CI_KEYED_FLEET_COMPAT_POLICY`. Both keyed
+The newly keyed `linux-fleet-compat` workflow uses the same `auto:` bridge
+through `CI_KEYED_FLEET_COMPAT_POLICY`, and `scripts/ci-fleet-compat-result`,
+its local note's command, the same missing-only choice as `scripts/ci-clippy-result`. Both keyed
 stages share the argument-based missing-only resolver; their existing hosted
 policy dependencies are retained, not introduced by the directory migration.
 

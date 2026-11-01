@@ -216,16 +216,24 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
     );
     let audits = newcomer.try_run(&["rules", "audit"]).unwrap();
     assert!(audits.starts_with("no write"), "{audits}");
-    // Doctor reads what is sealed and judged, and seals nothing itself. A node without a fleet
-    // seals its batches only for an exchange or a backup, so its newest claims stay counted as
-    // not yet sealed; the daemon's own verdict passes judge a claim soon after it is sealed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // Doctor reads what is sealed and judged, and seals nothing itself, so its newest claims
+    // stay counted as not yet sealed. A sealed claim counts as unsigned until a verdict pass
+    // judges it: startup judges a slice and the paced signature job the rest, at a pace a
+    // loaded machine slows. Wait for every sealed claim to be judged, bounded only so a
+    // daemon that never judges fails with its log instead of hanging.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let check = loop {
         let check = newcomer.signatures();
-        if check["message"].as_str().unwrap().contains(" 0 unsigned") || std::time::Instant::now() > deadline {
+        let message = check["message"].as_str().unwrap().to_owned();
+        if message.contains(" 0 unsigned") {
             break check;
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the daemon left sealed claims unjudged for 120 s: {message}\n{}",
+            std::fs::read_to_string(newcomer.root.path().join("daemon.log")).unwrap_or_default()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
     };
     assert_eq!(check["status"], "pass", "{check}");
     let message = check["message"].as_str().unwrap();

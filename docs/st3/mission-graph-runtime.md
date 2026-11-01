@@ -63,6 +63,7 @@ page the operator for each run. Ordinary reconciliation faults retain their exis
 - `assigned-to` and `available-to` can set a mission default or select one step.
 - `fresh-context` on a step starts its claiming seat in a new harness session for that step. On an agent seat, it does so for every step the seat claims.
 - `agentless` is step-only. A step with no inherited selector is also agentless.
+- `capacity cores=N memory="SIZE"` on a mission is the lane of each agent the mission and its steps declare that declares none of its own; on a step it raises the lane of the seat that works it, and it may not lower a lane ([seat-lanes.md](seat-lanes.md)).
 - A mission allows one active run by default.
 - `concurrent-runs` enables concurrent active runs. An optional `max` property bounds them.
 - A mission can declare exact text and resource inputs.
@@ -192,6 +193,7 @@ mission "MISSION_ID"
 
   assigned-to "agent/${ST_MISSION_RUN}/owner"
   // Or repeat available-to. A mission cannot declare agentless.
+  capacity cores=2 memory="4G"   // the lane of each agent here that declares none
 
   completion { when "all-steps-exhausted" }
   // Or: completion { depends-on { step "publish" completed } }
@@ -329,6 +331,7 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
   available-to "agent/${ST_MISSION_RUN}/worker-b"
   fresh-context
   keep-open
+  capacity cores=8 memory="16G"   // raises the claiming seat's lane for this step
   document "doc/project/request@SHA256"
 
   depends-on {
@@ -347,7 +350,7 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
 }
 ```
 
-`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
+`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `capacity`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
 
 `fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
 
@@ -745,6 +748,8 @@ gate "text omits value" { lacks "message/report" "UNVERIFIED" }
 ```
 
 `field` uses this argument order: path, full subject, operator, value. Operators are `is`, `starts-with`, and `contains`.
+
+On a `resource/...` subject, pinned to a claim (`resource/NAME@CLAIM`, as a resource input is) or not, the path reads the resource's facts first, then its whole observation. So `state` and `facts.state` both read a GitHub item's state.
 
 An `exit_code` field gate on an `exec/...` subject fails when the exec has ended and
 its selected launch cannot restart, including a missing exit code after the process was killed.

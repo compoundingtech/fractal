@@ -23,20 +23,24 @@ fleet_compat() {
   export FRACTAL_COMPAT_BIN="$baseline" ST3_COMPAT_BIN="$baseline"
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   test -x "${FRACTAL_COMPAT_BIN-${ST3_COMPAT_BIN-}}" || return
-  # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. Only
-  # linux-fleet-compat's own run names the skip policy (scripts/ci-fleet-compat-keyed, CI's linux-fleet-compat job): linux-gate runs this
-  # stage too and must not depend on the policy file, so without CI_KEYED_FLEET_COMPAT_POLICY the build keeps no messages and nothing is
-  # checked. --warn while linux-fleet-compat is in shadow (clippy's check fails).
-  if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
+  # Every file that compile reads must be in linux-fleet-compat's input key, or its notes could cover a tree they never measured. CI's
+  # linux-fleet-compat job names the skip policy (CI_KEYED_FLEET_COMPAT_POLICY) and checks it here. linux-gate runs this stage too and
+  # must not depend on the policy file (lane-definition-closure --check), so it never names it: a local run hands the stage's cargo
+  # messages to scripts/ci-fleet-compat-result instead (CI_FLEET_COMPAT_REPORT, below), which checks the same after the stage, outside
+  # linux-gate's command. --warn while linux-fleet-compat is in shadow (the local check fails).
+  if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ] || [ -n "${CI_FLEET_COMPAT_REPORT:-}" ]; then
     cargo test -p fractal --locked --test integration --no-run --message-format=json > "$logs/fleet-compat-build.jsonl" || return
+  fi
+  if [ -n "${CI_KEYED_FLEET_COMPAT_POLICY:-}" ]; then
     local policy
     policy=$(keyed_policy "$CI_KEYED_FLEET_COMPAT_POLICY") || return
     python3 scripts/dep-info-check --logs "$logs" --check linux-fleet-compat --policy "$policy" --jsonl 'fleet-compat-*.jsonl' --warn || return
   fi
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_replicates_with_new_members_and_preserves_history_on_upgrade \
-    fleet::previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place 2>&1 | tee "$logs/compat-result.log" || return
-  grep -q "test result: ok. 2 passed" "$logs/compat-result.log" || return
+    fleet::previous_release_is_never_dialed_for_the_messages_shard_and_upgrades_in_place \
+    fleet::previous_release_mail_reads_beside_stream_items_across_upgrade_and_rollback 2>&1 | tee "$logs/compat-result.log" || return
+  grep -q "test result: ok. 3 passed" "$logs/compat-result.log" || return
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_poller_beside_a_github_plugin_member_and_its_upgrade 2>&1 | tee "$logs/compat-plugin-result.log" || return
@@ -44,7 +48,12 @@ fleet_compat() {
   # A member of the previous release that depends on a repository keeps its item snapshots.
   cargo test -p fractal --locked --test integration -- --ignored --exact \
     fleet::previous_release_dependent_keeps_item_snapshots_until_it_upgrades 2>&1 | tee "$logs/compat-compact-result.log" || return
-  grep -q "test result: ok. 1 passed" "$logs/compat-compact-result.log"
+  grep -q "test result: ok. 1 passed" "$logs/compat-compact-result.log" || return
+  # linux-fleet-compat's note is signed from this stage (scripts/st-test): its cargo messages, and `passed` last, only when the whole
+  # stage passed, so a report without it says the stage did not.
+  if [ -n "${CI_FLEET_COMPAT_REPORT:-}" ]; then
+    mkdir -p "$CI_FLEET_COMPAT_REPORT" && cp "$logs"/fleet-compat-*.jsonl "$CI_FLEET_COMPAT_REPORT/" && : > "$CI_FLEET_COMPAT_REPORT/passed"
+  fi
 }
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.

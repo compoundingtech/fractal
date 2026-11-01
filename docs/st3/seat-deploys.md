@@ -42,6 +42,17 @@ refuses to start the provider; OpenCode starts with native delivery disabled and
 There is no rollback to a last-admitted executable. `st doctor` and the affected agent's state
 name the failed boundary and the remedy.
 
+The isolated `--version` child has a 20-second deadline, including cold runtime startup under
+the seat's inherited scheduling policy. A version timeout remains indeterminate and does not
+create measured evidence. The separate contract probe retains its 45-second deadline and all
+required checks; version completion never substitutes for them. The same scratch is reused, so
+runtime startup files created by the version child are available to the contract child.
+
+Changing this probe source changes `probeDigest`: both omp and OpenCode remeasure at their next
+launch on every host, even if the installed producer is unchanged. Install the admission-error
+diagnostics and this deadline fix together on macOS to remeasure once. macOS background seats
+keep their background policy for both children; the contract must still pass within 45 seconds.
+
 The fixture uses loopback endpoints and dummy keys, without real credentials. It needs writable
 temporary/state directories and the installed harness's normal runtime; omp also needs POSIX `sh`.
 The omp fixture supplies a scratch `--session-dir` and a synthetic `ST_AGENT` identity so a
@@ -52,6 +63,19 @@ Failed measurement records include the failed phase, elapsed time, exit versus t
 exit code when available, stderr tail, and error detail; these diagnostics are also logged
 when the probe runs or a failed record is reused. A changed probe implementation has a new
 cache identity, so deploying a repaired probe does not reuse its predecessor's failed record.
+Early admission errors, including a version timeout before any measurement record exists,
+are retained before scratch cleanup in the agent directory's `driver-diagnostic` file.
+Its optional `attempt` contains the runtime incarnation, phase, outcome, elapsed milliseconds,
+deadline duration, available exit code/signal, sanitized stderr tail (at most 4096 bytes), and
+error chain (at most 2048 bytes). A cache hit that refuses admission is labeled `cachedFailure`;
+it is not described as a newly failed contract child. Diagnostic write failures are logged and
+never change admission's result.
+The current incarnation's detail is carried in the existing `harness.diagnostic` reason and,
+when the driver reports exit before a physical observation is available, in the failed restart
+reason. Legacy diagnostics without an attempt and diagnostics for another incarnation cannot
+be rebound as this launch's error. Older readers ignore the optional local field; upgrade the
+driver and its runtime owner to get the detailed graph/restart reason. Admission deadlines,
+cache lookup order, and exact-build overrides are unchanged.
 A producer that bootstraps missing packages in its empty scratch cache can fail offline even when
 its normal installation works. A person can explicitly allow the exact installed build, on the
 host and as the operating-system user owning the seats, outside an agent seat:
@@ -109,7 +133,9 @@ mail stays held regardless of age; a missing receipt never authorizes another of
 window uses the original send time and the same threshold as the unread backlog. SQLite
 fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
-after a daemon restart. Socket loss creates no delivered or read receipt. Native ledgers retain
+after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
+just before the record goes to the messages shard, so a token revoked between them can still
+record one step. Socket loss creates no delivered or read receipt. Native ledgers retain
 uncertain handoffs, and successful handoffs retry lost receipt acknowledgements with stable IDs.
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 

@@ -4438,6 +4438,23 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let observed = fractal_drivers::driver_diagnostic::read(
             &fractal_drivers::driver_diagnostic::path(directory.path()),
         );
+        // A legacy same-code diagnostic is not evidence of this runtime's failure.
+        assert!(admission_diagnostic("agent/node.fixture", "first", &observed).is_none());
+        let Observed::Failure(mut failure) = observed else {
+            panic!("missing diagnostic")
+        };
+        failure.attempt = Some(Box::new(fractal_drivers::harness_admission::AttemptDiagnostic {
+            incarnation: "first".into(),
+            phase: "version".into(),
+            outcome: "timeout".into(),
+            elapsed_ms: 5008,
+            deadline_ms: Some(5000),
+            exit_code: None,
+            exit_signal: Some(9),
+            stderr_tail: "fixture error".into(),
+            error_chain: "admission process timed out".into(),
+        }));
+        let observed = Observed::Failure(failure);
         let claim = admission_diagnostic("agent/node.fixture", "first", &observed).unwrap();
         assert_eq!(claim.fields["code"], "harness-admission-failed");
         assert_eq!(claim.fields["severity"], severity);
@@ -4446,7 +4463,13 @@ fn admission_failure_projection_names_boundary_and_driver_policy() {
         let reason = claim.fields["reason"].as_str().unwrap();
         assert!(reason.contains("admissionNativeConsumption") && reason.contains("99.42.7"));
         assert!(reason.contains(driver.as_str()));
-        assert!(reason.contains(&format!("st admission override {} --binary", driver.as_str())));
+        assert!(reason.contains("phase=version outcome=timeout elapsed=5008ms deadline=5000ms"));
+        assert!(reason.contains("fixture error"));
+        assert!(admission_diagnostic("agent/node.fixture", "successor", &observed).is_none());
+        assert!(reason.contains(&format!(
+            "st admission override {} --binary",
+            driver.as_str()
+        )));
         assert_eq!(
             claim.idempotency_key,
             admission_diagnostic("agent/node.fixture", "first", &observed)
@@ -8645,7 +8668,7 @@ async fn initial_snapshot_requires_the_providers_runtime_binding() {
 #[tokio::test]
 async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publication() {
     use axum::{Json, Router, routing::post};
-    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Source, Stage, Support};
+    use fractal_drivers::driver_diagnostic::{Driver, Publisher, Reason, Support};
     use std::sync::{Arc, Mutex};
 
     let root = tempfile::tempdir().unwrap();
@@ -8659,11 +8682,24 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
         Some("99.42.7".into()),
         Support::Unsupported,
     );
-    publisher.publish(
-        Stage::VersionGate,
-        Reason::AdmissionIdleEdge,
-        Source::AdmissionProbe,
-    );
+    fractal_drivers::harness_admission::Admission {
+        version: Some("99.42.7".into()),
+        failed: Some(Reason::AdmissionIdleEdge),
+        cache_path: None,
+        override_reason: None,
+        attempt: Some(fractal_drivers::harness_admission::AttemptDiagnostic {
+            incarnation: "current-runtime".into(),
+            phase: "idleEdge".into(),
+            outcome: "timeout".into(),
+            elapsed_ms: 45000,
+            deadline_ms: Some(45000),
+            exit_code: None,
+            exit_signal: None,
+            stderr_tail: "fake producer diagnostic retained through outage".into(),
+            error_chain: "required idleEdge evidence was not observed".into(),
+        }),
+    }
+    .publish(&mut publisher);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -8724,6 +8760,12 @@ async fn admission_outbox_waits_for_current_runtime_and_retries_failed_publicati
             .as_str()
             .unwrap()
             .contains("admissionIdleEdge")
+    );
+    assert!(
+        captured[0].fields["reason"]
+            .as_str()
+            .unwrap()
+            .contains("fake producer diagnostic retained through outage")
     );
     assert!(!ready);
     server.abort();
@@ -9193,10 +9235,11 @@ async fn the_signature_job_drains_the_verdict_backlog_an_ordinary_pass_leaves() 
     store.judge_claims_slice(true).unwrap();
     assert!(store.verdicts_pending().unwrap(), "one ordinary pass takes only a slice");
     let deadline = Instant::now() + Duration::from_secs(60);
-    // An in-memory store shares one cache, so this read can meet the job's writer.
+    // An in-memory store shares one cache, so this read can meet the job's writer, and the job
+    // then retries its loan after a test build's one-second wait. Read seldom, so it rarely does.
     while store.verdicts_pending().unwrap_or(true) {
         assert!(Instant::now() < deadline, "the idle job drains what the pass left");
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
     assert!(!job.is_finished());
     job.abort();

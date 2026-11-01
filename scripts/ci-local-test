@@ -107,6 +107,23 @@ class CiLocal(unittest.TestCase):
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
         self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
 
+    def test_a_compile_in_the_lane_straight_after_a_check_there_succeeds(self):
+        # sccache's client starts the server its socket names when none answers there, and the server keeps the client's TMPDIR for
+        # every compile after. The stage stands in for such a compile: it starts the lane's server unless one runs, recording its TMPDIR.
+        socket = Path(self.tmp.name) / 'sccache-lane-x.sock'
+        compile_ = RECORD + 'if [ -n "${SCCACHE_SERVER_UDS:-}" ] && [ ! -e "$SCCACHE_SERVER_UDS" ]; then echo "$TMPDIR" > "$SCCACHE_SERVER_UDS"; fi\n'
+        done, calls = self.run_local('tests', ci_linux=compile_, SCCACHE_SERVER_UDS=str(socket), SCCACHE_DIR='/lane/cache')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn('SCCACHE_SERVER_UDS', call['env'])
+            self.assertNotIn('SCCACHE_DIR', call['env'])
+        # The seat's next compile in the lane: a server the run started would compile in a TMPDIR the run has removed
+        # ("Failed to create temp dir"); with none, the seat's compile starts the lane's server in its own.
+        self.assertFalse(socket.exists() and not Path(socket.read_text().strip()).is_dir(),
+                         'the lane\'s server was started inside the run and its TMPDIR is gone')
+        self.assertFalse(socket.exists(), 'no server was started inside the run')
+
     def test_the_stages_build_without_debug_info_as_ci_does(self):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -493,23 +510,17 @@ class CiLocal(unittest.TestCase):
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
 
-    def test_keyed_defaults_and_explicit_values_pass_through_ci_local(self):
-        # linux-clippy's local run no longer has an entry of its own: scripts/st-test runs `ci-local clippy` unkeyed and
-        # scripts/ci-clippy-result checks the policy after the stage (docs/keyed-clippy.md, PR 2).
-        for entry, stage, variable in (('ci-fleet-compat-keyed', 'fleet-compat', 'CI_KEYED_FLEET_COMPAT_POLICY'),):
-            shutil.copy(ROOT / 'scripts' / entry, self.work / 'scripts' / entry)
-            for explicit in (None, '', '.st/evidence-skip-policy.json', '/custom/policy.json'):
-                with self.subTest(entry=entry, explicit=explicit):
-                    extra = {} if explicit is None else {variable: explicit}
-                    done, calls = self.run_local(entry=entry, CLIPPY_BASE_SHA='f' * 40, **extra)
-                    self.assertEqual(done.returncode, 0, done.stderr)
-                    self.assertEqual(calls[-1]['env'][variable], 'auto:.st/evidence-skip-policy.json' if explicit is None else explicit)
-                    self.assertEqual(calls[-1]['argv'], [stage])
-                    self.log.unlink()
-            done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
-            self.log.unlink()
+    def test_ordinary_clippy_and_fleet_compat_stages_stay_unkeyed(self):
+        # Neither keyed check has a local entry of its own any more: scripts/st-test runs `ci-local clippy` / `ci-local fleet-compat` unkeyed
+        # and scripts/ci-clippy-result / ci-fleet-compat-result check the policy after the stage (docs/keyed-clippy.md). Only CI's keyed
+        # jobs name the policy.
+        for stage in ('clippy', 'fleet-compat'):
+            with self.subTest(stage=stage):
+                done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                for variable in ('CI_KEYED_CLIPPY_POLICY', 'CI_KEYED_FLEET_COMPAT_POLICY'):
+                    self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
+                self.log.unlink()
 
     def test_keyed_consumer_selects_missing_only_without_running_compiles(self):
         source = (ROOT / 'scripts/ci-linux').read_text()

@@ -11,6 +11,172 @@ import sys
 import tempfile
 import time
 from unittest.mock import patch
+import hashlib
+import socket
+import stat
+from unittest import TestCase
+
+
+def utc():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def peak(record, group, final=False):
+    key = "peak_final_lifecycle" if final else "peak_sampled_before_termination"
+    try:
+        record[key] = int((group / "memory.peak").read_text())
+    except OSError as error:
+        record[key] = f"unavailable ({'collected' if final and isinstance(error, FileNotFoundError) else error})"
+        if not final or not isinstance(error, FileNotFoundError):
+            raise
+
+
+def require(condition, detail="invalid perf-slot receipt"):
+    if not condition:
+        raise ValueError(detail)
+
+
+def validate_receipt(receipt):
+    require(receipt["status"] == "final" and receipt["outcome"] == "success")
+    for field in ("caller_pid", "caller_starttime", "gate_slot", "invocation", "source_head", "source_sha256",
+                  "hostname", "started_utc", "ended_utc"):
+        require(receipt[field], f"missing attribution: {field}")
+    require({"unit", "cgroup"} <= receipt["gate_slot"].keys())
+    require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0)
+    if receipt.get("skip") == "no-user-manager":
+        require(not re.search(r"/user@\d+\.service(?:/|$)", receipt["caller_cgroup"]))
+        require(receipt["gate_slot"] == {"unit": None, "cgroup": None} and not receipt["fixtures"])
+        return
+    admission = receipt["gate_slot"]
+    require(all(isinstance(admission[key], str) and admission[key] for key in ("unit", "cgroup")))
+    admitted = Path(os.path.normpath(admission["cgroup"]))
+    require(admitted.is_absolute() and admitted.name == admission["unit"])
+    require(Path(os.path.normpath(receipt["caller_cgroup"])).is_relative_to(admitted))
+    manager = next((parent for parent in admitted.parents if re.fullmatch(r"user@\d+\.service", parent.name)), None)
+    require(manager is not None and all(str(manager / lane) in receipt["scanned_roots"] for lane in ("app.slice", "builds.slice")))
+    fixtures = receipt["fixtures"]
+    require(len(fixtures) == 2 and len({r["unit"] for r in fixtures}) == 2)
+    for record in fixtures:
+        require(os.path.normpath(record["caller_slice"]) == os.path.dirname(os.path.normpath(receipt["gate_slot"]["cgroup"])))
+        parent = os.path.dirname(os.path.normpath(record["cgroup"]))
+        require(os.path.normpath(record["parent_slice"]) == parent == os.path.normpath(record["caller_slice"]))
+        require(parent in receipt["scanned_roots"])
+        require(record["drain"] == "empty and collected")
+        require(type(record["peak_sampled_before_termination"]) is int and record["peak_sampled_before_termination"] >= 0)
+        final = record["peak_final_lifecycle"]
+        require((type(final) is int and final >= 0) or final == "unavailable (collected)")
+        require(record["limits"] == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16})
+        require(record["RuntimeMaxUSec"] == 90000000)
+        require(record["manager"]["MemoryMax"] == "67108864")
+        require(record["manager"]["MemorySwapMax"] == "0" and record["manager"]["TasksMax"] == "16")
+        require(record["manager"]["ControlGroup"] == record["cgroup"])
+        require(record["manager"]["Slice"] == record["slice"] == Path(record["parent_slice"]).name)
+        require(record["cgroup"] == f"{record['caller_slice']}/{record['unit']}")
+        require(runtime_usec(record["manager"]["RuntimeMaxUSec"]) == record["RuntimeMaxUSec"])
+        require(all(record[field] for field in ("pid", "starttime", "cgroup", "slice", "caller_slice", "parent_slice")))
+        require(record["unit"].startswith(f"ci-perf-slot-fixture-{receipt['invocation']}-"))
+
+
+def fixture_cgroups(lane, prefix):
+    def failed(error):
+        if not (isinstance(error, FileNotFoundError) and Path(error.filename) == lane):
+            raise error
+    return sum(Path(directory).name.startswith(prefix) for directory, children, files in os.walk(lane, onerror=failed))
+
+
+def receipt_directory(path, roots):
+    require(stat.S_ISDIR(os.lstat(path).st_mode), "receipt sink must be a real directory")
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        require(info.st_uid == os.geteuid() and not info.st_mode & 0o022, "unsafe receipt directory owner or mode")
+        resolved = Path(os.path.realpath(f"/proc/self/fd/{fd}"))
+        require(not any(resolved.is_relative_to(Path(root).resolve()) for root in roots), "receipt sink is disposable")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def write_receipt(fd, name, data):
+    with os.fdopen(os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd), "w") as stream:
+        json.dump(data, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+class EvidenceTee:
+    def __init__(self, stream, lines):
+        self.stream, self.lines, self.pending = stream, lines, ""
+
+    def write(self, text):
+        self.stream.write(text)
+        self.pending += text
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            self.lines.append(line)
+        return len(text)
+
+    def flush(self):
+        self.stream.flush()
+
+
+@contextlib.contextmanager
+def receipt_sink(path):
+    receipt = {"invocation": os.urandom(12).hex(), "fixtures": [], "scanned_roots": []}
+    if not path:
+        yield receipt
+        return
+    source = Path(__file__).resolve()
+    git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    git = lambda *args: subprocess.check_output(["git", "-C", str(source.parent), *args], env=git_env, text=True, timeout=15).strip()
+    # Mirror st-test's default roots; st-test supplies its resolved configured roots before scrubbing ST_*.
+    roots = [git("rev-parse", "--show-toplevel"), os.getcwd(), str(Path.home() / ".cache/st-test"),
+             os.environ.get("ST_TEST_POOL", str(Path.home() / ".cache/st-test")),
+             os.environ.get("ST_TEST_TMP", "/var/tmp"), tempfile.gettempdir()]
+    roots += json.loads(os.environ.get("CI_PERF_SLOT_DISPOSABLE_ROOTS", "[]"))
+    roots.append(subprocess.check_output(["git", "-C", os.getcwd(), "rev-parse", "--show-toplevel"],
+                                         env=git_env, text=True, timeout=15).strip())
+    fd = receipt_directory(path, roots)
+    name = f"ci-perf-slot-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}.json"
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        group = cgroup_path(Path("/proc/self/cgroup").read_text())
+        admitted = os.environ.get("GATE_SLOT_SCOPE_UNIT")
+        require(not admitted or admitted in group.split("/"), "admission marker does not match kernel cgroup")
+        receipt.update(status="started", outcome="failure", caller_pid=os.getpid(),
+                       caller_starttime=starttime(Path("/proc/self/stat").read_text()),
+                       caller_cgroup=group,
+                       gate_slot={"unit": admitted, "cgroup": group.split(admitted)[0] + admitted if admitted else None},
+                       source_head=git("rev-parse", "HEAD"), source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                       hostname=socket.gethostname(), started_utc=utc(), stdout=[])
+        write_receipt(fd, name, receipt)
+        os.fsync(fd)
+        def interrupted(signum, frame):
+            receipt["signal"] = signal.Signals(signum).name
+            raise SystemExit(128 + signum)
+        for sig in previous:
+            signal.signal(sig, interrupted)
+        try:
+            with contextlib.redirect_stdout(EvidenceTee(sys.stdout, receipt["stdout"])):
+                yield receipt
+            receipt["outcome"] = "success"
+        except BaseException as error:
+            receipt["outcome"] = "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failure"
+            receipt["error"] = repr(error)
+            raise
+        finally:
+            receipt["fixtures"] = list(receipt["fixtures"])
+            receipt.update(status="final", ended_utc=utc())
+            temporary = name + "." + receipt["invocation"]
+            write_receipt(fd, temporary, receipt)
+            os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        os.close(fd)
 
 slot = str(Path(__file__).resolve().parent / "ci-perf-slot")
 
@@ -20,6 +186,26 @@ def start(env, *args, command, signal_mask=None):
     restore_mask = (lambda: signal.pthread_sigmask(signal.SIG_SETMASK, signal_mask)) if signal_mask is not None else None
     return subprocess.Popen([sys.executable, slot, *args, "--", *command], env=env, preexec_fn=restore_mask,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def signal_on_publication(env, number):
+    # Inject cancellation at the first instant holder.json is visible, before
+    # run() can continue to fork. This makes the startup race deterministic.
+    script = '''import os, pathlib, runpy, sys
+number = int(sys.argv.pop(1))
+replace = pathlib.Path.replace
+def publish(self, target):
+    result = replace(self, target)
+    if pathlib.Path(target).name == "holder.json":
+        os.kill(os.getpid(), number)
+    return result
+pathlib.Path.replace = publish
+sys.argv = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path(sys.argv[0]).parent))
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+    return subprocess.Popen([sys.executable, "-c", script, str(number), slot, "--", "sleep", "60"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def launch_fixture(unit, units, wrappers, env, *args, command):
@@ -70,11 +256,11 @@ def alive(pid):
 
 def cgroup_path(text):
     lines = text.splitlines()
-    assert lines and all(re.fullmatch(r"\d+:[^:]*:/.*", line) for line in lines), "malformed cgroup metadata"
+    require(lines and all(re.fullmatch(r"\d+:[^:]*:/.*", line) for line in lines), "malformed cgroup metadata")
     paths = [line[3:] for line in lines if line.startswith("0::")]
-    assert len(paths) == 1, "missing or duplicate unified cgroup metadata"
+    require(len(paths) == 1, "missing or duplicate unified cgroup metadata")
     path = paths[0]
-    assert path == "/" or all(part not in ("", ".", "..") for part in path[1:].split("/")), "malformed cgroup path"
+    require(path == "/" or all(part not in ("", ".", "..") for part in path[1:].split("/")), "malformed cgroup path")
     return path
 
 
@@ -98,7 +284,7 @@ def starttime(text):
 
 
 def runtime_usec(value):
-    assert re.fullmatch(r"\d+(?:min|us|s)(?: \d+(?:min|us|s))*", value), value
+    require(re.fullmatch(r"\d+(?:min|us|s)(?: \d+(?:min|us|s))*", value), "invalid runtime duration")
     return sum(int(n) * {"min": 60000000, "s": 1000000, "us": 1}[unit]
                for n, unit in re.findall(r"(\d+)(min|us|s)", value))
 
@@ -107,6 +293,13 @@ def kernel_limits(group):
     limits = {name: int((group / name).read_text()) for name in ("memory.max", "memory.swap.max", "pids.max")}
     assert limits == {"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, limits
     return limits
+
+
+if sys.argv[1:2] == ["--validate-receipt"]:
+    require(len(sys.argv) == 3, "expected --validate-receipt PATH")
+    validate_receipt(json.loads(Path(sys.argv[2]).read_text()))
+    print("passed: ci-perf-slot receipt")
+    sys.exit(0)
 
 
 # Fake cgroup lines exercise hierarchy-preserving leaf slice selection without a user bus.
@@ -126,7 +319,7 @@ for invalid in (f"{manager}/app.slice/outer.scope/child", manager, f"{manager}/i
 for metadata in ("", "not cgroup metadata", "0::relative", "0::/a\n0::/b\n", "0::/a/../b\n"):
     try:
         caller_slice(metadata)
-    except AssertionError:
+    except ValueError:
         pass
     else:
         raise AssertionError("malformed cgroup metadata must fail, not skip")
@@ -180,13 +373,111 @@ for helper, call in ((fixture_listing, "check_output"), (stop_fixture, "run")):
             assert "drain unconfirmed" in str(error) and "timed out after 15s" in str(error)
         else:
             raise AssertionError("manager timeout must fail the drain")
+with tempfile.TemporaryDirectory() as receipt_tmp:
+    sink = Path(receipt_tmp)
+    assert fixture_cgroups(sink / "missing", "fixture-") == 0
+    for error in (PermissionError(13, "denied", str(sink)), FileNotFoundError(2, "gone", str(sink / "child"))):
+        with patch.object(os, "walk", side_effect=lambda lane, onerror: onerror(error)), TestCase().assertRaises(type(error)):
+            fixture_cgroups(sink, "fixture-")
+    record = {}
+    with TestCase().assertRaises(FileNotFoundError):
+        peak(record, sink)
+    assert record["peak_sampled_before_termination"].startswith("unavailable")
+    peak(record, sink, final=True)
+    assert record["peak_final_lifecycle"] == "unavailable (collected)"
+    real_directory = receipt_directory
+    for refusal in ("symlink", "mode", "owner", "disposable", "missing"):
+        link = sink / "link"
+        link.symlink_to(sink)
+        sink.chmod(0o777 if refusal == "mode" else 0o700)
+        with patch.object(subprocess, "Popen") as launched, contextlib.ExitStack() as stack:
+            if refusal == "owner":
+                stack.enter_context(patch.object(os, "geteuid", return_value=-1))
+            with TestCase().assertRaises((ValueError, OSError)):
+                receipt_directory(link if refusal == "symlink" else sink / "missing" if refusal == "missing" else sink,
+                                  [sink] if refusal == "disposable" else [])
+            launched.assert_not_called()
+        link.unlink()
+    sink.chmod(0o700)
+    for outcome in ("success", "failure", "interrupted", "write-error"):
+        for existing in sink.iterdir():
+            existing.unlink()
+        with patch.dict(os.environ, {"GATE_SLOT_SCOPE_UNIT": ""}), patch.object(
+                sys.modules[__name__], "receipt_directory", side_effect=lambda path, roots: real_directory(path, [])), \
+                patch.object(subprocess, "check_output", return_value="fixture-source"), contextlib.ExitStack() as stack:
+            try:
+                with receipt_sink(sink) as saved:
+                    assert json.loads(next(sink.iterdir()).read_text())["status"] == "started"
+                    if outcome == "failure":
+                        raise ValueError("fixture failure")
+                    if outcome == "interrupted":
+                        signal.raise_signal(signal.SIGTERM)
+                    if outcome == "write-error":
+                        stack.enter_context(patch.object(os, "replace", side_effect=OSError("rename failed")))
+            except (ValueError, SystemExit, OSError):
+                assert outcome != "success"
+            else:
+                assert outcome == "success"
+            data = json.loads(next(p for p in sink.iterdir() if p.name.endswith(".json")).read_text())
+            assert data["status"] == ("started" if outcome == "write-error" else "final")
+            assert outcome == "write-error" or data["outcome"] == outcome
+            assert outcome != "interrupted" or data["signal"] == "SIGTERM"
+    code = "import ast,sys; t=ast.parse(open(sys.argv[1]).read()); exec(compile(ast.Module([n for n in t.body if isinstance(n,(ast.Import,ast.ImportFrom,ast.FunctionDef))],[]),sys.argv[1],'exec')); receipt_directory(sys.argv[2],[sys.argv[2]])"
+    refused = subprocess.run([sys.executable, "-O", "-c", code, str(Path(__file__).resolve()), str(sink)], capture_output=True)
+    assert refused.returncode != 0 and b"receipt sink is disposable" in refused.stderr
+    good = dict(data, outcome="success", status="final", ended_utc=utc(), remaining_units=0, remaining_cgroups=0,
+                skip="no-user-manager", caller_cgroup="/system.slice/runner.service", fixtures=[], gate_slot={"unit": None, "cgroup": None})
+    validate_receipt(good)
+    parent = f"{manager}/ci.slice"
+    fixture = dict(unit=f"ci-perf-slot-fixture-{good['invocation']}-0.scope", pid=1, starttime=1,
+                   slice="ci.slice", caller_slice=parent, parent_slice=parent,
+                   limits={"memory.max": 67108864, "memory.swap.max": 0, "pids.max": 16}, RuntimeMaxUSec=90000000,
+                   manager={"MemoryMax": "67108864", "MemorySwapMax": "0", "TasksMax": "16", "RuntimeMaxUSec": "90s", "Slice": "ci.slice"},
+                   peak_sampled_before_termination=1, peak_final_lifecycle="unavailable (collected)", drain="empty and collected")
+    fixtures = [dict(fixture, unit=fixture["unit"].replace("-0.scope", f"-{n}.scope")) for n in range(2)]
+    for record in fixtures:
+        record["cgroup"] = f"{parent}/{record['unit']}"
+        record["manager"] = dict(record["manager"], ControlGroup=record["cgroup"])
+    complete = dict(good, skip=None, fixtures=fixtures, gate_slot={"unit": "gate.scope", "cgroup": f"{parent}/gate.scope"},
+                    caller_cgroup=f"{parent}/gate.scope/child", scanned_roots=[parent, f"{manager}/app.slice", f"{manager}/builds.slice"])
+    validate_receipt(complete)
+    wrong = dict(complete, gate_slot={"unit": "gate.scope", "cgroup": "/other.slice/gate.scope"})
+    for candidate, accepted in ((complete, True), (wrong, False), (dict(complete, outcome="failure"), False),
+                                (dict(complete, gate_slot={"unit": None, "cgroup": None}), False),
+                                (dict(complete, caller_cgroup="/system.slice/runner.service"), False),
+                                (dict(complete, scanned_roots=[parent, f"{manager}/app.slice"]), False),
+                                (dict(complete, fixtures=[dict(record, parent_slice="/other/ci.slice") for record in fixtures],
+                                      scanned_roots=["/other/ci.slice"]), False),
+                                (dict(complete, scanned_roots=[]), False)):
+        (sink / "cli.json").write_text(json.dumps(candidate))
+        result = subprocess.run([sys.executable, "-O", str(Path(__file__).resolve()), "--validate-receipt", str(sink / "cli.json")], capture_output=True)
+        assert (result.returncode == 0) == accepted, result.stderr.decode()
+    for change in ({"drain": "not confirmed"}, *({"peak_final_lifecycle": value} for value in (None, -1, "unknown")),
+                   *({"manager": dict(fixtures[1]["manager"], **{field: value})}
+                     for field, value in (("ControlGroup", "/wrong"), ("Slice", "wrong.slice"), ("RuntimeMaxUSec", "1s")))):
+        with TestCase().assertRaises(ValueError):
+            validate_receipt(dict(complete, fixtures=[fixtures[0], dict(fixtures[1], **change)]))
+    for bad in (dict(good, status="started"), dict(good, outcome="failure"), dict(good, remaining_units=1),
+                dict(good, remaining_cgroups=1), dict(good, hostname=""), dict(good, ended_utc=""),
+                dict(good, skip=None, fixtures=[]), dict(good, skip=None, fixtures=[{"drain": "not confirmed"}] * 2)):
+        with TestCase().assertRaises((ValueError, KeyError)):
+            validate_receipt(bad)
+# A zombie is exited, not a live load. Leave it unreaped long enough to test
+# the real /proc state rather than assuming kill(pid, 0) means running.
+zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+try:
+    os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+    assert not alive(zombie.pid)
+finally:
+    zombie.wait()
+
 if sys.argv[1:] == ["--helpers-only"]:
     print("passed: ci-perf-slot helpers")
     sys.exit(0)
 
 
 
-with tempfile.TemporaryDirectory() as tmp:
+with receipt_sink(os.environ.get("CI_PERF_SLOT_RECEIPT_DIR")) as receipt, tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     env = {**os.environ, "PERF_SLOT_DIR": str(root / "slot"), "PERF_SLOT_POLL": "0.05", "PERF_SLOT_GRACE": "1"}
     holder = root / "slot/holder.json"
@@ -269,6 +560,7 @@ with tempfile.TemporaryDirectory() as tmp:
     slice_path = read_caller_slice() if scope_available else None
     if scope_available and slice_path:
         units, wrappers, scoped_pids, evidence = [], [], [], {}
+        receipt["fixtures"] = evidence.values()
         systemctl = str(systemd_run.with_name("systemctl"))
         scoped = root / "scoped"
         script = "echo $BASHPID > %s; exec sleep 60" % scoped
@@ -282,11 +574,6 @@ with tempfile.TemporaryDirectory() as tmp:
             for sig in previous_signals:
                 signal.signal(sig, signal.SIG_IGN)
             try:
-                for unit in units:
-                    record = evidence.setdefault(unit, {"unit": unit})
-                    group = record.get("cgroup", f"{slice_path}/{unit}")
-                    with contextlib.suppress(OSError):
-                        record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
                 for wrapper in wrappers:
                     if wrapper.poll() is None:
                         wrapper.terminate()
@@ -298,10 +585,20 @@ with tempfile.TemporaryDirectory() as tmp:
                 # Stop after wrapper exit: a launch already in flight must not register a scope after our stop.
                 for unit in units:
                     stop_fixture(systemctl, unit)
+                for unit in units:
+                    record = evidence.setdefault(unit, {"unit": unit})
+                    peak(record, Path("/sys/fs/cgroup", record.get("cgroup", f"{slice_path}/{unit}").lstrip("/")), final=True)
                 def no_fixtures():
-                    listed = fixture_listing(systemctl, os.getpid())
+                    listed = fixture_listing(systemctl, receipt["invocation"])
                     return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
                 until(no_fixtures, "all fixture scopes and processes are gone")
+                receipt["remaining_units"] = len(fixture_listing(systemctl, receipt["invocation"]).splitlines())
+                manager_root = Path("/sys/fs/cgroup", slice_path.lstrip("/").split(".service/", 1)[0] + ".service")
+                receipt["scanned_roots"] = sorted({str(manager_root / lane).removeprefix("/sys/fs/cgroup") for lane in ("app.slice", "builds.slice")} |
+                                                 {record.get("parent_slice", slice_path) for record in evidence.values()})
+                receipt["remaining_cgroups"] = sum(fixture_cgroups(Path("/sys/fs/cgroup", lane.lstrip("/")), f"ci-perf-slot-fixture-{receipt['invocation']}-")
+                                                  for lane in receipt["scanned_roots"])
+                require(receipt["remaining_units"] == receipt["remaining_cgroups"] == 0, "fixture cgroups remain")
                 cleaned = True
             except subprocess.TimeoutExpired as error:
                 raise AssertionError("fixture drain unconfirmed: wrapper did not exit after TERM/KILL deadlines") from error
@@ -314,13 +611,14 @@ with tempfile.TemporaryDirectory() as tmp:
 
         def cancelled(signum, frame):
             finish_fixtures()
+            receipt["signal"] = signal.Signals(signum).name
             raise SystemExit(128 + signum)
 
         for sig in previous_signals:
             signal.signal(sig, cancelled)
         try:
             for n, mode in enumerate(("kill", "timeout")):
-                unit = f"ci-perf-slot-fixture-{os.getpid()}-{n}.scope"
+                unit = f"ci-perf-slot-fixture-{receipt['invocation']}-{n}.scope"
                 scoped.unlink(missing_ok=True)
                 command = [str(systemd_run), "--user", "--scope", "--quiet", "--collect",
                            f"--slice={Path(slice_path).name}", f"--unit={unit}",
@@ -331,7 +629,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 scoped_pid = int(scoped.read_text())
                 scoped_pids.append(scoped_pid)
                 group = cgroup_path(Path(f"/proc/{scoped_pid}/cgroup").read_text())
-                record = evidence.setdefault(unit, {"unit": unit})
+                record = evidence.setdefault(unit, {"unit": unit, "caller_slice": slice_path, "parent_slice": slice_path})
                 record.update(pid=scoped_pid, starttime=starttime(Path(f"/proc/{scoped_pid}/stat").read_text()), cgroup=group)
                 assert group == f"{slice_path}/{unit}", f"fixture left caller slice: {group}"
                 properties = dict(line.split("=", 1) for line in subprocess.check_output(
@@ -344,8 +642,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 assert usec == 90000000, properties
                 record.update(slice=properties["Slice"], limits=kernel_limits(Path("/sys/fs/cgroup", group.lstrip("/"))),
                               RuntimeMaxUSec=usec, manager=properties)
-                with contextlib.suppress(OSError):
-                    record["memory.peak"] = int(Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak").read_text())
+                peak(record, Path("/sys/fs/cgroup", group.lstrip("/")))
                 if mode == "kill":
                     victim.kill()
                 assert victim.wait(20) == (124 if mode == "timeout" else -signal.SIGKILL)
@@ -353,18 +650,32 @@ with tempfile.TemporaryDirectory() as tmp:
         finally:
             finish_fixtures()
     elif scope_available:
+        receipt.update(skip="no-user-manager", remaining_units=0, remaining_cgroups=0)
         print("skipped: caller is not under a user manager; a --user scope would leave the caller's cgroup tree (scope-move case)")
     else:
+        receipt["skip"] = "no-user-bus"
         print("skipped: no systemd user bus for the scope case")
 
     # Ctrl-C and SIGTERM on the wrapper stop the run and free the slot too.
     for number in (signal.SIGINT, signal.SIGTERM):
         stopped = start(env, command=["sleep", "60"])
-        until(holder.exists, "run holds the slot")
-        pid = json.loads(holder.read_text())["pid"]
+        # No pause between looks, and nothing read first: the signal comes as soon as the record shows the slot held, which is
+        # where a wrapper that installed its handlers after publishing the record exited without dropping it (2026-11-01, two
+        # merge groups). The record names the wrapper itself.
+        deadline = time.time() + 10
+        while not holder.exists():
+            assert time.time() < deadline, "timed out: run holds the slot"
         stopped.send_signal(number)
+        pid = stopped.pid
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
+
+    # The publication itself is the readiness boundary: even a signal before
+    # the watchdog forks must return only after cleanup, not leave a record.
+    for number in (signal.SIGINT, signal.SIGTERM):
+        stopped = signal_on_publication(env, number)
+        assert stopped.wait(10) == 128 + number, stopped.stderr.read()
+        assert not holder.exists() and "perf slot free" in status()
 
     # The watchdog is protected from TERM itself, but must not pass SIG_IGN
     # through exec to its command. A shell cannot install a TERM cleanup trap
@@ -404,4 +715,4 @@ with tempfile.TemporaryDirectory() as tmp:
     for phrase in ("ci-perf load", "budget", "Evidence for the PR", "2h", "--timeout"):
         assert phrase in helped, phrase
 
-print("passed: ci-perf-slot")
+    print("passed: ci-perf-slot")

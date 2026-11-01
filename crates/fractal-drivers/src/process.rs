@@ -9,7 +9,7 @@ use std::os::unix::process::CommandExt as _;
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use super::*;
+use anyhow::Context as _;
 
 /// Per-stream cap for captured child diagnostics. Tail-preserving: when output exceeds the cap,
 /// the LAST [`CAPTURE_CAP_BYTES`] bytes are kept — recent output is what a failure message needs,
