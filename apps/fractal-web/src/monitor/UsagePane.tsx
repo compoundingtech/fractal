@@ -27,19 +27,20 @@ const Unread = ({ feed, what, onRetry }: { readonly feed: Unobserved; readonly w
 const Stale = ({ feed }: { readonly feed: Feed<unknown> }) => feed._tag === 'Observed' && feed.error
   ? <p role="status" {...stylex.props(styles.stale)}>Last reading: could not read again ({feed.error.detail})</p> : null
 
-export const UsagePane = (): React.ReactNode => {
+/** `label` names this pane's landmark and prefixes its section landmarks, so several panes on one page stay distinct. */
+export const UsagePane = ({ label = 'Usage' }: { readonly label?: string } = {}): React.ReactNode => {
   const objectives = useDataSource().objectives
   return (
-    <section aria-label="Usage" data-testid="usage-pane" {...stylex.props(styles.pane)}>
+    <section aria-label={label} data-testid="usage-pane" {...stylex.props(styles.pane)}>
       {objectives === undefined
         ? <SystemNotice kind="error" title="Objectives and budgets not supported" detail="This connection does not offer them" />
-        : <Usage source={objectives} />}
+        : <Usage source={objectives} label={label} />}
     </section>
   )
 }
 export default UsagePane
 
-const Usage = ({ source }: { readonly source: ObjectivesSource }): React.ReactNode => {
+const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly label: string }): React.ReactNode => {
   const list = useAtomValue(source.list)
   const accounts = useAtomValue(source.accounts)
   const now = useNow()
@@ -57,7 +58,7 @@ const Usage = ({ source }: { readonly source: ObjectivesSource }): React.ReactNo
       {list._tag !== 'Observed' ? <Unread feed={list} what="objectives and budgets" onRetry={source.refresh} />
         : rows.length === 0 ? <SystemNotice kind="empty" title="No objectives or budgets" detail="st declares none on this computer" />
           : sloGroups(rows).map(group => (
-            <section key={group.kind} aria-label={group.title}>
+            <section key={group.kind} aria-label={`${label}: ${group.title}`}>
               <h3 {...stylex.props(styles.section)}>{group.title} <span {...stylex.props(styles.meta)}>{group.rows.length}</span></h3>
               <ul {...stylex.props(styles.list)}>
                 {group.rows.map(row => {
@@ -80,7 +81,7 @@ const Usage = ({ source }: { readonly source: ObjectivesSource }): React.ReactNo
             </section>
           ))}
       {link ? <a href={link} target="_blank" rel="noopener noreferrer" {...stylex.props(styles.link)}>History in OpenTelemetry ›</a> : null}
-      <section aria-label="accounts">
+      <section aria-label={`${label}: accounts`}>
         <Stale feed={accounts} />
         {accounts._tag !== 'Observed' ? <Unread feed={accounts} what="usage" onRetry={source.refresh} />
           : (accounts.value.accounts ?? []).length === 0 ? <SystemNotice kind="empty" title="No declared accounts" />
@@ -174,5 +175,6 @@ const styles = stylex.create({
   wide: { gridColumn: '1 / -1' },
   account: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, padding: s.md, fontSize: t.metaSize },
   budget: { marginInlineEnd: s.md },
-  link: { alignSelf: 'flex-start', paddingInline: s.md, color: c.primary, fontSize: t.metaSize, textDecoration: 'none', ':hover': { textDecoration: 'underline' }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  // Brand blue alone is 4.3:1 on the dark canvas; mixing a fifth of the scheme's ink gives #5b87f2 on dark (5.8:1) and #1d46b5 on light (7.9:1).
+  link: { alignSelf: 'flex-start', paddingInline: s.md, color: `color-mix(in srgb, ${c.primary} 80%, ${c.fg})`, fontSize: t.metaSize, textDecoration: 'none', ':hover': { textDecoration: 'underline' }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
 })

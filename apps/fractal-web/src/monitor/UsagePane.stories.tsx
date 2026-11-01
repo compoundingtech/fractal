@@ -19,7 +19,7 @@ const Specimen = ({ read }: { readonly read: UsageRead }) => {
   const now = useScenarioNow()
   const [registry] = React.useState(() => AtomRegistry.make())
   const source = React.useMemo(() => scenarioUsageSource({ state: slice.state, loading: slice.loading, read, now, registry }), [slice, read, now, registry])
-  return <div data-usage-read={read} {...stylex.props(styles.frame)}><DataSourceProvider source={source} registry={registry}><UsagePane /></DataSourceProvider></div>
+  return <div data-usage-read={read} {...stylex.props(styles.frame)}><DataSourceProvider source={source} registry={registry}><UsagePane label={`Usage · ${read}`} /></DataSourceProvider></div>
 }
 const UsageSurface = ({ reads, scheme }: UsageArgs) =>
   <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
@@ -43,6 +43,13 @@ const pane = (canvas: HTMLElement, read: UsageRead) => within(canvas.querySelect
 export const AllStates: Story = {
   args: { reads: usageReads },
   play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    for (const read of usageReads) await expect(canvas.getByRole('region', { name: `Usage · ${read}`, exact: true })).toBeVisible()
+    for (const read of ['live', 'stale'] as const) {
+      for (const group of ['budgets', 'objectives', 'accounts']) {
+        await expect(canvas.getByRole('region', { name: `Usage · ${read}: ${group}`, exact: true })).toBeVisible()
+      }
+    }
     await waitFor(() => expect(pane(canvasElement, 'live').getByRole('heading', { name: 'budgets 4' })).toBeVisible())
     await expect(pane(canvasElement, 'waiting').getByText('Loading objectives and budgets…')).toBeVisible()
     const staleNotices = pane(canvasElement, 'stale').getAllByText('Last reading: could not read again (Could not read objectives and budgets.)')
