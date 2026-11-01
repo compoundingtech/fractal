@@ -113,6 +113,7 @@ mod harness_health_controls;
 mod harness_health_output_controls;
 mod delivery_probes;
 mod end_reason;
+mod exec_only;
 mod github_plugin;
 mod github_watch;
 pub mod harness_events;
@@ -3663,8 +3664,9 @@ fn client_agent_cards_presented(
         .map(|subject| subject.subject.clone())
         .collect::<Vec<_>>();
     // Declarations, usage and faults of the listed agents only, not of every subject.
-    let desired_agents = store
-        .desired_subjects_named(&agent_subjects)?
+    let desired = store.desired_subjects_named(&agent_subjects)?;
+    let exec_cards = exec_only::cards(store, &desired, snapshot_index)?;
+    let desired_agents = desired
         .into_iter()
         .filter_map(|desired| {
             let member = desired.member?;
@@ -3741,9 +3743,11 @@ fn client_agent_cards_presented(
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
+            let exec_card = exec_cards.get(&subject.subject);
             let fields = subject
                 .actual
                 .as_ref()
+                .filter(|_| exec_card.is_none())
                 .map(|actual| actual.get("fields").unwrap_or(actual));
             let observed = fields
                 .and_then(|fields| fields.get("status"))
@@ -3835,6 +3839,7 @@ fn client_agent_cards_presented(
                 _ if subject.desired.is_some() => "desired",
                 _ => "stopped",
             };
+            let state = exec_card.map_or(state, |card| card.state);
             // When a seat that has no running session began waiting for one.
             let launch_since_ms = (matches!(state, "desired" | "starting")
                 && !matches!(observed, Some("running" | "ready" | "working" | "idle")))
@@ -3901,9 +3906,9 @@ fn client_agent_cards_presented(
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
-            let runtime_ids = runtime_id
-                .map(|runtime| vec![format!("runtime/{runtime}")])
-                .unwrap_or_default();
+            let primary_runtime_ids = runtime_id.filter(|_| exec_card.is_none())
+                .map(|runtime| vec![format!("runtime/{runtime}")]).unwrap_or_default();
+            let runtime_ids = exec_card.map_or(primary_runtime_ids.as_slice(), |card| card.runtime_ids.as_slice());
             let incarnation_id = fields
                 .filter(|_| !moving)
                 .and_then(|fields| fields.get("incarnation_id"))
@@ -3944,7 +3949,9 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = if exec_card.is_some() { None } else {
+                end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at)
+            };
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
@@ -3989,8 +3996,10 @@ fn client_agent_cards_presented(
                     .as_ref()
                     .filter(|harness| harness.reason.as_deref() == Some("compaction"))
                     .map(|_| "compacting"),
-                "host_id": desired_agents.get(&subject.subject).map(|(host, _, _)| host),
-                "workspace": desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace),
+                "host_id": exec_card.map(|card| card.host.as_ref())
+                    .unwrap_or_else(|| desired_agents.get(&subject.subject).map(|(host, _, _)| host)),
+                "workspace": exec_card.map(|card| &card.workspace)
+                    .or_else(|| desired_agents.get(&subject.subject).map(|(_, workspace, _)| workspace)),
                 "checkout": desired_agents.get(&subject.subject).and_then(|(_, _, checkout)| checkout.as_ref()),
                 "last_activity_at": last_activity_at.map(client_timestamp),
                 "silent_since": silent_since.map(client_timestamp),
