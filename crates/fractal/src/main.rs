@@ -14896,6 +14896,23 @@ async fn send_message(
     reject_foreign_agent_actor(&args.from)?;
     let from = normalize_message_subject(&args.from);
     let mut args = args;
+    args.in_reply_to = args
+        .in_reply_to
+        .take()
+        .map(|reference| {
+            // Canonical subjects already belong to the server's validation boundary.
+            if reference.starts_with("message/") {
+                return Ok(reference);
+            }
+            let subject = format!("message/{}", normalize_message_reference(&reference));
+            fractal_schema::registry()
+                .validate_subject(&subject)
+                .with_context(|| {
+                    format!("invalid reply reference {reference:?}; expected message/<id>")
+                })?;
+            Ok::<_, anyhow::Error>(subject)
+        })
+        .transpose()?;
     let body = args.body.take().context("message body is required")?;
     if !args.wake.silent() && args.tags.iter().any(|tag| tag == fractal_daemon::silent::SILENT_TAG) {
         anyhow::bail!("wake messages cannot carry the silent delivery tag; use --kind silent");
