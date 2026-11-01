@@ -1,12 +1,12 @@
-import type { ReactNode } from 'react'
+import { lazy, Suspense, type ReactNode } from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import { useAtomValue } from '@effect/atom-react'
-import { DeclarationPanel } from '@fractal/ui/assistant-ui/shell'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource } from '../data/react.tsx'
 import { agentDeclarationState, declarationSubject, missionDeclarationState } from '../declarations/model.ts'
+const DeclarationPanel = lazy(() => import('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx').then(module => ({ default: module.DeclarationPanel })))
 
 /**
  * The canonical declaration of one agent or mission in a modal sheet. Inside a DialogTrigger it
@@ -23,7 +23,7 @@ export const DeclarationDialog = ({ subject, isOpen, onOpenChange }: {
     <Aria.ModalOverlay isDismissable {...(isOpen === undefined ? {} : { isOpen })} {...(onOpenChange === undefined ? {} : { onOpenChange })} {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
         <Aria.Dialog data-testid="declaration-dialog" {...stylex.props(styles.dialog)}>
-          {({ close }) => <DeclarationContents subject={subject} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} />}
+          {({ close }) => <Suspense fallback={<Aria.Button onPress={close}>Close declaration</Aria.Button>}><DeclarationContents subject={subject} close={<Aria.Button aria-label="Close declaration" onPress={close} {...stylex.props(styles.button)}>Close</Aria.Button>} /></Suspense>}
         </Aria.Dialog>
       </Aria.Modal>
     </Aria.ModalOverlay>
