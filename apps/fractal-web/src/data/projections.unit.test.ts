@@ -81,6 +81,28 @@ const row = openAgent(decodeUnknownSync(
   updated_at: '2026-10-04T12:00:00.000Z',
 } satisfies AgentEncoded))
 
+for (const [name, project] of [
+  ['uncached', fleetFromAgents],
+  ['cached', createProjections().fleetFromAgents],
+] as const) {
+  test(`${name} fleet preserves unknown placement without inventing a local host`, () => {
+    const placed = (host_id: string | null) => openAgent(decodeUnknownSync(Agent, 'strict')({
+      kind: 'agent', id: 'agent/exec-only', name: 'Exec-only', host_id,
+      runtime_ids: ['runtime/worker'], reachability: 'reachable', state: 'running',
+      revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
+    }))
+    const unknown = project([row, placed(null)])
+    expect(unknown.agents[1]?.host).toBe('unknown')
+    expect(unknown.hosts).toEqual([{ id: 'example', connected: true }])
+    const local = project([placed('host/local')])
+    expect(local.agents[0]?.host).toBe('local')
+    expect(local.hosts).toEqual([{ id: 'local', connected: true }])
+    // A real host named unknown remains a host; only absent wire placement is excluded.
+    expect(project([placed('host/unknown')]).hosts).toEqual([{ id: 'unknown', connected: true }])
+    expect(project([placed(null)]).hosts).toEqual([])
+  })
+}
+
 test('projects authoritative native subagents, distinguishes absence and retains equivalent row identity', () => {
   const decode = decodeUnknownSync(Agent)
   const encoded = {

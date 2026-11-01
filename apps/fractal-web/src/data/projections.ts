@@ -34,9 +34,9 @@ export const leafText = (value: string | { readonly raw: unknown }): string =>
 
 const harnesses = ['omp', 'claude', 'codex'] as const
 
-/** `host/<id>` → `<id>`; an agent without a host row runs on the gateway's own host. */
+/** `host/<id>` → `<id>`; a missing placement is unknown, never the gateway's host. */
 const hostName = (agent: DecodedAgent) =>
-  Option.match(agent.host_id, { onNone: () => 'local', onSome: (id) => id.slice('host/'.length) })
+  Option.match(agent.host_id, { onNone: () => 'unknown', onSome: (id) => id.slice('host/'.length) })
 
 /** The daemon can reach the agent's runtime now. */
 const isConnected = (agent: DecodedAgent) =>
@@ -154,10 +154,12 @@ const agentFromRow = (row: DecodedAgent): Agent => {
 export const fleetFromAgents = (rows: readonly DecodedAgent[]): Fleet => {
   const agents = rows.map(agentFromRow)
   const hosts = new Map<string, Host>()
-  for (const agent of agents) {
-    hosts.set(agent.host, {
-      id: agent.host,
-      connected: agent.connected || hosts.get(agent.host)?.connected === true,
+  for (const row of rows) {
+    if (Option.isNone(row.host_id)) continue
+    const host = hostName(row)
+    hosts.set(host, {
+      id: host,
+      connected: isConnected(row) || hosts.get(host)?.connected === true,
     })
   }
   return { hosts: [...hosts.values()], agents }
@@ -362,8 +364,11 @@ export const createProjections = (): {
         return agent
       })
       const connected = new Map<string, boolean>()
-      for (const agent of projected)
-        connected.set(agent.host, agent.connected || connected.get(agent.host) === true)
+      for (const row of rows) {
+        if (Option.isNone(row.host_id)) continue
+        const host = hostName(row)
+        connected.set(host, isConnected(row) || connected.get(host) === true)
+      }
       const oldHosts = new Map(previousFleet?.hosts.map((host) => [host.id, host]))
       const hosts = [...connected].map(([id, live]): Host => {
         const old = oldHosts.get(id)
