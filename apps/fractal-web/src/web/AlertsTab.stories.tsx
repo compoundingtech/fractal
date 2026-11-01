@@ -13,8 +13,6 @@ import { observed, unavailable, waiting, type Feed } from '../data/source.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { AlertsList } from './AlertsTab.tsx'
 
-// The kit's world anchor (fractal-scenarios kit/time.ts ANCHOR): card times are relative to it.
-const NOW = Date.UTC(2030, 0, 1, 12)
 const decode = Native.decodeUnknownSync(Native.Attention)
 
 type Args = { readonly scheme: 'dark' | 'light'; readonly feed: 'served' | 'waiting' | 'ungranted' | 'stale'; readonly attention?: string }
@@ -22,18 +20,20 @@ type Args = { readonly scheme: 'dark' | 'light'; readonly feed: 'served' | 'wait
 /** The feed the tab reads: the slice's cards as served, or the same cards in the source's waiting, refused and stale states. The play gate sets the scheme and the 440/1440 width. */
 const AlertsTabStory = ({ scheme, feed: state }: Args) => {
   const slice = useScenarioSlice('attention')
+  // Scenario readers shift committed instants to the current clock.
+  const [now] = React.useState(Date.now)
   const [opened, setOpened] = React.useState('')
   const feed = React.useMemo((): Feed<readonly Native.Attention[]> => {
     if (slice.loading || state === 'waiting') return waiting
     if (state === 'ungranted') return unavailable({ reason: 'ungranted', detail: 'Read access to attention has not been granted.' })
     const value = slice.state.attention.map((card) => decode(card))
-    return state === 'stale' ? { _tag: 'Observed', value, freshness: 'stale', readAt: NOW - 5 * 60_000 } : observed({ value })
-  }, [slice, state])
+    return state === 'stale' ? { _tag: 'Observed', value, freshness: 'stale', readAt: now - 5 * 60_000 } : observed({ value })
+  }, [slice, state, now])
   return (
     <NarrowLayoutContext.Provider value={window.innerWidth < 900}>
       <main data-scheme={scheme} {...stylex.props(styles.canvas, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
         <aside aria-label="Alerts sidebar" data-sidebar-host {...stylex.props(styles.sidebar)}>
-          <AlertsList feed={feed} now={NOW} onOpen={setOpened} />
+          <AlertsList feed={feed} now={now} onOpen={setOpened} />
         </aside>
         <output data-testid="alerts-opened">{opened}</output>
       </main>
@@ -73,7 +73,7 @@ const servedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   }
   // Facts that are not served are omitted, never painted as placeholders.
   await expect(list.textContent).not.toMatch(/—|undefined|null|NaN/)
-  await expect(rowButton(all.find((row) => row.dataset.alertGlyph === '?')!)).toHaveAccessibleName(/, asks a question, waited /)
+  await expect(rowButton(all.find((row) => row.dataset.alertGlyph === '?')!)).toHaveAccessibleName(/, asks a question$/)
 
   // The same menu opens from ⋯, a right click, Shift+F10 or the ContextMenu key, and offers only what is served:
   // Answer always; Open conversation for a requesting agent; Open mission only on the card holding a mission.

@@ -117,7 +117,7 @@ const AlertRow = ({ row, expanded, onExpand, onOpen, onAct, onAnswer }: {
           ref={trigger}
           aria-expanded={expanded}
           aria-controls={expanded ? panelId : undefined}
-          aria-label={`${row.title}, ${GLYPH_WORDS[row.glyph]}, waited ${row.age}`}
+          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
           onPress={() => onExpand(!expanded)}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -126,11 +126,11 @@ const AlertRow = ({ row, expanded, onExpand, onOpen, onAct, onAnswer }: {
           {...stylex.props(styles.main)}
         >
           <span {...stylex.props(styles.line)}>
-            <span aria-hidden="true" {...stylex.props(styles.glyph, row.glyph === '?' && styles.question, row.glyph === '!' && styles.fault)}>{row.glyph}</span>
-            <span {...stylex.props(styles.title)}>{row.title}</span>
+            <span aria-hidden="true" data-alert-row-glyph={row.glyph} {...stylex.props(styles.glyph, row.glyph === '?' && styles.question, row.glyph === '!' && styles.fault)} />
+            <span {...stylex.props(styles.title)}>{row.title}</span>{' '}
             <span {...stylex.props(styles.metric)}>{row.age}</span>
           </span>
-          {row.line2 === '' ? null : <span {...stylex.props(styles.meta)}>{row.line2}</span>}
+          {row.line2 === '' ? null : <>{' '}<span {...stylex.props(styles.meta)}>{row.line2}</span></>}
         </Aria.Button>
         <Aria.MenuTrigger isOpen={menu} onOpenChange={setMenu}>
           <Aria.Button aria-label={`Actions for ${row.title}`} {...stylex.props(styles.more, touch && styles.touch)}>⋯</Aria.Button>
@@ -163,7 +163,7 @@ const styles = stylex.create({
   row: { display: 'flex', alignItems: 'stretch', borderRadius: 4, ':hover': { backgroundColor: c.rowHover } },
   main: { flexGrow: 1, minWidth: 0, minHeight: g.sidebarRow, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2, paddingBlock: s.xs, paddingInline: s.row, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ...focus },
   line: { display: 'flex', alignItems: 'baseline', gap: s.sm, minWidth: 0 },
-  glyph: { flexShrink: 0, width: g.iconSm, textAlign: 'center', color: c.attention, fontWeight: 600 },
+  glyph: { flexShrink: 0, width: g.iconSm, textAlign: 'center', color: c.attention, fontWeight: 600, '::before': { content: 'attr(data-alert-row-glyph)' } },
   question: { color: c.primary },
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
