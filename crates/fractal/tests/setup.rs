@@ -470,6 +470,9 @@ fn archive_setup_records_its_files_for_uninstall_in_the_selected_data_home() {
             assert!(
                 fs::symlink_metadata(fixture.path(&format!("home/.local/bin/{name}"))).is_err()
             );
+        }
+        // Ownership receipts are created at the destination, not in the archive.
+        for name in ["fractal", "st3", "st", "pty"] {
             assert!(
                 fixture.path(&format!("archive/{name}")).exists(),
                 "source archive is preserved"
