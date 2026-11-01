@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Agent cards without a primary runtime show their declared child runtimes instead of a stale stopped parent receipt",
+  "replay": {"status": "none", "detail": "No persisted projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, claim, or migration change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "Exec-only cards aggregate current declared children, keeping failures and unknown states visible. Harness cards are unchanged. Root placement uses explicit fields or inherited child placement; an unresolved host remains unknown."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Rolling back restores the previous card presentation; runtime declarations and observations are unchanged."}
+}

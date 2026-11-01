@@ -1,5 +1,6 @@
 #[path = "agents_publication_tests.rs"]
 mod agents_publication_tests;
+mod exec_only;
 mod roster_fresh;
 
 #[cfg(any(test, feature = "test-support"))]
