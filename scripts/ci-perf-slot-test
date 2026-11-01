@@ -22,6 +22,26 @@ def start(env, *args, command, signal_mask=None):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
+def signal_on_publication(env, number):
+    # Inject cancellation at the first instant holder.json is visible, before
+    # run() can continue to fork. This makes the startup race deterministic.
+    script = '''import os, pathlib, runpy, sys
+number = int(sys.argv.pop(1))
+replace = pathlib.Path.replace
+def publish(self, target):
+    result = replace(self, target)
+    if pathlib.Path(target).name == "holder.json":
+        os.kill(os.getpid(), number)
+    return result
+pathlib.Path.replace = publish
+sys.argv = sys.argv[1:]
+sys.path.insert(0, str(pathlib.Path(sys.argv[0]).parent))
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+    return subprocess.Popen([sys.executable, "-c", script, str(number), slot, "--", "sleep", "60"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
 def launch_fixture(unit, units, wrappers, env, *args, command):
     previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
@@ -180,6 +200,15 @@ for helper, call in ((fixture_listing, "check_output"), (stop_fixture, "run")):
             assert "drain unconfirmed" in str(error) and "timed out after 15s" in str(error)
         else:
             raise AssertionError("manager timeout must fail the drain")
+# A zombie is exited, not a live load. Leave it unreaped long enough to test
+# the real /proc state rather than assuming kill(pid, 0) means running.
+zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+try:
+    os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+    assert not alive(zombie.pid)
+finally:
+    zombie.wait()
+
 if sys.argv[1:] == ["--helpers-only"]:
     print("passed: ci-perf-slot helpers")
     sys.exit(0)
@@ -365,6 +394,13 @@ with tempfile.TemporaryDirectory() as tmp:
         stopped.send_signal(number)
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
+
+    # The publication itself is the readiness boundary: even a signal before
+    # the watchdog forks must return only after cleanup, not leave a record.
+    for number in (signal.SIGINT, signal.SIGTERM):
+        stopped = signal_on_publication(env, number)
+        assert stopped.wait(10) == 128 + number, stopped.stderr.read()
+        assert not holder.exists() and "perf slot free" in status()
 
     # The watchdog is protected from TERM itself, but must not pass SIG_IGN
     # through exec to its command. A shell cannot install a TERM cleanup trap
