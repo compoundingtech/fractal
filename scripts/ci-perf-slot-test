@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -36,6 +37,29 @@ def alive(pid):
     except (FileNotFoundError, ProcessLookupError):
         return False  # it exited and was reaped after the kill above: gone, so not running
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+def cgroup_path(text):
+    return next((line[3:] for line in text.splitlines() if line.startswith("0::")), "")
+
+
+def caller_slice(text):
+    parent = cgroup_path(text).rsplit("/", 1)[0]
+    assert any(re.fullmatch(r"user@\d+\.service", part) for part in parent.split("/")), "caller has no user manager cgroup"
+    assert parent.endswith(".slice"), f"caller cgroup parent is not a slice: {parent}"
+    return parent
+
+
+# Fake cgroup lines exercise hierarchy-preserving leaf slice selection without a user bus.
+manager = "/user.slice/user-1000.slice/user@1000.service"
+for leaf in ("app.slice", "app.slice/app-capped.slice/app-capped-heavy.slice"):
+    assert caller_slice(f"0::{manager}/{leaf}/gate-slot-heavy-1.scope\n") == f"{manager}/{leaf}"
+try:
+    caller_slice(f"0::{manager}/app.slice/outer.scope/child\n")
+except AssertionError:
+    pass
+else:
+    raise AssertionError("a non-slice parent must fail, not default to app.slice")
+
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -112,27 +136,58 @@ with tempfile.TemporaryDirectory() as tmp:
     victim.wait()
     assert not holder.exists()
 
-    # hetz2's cargo test runner starts the test binary with `systemd-run --user --scope`. A scope
-    # moves the process into a transient unit but keeps it in this process group, so killing the
-    # group kills it. Skipped where there is no user bus.
+    # A scope move keeps the process group, so killing or timing out the group must kill it too.
+    # Keep the moved fixture in the caller's enclosing slice and give it its own small hard limits.
     runtime = os.environ.get("XDG_RUNTIME_DIR", "")
     systemd_run = next((Path(d) / "systemd-run" for d in os.environ["PATH"].split(":") + ["/run/current-system/sw/bin", "/usr/bin"]
                         if (Path(d) / "systemd-run").exists()), None)
     if systemd_run and runtime and Path(runtime, "bus").exists():
+        slice_path = caller_slice(Path("/proc/self/cgroup").read_text())
+        units, wrappers, scoped_pids = [], [], []
+        systemctl = str(systemd_run.with_name("systemctl"))
         scoped = root / "scoped"
         script = "echo $BASHPID > %s; exec sleep 60" % scoped
-        victim = start(env, command=[str(systemd_run), "--user", "--scope", "--quiet", "--collect", "--",
-                                     "bash", "-c", script])
-        until(lambda: scoped.exists() and scoped.read_text().strip(), "scoped run started")
-        scoped_pid = int(scoped.read_text())
-        assert "scope" in Path("/proc/%d/cgroup" % scoped_pid).read_text(), "the run is in a transient scope unit"
-        victim.kill()
-        until(lambda: not alive(scoped_pid), "a killed run takes its systemd scope process with it")
-        victim.wait()
-        stopped = start(env, "--timeout", "1s", command=[str(systemd_run), "--user", "--scope", "--quiet", "--collect",
-                                                         "--", "bash", "-c", script])
-        assert stopped.wait(20) == 124
-        until(lambda: not alive(int(scoped.read_text())), "a timeout stops the scope process too")
+        try:
+            for n, mode in enumerate(("kill", "timeout")):
+                unit = f"ci-perf-slot-fixture-{os.getpid()}-{n}.scope"
+                units.append(unit)
+                scoped.unlink(missing_ok=True)
+                command = [str(systemd_run), "--user", "--scope", "--quiet", "--collect",
+                           f"--slice={Path(slice_path).name}", f"--unit={unit}",
+                           "-p", "MemoryMax=64M", "-p", "MemorySwapMax=0", "-p", "TasksMax=16",
+                           "-p", "RuntimeMaxSec=90", "--", "bash", "-c", script]
+                victim = start(env, *(("--timeout", "1s") if mode == "timeout" else ()), command=command)
+                wrappers.append(victim)
+                until(lambda: scoped.exists() and scoped.read_text().strip(), "scoped run started")
+                scoped_pid = int(scoped.read_text())
+                scoped_pids.append(scoped_pid)
+                group = cgroup_path(Path(f"/proc/{scoped_pid}/cgroup").read_text())
+                assert group == f"{slice_path}/{unit}", f"fixture left caller slice: {group}"
+                properties = dict(line.split("=", 1) for line in subprocess.check_output(
+                    [systemctl, "--user", "show", unit, "-p", "MemoryMax", "-p", "MemorySwapMax",
+                     "-p", "TasksMax", "-p", "RuntimeMaxUSec"], text=True).splitlines())
+                assert properties["MemoryMax"] == "67108864", properties
+                assert properties["MemorySwapMax"] == "0" and properties["TasksMax"] == "16", properties
+                assert properties["RuntimeMaxUSec"] in ("1min 30s", "90s"), properties
+                peak = Path("/sys/fs/cgroup", group.lstrip("/"), "memory.peak")
+                if peak.is_file():
+                    print(f"{unit}: fixture memory.peak={peak.read_text().strip()} bytes", flush=True)
+                if mode == "kill":
+                    victim.kill()
+                assert victim.wait(20) == (124 if mode == "timeout" else -signal.SIGKILL)
+                until(lambda: not alive(scoped_pid), f"{mode} stops the scope process")
+        finally:
+            for unit in units:
+                subprocess.run([systemctl, "--user", "stop", unit], capture_output=True)
+            for wrapper in wrappers:
+                if wrapper.poll() is None:
+                    wrapper.kill()
+                wrapper.wait(10)
+            def no_fixtures():
+                listed = subprocess.check_output([systemctl, "--user", "list-units", "ci-perf-slot-fixture-*",
+                                                  "--all", "--no-legend", "--plain"], text=True)
+                return not listed.strip() and not any(alive(pid) for pid in scoped_pids)
+            until(no_fixtures, "all fixture scopes and processes are gone")
     else:
         print("skipped: no systemd user bus for the scope case")
 
