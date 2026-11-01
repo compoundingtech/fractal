@@ -9,7 +9,7 @@ import { Banners, StatusLine, useMissionsOnFocus } from '../chrome';
 import type { StackParams } from '../navigation';
 import { useStore } from '../store';
 import { theme } from '../theme';
-import { bars, leftText, safeLink, secondLine, forecastOf, sloGroups, type SloTone } from '../slo';
+import { bars, landed, leftText, ownedBy, safeLink, secondLine, forecastOf, sloGroups, type Owned, type SloTone } from '../slo';
 import { accounts, byOf, cost, creditsLine, groups, label, limitLine, nextBy, PERIODS, periodName, tokens, totalOf, type By, type Names, type Tone } from '../usage';
 import { Button, ListRow, Note, Screen, SectionHeader, T } from '../ui';
 
@@ -58,39 +58,51 @@ export function useUsage(hours: typeof PERIODS[number]) {
 
 const sloTone: Record<SloTone, string> = { red: theme.fault, green: theme.idle, yellow: theme.waiting, quiet: theme.overlay0 };
 const CHART_HOURS = 24;
+const noChart: { open: string | null; history: Record<string, SloHistory | string> } = { open: null, history: {} };
 
-/** Objectives and budgets from st's `slo.list`, read on focus and on pull, as the rest of this screen is on older members. */
+type SloRead = { list: SloList | null; issue: string };
+const noSlo: SloRead = { list: null, issue: '' };
+
+/** Objectives and budgets from st's `slo.list`, read on focus and on pull, as the rest of this screen is on older members. What was read belongs to the client that read it. */
 export function useSlo() {
   const { client } = useStore();
-  const [list, setList] = useState<SloList | null>(null);
-  const [issue, setIssue] = useState('');
+  const current = useRef(client);
+  current.current = client;
+  const [read_, setRead] = useState<Owned<typeof client, SloRead>>({ owner: null, value: noSlo });
   const read = useCallback(async () => {
     if (!client) return;
+    const keep = (value: SloRead) => setRead(state => landed(state, current.current, client, noSlo, () => value));
     try {
-      setList((await client.sloList()).value);
-      setIssue('');
+      keep({ list: (await client.sloList()).value, issue: '' });
     } catch (error) {
       const text = plainError(error);
-      setIssue(/404|not-found|it is gone/i.test(text) ? 'This Fractal version does not serve objectives and budgets yet; it needs an update.' : `Could not read objectives and budgets: ${text}`);
+      const issue = /404|not-found|it is gone/i.test(text) ? 'This Fractal version does not serve objectives and budgets yet; it needs an update.' : `Could not read objectives and budgets: ${text}`;
+      // The last read of this member stays under the issue; another member's never does.
+      setRead(state => landed(state, current.current, client, noSlo, value => ({ ...value, issue })));
     }
   }, [client]);
   useFocusEffect(useCallback(() => { void read(); }, [read]));
-  return { list, issue, read };
+  return { ...ownedBy(read_, client, noSlo), read };
 }
 
 /** Budgets and objectives with each budget's projected use at its reset; tap a row for its words and a chart of the last day. */
 function SloSection({ list, issue }: { list: SloList | null; issue: string }) {
   const { client } = useStore();
-  const [open, setOpen] = useState<string | null>(null);
-  const [history, setHistory] = useState<Record<string, SloHistory | string>>({});
+  const current = useRef(client);
+  current.current = client;
+  // The open row and the charts read for it belong to the member they were read from, and row ids repeat between members.
+  const [shown, setShown] = useState<Owned<typeof client, typeof noChart>>({ owner: null, value: noChart });
+  const { open, history } = ownedBy(shown, client, noChart);
   const now = Date.now();
   const link = safeLink(list?.otel_ui_url);
   const toggle = (id: string) => {
-    setOpen(open === id ? null : id);
-    if (open === id || !client) return;
+    if (!client) return;
+    setShown(state => landed(state, current.current, client, noChart, value => ({ ...value, open: value.open === id ? null : id })));
+    if (open === id) return;
+    const keep = (chart: SloHistory | string) => setShown(state => landed(state, current.current, client, noChart, value => ({ ...value, history: { ...value.history, [id]: chart } })));
     client.sloHistory(id, { since_ms: Date.now() - CHART_HOURS * 3_600_000, steps: 48 })
-      .then(result => setHistory(found => ({ ...found, [id]: result.value })))
-      .catch(error => setHistory(found => ({ ...found, [id]: plainError(error) })));
+      .then(result => keep(result.value))
+      .catch(error => keep(plainError(error)));
   };
   if (issue && !list) return <Note tone="warning">{issue}</Note>;
   if (!list) return null;

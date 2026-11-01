@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { bars, forecastOf, leftText, safeLink, secondLine, sloGroups, spanText } from './slo.ts';
+import { bars, forecastOf, landed, leftText, ownedBy, safeLink, secondLine, sloGroups, spanText } from './slo.ts';
 
 // The same words the Fractal terminal UI uses (crates/fractal-tui/src/ui/objectives.rs).
 assert.equal(leftText({ remaining_percent: 5.6 }), '6% left');
@@ -28,3 +28,41 @@ assert.equal(bars({ steps: [100, 50, null, 0] }, 2), '·▁');
 assert.equal(safeLink('https://otel.example.test/d/slo'), 'https://otel.example.test/d/slo');
 assert.equal(safeLink('javascript:alert(1)'), null);
 assert.equal(safeLink(undefined), null);
+
+// A member switch: what member A read is never shown for member B, and A's slow answers are dropped.
+{
+  const a = { name: 'a' };
+  const b = { name: 'b' };
+  const empty = { open: null, history: {} };
+  let state = { owner: null, value: empty };
+  let current = a;
+  // A opens a row and its chart arrives.
+  state = landed(state, current, a, empty, value => ({ ...value, open: 'anthropic-weekly' }));
+  state = landed(state, current, a, empty, value => ({ ...value, history: { ...value.history, 'anthropic-weekly': 'a-chart' } }));
+  assert.equal(ownedBy(state, a, empty).history['anthropic-weekly'], 'a-chart');
+  // The phone switches to B: nothing of A shows, though B has the same row id.
+  current = b;
+  assert.deepEqual(ownedBy(state, b, empty), empty);
+  // A's chart for another row arrives late, after the switch: dropped, not shown beside B's rows.
+  state = landed(state, current, a, empty, value => ({ ...value, history: { ...value.history, 'request-latency': 'late-a' } }));
+  assert.deepEqual(ownedBy(state, b, empty), empty);
+  // B opens the same row id and gets its own chart; A's never leaks in.
+  state = landed(state, current, b, empty, value => ({ ...value, open: 'anthropic-weekly' }));
+  assert.equal(ownedBy(state, b, empty).history['anthropic-weekly'], undefined);
+  state = landed(state, current, b, empty, value => ({ ...value, history: { ...value.history, 'anthropic-weekly': 'b-chart' } }));
+  assert.deepEqual(ownedBy(state, b, empty).history, { 'anthropic-weekly': 'b-chart' });
+  // Back to A: B's state is not A's.
+  assert.deepEqual(ownedBy(state, a, empty), empty);
+  // No client at all shows nothing.
+  assert.deepEqual(ownedBy(state, null, empty), empty);
+}
+
+// A failed read for the new member leaves the old member's rows out of sight rather than under the issue.
+{
+  const a = { name: 'a' };
+  const b = { name: 'b' };
+  const empty = { list: null, issue: '' };
+  let state = landed({ owner: null, value: empty }, a, a, empty, () => ({ list: { rows: ['a-row'] }, issue: '' }));
+  state = landed(state, b, b, empty, value => ({ ...value, issue: 'Could not read objectives and budgets: down' }));
+  assert.deepEqual(ownedBy(state, b, empty), { list: null, issue: 'Could not read objectives and budgets: down' });
+}

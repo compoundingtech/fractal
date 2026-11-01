@@ -57,3 +57,18 @@ export function bars(history: Pick<SloHistory, 'steps'>, width: number): string 
 
 /** Only an http or https address is offered as a link. */
 export const safeLink = (url: string | undefined | null): string | null => url && /^https?:\/\//i.test(url) ? url : null;
+
+/** Values read through one client (one member), kept with the client that read them. */
+export type Owned<Owner, Value> = { owner: Owner | null; value: Value };
+
+/** What was read through `current`, or `empty` when it was read through another client: a member switch shows nothing of the last member. */
+export const ownedBy = <Owner, Value>(state: Owned<Owner, Value>, current: Owner | null, empty: Value): Value => state.owner === current ? state.value : empty;
+
+/**
+ * The state after a read through `from` finishes. A read that finished after the client changed is dropped, so a slow
+ * answer from the last member never lands beside the new member's rows; the first read through a client starts from `empty`.
+ */
+export function landed<Owner, Value>(state: Owned<Owner, Value>, current: Owner | null, from: Owner, empty: Value, update: (value: Value) => Value): Owned<Owner, Value> {
+  if (from !== current) return state;
+  return { owner: from, value: update(state.owner === from ? state.value : empty) };
+}
