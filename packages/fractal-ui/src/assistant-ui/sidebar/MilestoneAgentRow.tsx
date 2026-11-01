@@ -130,7 +130,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
       <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
       {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
-        <React.Suspense fallback={null}><AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} /></React.Suspense>
+        <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
       </Popover>}
     </>}
     </ThemePortal>
