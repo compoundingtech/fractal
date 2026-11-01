@@ -55,3 +55,24 @@ fn cold_status_preserves_our_published_terms_without_claiming_a_ready_digest() {
     assert!(pending.sealed.contains("status-node"));
     SEALED_IDENTITY_WALKS.with(|walks| assert_eq!(walks.get(), 0));
 }
+
+#[test]
+fn cold_membership_status_never_seals_pending_batches_or_writes() {
+    let store = store();
+    store.append_claim(&serde_json::from_value(serde_json::json!({
+        "subject":"note/pending", "kind":"note"
+    })).unwrap()).unwrap();
+    *store.membership_cache.lock().unwrap() = None;
+    *store.sealing_recovery.lock().unwrap() = true;
+    let pending_batches = || store.readers.get().query_row(
+        "SELECT COUNT(*) FROM batches WHERE NOT EXISTS (SELECT 1 FROM replica_envelopes WHERE batch_id=batches.id)",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    let pending = pending_batches();
+    assert!(pending > 0);
+    let changes = store.connection.write().total_changes();
+    store.checkpoint_status(NOW, &[]).unwrap();
+    assert_eq!(store.connection.write().total_changes(), changes);
+    assert_eq!(pending_batches(), pending);
+    assert!(*store.sealing_recovery.lock().unwrap(), "status entered sealing recovery");
+}

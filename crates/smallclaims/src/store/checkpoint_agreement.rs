@@ -648,6 +648,12 @@ impl Store {
         &self,
         configured_peers: &[String],
     ) -> Result<BTreeSet<String>> {
+        self.checkpoint_known_writers_with_membership(configured_peers, &self.fleet_membership()?)
+    }
+
+    fn checkpoint_known_writers_with_membership(
+        &self, configured_peers: &[String], membership: &crate::fleet::Membership,
+    ) -> Result<BTreeSet<String>> {
         let mut known = {
             let connection = self.readers.get();
             // Both primary keys start with the writer, so step from one writer to the next with
@@ -678,7 +684,6 @@ impl Store {
         };
         known.insert(self.origin.clone());
         known.extend(configured_peers.iter().cloned());
-        let membership = self.fleet_membership()?;
         known.extend(
             membership
                 .incarnations()
@@ -690,12 +695,15 @@ impl Store {
     /// Writers that left the fleet: every incarnation ended with a drained `leave`. A removal
     /// does not count; see section 3 of the design.
     pub fn checkpoint_left_writers(&self) -> Result<BTreeSet<String>> {
-        let membership = self.fleet_membership()?;
+        Ok(Self::checkpoint_left_writers_from_membership(&self.fleet_membership()?))
+    }
+
+    fn checkpoint_left_writers_from_membership(membership: &crate::fleet::Membership) -> BTreeSet<String> {
         let names = membership
             .incarnations()
             .map(|incarnation| incarnation.name.clone())
             .collect::<BTreeSet<_>>();
-        Ok(names
+        names
             .into_iter()
             .filter(|name| {
                 matches!(
@@ -704,7 +712,7 @@ impl Store {
                         if incarnation.ended.as_deref() == Some("left")
                 )
             })
-            .collect())
+            .collect()
     }
 
     pub fn checkpoint_participants(
@@ -712,8 +720,14 @@ impl Store {
         claims: &[CheckpointClaim],
         configured_peers: &[String],
     ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
-        let known = self.checkpoint_known_writers(configured_peers)?;
-        let left = self.checkpoint_left_writers()?;
+        self.checkpoint_participants_with_membership(claims, configured_peers, &self.fleet_membership()?)
+    }
+
+    fn checkpoint_participants_with_membership(
+        &self, claims: &[CheckpointClaim], configured_peers: &[String], membership: &crate::fleet::Membership,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        let known = self.checkpoint_known_writers_with_membership(configured_peers, membership)?;
+        let left = Self::checkpoint_left_writers_from_membership(membership);
         Ok((
             participants_for_rules(
                 &known,
@@ -1205,7 +1219,9 @@ impl Store {
             .iter()
             .next_back()
             .and_then(|(_, certificates)| certificates.first().cloned());
-        let (mut participants, left) = self.checkpoint_participants(&claims, configured_peers)?;
+        let (mut participants, left) = self.checkpoint_participants_with_membership(
+            &claims, configured_peers, &self.fleet_membership_sealed()?,
+        )?;
         participants.insert(self.origin.clone());
         let cut = newest_due_cut(now_unix_ms);
         let pending = (cut > 0
