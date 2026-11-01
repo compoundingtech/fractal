@@ -1,4 +1,4 @@
-/** Sidebar tabs over the fleet-mid-refactor world: Agents, Alerts, Missions and Fleet in one row over a fixed-width sidebar, at 440 and 1440 in both themes. Leading strongest marker, counts dropping before any label truncates, keyboard selection and a bounded panel. */
+/** Sidebar tabs over the fleet-mid-refactor world: Agents, Alerts, Missions and Fleet in one row over a fixed-width sidebar, at 440 and 1440 in both themes, beside the records each marker counts. Leading strongest marker, counts dropping before any label truncates, keyboard selection and a bounded panel. */
 import * as React from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import * as stylex from '@stylexjs/stylex'
@@ -36,7 +36,11 @@ const strongest = (cards: readonly WireCard[]): Attention | undefined => cards.l
 const machineGlyph = (machine: WireMachine): SidebarTabGlyph => machine.state === 'unreachable' ? (machine.work.length > 0 ? '!' : '×') : machine.state === 'dial-out' ? '○' : machine.state === 'indeterminate' ? '~' : '●'
 
 interface Item { readonly id: string; readonly glyph: string; readonly title: string; readonly attention?: Attention; readonly metric?: string; readonly facts: string }
-interface Sidebar { readonly tabs: readonly SidebarTab[]; readonly agents: readonly Row[]; readonly alerts: readonly Item[]; readonly missions: readonly Item[]; readonly fleet: readonly Item[] }
+interface Group { readonly id: string; readonly title: string; readonly attention?: Attention; readonly items: readonly Item[] }
+interface Sidebar { readonly tabs: readonly SidebarTab[]; readonly agents: readonly Row[]; readonly alerts: readonly Item[]; readonly missions: readonly Item[]; readonly fleet: readonly Item[]; readonly agentSources: readonly Group[]; readonly missionSteps: readonly Group[] }
+
+/** The brief's step cells: done ■, working ▣, needs you ◆, blocked or failed !, otherwise □. */
+const stepGlyphs: Partial<Record<string, string>> = { completed: '■', claimed: '▣', verifying: '▣', 'waiting-person': '◆', blocked: '!', failed: '!' }
 
 /** One projection for the tab markers and the panels, so a marker always counts what its panel shows. */
 function useSidebar(): Sidebar {
@@ -46,6 +50,8 @@ function useSidebar(): Sidebar {
   return React.useMemo((): Sidebar => {
     const cards = attention.loading ? [] : attention.state.attention.filter(card => card.state === 'open')
     const machines = roster.loading ? [] : roster.state.machines
+    const messages = attention.loading ? [] : attention.state.messages
+    const work = details.loading ? [] : details.state.work
     const hosts = new Map(machines.map(machine => [machine.host_id, machine.name]))
     const agents = (roster.loading ? [] : roster.state.agents).map((agent): Row & { readonly attention?: Attention } => {
       const status = agentStatus(agent.state)
@@ -60,6 +66,15 @@ function useSidebar(): Sidebar {
       const marker = strongest(cards.filter(card => card.mission_id === mission.id))
       return { id: mission.id, glyph: mission.state === 'running' ? '●' : '○', title: mission.title, ...(marker === undefined ? {} : { attention: marker }), facts: mission.state }
     })
+    // Each agent's ◆ counts the cards it requested; its mail is listed but raises no marker. Each mission's marker sits over its steps.
+    const agentSources = agents.flatMap((agent): Group[] => {
+      const items = [...cards.flatMap((card, index) => card.requester_id === agent.id ? [alerts[index]!] : []), ...messages.filter(message => message.from === agent.id).map((message): Item => ({ id: message.id, glyph: '·', title: message.title, facts: `Mail, no marker · ${message.content}` }))]
+      return items.length === 0 ? [] : [{ id: agent.id, title: agent.title, ...(agent.attention === undefined ? {} : { attention: agent.attention }), items }]
+    })
+    const missionSteps = missions.map(({ id, title, attention: marker }): Group => ({
+      id, title, ...(marker === undefined ? {} : { attention: marker }),
+      items: work.filter(item => item.mission_id === id).map((item): Item => ({ id: item.id, glyph: stepGlyphs[item.state] ?? '□', title: item.title, facts: item.blocked_reason == null ? item.state : `${item.state} · ${item.blocked_reason}` })),
+    }))
     const fleet = machines.map((machine): Item => ({ id: machine.id, glyph: machineGlyph(machine), title: machine.name, metric: `${machine.occupancy.running_runtimes} running`, facts: `${machine.state} · ${machine.projects.length} projects · ${machine.work.length} work` }))
     const counted = (id: string, label: string, items: readonly { readonly attention?: Attention }[]): SidebarTab => ({
       id, label, questionCount: items.filter(item => item.attention === 'question').length, needsYouCount: items.filter(item => item.attention === 'needs-you').length,
@@ -67,9 +82,13 @@ function useSidebar(): Sidebar {
     const faulted = fleet.filter(item => item.glyph === '!').length
     return {
       tabs: [counted('agents', 'Agents', agents), counted('alerts', 'Alerts', alerts), counted('missions', 'Missions', missions), { id: 'fleet', label: 'Fleet', ...(faulted === 0 ? {} : { status: { glyph: '!', label: `${faulted} unreachable with work` } }) }],
-      agents, alerts, missions, fleet,
+      agents, alerts, missions, fleet, agentSources, missionSteps,
     }
   }, [roster, details, attention])
+}
+
+function Suffix({ attention }: { readonly attention?: Attention }) {
+  return attention === undefined ? null : <span {...stylex.props(attention === 'question' ? styles.question : styles.needsYou)}>{attention === 'question' ? '?' : '◆'}</span>
 }
 
 function ItemList({ label, items }: { readonly label: string; readonly items: readonly Item[] }) {
@@ -77,11 +96,22 @@ function ItemList({ label, items }: { readonly label: string; readonly items: re
     <span {...stylex.props(styles.line)}>
       <span aria-hidden {...stylex.props(styles.glyph, item.glyph === '!' && styles.fault)}>{item.glyph}</span>
       <span data-sidebar-item-title {...stylex.props(styles.title)}>{item.title}</span>
-      {item.attention === undefined ? null : <span {...stylex.props(item.attention === 'question' ? styles.question : styles.needsYou)}>{item.attention === 'question' ? '?' : '◆'}</span>}
+      <Suffix attention={item.attention} />
       {item.metric === undefined ? null : <span {...stylex.props(styles.metric)}>{item.metric}</span>}
     </span>
     <span {...stylex.props(styles.facts)}>{item.facts}</span>
   </li>)}</ul>
+}
+
+/** Beside the sidebar, outside its panels: the cards and mail behind each agent's marker, and each mission's steps. */
+function MarkerSources({ sidebar }: { readonly sidebar: Sidebar }) {
+  const groups = [...sidebar.agentSources, ...sidebar.missionSteps]
+  return groups.length === 0 ? null : <section aria-label="Marker sources" {...stylex.props(styles.specimen, styles.sources)}>
+    {groups.map(group => <div key={group.id}>
+      <p {...stylex.props(styles.line, styles.caption)}><span {...stylex.props(styles.title)}>{group.title}</span><Suffix attention={group.attention} /></p>
+      <ItemList label={group.title} items={group.items} />
+    </div>)}
+  </section>
 }
 
 /** The host owns selection and supplies only the selected tab's content, as the app does. */
@@ -109,6 +139,7 @@ function SidebarTabsStory({ scheme, both = false }: Args) {
   return <NarrowLayoutContext.Provider value={window.innerWidth < 900}>
     <main {...stylex.props(styles.canvas, !both && scheme === 'light' && lightTheme)}>
       {(both ? ['dark', 'light'] as const : [scheme]).map(value => <SidebarTabsHost key={value} scheme={value} sidebar={sidebar} />)}
+      <MarkerSources sidebar={sidebar} />
     </main>
   </NarrowLayoutContext.Provider>
 }
@@ -143,6 +174,8 @@ async function assertMarkers(section: HTMLElement, expected: { readonly names: r
   await expect(visibleText(tablist)).toEqual(fits ? expected.withCounts : expected.withoutCounts)
   const firsts = within(tablist).getAllByRole('tab').map(tab => tab.querySelector('[data-sidebar-tab-label]')!.parentElement!.firstElementChild)
   await expect(firsts.map(first => first?.getAttribute('data-sidebar-tab-marker') ?? 'label')).toEqual(expected.leading)
+  // The glyph is decorative: the tab's name carries its meaning, so the visible label stays inside the accessible name.
+  for (const marker of tablist.querySelectorAll('[data-sidebar-tab-marker]')) await expect(marker).toHaveAttribute('aria-hidden', 'true')
   await assertNoClip(tablist)
 }
 const plain = { names, withCounts, withoutCounts, leading }
@@ -155,6 +188,10 @@ async function keyboardPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   const tabs = within(tablist).getAllByRole('tab')
   await expect(sidebarTabName({ id: 'alerts', label: 'Alerts', needsYouCount: 3, questionCount: 2 })).toBe('Alerts, 2 open questions')
   await assertMarkers(section, plain)
+  // Beside the sidebar: the three cards behind Agents ◆3, one per requesting agent, then the mission's five steps.
+  const sources = canvas.getByRole('region', { name: 'Marker sources' })
+  await expect(within(sources).getAllByRole('list').map(list => list.querySelectorAll('[data-sidebar-item="needs-you"]').length)).toEqual([1, 1, 1, 0])
+  await expect(within(within(sources).getAllByRole('list').at(-1)!).getAllByRole('listitem')).toHaveLength(5)
   // Fixed sidebar width at either viewport; only the tab height follows the layout.
   await expect(host.getBoundingClientRect().width).toBe(256)
   await expect(tabs[0]!.getBoundingClientRect().height).toBe(window.innerWidth < 900 ? 44 : 24)
@@ -248,6 +285,8 @@ const styles = stylex.create({
   canvas: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl, minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   specimen: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg },
   output: { color: ink.fgMuted },
+  sources: { width: g.sidebarDefault, boxSizing: 'border-box' },
+  caption: { margin: s.zero, fontWeight: t.weightSemibold },
   // The sidebar keeps its default width at either viewport; CountFit changes it directly. Shorter than four rows, so the panel must scroll.
   sidebar: { display: 'flex', flexDirection: 'column', boxSizing: 'border-box', width: g.sidebarDefault, height: '200px', flexShrink: 0, overflow: 'hidden', backgroundColor: surface.sidebar, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border },
   scroller: { flex: '1 1 0', minHeight: 0, overflowY: 'auto' },

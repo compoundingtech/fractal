@@ -119,6 +119,21 @@ it('removes obsolete unknown declarations from regenerated slices and preserves 
   }
 })
 
+it('keeps sidebar roster state declarations without retaining discarded timeline declarations', () => {
+  for (const world of [buildWorld(contaminated, genericVariants, ANCHOR_MS), loadWorld('unknown-fields', { now: ANCHOR_MS })]) {
+    const variant = world.with({ roster: 'sidebar-tabs' })
+    const roster = variant.slices.roster
+    expect(roster.decode).toBe(world.slices.roster.decode)
+    expect(roster.unknown).toEqual(world.slices.roster.unknown?.filter(({ pointer }) => pointer.startsWith('/state/')))
+    expect(roster.unknown?.length).toBeGreaterThan(0)
+    expect(roster.timeline).toEqual([])
+    expect(roster.state.agents).toEqual(world.slices.roster.state.agents)
+    expect(roster.state.resources).toEqual(world.slices.roster.state.resources)
+    expect(decodeSlice(world.id, roster)).toEqual([])
+    for (const kind of ['attention', 'conversation', 'terminal', 'sync'] as const) expect(variant.slices[kind].state).toEqual(world.slices[kind].state)
+  }
+})
+
 // The huge world leaves this matrix: its per-agent conversation variants synthesize hundreds of
 // thousands of entries and its roster phases thousands of agents per build. Its bounded variant
 // coherence has a dedicated suite (huge.test.ts).

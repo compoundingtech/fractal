@@ -59,7 +59,7 @@ function TabFace({ tab, showCount }: { readonly tab: SidebarTab; readonly showCo
   const marker = markerOf(tab)
   // One text run, so the gap between marker and label is exactly one space: "◆3 Alerts", "? Missions", "! Fleet", "Agents".
   return <span {...stylex.props(styles.face)}>
-    {marker === null ? null : <><span data-sidebar-tab-marker={marker.kind} {...stylex.props(styles.marker, marker.kind === 'question' ? styles.question : marker.kind === 'needs-you' ? styles.needsYou : marker.glyph === '!' ? styles.fault : styles.status)}>{marker.glyph}{showCount && marker.count > 1 ? <span data-sidebar-tab-count>{marker.count}</span> : null}</span>{' '}</>}
+    {marker === null ? null : <><span aria-hidden="true" data-sidebar-tab-marker={marker.kind} {...stylex.props(styles.marker, marker.kind === 'question' ? styles.question : marker.kind === 'needs-you' ? styles.needsYou : marker.glyph === '!' ? styles.fault : styles.status)}>{marker.glyph}{showCount && marker.count > 1 ? <span data-sidebar-tab-count>{marker.count}</span> : null}</span>{' '}</>}
     <span data-sidebar-tab-label>{tab.label}</span>
   </span>
 }
