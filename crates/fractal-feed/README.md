@@ -47,7 +47,7 @@ async fn main() {
 
 | Caller subscribes to | Updates it receives |
 | --- | --- |
-| Attention, missions and agents automatically | `Window` replaces the entire joined window, with its snapshot and `has_more`; `WindowFailed` leaves the last successful items visible. Each window holds at most 200 rows. |
+| Attention, missions and agents automatically | `Window` replaces the entire joined window, with its snapshot and `has_more`; `WindowFailed` leaves the last successful items visible. Legacy windows hold at most 200 rows. When `collections.agents.revisioned.v1` is granted, agents instead follow the complete current roster: snapshot chunks become visible atomically, and whole-row deltas are fenced by epoch and base revision. Reconnects start from a complete snapshot; older daemons keep the legacy agents window. |
 | Glasses via the `glasses` argument, if granted at version 1 or newer | `GlassesVersion` precedes the glasses `Window`, so the application can select the matching storage shape. The window holds at most 100 glasses. |
 | `Converse { targets }` | Up to `MAX_CONVERSATIONS` (three) agent or session conversations. `Conversation` identifies its target and resolved session; `replace` resets the newest page, otherwise merge entries by ID. Preserve `has_more` for older-page navigation. `ConversationFailed` retries unless history is permanently incomplete. |
 | `Resubscribe { target }` | Resolve a followed agent's current session again after a restart; subsequent conversation updates replace the previous page. |
@@ -57,6 +57,8 @@ async fn main() {
 data before enabling them. `Offline` retains the last display while the feed retries. The waits
 grow through 1, 2, 5, 10 and 30 seconds with jitter. `Reconnect` interrupts an offline wait.
 Dropping the command sender stops the task.
+Revisioned agents errors or resync refusals with `retryable: false` immediately emit
+`WindowFailed` and cancel automatic window retries; an oversized row is not prepared repeatedly.
 
 The feed resubscribes windows and conversations and reattaches a followed terminal after a
 disconnect. Window resync frames request fresh subscriptions. While connected, projection

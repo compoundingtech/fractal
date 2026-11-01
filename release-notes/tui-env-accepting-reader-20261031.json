@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The TUI accepts FRACTAL_PERSON, FRACTAL_ENDPOINT and FRACTAL_DOWNLOADS while continuing to read ST3_PERSON, ST3_ENDPOINT and ST3_DOWNLOADS. Unequal non-empty aliases report an error without exposing their values. Demo playback excludes both configuration spellings; the phone client and interaction QA accept both names too.",
+  "replay": { "status": "none", "detail": "No stored data changes or replay." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rule or digest changes." },
+  "compatibility": { "status": "changed", "detail": "Old environment names remain readable. New names are preferred, empty values are ignored, and conflicting non-empty values must be made equal or one unset. Producers are unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "Existing single-name configurations need no changes." },
+  "recovery": { "status": "none", "detail": "No persistent changes to recover." }
+}

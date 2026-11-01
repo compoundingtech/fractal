@@ -43,6 +43,8 @@ pub struct Snapshot {
     pub store_index: u64,
     pub projection_version: String,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 /// Node-local source cut; do not compare across nodes or publication epochs.
@@ -87,6 +89,8 @@ pub struct ErrorEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
+    InvalidAnswer,
+    NotAnswerable,
     RecipientRetired,
     IdentityCycle,
     IdentityOccupied,
@@ -95,6 +99,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    RetireRevisionMismatch,
+    RetireIncarnationMismatch,
     InvalidCustodySuccessor,
     CustodyPending,
     AttentionMigrated,
@@ -112,6 +118,15 @@ pub enum ErrorCode {
     InvalidArrangementFolder,
     InvalidArrangementName,
     InvalidArrangementKey,
+    InvalidArrangementVersion,
+    InvalidArrangementBody,
+    UnsupportedMembershipContainer,
+    MembershipOwnerForbidden,
+    InvalidMembershipMember,
+    InvalidMembershipBucket,
+    InvalidMembershipKey,
+    InvalidMembershipOperations,
+    MembershipEditTooLarge,
     InvalidSubjectReference,
     NotFound,
     Forbidden,
@@ -139,6 +154,7 @@ pub enum ErrorCode {
     TerminalEnded,
     TimelineHistoryIncomplete,
     ProjectionDetailTooLarge,
+    AgentsPublicationRowTooLarge,
     ProjectionDetailInvalidSource,
     ConversationContentInvalidated,
     TranscriptUnavailable,
@@ -575,6 +591,12 @@ pub struct Attention {
     pub priority: String,
     pub state: String,
     pub requested_at: String,
+    /// When a person-step ask resolves by itself if nobody answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
+    /// The ask's answer that applies at its deadline; absent, it times out without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<AskDefaultAnswer>,
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default)]
@@ -872,6 +894,9 @@ pub struct MailBacklog {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct SloList {
     pub as_of_unix_ms: u64,
+    /// Where a person reads the exported observation history, when the daemon is configured with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otel_ui_url: Option<String>,
     pub rows: Vec<SloRow>,
 }
 /// One objective (a target with windows and an error budget) or one budget (an allowance that
@@ -888,10 +913,22 @@ pub struct SloRow {
     pub window: String,
     pub remaining_percent: Option<f64>,
     pub status: String,
+    /// How urgent the row is: `red`, `green`, `yellow` or `quiet`; a client treats any other word as `quiet`. Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
     #[serde(default)]
     pub resets_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub measured_at_unix_ms: Option<u64>,
+    /// A budget's projected use when it resets, at the rate of its recent past (at most 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_used_percent: Option<f64>,
+    /// How many minutes of recent readings the forecast was fitted to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forecast_basis_minutes: Option<u64>,
+    /// When the allowance runs out at that rate; present only when that is before it resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_out_at_unix_ms: Option<u64>,
     pub explain: String,
 }
 /// What was left of one objective or budget across a period, in equal steps. A step holds its
@@ -1939,6 +1976,8 @@ pub struct AgentDelivery {
     #[serde(default)]
     pub polled_seconds_ago: Option<u64>,
     #[serde(default)]
+    pub since_unix_ms: Option<u64>,
+    #[serde(default)]
     pub transport: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -2351,8 +2390,221 @@ pub struct SummaryAgentsAsOf {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct HarnessQuestion {
+    #[serde(flatten)]
+    pub header: ResourceHeader,
+    pub agent: String,
+    pub session: String,
+    pub native_id: String,
+    pub runtime_incarnation: String,
+    pub questions: Vec<HarnessQuestionItem>,
+    pub observed_at: u64,
+    pub resolution: Option<HarnessQuestionResolution>,
+    pub answer: HarnessQuestionAnswerability,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessQuestionItem {
+    pub id: String,
+    pub options: u32,
+    pub multi: bool,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAnswerInput {
+    pub positions: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessResolvedAnswer {
+    pub positions: Vec<u32>,
+    pub timed_out: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+pub enum HarnessQuestionResolutionStatus {
+    Answered,
+    AnsweredElsewhere,
+    Expired,
+    Cancelled,
+    Unknown(String),
+}
+impl From<String> for HarnessQuestionResolutionStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "answered" => Self::Answered,
+            "answered_elsewhere" => Self::AnsweredElsewhere,
+            "expired" => Self::Expired,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+impl From<HarnessQuestionResolutionStatus> for String {
+    fn from(value: HarnessQuestionResolutionStatus) -> Self {
+        match value {
+            HarnessQuestionResolutionStatus::Answered => "answered".into(),
+            HarnessQuestionResolutionStatus::AnsweredElsewhere => "answered_elsewhere".into(),
+            HarnessQuestionResolutionStatus::Expired => "expired".into(),
+            HarnessQuestionResolutionStatus::Cancelled => "cancelled".into(),
+            HarnessQuestionResolutionStatus::Unknown(value) => value,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessQuestionResolution {
+    pub status: HarnessQuestionResolutionStatus,
+    pub revision: String,
+    pub answers: BTreeMap<String, HarnessResolvedAnswer>,
+    pub resolved_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+pub enum HarnessQuestionAnswerabilityState {
+    Available,
+    Unavailable,
+    Unknown(String),
+}
+impl From<String> for HarnessQuestionAnswerabilityState {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "available" => Self::Available,
+            "unavailable" => Self::Unavailable,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+impl From<HarnessQuestionAnswerabilityState> for String {
+    fn from(value: HarnessQuestionAnswerabilityState) -> Self {
+        match value {
+            HarnessQuestionAnswerabilityState::Available => "available".into(),
+            HarnessQuestionAnswerabilityState::Unavailable => "unavailable".into(),
+            HarnessQuestionAnswerabilityState::Unknown(value) => value,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+pub enum HarnessQuestionAnswerabilityReason {
+    AdapterMissing,
+    AdapterUnavailable,
+    Resolved,
+    Unknown(String),
+}
+impl From<String> for HarnessQuestionAnswerabilityReason {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "adapter_missing" => Self::AdapterMissing,
+            "adapter_unavailable" => Self::AdapterUnavailable,
+            "resolved" => Self::Resolved,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+impl From<HarnessQuestionAnswerabilityReason> for String {
+    fn from(value: HarnessQuestionAnswerabilityReason) -> Self {
+        match value {
+            HarnessQuestionAnswerabilityReason::AdapterMissing => "adapter_missing".into(),
+            HarnessQuestionAnswerabilityReason::AdapterUnavailable => "adapter_unavailable".into(),
+            HarnessQuestionAnswerabilityReason::Resolved => "resolved".into(),
+            HarnessQuestionAnswerabilityReason::Unknown(value) => value,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessQuestionAnswerability {
+    pub state: HarnessQuestionAnswerabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<HarnessQuestionAnswerabilityReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAnswerParameters {
+    pub question: String,
+    pub answers: BTreeMap<String, HarnessAnswerInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(from = "String", into = "String")]
+pub enum HarnessAnswerStatus {
+    Accepted,
+    AlreadyResolved,
+    Unknown(String),
+}
+impl From<String> for HarnessAnswerStatus {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "accepted" => Self::Accepted,
+            "already_resolved" => Self::AlreadyResolved,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+impl From<HarnessAnswerStatus> for String {
+    fn from(value: HarnessAnswerStatus) -> Self {
+        match value {
+            HarnessAnswerStatus::Accepted => "accepted".into(),
+            HarnessAnswerStatus::AlreadyResolved => "already_resolved".into(),
+            HarnessAnswerStatus::Unknown(value) => value,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessAnswerResult {
+    pub status: HarnessAnswerStatus,
+    pub resolution: HarnessQuestionResolution,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInvalidAnswerReason {
+    UnknownOption,
+    TooMany,
+    RequiredMissing,
+    EmptySingle,
+    TooLong,
+    UnknownQuestion,
+    OtherNotAllowed,
+    NoteNotAllowed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessInvalidAnswerDetails {
+    pub reason: HarnessInvalidAnswerReason,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessNotAnswerableReason {
+    AdapterMissing,
+    AdapterUnavailable,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessNotAnswerableDetails {
+    pub reason: HarnessNotAnswerableReason,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Resource {
+    HarnessQuestion(HarnessQuestion),
     ConnectedClient(ConnectedClient),
     Usage(Usage),
     Summary(Summary),
@@ -2386,6 +2638,7 @@ pub enum Resource {
 
 /// The resource kinds this client models; any other kind reads as [`Resource::Unknown`].
 pub const KNOWN_RESOURCE_KINDS: &[&str] = &[
+    "harness-question",
     "connected-client",
     "usage",
     "summary",
@@ -2453,6 +2706,7 @@ impl<'de> Deserialize<'de> for UnknownResource {
 impl Resource {
     pub fn header(&self) -> &ResourceHeader {
         match self {
+            Self::HarnessQuestion(v) => &v.header,
             Self::ConnectedClient(v) => &v.header,
             Self::Usage(v) => &v.header,
             Self::Summary(v) => &v.header,
@@ -2750,6 +3004,9 @@ pub struct TimelineContentBody {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<String>,
+    /// A mailbox message's content names its message, as its message entry does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
 }
@@ -2995,6 +3252,8 @@ pub struct Fence {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ActionType {
+    #[serde(rename = "harness.answer")]
+    HarnessAnswer,
     #[serde(rename = "custom.reply")]
     CustomReply,
     #[serde(rename = "private-notes.write")]
@@ -3003,6 +3262,8 @@ pub enum ActionType {
     PromptRespond,
     #[serde(rename = "arrangement.edit")]
     ArrangementEdit,
+    #[serde(rename = "arrangement.membership.edit")]
+    ArrangementMembershipEdit,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -3255,6 +3516,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn arrangement_membership_edit(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ArrangementMembershipEditParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ArrangementMembershipEdit,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn attention_resolve(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -3278,6 +3553,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::CustomReply,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn harness_answer(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: HarnessAnswerParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::HarnessAnswer,
             idempotency_key,
             fence,
             &parameters,
@@ -4057,6 +4346,12 @@ pub struct PersonAnswer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
+/// The answer of a person-step ask that applies at its deadline.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AskDefaultAnswer {
+    pub id: String,
+    pub label: String,
+}
 /// A response to a person ask, as the asker reads it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct PersonAnswerRecord {
@@ -4093,6 +4388,8 @@ pub struct AgentRetireParameters {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -4364,6 +4661,10 @@ pub struct ActionResult {
     pub private_notes: Option<PrivateNotesFence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_answer: Option<HarnessAnswerResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -5220,12 +5521,14 @@ pub struct ArrangementEditParameters {
     pub subject: String,
     pub owner: String,
     pub operations: Vec<ArrangementOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u8>,
 }
 pub type ArrangementRegister<T> = fractal_schema::arrangements::Register<T>;
 pub type ArrangementPosition = fractal_schema::arrangements::Position;
 pub type ArrangementPlacement = fractal_schema::arrangements::Placement;
 pub type ArrangementFolder = fractal_schema::arrangements::Folder;
-pub type ArrangementBody = fractal_schema::arrangements::Body;
+pub type ArrangementBody = fractal_schema::arrangements::VersionedBody;
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ArrangementResolved {
     pub parents: std::collections::BTreeMap<String, Option<String>>,
@@ -5248,6 +5551,46 @@ pub struct ArrangementPage {
     #[serde(default)]
     pub filters: BTreeMap<String, String>,
     pub items: Vec<Arrangement>,
+    pub page: PageInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncNotice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicated: Option<ReplicatedNotice>,
+}
+
+pub type OrderedMembershipOperation = fractal_schema::ordered_membership::Operation;
+pub type OrderedMembershipPosition = fractal_schema::ordered_membership::Position;
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ArrangementMembershipEditParameters {
+    pub subject: String,
+    pub owner: String,
+    pub operations: Vec<OrderedMembershipOperation>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OrderedMembership {
+    pub id: String,
+    pub container: String,
+    pub member: String,
+    pub position: OrderedMembershipPosition,
+    pub revision: String,
+}
+/// The whole container's membership state, carried by every `ordered-memberships` window
+/// frame so a held window observes edits outside its rows. `changed_index` is an opaque,
+/// host-local, monotonic invalidation frontier scoped by the frame's `snapshot.host_id`; it is
+/// neither a canonical revision nor a count of global history and never compares across hosts.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OrderedMembershipState {
+    pub container: String,
+    pub live_count: u64,
+    pub changed_index: u64,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct OrderedMembershipPage {
+    pub kind: String,
+    pub collection: String,
+    #[serde(default)]
+    pub filters: BTreeMap<String, String>,
+    pub items: Vec<OrderedMembership>,
     pub page: PageInfo,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncNotice>,

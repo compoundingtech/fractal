@@ -136,6 +136,15 @@ def git(*args):
     return subprocess.run(['git', *args], capture_output=True, text=True)
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — never consult candidate keys.
+def config_path(base, name):
+    path = f'.fractal/{name}'
+    probe = git('ls-tree', '--full-tree', '-z', base, '--', path)
+    if probe.returncode != 0:
+        raise RuntimeError(f'cannot inspect accepted configuration at {base}')
+    return path if probe.stdout else f'.st/{name}'
+
+
 def positive(name, default):
     raw = os.environ.get(name)
     if raw is None:
@@ -175,10 +184,12 @@ def signer_listed(base):
         return True
     try:
         principal = json.loads((Path.home() / '.config/st/evidence-sign.json').read_text())['signer']
-        keys = git('show', f'{base}:.st/evidence-keys')
+        keys = git('show', f'{base}:{config_path(base, "evidence-keys")}')
     except (OSError, ValueError, KeyError, TypeError):
         return True  # cannot tell: let the run decide
-    return keys.returncode != 0 or any(line.split(' ', 1)[0] == principal for line in keys.stdout.splitlines())
+    if keys.returncode != 0:
+        raise RuntimeError(f'cannot read accepted evidence keys at {base}')
+    return any(line.split(' ', 1)[0] == principal for line in keys.stdout.splitlines())
 
 
 def has_signer():

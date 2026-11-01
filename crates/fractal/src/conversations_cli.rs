@@ -155,6 +155,36 @@ pub(super) async fn upload_attachments(
     Ok(attachments)
 }
 
+pub(super) fn read_message_body(
+    body: Option<String>,
+    file: Option<PathBuf>,
+    stdin: impl std::io::Read,
+) -> Result<String> {
+    fn read(reader: impl std::io::Read) -> Result<String> {
+        use std::io::Read as _;
+        let limit = fractal_daemon::message_body::MAX_BYTES;
+        let mut bytes = Vec::new();
+        reader.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= limit, "message body exceeds {limit} UTF-8 bytes");
+        String::from_utf8(bytes).context("message body must be valid UTF-8")
+    }
+    let body = match (body, file) {
+        (Some(body), None) if body != "-" => body,
+        (Some(_), None) => read(stdin)?,
+        (None, Some(path)) => read(std::fs::File::open(&path)
+            .with_context(|| format!("reading body file {}", path.display()))?)?,
+        _ => anyhow::bail!("exactly one of --body or --body-file is required"),
+    };
+    let limit = fractal_daemon::message_body::MAX_BYTES;
+    anyhow::ensure!(body.len() <= limit, "message body exceeds {limit} UTF-8 bytes");
+    // An empty body reaches its recipient as a message with nothing in it (#4585).
+    anyhow::ensure!(
+        !body.trim().is_empty(),
+        "the message body is empty or only whitespace"
+    );
+    Ok(body)
+}
+
 pub(super) async fn run_message(
     client: &Client,
     endpoint: &Endpoint,
@@ -164,7 +194,8 @@ pub(super) async fn run_message(
 ) -> Result<()> {
     sync_message_projection(client).await?;
     match command {
-        MessageCommand::Send(args) => {
+        MessageCommand::Send(mut args) => {
+            args.body = Some(read_message_body(args.body.take(), args.body_file.take(), std::io::stdin().lock())?);
             if !args.print_kdl {
                 preflight_message_recipient(client, &args.to, args.allow_undeclared_recipient).await?;
             }
@@ -363,6 +394,8 @@ pub(super) async fn run_message(
             Ok(())
         }
         MessageCommand::Reply(args) => {
+            // The body is read and checked first, so a refused one writes nothing.
+            let body = read_message_body(Some(args.body), None, std::io::stdin().lock())?;
             let original = read_message(client, &args.reference).await?;
             let recipient = message_reply_recipient(&original, &args.from)?;
             fractal_daemon::model::refuse_person_recipient(&normalize_message_subject(&recipient))
@@ -378,7 +411,8 @@ pub(super) async fn run_message(
                 MessageSendArgs {
                     to: recipient,
                     attach: Vec::new(),
-                    body: args.body,
+                    body: Some(body),
+                    body_file: None,
                     subject: args
                         .subject
                         .or(original.title.map(|title| format!("Re: {title}"))),
@@ -506,17 +540,7 @@ pub(super) async fn run_message(
                 Ok(())
             })
             .await?;
-            let links = messages
-                .iter()
-                .map(|message| (message.subject.clone(), message.in_reply_to.clone()))
-                .collect::<BTreeMap<_, _>>();
-            let root = thread_root_from_links(&selected.subject, &links);
-            let mut thread = messages
-                .into_iter()
-                .filter(|message| thread_root_from_links(&message.subject, &links) == root)
-                .collect::<Vec<_>>();
-            thread.sort_by_key(|message| message.created_index);
-            print_value(&thread, json_output)
+            print_value(&thread_of(&selected.subject, messages), json_output)
         }
         MessageCommand::Search {
             text,
@@ -825,6 +849,22 @@ fn print_reply_wait(reply: Option<&MessageView>, json_output: bool) -> Result<()
     }
 }
 
+/// The thread `selected` is in, out of every message: those with its root, oldest first. A stream
+/// item's index is past every graph index, so it follows the graph's messages, as pages list it.
+fn thread_of(selected: &str, messages: Vec<MessageView>) -> Vec<MessageView> {
+    let links = messages
+        .iter()
+        .map(|message| (message.subject.clone(), message.in_reply_to.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let root = thread_root_from_links(selected, &links);
+    let mut thread = messages
+        .into_iter()
+        .filter(|message| thread_root_from_links(&message.subject, &links) == root)
+        .collect::<Vec<_>>();
+    thread.sort_by_key(|message| message.created_index);
+    thread
+}
+
 fn thread_root_from_links(subject: &str, links: &BTreeMap<String, Option<String>>) -> String {
     let mut current = subject.to_owned();
     let mut seen = BTreeSet::new();
@@ -843,4 +883,61 @@ fn thread_root_from_links(subject: &str, links: &BTreeMap<String, Option<String>
         current = normalized;
     }
     current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fractal_store::store::Store;
+    use fractal_store::store::messages_shard;
+    use std::sync::Arc;
+
+    /// A thread reads every message one page at a time, from the graph on into the stream, and
+    /// keeps those that share the selected message's root: a stream reply to a graph message
+    /// is in it, and a stream item outside it is not.
+    #[test]
+    fn a_thread_follows_its_replies_from_the_graph_into_the_stream() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "alder").unwrap());
+        let shard = messages_shard::open(&store, root.path()).unwrap();
+        let message = |subject: &str, in_reply_to: Option<&str>| {
+            let mut fields = json!({
+                "from": "agent/birch", "to": "agent/cedar", "content": subject, "status": "sent"
+            });
+            if let Some(parent) = in_reply_to {
+                fields["in_reply_to"] = json!(parent);
+            }
+            smallclaims::claim::ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some("agent/birch".into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }
+        };
+        let (start, reply, other) = ("message/00000000000000a1", "message/00000000000000b1", "message/00000000000000b2");
+        store.append_claim(&message(start, None)).unwrap();
+        shard.append_claim(&message(other, None)).unwrap();
+        shard.append_claim(&message(reply, Some(start))).unwrap();
+        let through = store.index().unwrap();
+        let (mut after, mut messages, mut pages) = (None, Vec::new(), 0);
+        loop {
+            let (page, next) = store.messages_page_inner(None, true, after, through, 1, false).unwrap();
+            pages += 1;
+            messages.extend(page);
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3, "one message a page");
+        let listed = |messages: &[MessageView]| {
+            messages.iter().map(|message| message.subject.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(listed(&messages), [start, other, reply]);
+        assert_eq!(listed(&thread_of(reply, messages.clone())), [start, reply]);
+        assert_eq!(listed(&thread_of(other, messages)), [other]);
+    }
 }

@@ -81,6 +81,14 @@ def _git(*args):
     return done.stdout
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — this script is copied alone.
+def config_path(base, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    listing = _git('ls-tree', '-z', '--full-tree', base, '--', preferred, legacy)
+    names = {entry.partition('\t')[2] for entry in listing.split('\0') if entry}
+    return preferred if preferred in names else legacy
+
+
 def _strings(value, what):
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise Refused(f'{AUTHORS_FILE}: {what} must be a list of nonempty strings')
@@ -103,7 +111,7 @@ def check_authors(base, head, opener, *actors):
     if not base or not head:
         raise Refused('the pull request base and head commits are not known, so its authors cannot be checked')
     try:
-        allowed = json.loads(_git('show', f'{base}:{AUTHORS_FILE}'))
+        allowed = json.loads(_git('show', f'{base}:{config_path(base, AUTHORS_FILE)}'))
         logins = set(_strings(allowed['logins'], 'logins'))
         emails = set(_strings(allowed['emails'], 'emails'))
         noreply = [re.compile(r'(?:[0-9]+\+)?' + re.escape(login) + r'@users\.noreply\.github\.com', re.IGNORECASE)

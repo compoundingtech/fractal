@@ -134,8 +134,8 @@ consistent prefix and its cursor. The phases, in order:
    writes one compact row: canonical position, ID, envelope, kind, subject, actor, operation,
    validity, whether it is a first occurrence, its field names, and its rule and slot key or
    status seat, which the runtime computes from the body. It also writes the claim's blob hashes,
-   the IDs it cites as evidence or pins as a run input, and any request it closes. The body is
-   dropped when the page is written.
+   the IDs it cites as evidence, pins as a run input or names as a request's discovery, and any
+   request it closes. The body is dropped when the page is written.
 4. **Protection.** The protected-claim queries, by rowid, into a table of protected IDs.
 5. **Earlier tombstones.** `checkpoint_envelopes` and `checkpoint_claims` before the cut, by
    rowid, as today's filter selects them.

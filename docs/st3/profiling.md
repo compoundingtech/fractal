@@ -229,7 +229,11 @@ A writer hold over 1 s also logs one WARN line when it ends, "a write held the s
 over 1 s", so a stall can be attributed from the daemon's log after the hour has passed. It
 names the same holder (`holder`, `client`, `at`), with `kind`, `held_ms`, `writes`, `stages`
 (a staged lend's time by stage, or `-`) and `waited_ms`, how long that holder waited for the
-writer before its hold began.
+writer before its hold began. A trim chunk held over 1 s also logs "a trim chunk held the
+store's writer over 1 s", with what that hold did: `phase` (`record` for tombstones,
+`envelopes` or `claims` for deletes, `rebuild` for deferred derived state), the `envelopes` and
+`claims` it took, `body_bytes` of the claim bodies it deleted, and `held_ms` split into `step_ms`
+and `commit_ms`, the commit's own time (fsync and any WAL checkpoint it ran).
 
 Three more fields show what keeps the WAL from recycling:
 - `read_loans` lists every read loan now, grouped by the route label of the read budget it works

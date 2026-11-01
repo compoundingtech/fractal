@@ -39,6 +39,7 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
         id: "snapshot/scenario-demo".into(), host_id: "host/meadow".into(),
         store_index: 1, projection_version: "scenario-demo".into(),
         created_at: chrono::DateTime::from_timestamp_millis(now).context("invalid demo clock")?.to_rfc3339(),
+        published_at: None,
     };
     for collection in [&mut model.now, &mut model.messages, &mut model.launches,
         &mut model.missions, &mut model.work, &mut model.agents, &mut model.sessions,
@@ -96,20 +97,7 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
     let person = "person/robin";
     let names = adapt::names(&model, person);
     for (agent, entries) in conversations {
-        extras.pending_calls.insert(agent.clone(), adapt::pending_calls(&entries));
         extras.conversations.insert(agent, Load::Ready(adapt::conversation(&entries, &names)));
-    }
-    // Match the live launch card: the latest variant belongs to the attention's launch.
-    for item in model.attention().filter(|item| item.attention_kind == "launch-approval") {
-        let variant = model.launches.items.iter().filter_map(|resource| match resource {
-            Resource::LaunchVariant(variant) if variant.launch_id == item.source_id => Some(variant),
-            _ => None,
-        }).max_by_key(|variant| variant.ordinal);
-        if let Some(variant) = variant {
-            let name = item.mission_id.as_deref().unwrap_or(&item.title).trim_start_matches("mission/");
-            extras.previews.insert(item.header.id.clone(),
-                Load::Ready(adapt::preview(name, &variant.normalized_mission)));
-        }
     }
     let mut world = adapt::world_at(&model, person, &extras, &snapshot.created_at);
     world.worktrees = Load::Failed("The scenario kit does not model worktrees".into());
@@ -139,7 +127,6 @@ pub(super) fn loading_from(mut world: World) -> World {
     world.clients = Load::Loading;
     world.slo = Load::Loading;
     world.conversations.clear();
-    world.pending_calls.clear();
     world
 }
 

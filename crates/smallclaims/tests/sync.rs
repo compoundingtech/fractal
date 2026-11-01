@@ -25,7 +25,7 @@ impl Member {
     fn start(state_dir: &Path, node: &str) -> Self {
         let file = FleetFile::load(state_dir).unwrap().unwrap();
         let store =
-            Arc::new(Store::open(&join::store_path(state_dir), node, Arc::new(Plain)).unwrap());
+            Arc::new(Store::open(&state_dir.join("claims.sqlite3"), node, Arc::new(Plain)).unwrap());
         smallclaims::fleet::activate(&store, state_dir, &file).unwrap();
         let (wake, _) = watch::channel(0);
         let config = WorkerConfig::from_fleet_file(state_dir, node).unwrap();
@@ -113,6 +113,8 @@ async fn a_store_joins_a_fleet_and_claims_sync_both_ways() {
 
     let joined = join::join(&JoinOptions {
         state_dir: grace_dir.path().to_path_buf(),
+        store_path: grace_dir.path().join("claims.sqlite3"),
+        admitted_store: None,
         configured_node: "grace".into(),
         code: invitation.code,
         name: None,

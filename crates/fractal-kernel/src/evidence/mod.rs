@@ -805,10 +805,140 @@ pub fn verify(
 /// pins its accepted base; trust roots remain external to repository policy.
 pub fn load_policy(repo: &Path, revision: &str) -> Result<Policy> {
     let revision = commit(repo, revision)?;
+    // arn:lmig:smalltalk:2026-10-27-dot-fractal-config: only absence permits legacy policy.
+    // Probe the pinned tree separately: missing objects and unreadable new blobs fail closed.
+    let path = if git(
+        repo,
+        &[
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            &revision,
+            "--",
+            ".fractal/evidence-policy.json",
+        ],
+        None,
+    )?
+    .is_empty()
+    {
+        ".st/evidence-policy.json"
+    } else {
+        ".fractal/evidence-policy.json"
+    };
     let policy = serde_json::from_slice(&git(
         repo,
-        &["show", &format!("{revision}:.st/evidence-policy.json")],
+        &["show", &format!("{revision}:{path}")],
         None,
     )?)?;
     Ok(policy)
+}
+
+#[cfg(test)]
+mod policy_path_tests {
+    use super::*;
+
+    fn policy_bytes(check: &str) -> Vec<u8> {
+        serde_json::to_vec(&Policy {
+            version: 1,
+            risk_class: "daemon".into(),
+            required_checks: BTreeSet::from([check.into()]),
+            allowed_tiers: BTreeSet::from([TrustTier::Full]),
+            test_signers: BTreeSet::from(["fleet/fixture-observer".into()]),
+            review_signers: BTreeSet::from(["fleet/fixture-observer".into()]),
+        })
+        .unwrap()
+    }
+
+    fn fixture(legacy: Option<&[u8]>, current: Option<&[u8]>) -> (tempfile::TempDir, String) {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path();
+        git(repo, &["init", "-q"], None).unwrap();
+        for (directory, contents) in [(".st", legacy), (".fractal", current)] {
+            if let Some(contents) = contents {
+                std::fs::create_dir(repo.join(directory)).unwrap();
+                std::fs::write(repo.join(directory).join("evidence-policy.json"), contents).unwrap();
+            }
+        }
+        git(repo, &["add", "."], None).unwrap();
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "policy fixture",
+            ],
+            None,
+        )
+        .unwrap();
+        let revision = commit(repo, "HEAD").unwrap();
+        (root, revision)
+    }
+
+    #[test]
+    fn policy_layouts_prefer_new_at_the_pinned_revision() {
+        let old = policy_bytes("old-check");
+        let new = policy_bytes("new-check");
+        for (legacy, current, expected) in [
+            (Some(old.as_slice()), None, "old-check"),
+            (None, Some(new.as_slice()), "new-check"),
+            (Some(old.as_slice()), Some(new.as_slice()), "new-check"),
+        ] {
+            let (root, revision) = fixture(legacy, current);
+            let policy = load_policy(root.path(), &revision).unwrap();
+            assert_eq!(policy.required_checks, BTreeSet::from([expected.into()]));
+            let subdir = root.path().join("nested");
+            std::fs::create_dir(&subdir).unwrap();
+            assert_eq!(
+                load_policy(&subdir, &revision).unwrap().required_checks,
+                BTreeSet::from([expected.into()])
+            );
+        }
+        let (root, revision) = fixture(Some(&old), None);
+        std::fs::create_dir(root.path().join(".fractal")).unwrap();
+        std::fs::write(
+            root.path().join(".fractal/evidence-policy.json"),
+            b"untrusted candidate policy",
+        )
+        .unwrap();
+        assert_eq!(
+            load_policy(root.path(), &revision).unwrap().required_checks,
+            BTreeSet::from(["old-check".into()])
+        );
+    }
+
+    #[test]
+    fn malformed_or_absent_policy_and_invalid_revision_fail_closed() {
+        let old = policy_bytes("old-check");
+        let (root, revision) = fixture(Some(&old), Some(b"{malformed"));
+        assert!(load_policy(root.path(), &revision).is_err());
+        assert!(load_policy(root.path(), "missing-revision").is_err());
+        let (root, revision) = fixture(None, None);
+        assert!(load_policy(root.path(), &revision).is_err());
+    }
+
+    #[test]
+    fn missing_new_policy_object_does_not_fall_back() {
+        let old = policy_bytes("old-check");
+        let new = policy_bytes("new-check");
+        let (root, revision) = fixture(Some(&old), Some(&new));
+        let blob = git_text(
+            root.path(),
+            &["rev-parse", &format!("{revision}:.fractal/evidence-policy.json")],
+            None,
+        )
+        .unwrap();
+        std::fs::remove_file(
+            root.path()
+                .join(".git/objects")
+                .join(&blob[..2])
+                .join(&blob[2..]),
+        )
+        .unwrap();
+        assert!(load_policy(root.path(), &revision).is_err());
+    }
 }

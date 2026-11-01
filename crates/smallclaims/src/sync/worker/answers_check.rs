@@ -3,15 +3,18 @@
 //! UTC day. It waits an hour into the day, so replication has brought every member what was
 //! written before the cut, and checks a peer only after an exchange with it moved nothing.
 //!
-//! A kind that differs is compared again every half hour, when both members have computed their
-//! answers again and counted any claim that arrived late. A difference that lasts two hours is
-//! narrowed to buckets and keys and handed to the store to record, which raises a fault. An
-//! agreeing check is handed over too, so the store can end an earlier fault. A peer on a build
+//! A kind that differs is compared again two hours later. Each member keeps its summary at a cut
+//! until a claim older than the cut arrives, so a real difference stays, and comparing more often
+//! only costs the members another read. A difference that lasts two
+//! hours is narrowed to buckets and keys and handed to the store to record, which raises a fault.
+//! A kind whose differing keys all moved past the cut on one member is no difference: that member
+//! only computed after the newer claim arrived. An agreeing check is handed over too, so the store
+//! can end an earlier fault. A peer on a build
 //! without the check answers 404 and is not compared.
 use super::*;
 use crate::answers::{
-    AnswersCheck, AnswersReply, AnswersRequest, KindReport, differing_buckets, differing_keys,
-    differing_kinds,
+    AnswersCheck, AnswersReply, AnswersRequest, KindReport, claims_compare, differing_buckets,
+    differing_keys, differing_kinds,
 };
 use crate::sync::ANSWERS_PATH;
 
@@ -20,10 +23,11 @@ const GRACE_MS: u128 = 3_600_000;
 /// How soon to ask again when either member is still computing.
 const PENDING: Duration = Duration::from_secs(60);
 /// How soon to compare again after a difference, longer than `ANSWERS_FRESH`.
-const RECHECK: Duration = Duration::from_secs(30 * 60);
+const RECHECK: Duration = Duration::from_secs(2 * 60 * 60);
 /// How long a difference lasts before it is reported.
 const SETTLE: Duration = Duration::from_secs(2 * 60 * 60);
-/// The kinds narrowed to keys, the buckets read per kind, and the keys named per kind.
+/// The claim kinds narrowed to keys (fold readers are always narrowed), the buckets read per
+/// request, and the keys named per kind.
 const MAX_KINDS: usize = 8;
 const MAX_BUCKETS: usize = 8;
 const MAX_KEYS: usize = 20;
@@ -162,12 +166,14 @@ async fn compare_answers<B: Backend>(
     let (Some(ours), Some(theirs)) = (ours.summary, theirs.summary) else {
         return Ok(Step::Pending);
     };
-    let kinds = differing_kinds(&ours, &theirs, ours.trims_locally == theirs.trims_locally);
+    let compare_claims = claims_compare(&ours, &theirs);
+    let kinds = differing_kinds(&ours, &theirs, compare_claims);
     if !kinds.is_empty() && !settled {
         return Ok(Step::Differ);
     }
     let mut differences = Vec::new();
-    for (index, kind) in kinds.into_iter().enumerate() {
+    let mut narrowed = 0;
+    for kind in kinds {
         let mut report = KindReport {
             kind: kind.kind,
             ours: kind.ours,
@@ -175,24 +181,42 @@ async fn compare_answers<B: Backend>(
             keys: Vec::new(),
             complete: false,
         };
-        if index < MAX_KINDS {
+        // A fold reader's keys come with the summary, so narrowing one computes nothing.
+        let reader = report.kind.starts_with(crate::answers::READER_PREFIX);
+        if reader || narrowed < MAX_KINDS {
+            narrowed += usize::from(!reader);
             let Some((ours, theirs)) = both(ask(Some(&report.kind), BTreeSet::new())).await? else {
                 return Ok(Step::Pending);
             };
             let (Some(ours), Some(theirs)) = (ours.buckets, theirs.buckets) else {
                 return Ok(Step::Pending);
             };
-            let buckets = differing_buckets(&ours.buckets, &theirs.buckets);
-            let wanted = buckets.iter().take(MAX_BUCKETS).copied().collect();
-            let Some((ours, theirs)) = both(ask(Some(&report.kind), wanted)).await? else {
-                return Ok(Step::Pending);
-            };
-            let (Some(ours), Some(theirs)) = (ours.buckets, theirs.buckets) else {
-                return Ok(Step::Pending);
-            };
-            report.keys = differing_keys(&ours.keys, &theirs.keys);
-            report.complete = buckets.len() <= MAX_BUCKETS && report.keys.len() <= MAX_KEYS;
+            let buckets = differing_buckets(&ours.buckets, &theirs.buckets).into_iter().collect::<Vec<_>>();
+            // A bucket whose differing keys all move on one member names no key, so read on
+            // until one does or every differing bucket is read.
+            let mut read = 0;
+            for wanted in buckets.chunks(MAX_BUCKETS) {
+                let Some((ours, theirs)) = both(ask(Some(&report.kind), wanted.iter().copied().collect())).await? else {
+                    return Ok(Step::Pending);
+                };
+                let (Some(ours), Some(theirs)) = (ours.buckets, theirs.buckets) else {
+                    return Ok(Step::Pending);
+                };
+                report.keys.extend(differing_keys(&ours.keys, &theirs.keys));
+                read += wanted.len();
+                if !report.keys.is_empty() {
+                    break;
+                }
+            }
+            report.complete = read == buckets.len() && report.keys.len() <= MAX_KEYS;
             report.keys.truncate(MAX_KEYS);
+            // Every key that differs is moving, and the members count the same claims: they
+            // differ only in when they computed.
+            let claims = |side: &Option<crate::answers::KindAnswers>| side.as_ref().map_or(0, |side| side.claims);
+            let claims_differ = compare_claims && claims(&report.ours) != claims(&report.theirs);
+            if report.complete && report.keys.is_empty() && !claims_differ {
+                continue;
+            }
         }
         differences.push(report);
     }
@@ -295,7 +319,10 @@ pub async fn fetch_answers(
     );
     let response: PeerResponse<AnswersReply> =
         serde_json::from_slice(&bytes).context("decode the signed answers")?;
-    anyhow::ensure!(response.api_version == PEER_API_VERSION, "the peer API version differs");
+    anyhow::ensure!(
+        ACCEPTED_PEER_API_VERSIONS.contains(&response.api_version.as_str()),
+        "the peer API version differs"
+    );
     fleet.note_activity(&peer.name);
     let answered = |kind: Option<&str>, cut: u128| kind == request.kind.as_deref() && cut == request.cut_unix_ms;
     anyhow::ensure!(
@@ -330,9 +357,9 @@ mod tests {
 
     const FLEET: &str = "1f91ca65-7793-48cc-866e-ac15690130e1";
 
-    /// A store this process holds that answers on request, as a daemon's cache does.
+    /// A store this process holds that answers on request, or through a daemon's cache.
     #[derive(Clone)]
-    struct Answering(Local<Store>);
+    struct Answering(Local<Store>, Option<Arc<crate::answers::AnswersCache>>);
 
     impl Backend for Answering {
         async fn export(
@@ -392,7 +419,10 @@ mod tests {
         }
 
         async fn answers(&self, request: &AnswersRequest) -> Result<Option<AnswersReply>> {
-            Ok(Some(self.0.0.answer(request)?))
+            Ok(Some(match &self.1 {
+                Some(cache) => cache.answer(&self.0.0, request),
+                None => self.0.0.answer(request)?,
+            }))
         }
     }
 
@@ -430,10 +460,19 @@ mod tests {
 
     /// Serve `store` as the peer alder, for birch to ask.
     async fn serve(store: Arc<Store>, auth: &FleetAuth) -> (PeerConfig, tokio::task::JoinHandle<()>) {
+        serve_through(store, None, auth).await
+    }
+
+    /// Serve `store` as the peer alder, answering through `cache` if there is one.
+    async fn serve_through(
+        store: Arc<Store>,
+        cache: Option<Arc<crate::answers::AnswersCache>>,
+        auth: &FleetAuth,
+    ) -> (PeerConfig, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let state = PeerState::new(
-            Answering(Local(store)),
+            Answering(Local(store), cache),
             "alder".into(),
             auth.clone(),
             FleetContext::legacy(BTreeSet::from(["birch".into()])),
@@ -454,7 +493,7 @@ mod tests {
         let (peer, server) = serve(alder.clone(), &auth).await;
         let http = replication_http_client();
         let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
-        let backend = Answering(Local(birch.clone()));
+        let backend = Answering(Local(birch.clone()), None);
         let cut = tomorrow();
         let compare = async |settled| {
             compare_answers(&http, &backend, "birch", &peer, &auth, &dialer, cut, settled).await.unwrap()
@@ -491,6 +530,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_that_moves_past_the_cut_on_one_member_is_no_difference() {
+        let auth = FleetAuth::test(FLEET, &[6; 32]);
+        let alder = node("alder");
+        let birch = node("birch");
+        state(&alder, "item/a", "one");
+        state(&alder, "item/b", "one");
+        push(&alder, &birch);
+        std::thread::sleep(Duration::from_millis(5));
+        let cut = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        std::thread::sleep(Duration::from_millis(5));
+        // alder writes again after the cut, so it no longer counts item/b; birch has not seen the
+        // newer claim yet and still counts the one before the cut.
+        state(&alder, "item/b", "two");
+        let (peer, server) = serve(alder.clone(), &auth).await;
+        let http = replication_http_client();
+        let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
+        let backend = Answering(Local(birch.clone()), None);
+        let compare = async |settled| {
+            compare_answers(&http, &backend, "birch", &peer, &auth, &dialer, cut, settled).await.unwrap()
+        };
+        let summary = |store: &Store| store.answers_summary(cut).unwrap().kinds["example.state"].clone();
+        let (ours, theirs) = (summary(&birch), summary(&alder));
+        assert_ne!((ours.keys, &ours.digest), (theirs.keys, &theirs.digest), "item/b counts only on birch");
+        assert_eq!(ours.before_cut, theirs.before_cut, "both hold item/b's claim before the cut");
+        let agree = AnswersCheck { peer: "alder".into(), cut_unix_ms: cut, differences: Vec::new() };
+        assert_eq!(compare(false).await, Step::Found(agree.clone()), "they agree on the claims before the cut");
+        assert_eq!(compare(true).await, Step::Found(agree), "a moving key is not reported");
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn seats_that_move_on_one_member_in_more_buckets_than_a_read_are_no_difference() {
+        use crate::answers::{AnswerKey, AnswersCache, bucket};
+        // Seats in more buckets than one read covers: alder still counts them, birch already
+        // saw each of them written after the cut.
+        let mut seen = BTreeSet::new();
+        let seats = (0..)
+            .map(|index| format!("agent/sample.seat-{index}"))
+            .filter(|subject| seen.insert(bucket(subject, "")))
+            .take(MAX_BUCKETS + 4)
+            .collect::<Vec<_>>();
+        let member = |moving: bool| {
+            let seats = seats.clone();
+            let cache = Arc::new(AnswersCache::default());
+            cache.set_readers(Arc::new(move |_: &rusqlite::Connection, _: u128| {
+                let keys = seats
+                    .iter()
+                    .map(|subject| AnswerKey {
+                        subject: subject.clone(),
+                        origin: String::new(),
+                        claim: if moving { String::new() } else { "idle".into() },
+                        moving,
+                    })
+                    .collect();
+                Ok(BTreeMap::from([("harness".to_owned(), keys)]))
+            }));
+            cache
+        };
+        let auth = FleetAuth::test(FLEET, &[6; 32]);
+        let (alder, birch) = (node("alder"), node("birch"));
+        let (peer, server) = serve_through(alder.clone(), Some(member(false)), &auth).await;
+        let http = replication_http_client();
+        let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
+        let backend = Answering(Local(birch.clone()), Some(member(true)));
+        let cut = tomorrow();
+        let mut step = Step::Pending;
+        for _ in 0..500 {
+            step = compare_answers(&http, &backend, "birch", &peer, &auth, &dialer, cut, true).await.unwrap();
+            if step != Step::Pending {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let agree = AnswersCheck { peer: "alder".into(), cut_unix_ms: cut, differences: Vec::new() };
+        assert_eq!(step, Step::Found(agree), "every differing key moves on birch");
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_member_without_answers_asks_no_peer() {
         let auth = FleetAuth::test(FLEET, &[6; 32]);
         // Nothing listens here: asking would fail.
@@ -515,7 +633,7 @@ mod tests {
         let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
         let step = compare_answers(
             &replication_http_client(),
-            &Answering(Local(node("birch"))),
+            &Answering(Local(node("birch")), None),
             "birch",
             &peer,
             &auth,

@@ -24,19 +24,25 @@ const LEAD: &str = "agent/example/lead";
 /// An in-process daemon on its own socket, and the store behind it.
 async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState { owning_person: None,
-    store: Arc::new(Store::open_memory("message-send-once").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "message-send-once".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: PathBuf::from("pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: Arc::new(Store::open_memory("message-send-once").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "message-send-once".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let store = state.store.clone();
     let intent = fractal_daemon::parse_intent(
         "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/lead\" { workspace \"/tmp\"; command \"true\" }",
@@ -182,6 +188,38 @@ async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
     .unwrap()
 }
 
+/// Run the st CLI as [`st`] does, with `input` on its stdin.
+async fn st_with_stdin(socket: &Path, input: &str, args: &[&str]) -> Output {
+    let binary = test_bin!("fractal-fixture").to_path_buf();
+    let socket = socket.to_path_buf();
+    let input = input.to_owned();
+    let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut command = fractal_daemon::test_support::command(binary);
+        for (name, _) in std::env::vars_os() {
+            let name = name.to_string_lossy();
+            if name.starts_with("ST_") || name.starts_with("ST3_") {
+                command.env_remove(name.as_ref());
+            }
+        }
+        let mut child = command
+            .arg("--endpoint")
+            .arg(socket)
+            .args(["--daemon-wait", "0"])
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap()
+}
+
 fn value(output: &Output) -> Value {
     assert!(
         output.status.success(),
@@ -259,6 +297,67 @@ async fn running_the_same_send_twice_sends_one_message() {
     assert_eq!(other["already_sent"], false);
     assert_ne!(other["subject"], first["subject"]);
     assert_eq!(message_count(&store), 2);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_reply_references_use_read_normalization() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let original = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", LEAD,
+        "--from", WORKER, "--body", "Shall I start?",
+    ]).await);
+    let parent = original["subject"].as_str().unwrap();
+    let bare = parent.strip_prefix("message/").unwrap();
+    let encoded = format!("message%2F{bare}");
+    let projected = format!("/mail/inbox/00000000000000000001-{bare}.md");
+    let mut first_subject = None;
+    for reference in [parent, bare, encoded.as_str(), projected.as_str()] {
+        let sent = value(&st(&socket, &[], &[
+            "--json", "conversations", "send", WORKER,
+            "--from", LEAD, "--body", "Acknowledged.", "--in-reply-to", reference,
+        ]).await);
+        assert_eq!(sent["in_reply_to"], parent);
+        if let Some(first) = &first_subject {
+            assert_eq!(&sent["subject"], first, "equivalent references sent twice");
+            assert_eq!(sent["already_sent"], true);
+        } else {
+            first_subject = Some(sent["subject"].clone());
+        }
+    }
+    assert_eq!(message_count(&store), 2);
+
+    let reply = value(&st(&socket, &[], &[
+        "--json", "conversations", "reply", bare,
+        "--from", LEAD, "--body", "Reply also accepts bare IDs.",
+    ]).await);
+    assert_eq!(reply["in_reply_to"], parent);
+
+    let malformed = st(&socket, &[], &[
+        "--json", "conversations", "send", WORKER,
+        "--from", LEAD, "--body", "Invalid.", "--in-reply-to", "not a message",
+    ]).await;
+    assert!(!malformed.status.success());
+    assert!(stderr(&malformed).contains("message/<id>"), "{}", stderr(&malformed));
+    assert_eq!(message_count(&store), 3, "invalid reference sent a message");
+
+    // Canonical subjects retain their exact spelling, even when read would normalize it.
+    use sha2::{Digest as _, Sha256};
+    for reference in ["message/message/x", "message/topic.md", "message/topic%2Fx"] {
+        let sent = value(&st(&socket, &[("ST3_MESSAGE_KEY_HOUR", "42")], &[
+            "--json", "conversations", "send", WORKER,
+            "--from", LEAD, "--body", "Canonical.", "--in-reply-to", reference,
+        ]).await);
+        assert_eq!(sent["in_reply_to"], reference);
+        let canonical = serde_json::json!([
+            "st3-message:v1:", LEAD, WORKER, reference, null, "Canonical.",
+            [], [], null, 42,
+        ]);
+        let digest = hex::encode(Sha256::digest(canonical.to_string().as_bytes()));
+        let expected_key = format!("st3-message:v1:{}", &digest[..32]);
+        assert_eq!(sent["idempotency_key"], expected_key);
+    }
     server.abort();
 }
 
@@ -576,6 +675,54 @@ async fn a_landed_send_succeeds_when_the_projection_cannot_be_refreshed() {
     assert!(warning.contains(&subject), "{warning}");
     assert!(warning.contains("st3-message:v1:"), "{warning}");
     proxy.abort();
+    server.abort();
+}
+
+/// `--body -` reads a reply's text from stdin, as it does a send's, and a body that is empty or
+/// only whitespace is refused before anything is written (#4585).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dash_body_reads_stdin_and_an_empty_body_sends_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let (socket, store, server) = daemon(root.path()).await;
+    let original = value(&st(&socket, &[], &[
+        "--json", "conversations", "send", LEAD, "--from", WORKER, "--body", "Shall I start?",
+    ]).await);
+    let parent = original["subject"].as_str().unwrap();
+    let content = |subject: &Value| store.messages(None, true).unwrap().into_iter()
+        .find(|message| message.subject == subject.as_str().unwrap())
+        .unwrap().content;
+
+    let text = "Long reply\nwith `code` and a second line\n";
+    for (flag, key) in [("--body", "long-flag"), ("-m", "short-flag")] {
+        let reply = value(&st_with_stdin(&socket, text, &[
+            "--json", "conversations", "reply", parent, "--from", LEAD, flag, "-",
+            "--idempotency-key", key,
+        ]).await);
+        assert_eq!(content(&reply["subject"]), text, "{flag}");
+    }
+    let sent = value(&st_with_stdin(&socket, text, &[
+        "--json", "conversations", "send", LEAD, "--from", WORKER, "--body", "-", "--subject", "From stdin",
+    ]).await);
+    assert_eq!(content(&sent["subject"]), text);
+    let written = message_count(&store);
+    let image = root.path().join("fixture.png");
+    image::RgbaImage::new(1, 1).save(&image).unwrap();
+    let before = store.index().unwrap();
+
+    for (input, args) in [
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-"]),
+        (" \n\t\n", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-"]),
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "  "]),
+        ("", vec!["conversations", "send", LEAD, "--from", WORKER, "--body", "-"]),
+        ("", vec!["conversations", "send", LEAD, "--from", WORKER, "--body", ""]),
+        ("", vec!["conversations", "reply", parent, "--from", LEAD, "--body", "-", "--attach", image.to_str().unwrap()]),
+    ] {
+        let refused = st_with_stdin(&socket, input, &args).await;
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(stderr(&refused).contains("the message body is empty or only whitespace"), "{}", stderr(&refused));
+    }
+    assert_eq!(message_count(&store), written, "an empty body was sent");
+    assert_eq!(store.index().unwrap(), before, "a refused body wrote durable claims");
     server.abort();
 }
 

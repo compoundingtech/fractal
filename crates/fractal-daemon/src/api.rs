@@ -5,6 +5,8 @@ pub use fractal_api_core::api::*;
 pub use fractal_api_client_v0::api::client_v0;
 pub use fractal_api_mailbox::api::mailbox;
 use axum::Router;
+mod worker_ingress;
+pub use worker_ingress::{worker_authenticated, worker_observer};
 
 /// Every route family the daemon serves beside fractal-api-core's own routes.
 pub const ROUTE_FAMILIES: &[RouteFamily] = &[mailbox::routes, client_v0::routes];

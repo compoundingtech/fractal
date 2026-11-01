@@ -204,11 +204,13 @@ def read_reports(directory, shards, attempt):
     return union, described[0], failed_before
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — accepted base only, including probes.
 def base_file(base, path):
-    try:
-        return git('show', f'{base}:{path}')
-    except Refused:
-        return None
+    preferred = path.replace('.st/', '.fractal/', 1)
+    listing = git('ls-tree', '-z', '--full-tree', base, '--', preferred, path)
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}
+    selected = preferred if preferred in names else path if path in names else None
+    return git('show', f'{base}:{selected}') if selected is not None else None
 
 
 def crate_keys(base, tree, scratch):
@@ -248,6 +250,12 @@ def crate_result(junit, crate):
     return shown.returncode, hashlib.sha256(shown.stdout).hexdigest(), json.loads(summary.stdout)
 
 
+def planning_event(event, topology):
+    if topology and (topology != 'merge-group' or event != 'push'):
+        raise Refused('explicit merge-group test topology is only valid on a guarded main push')
+    return 'merge_group' if topology else event
+
+
 def plan(reports, out):
     """Decide what may be signed, before the key exists. Writes OUT/plan.json and OUT/junit.xml; returns the plan."""
     guard()
@@ -262,7 +270,7 @@ def plan(reports, out):
         needs = json.loads(env('NEEDS_JSON') or '{}')
     except ValueError:
         raise Refused('NEEDS_JSON is not JSON')
-    shards = checked_needs(needs, event)
+    shards = checked_needs(needs, planning_event(event, env('CI_TEST_TOPOLOGY')))
     union, (toolchain, system), failed_before = read_reports(reports, shards, int(attempt))
     commit = git('rev-parse', 'HEAD').decode().strip()
     tree = git('rev-parse', 'HEAD^{tree}').decode().strip()

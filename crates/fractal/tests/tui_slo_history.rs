@@ -2,8 +2,7 @@
 use std::{path::Path, process::Command};
 
 fn history(root: &Path) -> String {
-    let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
-        .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
+    let output = Command::new(test_env!("CARGO_BIN_EXE_fractal"))
         .args(["ui", "--slo"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env("HOME", root)
         .env("XDG_CACHE_HOME", root.join("cache"))

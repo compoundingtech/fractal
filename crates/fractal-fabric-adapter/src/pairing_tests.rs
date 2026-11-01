@@ -203,9 +203,12 @@ async fn acknowledged_happy_path_confirms_exact_atomic_selectors() {
                 assert_eq!(admission["request"]["node_id"], "node");
             }
             let body = if index == 0 {
-                answer_body.clone()
+                serde_json::to_vec(&crate::tests::envelope(
+                    serde_json::from_slice(&answer_body).unwrap(),
+                ))
+                .unwrap()
             } else {
-                serde_json::to_vec(&json!({"fleet_id":"fleet","own_member_key":"sponsor-key","persistence_error":null,"members":[],"membership":{"anchor":"anchor","legacy_removed":[],"members":[{"name":"joining","member_key":"member-key","node_id":"node","state":"current","mode":"listening","endpoints":[],"start":1}]}})).unwrap()
+                serde_json::to_vec(&crate::tests::envelope(json!({"fleet_id":"fleet","own_member_key":"sponsor-key","persistence_error":null,"members":[],"membership":{"anchor":"anchor","legacy_removed":[],"members":[{"name":"joining","member_key":"member-key","node_id":"node","state":"current","mode":"listening","endpoints":[],"start":1}]}}))).unwrap()
             };
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

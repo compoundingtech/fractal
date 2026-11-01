@@ -17,6 +17,145 @@ fn decode<T: serde::de::DeserializeOwned>(name: &str) -> T {
 }
 
 #[test]
+fn revisioned_agents_frames_keep_typed_publication_and_snapshot_provenance() {
+    let CollectionEvent::AgentsSnapshotChunk {
+        id, collection, snapshot, publication, chunk_index, chunk_count, items, order, has_more,
+    } = decode("agents-publication-chunk.json") else { panic!("expected typed chunk"); };
+    assert_eq!(id, "roster");
+    assert_eq!(collection, "agents");
+    assert_eq!(snapshot.published_at.as_deref(), Some("2026-10-10T12:00:00.000Z"));
+    assert_eq!(publication.revision, 42);
+    assert_eq!(publication.status_watermark.store_index, snapshot.store_index);
+    assert_eq!(publication.status_watermark.local_frontier, 17);
+    assert_eq!(publication.materialized_at_ms, 1791633600000);
+    assert_eq!((chunk_index, chunk_count), (0, 2));
+    assert_eq!(items[0].header.id, "agent/a");
+    assert_eq!(order, ["agent/a"]);
+    assert!(!has_more);
+    let CollectionEvent::AgentsChanges {
+        id, collection, snapshot, publication, base_revision, upserts, removes, order, has_more,
+    } = decode("agents-publication-changes.json") else { panic!("expected typed delta"); };
+    assert_eq!(id, "roster");
+    assert_eq!(collection, "agents");
+    assert_eq!(snapshot.published_at.as_deref(), Some("2026-10-10T12:00:01.000Z"));
+    assert_eq!(publication.revision, 43);
+    assert_eq!(base_revision, 42);
+    assert!(upserts.is_empty());
+    assert_eq!(removes, ["agent/b"]);
+    assert_eq!(order, ["agent/a"]);
+    assert!(!has_more);
+}
+
+#[test]
+fn collection_errors_keep_distinct_permanent_code_and_optional_legacy_metadata() {
+    let CollectionEvent::Error { id, collection, code, retryable, .. } =
+        decode("agents-publication-row-too-large.json") else { panic!("expected error"); };
+    assert_eq!(id, "roster");
+    assert_eq!(collection.as_deref(), Some("agents"));
+    assert_eq!(code, Some(ErrorCode::AgentsPublicationRowTooLarge));
+    assert_eq!(retryable, Some(false));
+    let legacy: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"resync", "id":"roster"
+    })).unwrap();
+    assert!(matches!(legacy, CollectionEvent::Resync { collection: None, retryable: None, .. }));
+    let notice: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"resync", "id":"talk", "collection":"conversation", "retryable":true, "code":"remote-unavailable"
+    })).unwrap();
+    assert!(matches!(notice, CollectionEvent::Resync { collection: Some(collection), retryable: Some(true), .. } if collection == "conversation"));
+    let error: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"error", "message":"legacy refusal"
+    })).unwrap();
+    assert!(matches!(error, CollectionEvent::Error { collection: None, retryable: None, .. }));
+}
+
+#[test]
+fn collection_publication_grammar_cannot_leak_into_legacy_events() {
+    let chunk: serde_json::Value = serde_json::from_slice(&fixture("agents-publication-chunk.json")).unwrap();
+    let mut legacy = chunk.clone();
+    for key in ["publication", "chunk_index", "chunk_count"] { legacy.as_object_mut().unwrap().remove(key); }
+    let event: CollectionEvent = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(matches!(event, CollectionEvent::Snapshot { collection, snapshot, .. } if collection == "agents" && snapshot.published_at.is_some()));
+    for key in ["chunk_index", "chunk_count", "base_revision"] {
+        let mut invalid = legacy.clone();
+        invalid[key] = serde_json::json!(1);
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err(), "{key}");
+    }
+    for key in ["publication", "chunk_index", "chunk_count"] {
+        let mut invalid = chunk.clone();
+        invalid.as_object_mut().unwrap().remove(key);
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err(), "{key}");
+    }
+    for (key, value) in [
+        ("chunk_count", serde_json::json!(0)),
+        ("chunk_index", serde_json::json!(2)),
+        ("collection", serde_json::json!("work")),
+        ("has_more", serde_json::json!(true)),
+    ] {
+        let mut invalid = chunk.clone();
+        invalid[key] = value;
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err(), "{key}");
+    }
+    let mut unpublished = chunk.clone();
+    unpublished["snapshot"].as_object_mut().unwrap().remove("published_at");
+    assert!(serde_json::from_value::<CollectionEvent>(unpublished).is_err());
+    for base_revision in [0, 9_007_199_254_740_992_u64] {
+        let mut invalid: serde_json::Value = serde_json::from_slice(&fixture("agents-publication-changes.json")).unwrap();
+        invalid["base_revision"] = serde_json::json!(base_revision);
+        assert!(serde_json::from_value::<CollectionEvent>(invalid).is_err());
+    }
+    let mut delta: serde_json::Value = serde_json::from_slice(&fixture("agents-publication-changes.json")).unwrap();
+    delta["chunk_index"] = serde_json::json!(0);
+    assert!(serde_json::from_value::<CollectionEvent>(delta).is_err());
+    let legacy_snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "id":"snapshot/host-a/1/fence", "host_id":"host/host-a", "store_index":1,
+        "projection_version":"client-projection.v0", "created_at":"2026-10-10T12:00:00.000Z"
+    })).unwrap();
+    assert!(legacy_snapshot.published_at.is_none());
+    assert!(serde_json::to_value(legacy_snapshot).unwrap().get("published_at").is_none());
+}
+
+#[test]
+fn collection_frames_ignore_unknown_extension_keys() {
+    for (name, publication) in [
+        ("agents-publication-chunk.json", true),
+        ("agents-publication-changes.json", true),
+        ("agents-publication-chunk.json", false),
+    ] {
+        let mut frame: serde_json::Value = serde_json::from_slice(&fixture(name)).unwrap();
+        if !publication {
+            for key in ["publication", "chunk_index", "chunk_count"] {
+                frame.as_object_mut().unwrap().remove(key);
+            }
+        }
+        frame["future_extension"] = serde_json::json!({"value": true});
+        let event: CollectionEvent = serde_json::from_value(frame).unwrap();
+        assert!(matches!((publication, event),
+            (true, CollectionEvent::AgentsSnapshotChunk { .. } | CollectionEvent::AgentsChanges { .. })
+            | (false, CollectionEvent::Snapshot { .. })));
+    }
+}
+
+#[test]
+fn terminal_conversation_and_legacy_changes_keep_collection_names() {
+    let envelope: serde_json::Value = serde_json::from_slice(&fixture("terminal-screen.json")).unwrap();
+    let screen: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"screen", "id":"term", "collection":"terminal",
+        "snapshot":envelope["snapshot"], "value":envelope["value"],
+    })).unwrap();
+    assert!(matches!(screen, CollectionEvent::Screen { collection, .. } if collection == "terminal"));
+    let conversation: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"conversation", "id":"talk", "collection":"conversation",
+        "session_id":"session/a", "replace":false, "items":[],
+    })).unwrap();
+    assert!(matches!(conversation, CollectionEvent::Conversation { collection, has_more: None, .. } if collection == "conversation"));
+    let changes: CollectionEvent = serde_json::from_value(serde_json::json!({
+        "kind":"changes", "id":"window", "collection":"agents", "snapshot":envelope["snapshot"],
+        "upserts":[], "removes":[], "order":[], "has_more":false,
+    })).unwrap();
+    assert!(matches!(changes, CollectionEvent::Changes { collection, .. } if collection == "agents"));
+}
+
+#[test]
 fn shared_error_sentences_preserve_machine_values_and_match_human_clients() {
     #[derive(serde::Deserialize)]
     struct Case {
@@ -359,7 +498,34 @@ fn assistant_pairing_is_disjoint_from_person_delegation() {
 #[test]
 fn generated_resource_union_decodes_all_kinds() {
     let resources: Vec<Resource> = serde_json::from_slice(&fixture("resources.json")).unwrap();
-    assert_eq!(resources.len(), 18);
+    assert_eq!(resources.len(), 19);
+    let question = resources
+        .iter()
+        .find_map(|resource| match resource {
+            Resource::HarnessQuestion(question) => Some(question),
+            _ => None,
+        })
+        .expect("the fixture must decode a typed harness question, not an unknown resource");
+    assert_eq!(question.header.id, "harness-question/00ca25ee5d0da6af852c81a5ee4949df");
+    assert_eq!(question.header.revision, "claim/ada-observed");
+    assert_eq!(question.agent, "agent/ada");
+    assert_eq!(question.session, "ada-session");
+    assert_eq!(question.runtime_incarnation, "ada-incarnation-1");
+    assert_eq!(question.observed_at, 1793008800000);
+    assert_eq!(question.questions, vec![HarnessQuestionItem {
+        id: "q0".into(),
+        options: 2,
+        multi: false,
+        required: true,
+    }]);
+    assert!(question.resolution.is_none());
+    assert_eq!(question.answer.state, HarnessQuestionAnswerabilityState::Unavailable);
+    assert_eq!(question.answer.reason, Some(HarnessQuestionAnswerabilityReason::AdapterMissing));
+    let typed = Resource::HarnessQuestion(question.clone());
+    let encoded = serde_json::to_value(&typed).unwrap();
+    assert_eq!(encoded["kind"], "harness-question");
+    let round_trip: Resource = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round_trip, typed);
     let lane = resources
         .iter()
         .find_map(|resource| match resource {
@@ -620,6 +786,26 @@ fn timeline_tool_result_preserves_timing_metadata_and_decodes_legacy_results() {
 }
 
 #[test]
+fn a_mailbox_content_entry_names_its_message_and_older_content_decodes_without() {
+    let mut wire = serde_json::json!({
+        "id": "timeline-entry/mailbox-content", "sequence": 3, "revision": 1,
+        "timestamp": "2026-09-20T12:00:00Z", "role": "user", "type": "content", "final": true,
+        "body": {"media_type": "text/plain", "text": "hello", "message_id": "message/first"}
+    });
+    let entry: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    let TimelineBody::Content(body) = &entry.body else {
+        panic!("content discriminator was not preserved");
+    };
+    assert_eq!(body.message_id.as_deref(), Some("message/first"));
+    assert_eq!(serde_json::to_value(&entry).unwrap(), wire);
+
+    wire["body"].as_object_mut().unwrap().remove("message_id");
+    let older: TimelineEntry = serde_json::from_value(wire.clone()).unwrap();
+    assert!(matches!(&older.body, TimelineBody::Content(body) if body.message_id.is_none()));
+    assert_eq!(serde_json::to_value(&older).unwrap(), wire);
+}
+
+#[test]
 fn timeline_models_tolerate_future_discriminators() {
     fn entry(entry_type: &str, body: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
@@ -844,6 +1030,82 @@ fn a_kind_this_client_does_not_know_reads_as_unknown_and_the_page_still_reads() 
 }
 
 #[test]
+fn ordered_membership_contract_preserves_root_remove_and_versioned_bodies() {
+    let value: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let parameters: ArrangementMembershipEditParameters = serde_json::from_value(value["edit"]["parameters"].clone()).unwrap();
+    assert!(matches!(&parameters.operations[0], OrderedMembershipOperation::Place { bucket: None, .. }));
+    assert!(matches!(&parameters.operations[1], OrderedMembershipOperation::Remove { .. }));
+    let fence: Fence = serde_json::from_value(value["edit"]["fence"].clone()).unwrap();
+    let serialized_fence = serde_json::to_value(&fence).unwrap();
+    let request = ActionRequest::arrangement_membership_edit(
+        "action/membership-edit", "membership-edit-ada-0001",
+        fence, parameters,
+    ).unwrap();
+    let mut expected = value["edit"].clone();
+    expected["fence"] = serialized_fence;
+    assert_eq!(serde_json::to_value(request).unwrap(), expected);
+    let page: OrderedMembershipPage = serde_json::from_value(value["page"].clone()).unwrap();
+    assert_eq!(page.items[0].id, page.items[0].member);
+    assert!(page.items[0].position.bucket.is_none());
+    let mut expected_page = value["page"].clone();
+    expected_page["page"]["next_cursor"] = serde_json::Value::Null;
+    expected_page["page"]["cursor_expires_at"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(page).unwrap(), expected_page);
+    let body: ArrangementBody = serde_json::from_value(value["body"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(body).unwrap(), value["body"]);
+    let legacy: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/arrangements-v1.json")).unwrap();
+    let body: ArrangementBody = serde_json::from_value(legacy["resource"]["body"].clone()).unwrap();
+    assert_eq!(serde_json::to_value(body).unwrap(), legacy["resource"]["body"]);
+    let mut invalid = value["body"].clone();
+    invalid["version"] = serde_json::json!(3);
+    assert!(serde_json::from_value::<ArrangementBody>(invalid).is_err());
+    let mut invalid = value["body"].clone();
+    invalid["placements"] = serde_json::json!({});
+    assert!(serde_json::from_value::<ArrangementBody>(invalid).is_err());
+    let parameters: ArrangementEditParameters = serde_json::from_value(legacy["edit"]["parameters"].clone()).unwrap();
+    assert_eq!(parameters.version, None);
+    assert_eq!(serde_json::to_value(parameters).unwrap(), legacy["edit"]["parameters"]);
+    for (raw, code) in [
+        ("unsupported-membership-container", ErrorCode::UnsupportedMembershipContainer),
+        ("membership-owner-forbidden", ErrorCode::MembershipOwnerForbidden),
+        ("invalid-membership-member", ErrorCode::InvalidMembershipMember),
+        ("invalid-membership-bucket", ErrorCode::InvalidMembershipBucket),
+        ("invalid-membership-key", ErrorCode::InvalidMembershipKey),
+        ("invalid-membership-operations", ErrorCode::InvalidMembershipOperations),
+        ("invalid-arrangement-version", ErrorCode::InvalidArrangementVersion),
+        ("invalid-arrangement-body", ErrorCode::InvalidArrangementBody),
+        ("membership-edit-too-large", ErrorCode::MembershipEditTooLarge),
+    ] {
+        assert_eq!(serde_json::from_value::<ErrorCode>(serde_json::json!(raw)).unwrap(), code);
+        assert_eq!(serde_json::to_value(code).unwrap(), raw);
+    }
+}
+
+#[test]
+fn ordered_membership_envelopes_decode_and_missing_buckets_fail_before_a_request_exists() {
+    let value: serde_json::Value = serde_json::from_str(include_str!("../../../fixtures/clients/ordered-memberships-v2.json")).unwrap();
+    let envelope: Envelope<OrderedMembershipPage> = serde_json::from_value(value["envelope"].clone()).unwrap();
+    assert_eq!(envelope.value.collection, "ordered-memberships");
+    assert!(envelope.value.items.is_empty());
+    let mut expected_page = value["envelope"]["value"].clone();
+    expected_page["page"]["next_cursor"] = serde_json::Value::Null;
+    expected_page["page"]["cursor_expires_at"] = serde_json::Value::Null;
+    assert_eq!(serde_json::to_value(&envelope.value).unwrap(), expected_page);
+    // A missing bucket is not the root: neither the edit nor a read row decodes without it.
+    let mut missing = value["edit"]["parameters"].clone();
+    missing["operations"][0].as_object_mut().unwrap().remove("bucket");
+    let error = serde_json::from_value::<ArrangementMembershipEditParameters>(missing).unwrap_err();
+    assert!(error.to_string().contains("missing field `bucket`"), "{error}");
+    let mut row = value["page"]["items"][0].clone();
+    row["position"].as_object_mut().unwrap().remove("bucket");
+    assert!(serde_json::from_value::<OrderedMembership>(row).is_err());
+    let mut explicit_root = value["page"]["items"][0].clone();
+    explicit_root["position"]["bucket"] = serde_json::Value::Null;
+    let decoded: OrderedMembership = serde_json::from_value(explicit_root).unwrap();
+    assert_eq!(decoded.position.bucket, None);
+}
+
+#[test]
 fn relay_omission_fixture_round_trips_without_inventing_nonnullable_fields() {
     let bytes = fixture("timeline-relay-omission.json");
     let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -1002,4 +1264,23 @@ fn optional_message_participants_preserve_legacy_scalar_types_and_typed_relay() 
         "items":raw["value"]["items"], "next_cursor":"conversation-cursor/participants/next"});
     let typed: ConversationChanges = serde_json::from_value(changes.clone()).unwrap();
     assert_eq!(serde_json::to_value(typed).unwrap(),changes);
+}
+
+#[tokio::test]
+async fn a_relayed_plugin_read_refuses_paths_outside_the_plugin_routes() {
+    let client = Client::unix(Path::new("/nonexistent/fractal-plugin-read.sock"));
+    let refused = |result: &Result<serde_json::Value, ClientError>| {
+        matches!(result, Err(ClientError::Protocol(message)) if message.contains("not a GitHub plugin read"))
+    };
+    for path in [
+        "/v1/plugins/github/repos/acme/../garden/pulls",
+        "/v1/plugins/github/repos/./acme/garden/pulls",
+        "/v1/client/agents",
+        "/v1/plugins/github/repos/acme/garden/pulls#12",
+    ] {
+        assert!(refused(&client.github_plugin_read(path).await), "{path}");
+    }
+    // A dotted value in the query names no segment: the read is sent, and finds no daemon here.
+    let sent = client.github_plugin_read("/v1/plugins/github/repos/acme/garden/events?after=a..b").await;
+    assert!(sent.is_err() && !refused(&sent), "{sent:?}");
 }

@@ -36,6 +36,7 @@ it('projects authoritative register values and tombstones without editing an arr
     position: { value: { parent: null, key: 'a0' }, revision: 'claim/position' },
     tombstone: null,
   }
+  if (arrangement.body.version !== 1) throw new Error('the fixture is a version 1 layout')
   arrangement.body.placements['agent/a'] = { value: { folder: id, key: 'a0' }, revision: 'claim/place' }
   const original = JSON.stringify(arrangement)
   expect(project(arrangementSidebarDoc(arrangement), ['agent/a']).folders[0]).toMatchObject({ id, name: 'Inbox', members: ['agent/a'] })
@@ -69,7 +70,7 @@ it('shows the lowest-UUIDv7 arrangement and switches when an empty owner frame r
     collectionStream: async (next) => {
       options = next
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop } satisfies CollectionStream
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop } satisfies CollectionStream
     },
   }
   const atom = sidebarFolders({ gateway: () => gateway })
@@ -111,7 +112,7 @@ it('binds a granted live Sidebar atom to optimistic generated edits and exactly 
     collectionStream: async (next) => {
       options = next
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
     },
     actions: {
       snapshot: Effect.succeed(testSnapshot.id),
@@ -166,7 +167,7 @@ it.each([false, true])('propagates adoption metadata and a removed reserved Side
       options = next
       subscriptions++
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribeOrderedMemberships: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeAgentsPublication: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
     },
     actions: {
       snapshot: Effect.succeed(testSnapshot.id),

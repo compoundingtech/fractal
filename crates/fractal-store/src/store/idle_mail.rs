@@ -2,12 +2,14 @@
 //! populate it. Startup backfill commits at most 64 message subjects at a time.
 use super::*;
 
-const FOLD: &str = /* sqlite-large-value: allow-for-now lv-h3c489a0f77ec owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ r#"
+const FOLD: &str = /* sqlite-large-value: allow-for-now lv-h30eb7719f37c owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ r#"
 INSERT OR REPLACE INTO local_idle_messages(subject,recipient,wait_tag,source_prefix,sent_at,pending,delivered)
 SELECT sent.subject,COALESCE(json_extract(sent.body,'$.fields.to'),''),
        json_extract(sent.body,'$.fields.tags[1]'),
+       -- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
        CASE WHEN json_extract(sent.body,'$.fields.tags[0]')='github-watch' THEN 'github-watch'
-            WHEN json_extract(sent.body,'$.fields.tags[0]') GLOB 'st3-run-report:*' THEN 'st3-run-report:' END,
+            WHEN json_extract(sent.body,'$.fields.tags[0]') GLOB 'st3-run-report:*' OR json_extract(sent.body,'$.fields.tags[0]') GLOB 'fractal-run-report:*' THEN 'st3-run-report:' END,
+       -- LIVE-MIGRATION END
        CAST(sent.accepted_at_unix_ms AS INTEGER),
        NOT EXISTS(SELECT 1 FROM claims terminal
                   WHERE terminal.subject=sent.subject
@@ -22,7 +24,7 @@ FROM claims sent WHERE sent.store_index=(
 
 pub fn create_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h658083da337d owner=fractal_store::store::idle_mail TODO=chunk-or-reference-variable-columns */ r#"
+        /* sqlite-large-value: allow-for-now lv-h1651b33950e6 owner=fractal_store::store::idle_mail TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_idle_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -41,11 +43,14 @@ WHERE delivered=1 AND source_prefix IS NOT NULL;
 DROP TRIGGER IF EXISTS local_idle_messages_insert;
 DROP TRIGGER IF EXISTS local_idle_messages_delete;
 DROP TRIGGER IF EXISTS local_idle_messages_update;
+DROP TRIGGER IF EXISTS local_idle_messages_sent_v1;
+DROP TRIGGER IF EXISTS local_idle_messages_delete_v1;
+DROP TRIGGER IF EXISTS local_idle_messages_update_v1;
 "#,
     )?;
     for (name, event, reference) in [
-        ("sent_v1", "AFTER INSERT", "NEW"),
-        ("delete_v1", "AFTER DELETE", "OLD"),
+        ("sent_v2", "AFTER INSERT", "NEW"),
+        ("delete_v2", "AFTER DELETE", "OLD"),
     ] {
         let subject = format!("{reference}.subject");
         connection.execute_batch(&format!(
@@ -53,7 +58,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
              WHEN {reference}.kind IN ({kinds})
              BEGIN DELETE FROM local_idle_messages WHERE subject={subject}; {} END;",
             FOLD.replace("SUBJECT", &subject),
-            kinds = if name == "sent_v1" {
+            kinds = if name == "sent_v2" {
                 "'message.sent'"
             } else {
                 "'message.sent','message.delivered','message.read','message.closed'"
@@ -72,7 +77,7 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
     )?;
     // Claim bytes are immutable in normal admission; a migration can update them.
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-h23e63f3afa29 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v1
+        /* sqlite-large-value: allow-for-now lv-h696035ca81b6 owner=fractal_store::store::idle_mail TODO=prepare-body-and-predecessor-values */ "CREATE TRIGGER IF NOT EXISTS local_idle_messages_update_v2
          AFTER UPDATE OF subject,kind,body,accepted_at_unix_ms ON claims
          WHEN OLD.kind IN ('message.sent','message.delivered','message.read','message.closed')
            OR NEW.kind IN ('message.sent','message.delivered','message.read','message.closed')
@@ -81,6 +86,8 @@ DROP TRIGGER IF EXISTS local_idle_messages_update;
         FOLD.replace("SUBJECT", "OLD.subject"),
         FOLD.replace("SUBJECT", "NEW.subject"),
     ))?;
+    // Existing completion/cursor keys remain valid: writers still emit st3 tags, so there
+    // are no new-prefix rows to refold. Incomplete backfills use the widened FOLD below.
     let filled: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='local_idle_messages_v1')",
         [],
@@ -222,6 +229,84 @@ mod tests {
     fn seed_messages(store: &Store, count: usize) {
         store.connection.write().execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('idle-history','node',1,'fixture','1')", []).unwrap();
         store.seed_idle_history("agent/node.worker", 1, 0..count, 0..0);
+    }
+
+    #[test]
+    fn idle_mail_upgrades_old_fold_triggers_without_restarting_backfill() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        {
+            let store = Store::open(&path, "node").unwrap();
+            seed_messages(&store, 1);
+            let connection = store.connection.write();
+            for name in ["sent", "delete", "update"] {
+                let current = format!("local_idle_messages_{name}_v2");
+                let old = format!("local_idle_messages_{name}_v1");
+                let ddl: String = connection
+                    .query_row(
+                        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                        [&current],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let legacy = ddl.replace(&current, &old).replace(
+                    " OR json_extract(sent.body,'$.fields.tags[0]') GLOB 'fractal-run-report:*'",
+                    "",
+                );
+                connection
+                    .execute_batch(&format!("DROP TRIGGER {current}; {legacy}"))
+                    .unwrap();
+            }
+            // A completed old projection must not be rebuilt when its triggers upgrade.
+            connection.execute_batch("CREATE TRIGGER reject_idle_refold BEFORE INSERT ON local_idle_messages BEGIN SELECT RAISE(ABORT,'unexpected backfill'); END;").unwrap();
+        }
+        let store = Store::open(&path, "node").unwrap();
+        let connection = store.connection.write();
+        for (version, expected) in [(1, 0), (2, 3)] {
+            let count: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (?1,?2,?3)",
+                params![format!("local_idle_messages_sent_v{version}"),
+                    format!("local_idle_messages_delete_v{version}"),
+                    format!("local_idle_messages_update_v{version}")], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, expected);
+        }
+        assert_eq!(connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='local_idle_messages_receipt_v1'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM local_idle_messages", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn idle_mail_update_and_initial_backfill_fold_both_run_report_prefixes() {
+        for prefix in ["st3-", "fractal-"] {
+            let store = Store::open_memory("node").unwrap();
+            seed_messages(&store, 1);
+            let connection = store.connection.write();
+            connection.execute(
+                "UPDATE claims SET body=json_set(body,'$.fields.tags[0]',?1) WHERE kind='message.sent'",
+                [format!("{prefix}run-report:failed")],
+            ).unwrap();
+            for backfill in [false, true] {
+                if backfill {
+                    connection.execute_batch("DELETE FROM local_idle_messages; DELETE FROM meta WHERE key='local_idle_messages_v1';").unwrap();
+                    create_schema(&connection).unwrap();
+                }
+                let source: String = connection
+                    .query_row("SELECT source_prefix FROM local_idle_messages", [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(source, "st3-run-report:");
+            }
+        }
     }
 
     #[test]
@@ -423,9 +508,13 @@ mod tests {
             for mode in ["baseline", "full_fold_receipts", "state_update_receipts"] {
                 create_schema(&connection).unwrap();
                 if mode == "baseline" {
-                    for name in ["sent", "receipt", "delete", "update"] {
+                    for (name, version) in
+                        [("sent", 2), ("receipt", 1), ("delete", 2), ("update", 2)]
+                    {
                         connection
-                            .execute_batch(&format!("DROP TRIGGER local_idle_messages_{name}_v1"))
+                            .execute_batch(&format!(
+                                "DROP TRIGGER local_idle_messages_{name}_v{version}"
+                            ))
                             .unwrap();
                     }
                 } else if mode == "full_fold_receipts" {

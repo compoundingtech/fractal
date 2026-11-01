@@ -14,8 +14,10 @@ fn independently_folded_faults(store: &Store, as_of: u128) -> Result<Vec<FaultVi
     items.extend(store.checkpoint_attention_items(None, as_of)?);
     items.extend(store.signature_attention_items()?);
     let fallback = store.fleet_fault_agent()?;
+    let dismissed = store.dismissed_faults()?;
     store.current_attention(items, as_of)?
         .into_iter()
+        .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
         .map(|item| {
             Ok(FaultView {
                 owner: store.fault_owner(&item, fallback.as_deref())?,
@@ -227,8 +229,10 @@ fn reference_fault_snapshot(store: &Store, as_of: u128) -> Result<Vec<FaultView>
     items.extend(store.checkpoint_attention_items(None, as_of)?);
     items.extend(store.signature_attention_items()?);
     let fallback = store.fleet_fault_agent()?;
+    let dismissed = store.dismissed_faults()?;
     store.current_attention(items, as_of)?
         .into_iter()
+        .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
         .map(|item| {
             Ok(FaultView {
                 owner: store.fault_owner(&item, fallback.as_deref())?,

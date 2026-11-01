@@ -215,6 +215,7 @@ impl FractalRuntime {
         glass_heads::create_schema(connection)?;
         directive_notes::create_schema(connection)?;
         limits::create_limits_schema(connection)?;
+        ordered_membership::create_schema(connection)?;
         if let Some(transaction) = transaction {
             transaction.commit()?;
         }
@@ -361,6 +362,7 @@ impl Runtime for FractalRuntime {
         }
         projectors::run_hooks(projectors::OPEN, transaction)?;
         resource_references::open(transaction, shared_memory)?;
+        ordered_membership::open(transaction)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
@@ -449,7 +451,24 @@ impl Runtime for FractalRuntime {
         replacement: &str,
     ) -> Result<()> {
         select_desired_repair_tx(transaction, repaired, replacement)?;
-        slo_breaches::repair(transaction, repaired)
+        slo_breaches::repair(transaction, repaired)?;
+        let original: Option<(String, String)> = transaction.query_row(
+            "SELECT subject,kind FROM claims WHERE id=?1",
+            [repaired], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((subject, kind)) = original else { return Ok(()); };
+        if matches!(kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
+            // Repair retracts every operation in the original, including pairs omitted
+            // by its replacement and the arrangement's shared revision. Reuse the same
+            // unrepaired-authority reducer as restart/checkpoint instead of partial undo.
+            arrangements::rebuild(transaction)?;
+            ordered_membership::rebuild(transaction)?;
+            arrangements::repair_frontier(transaction, &subject)?;
+            ordered_membership::repair_frontier(transaction, &subject)?;
+        } else {
+            ordered_membership::member_repaired(transaction, &subject)?;
+        }
+        Ok(())
     }
 
     fn append_claim_tx(
@@ -499,6 +518,18 @@ impl Runtime for FractalRuntime {
     fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
         projectors::run_hooks(projectors::FLUSH, transaction).map_err(internal)?;
         reapply_local_work_lease_renewals_tx(transaction)
+    }
+
+    fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
+        resources::flush_deferred_preparation(transaction, budget)
+    }
+
+    fn deferred_pending(&self, connection: &Connection) -> Result<bool> {
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
@@ -645,7 +676,7 @@ impl Runtime for FractalRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.slo-breach-episodes-declared-resource-edges.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges-ordered-membership.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {

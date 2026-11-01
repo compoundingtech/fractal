@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-flip-ready counts a run that concluded cancelled as no evidence, neither an ok line nor a red, unless a job it judged failed; such runs are reported as cancelled_runs, which replaces superseded_red (a cancelled duplicate run of one head had read as fractal-web's hidden red)",
+  "replay": {"status": "none", "detail": "No record, signature or storage format changes."},
+  "schema": {"status": "none", "detail": "The script's JSON report: superseded_red is gone and cancelled_runs lists every cancelled run without a failed judged job. Only the daily flip check reads it."},
+  "rules": {"status": "none", "detail": "The gate decides as before; only the read-only flip trigger counts differently. A failed member, or the check's own failed job when it has no members, keeps a cancelled run red, and a timeout concludes the run failure."},
+  "compatibility": {"status": "none", "detail": "No other script reads superseded_red."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the change; cancelled runs are judged by the superseded rule again."}
+}

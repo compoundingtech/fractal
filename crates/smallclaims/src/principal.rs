@@ -23,6 +23,8 @@ use serde_json::Value;
 use crate::fleet::{MemberKey, verify_signature};
 use crate::hash::{canonical_hash, canonical_json_value};
 
+pub mod facts;
+
 /// A key delegated to a principal, written on the principal's subject and signed by its issuer.
 pub const KEY_GRANTED: &str = "principal.key-granted";
 /// A delegated key withdrawn, written on the principal's subject.

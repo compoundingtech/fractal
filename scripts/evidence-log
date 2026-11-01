@@ -86,6 +86,12 @@ def git(repo, *args, stdin=None, check=True, env=None, config=()):
     return done
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for timer-extracted log tools.
+def config_path(repo, base, name):
+    path = f'.fractal/{name}'
+    return path if git(repo, 'ls-tree', '--full-tree', '-z', base, '--', path).stdout else f'.st/{name}'
+
+
 def verifier():
     here = os.path.dirname(os.path.abspath(__file__))
     loader = importlib.machinery.SourceFileLoader('evidence_verify_for_log', os.path.join(here, 'evidence-verify'))
@@ -284,7 +290,7 @@ def pull(args):
     main_tip = there.pop(f'refs/heads/{remote_main}', None)
     if main_tip != refs(repo, f'refs/remotes/{args.main}').get(f'refs/remotes/{args.main}'):
         git(repo, 'fetch', '--no-tags', '-q', remote, f'+refs/heads/{remote_main}:refs/remotes/{args.main}')
-    keys_text = git(repo, 'show', f'{args.main}:.st/evidence-keys').stdout
+    keys_text = git(repo, 'show', f'{args.main}:{config_path(repo, args.main, "evidence-keys")}').stdout
     # refs/evidence-seen is exactly what the remote holds now. Only refs whose object is new are fetched, by name: a glob fetch
     # negotiates every ref (9 s for 5,000, against 0.6 s for the listing). With full history, never shallow: a shallow copy sends
     # every shallow root on every fetch (13 s to fetch 20 records into a copy of 5,000), and a restore from it is refused as a

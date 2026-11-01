@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A member that trims locally also drops superseded harness.observed claims, by the audited rule shared checkpoints use (rules version 24 keeps where a seat's needs-login run began, see #4237; version 25 keeps a seat's last turn)",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "none", "detail": "No table or claim schema change."},
+  "rules": {"status": "changed", "detail": "On a local cut only, harness.observed joins the kinds dropped, by its existing audited rule. Shared checkpoints, the rules version and the rules digest are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire or stored format change. A dropped claim is retired, so peers do not send it back. Known limits, as for shared checkpoints and for observer.observed: the client timeline's harness-status entries and reads at a past store index see fewer observations before the cut; and, never as a wrong state, a seat's since can read earlier in two rare cases: an incarnation whose newest observation predates observed_since_ms, and an incarnation with a provider prompt whose newest observation is not a transition."},
+  "downtime": {"status": "none", "detail": "None. The next daily cut on each member that trims locally deletes these claims in its usual chunks."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the build: later cuts keep harness.observed whole again. What was deleted stays retired."}
+}

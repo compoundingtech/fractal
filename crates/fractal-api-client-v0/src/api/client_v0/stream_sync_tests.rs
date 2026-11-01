@@ -221,7 +221,7 @@ fn a_window_read_from_an_incremental_source_states_no_sync() {
             json!({"kind":"subscribe", "id":"a", "collection":collection, "limit":200}),
         )
         .unwrap();
-        CollectionSubscription { generation: 0, reading: None, dirty: false, delivered: true, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: None, waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), request }
+        CollectionSubscription { generation: 0, reading: None, dirty: false, delivered: true, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: None, waiting_for_view: false, pinned: None, sync: None, sync_flags: (false, false), request }
     };
     assert!(window_states_sync(&subscription("attention", None)));
     assert!(!window_states_sync(&subscription("missions", None)));

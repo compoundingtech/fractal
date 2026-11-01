@@ -34,13 +34,19 @@ pub fn append(store: &Store, kind: &str, subject: &str, fields: Value) -> ClaimR
         .unwrap()
 }
 
+/// A plain replicated claim: a diagnostic as an older build wrote it, before it became local.
 pub fn note(store: &Store, text: &str) -> ClaimRecord {
-    append(
-        store,
-        "daemon.diagnostic",
-        &format!("daemon/{}", store.origin),
-        json!({"severity": "warning", "code": "fleet-test", "reason": text}),
-    )
+    store
+        .append_as_older_build_for_test(&ClaimInput {
+            subject: format!("daemon/{}", store.origin),
+            kind: "daemon.diagnostic".into(),
+            actor: None,
+            fields: serde_json::from_value(json!({"severity": "warning", "code": "fleet-test", "reason": text})).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap()
 }
 
 pub fn admit(by: &Store, name: &str, member: &MemberKey, via: &str, floor: Option<u64>) {

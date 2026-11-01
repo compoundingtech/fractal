@@ -36,6 +36,7 @@ const KEYWORDS: &[&str] = &[
     "format",
     "contains",
     "propertyNames",
+    "maxProperties",
     "maxItems",
     "uniqueItems",
     "x-st-ref",
@@ -447,7 +448,7 @@ fn subject_ref(object: &Map<String, Value>, families: &Value) -> Result<String> 
 }
 
 fn emit_string(object: &Map<String, Value>) -> Result<String> {
-    let mut excluded = None;
+    let mut excluded = vec![];
     let mut excluded_pattern = None;
     if let Some(not) = object.get("not") {
         let only = not.as_object().filter(|n| n.len() == 1);
@@ -458,43 +459,58 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
         if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
             excluded_pattern = Some(pattern.as_str().context("`not.pattern` must be a string")?);
         } else {
-            // `not: { const }` excludes one value from an otherwise plain string.
-            excluded = Some(only.and_then(|n| n.get("const")).context(
-                "only `not: { enum }`, `not: { const }` and `not: { pattern }` are translated",
-            )?);
+            // `not: { const }` excludes one value, and `not: { anyOf: [{ const }, ..] }` several,
+            // from an otherwise plain string.
+            excluded = match only.and_then(|n| n.get("anyOf")).and_then(Value::as_array) {
+                Some(branches) => branches
+                    .iter()
+                    .map(|branch| {
+                        branch
+                            .as_object()
+                            .filter(|b| b.len() == 1)
+                            .and_then(|b| b.get("const"))
+                            .context("`not: { anyOf }` must list only `{ const }` branches")
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                None => vec![only.and_then(|n| n.get("const")).context(
+                    "only `not: { enum }`, `not: { const }`, `not: { anyOf: [{ const }] }` and `not: { pattern }` are translated",
+                )?],
+            };
         }
     }
-    let mut schema = match object.get("x-st-ref") {
+    let mut checks = vec![];
+    if !object.contains_key("x-st-ref")
+        && let Some(pattern) = object.get("pattern")
+    {
+        checks.push(format!(
+            "Schema.isPattern(new RegExp({}, \"u\"))",
+            js(pattern)
+        ));
+    }
+    if let Some(min) = object.get("minLength") {
+        checks.push(format!("Schema.isMinLength({min})"));
+    }
+    if let Some(max) = object.get("maxLength") {
+        checks.push(format!("Schema.isMaxLength({max})"));
+    }
+    match object.get("format").and_then(Value::as_str) {
+        Some("date-time") => checks.push(
+            "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
+        ),
+        Some("uri-reference") | None => {}
+        Some(other) => bail!("unsupported string format `{other}`"),
+    }
+    let base = match object.get("x-st-ref") {
         Some(families) => subject_ref(object, families)?,
-        None => {
-            let mut checks = vec![];
-            if let Some(pattern) = object.get("pattern") {
-                checks.push(format!(
-                    "Schema.isPattern(new RegExp({}, \"u\"))",
-                    js(pattern)
-                ));
-            }
-            if let Some(min) = object.get("minLength") {
-                checks.push(format!("Schema.isMinLength({min})"));
-            }
-            if let Some(max) = object.get("maxLength") {
-                checks.push(format!("Schema.isMaxLength({max})"));
-            }
-            match object.get("format").and_then(Value::as_str) {
-                Some("date-time") => checks.push(
-                    "Schema.isPattern(DATE_TIME, { expected: \"an RFC 3339 date-time\" })".into(),
-                ),
-                Some("uri-reference") | None => {}
-                Some(other) => bail!("unsupported string format `{other}`"),
-            }
-            with_checks("Schema.String".into(), checks)
-        }
+        None => "Schema.String".into(),
     };
-    if let Some(value) = excluded {
+    let mut schema = with_checks(base, checks);
+    if !excluded.is_empty() {
+        let values = js(&Value::Array(excluded.iter().map(|value| (*value).clone()).collect()));
+        let expected = excluded.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(", ");
         schema = format!(
-            "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
-            js(value),
-            js(&json!(format!("a string other than {value}")))
+            "{schema}.check(Schema.makeFilter((value: string) => !{values}.includes(value), {{ expected: {} }}))",
+            js(&json!(format!("a string other than {expected}")))
         );
     }
     if let Some(pattern) = excluded_pattern {
@@ -640,10 +656,7 @@ fn emit(value: &Value, cx: &mut Cx) -> Result<String> {
         }) {
             break;
         }
-        let members = branches
-            .iter()
-            .map(|branch| emit(branch, cx))
-            .collect::<Result<Vec<_>>>()?;
+        let members = union_members(branches, combinator == "oneOf", cx)?;
         let mode = if combinator == "oneOf" {
             ", { mode: \"oneOf\" }"
         } else {
@@ -1059,6 +1072,10 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         Some(schema) => Some(emit(schema, cx)?),
     };
     let mut checks = vec![];
+    if let Some(max) = object.get("maxProperties") {
+        let max = max.as_u64().context("maximum object property count")?;
+        checks.push(format!("Schema.makeFilter((o: object) => Object.keys(o).length <= {max}, {{ expected: \"at most {max} properties\" }})"));
+    }
     if let Some(conditions) = object.get("x-st-conditions") {
         for condition in conditions.as_array().context("object conditions")? {
             let condition = condition.as_object().context("object condition")?;
@@ -1121,6 +1138,37 @@ fn emit_object(object: &Map<String, Value>, cx: &mut Cx, indent: &str) -> Result
         checks,
         multiline,
     })
+}
+
+/// Closed oneOf branches must also remain disjoint when Effect encoding ignores excess
+/// properties. Explicitly forbid known sibling fields, without changing tolerant handling
+/// of unrelated future fields or the canonical wire schema.
+fn union_members(branches: &[Value], exclusive: bool, cx: &mut Cx) -> Result<Vec<String>> {
+    let resolved = branches.iter().map(|branch| match branch.get("$ref").and_then(Value::as_str) {
+        Some(reference) => cx.normalized.get(reference.trim_start_matches("#/$defs/")).unwrap_or(branch),
+        None => branch,
+    }).collect::<Vec<_>>();
+    let fields = if exclusive {
+        resolved.iter().filter(|branch| branch["additionalProperties"] == false)
+            .filter_map(|branch| branch["properties"].as_object())
+            .flat_map(|properties| properties.keys().map(String::as_str)).collect::<BTreeSet<_>>()
+    } else { BTreeSet::new() };
+    branches.iter().zip(resolved.iter().copied()).map(|(branch, resolved)| {
+        if exclusive && resolved["additionalProperties"] == false
+            && let Some(object) = resolved.as_object()
+            && let Some(properties) = object.get("properties").and_then(Value::as_object)
+        {
+            let mut forbidden = fields.iter().filter(|field| !properties.contains_key(**field)).peekable();
+            if forbidden.peek().is_some() {
+                let mut built = emit_object(object, cx, "")?;
+                built.fields.extend(forbidden.map(|field| {
+                    format!("{}: Schema.optionalKey(Schema.Never)", js(&json!(field)))
+                }));
+                return Ok(built.expression());
+            }
+        }
+        emit(branch, cx)
+    }).collect()
 }
 
 /// The required single-const discriminator shared by every branch, if all values are unique
@@ -1376,10 +1424,7 @@ fn def_decl(name: &str, value: &Value, cx: &mut Cx) -> Result<String> {
         .and_then(Value::as_array)
         .filter(|b| b.len() > 2 || b.iter().all(|x| x.get("type") != Some(&json!("null"))));
     if let Some(branches) = branches.filter(|_| open_enum(value).is_none()) {
-        let members = branches
-            .iter()
-            .map(|branch| emit(branch, cx))
-            .collect::<Result<Vec<_>>>()?;
+        let members = union_members(branches, true, cx)?;
         let tag = tagged_by(branches, cx);
         let mut union = format!(
             "Schema.Union([\n  {}\n], {{ mode: \"oneOf\" }})",
@@ -1637,6 +1682,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subject_references_keep_string_length_constraints() -> Result<()> {
+        let schema = json!({
+            "type": "string",
+            "pattern": ID_PATTERN,
+            "x-st-ref": "*",
+            "minLength": 8,
+            "maxLength": 256
+        });
+        let output = emit_string(schema.as_object().context("string schema")?)?;
+        assert!(output.contains("subjectRef<string>"));
+        assert!(output.contains("Schema.isMinLength(8)"));
+        assert!(output.contains("Schema.isMaxLength(256)"));
+        Ok(())
+    }
+
+    #[test]
     fn wire_alias_schemas_keep_the_deployed_sender_constant() -> Result<()> {
         let schema: Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
@@ -1836,6 +1897,26 @@ mod tests {
         unsupported["$defs"]["Entry"]["allOf"][1]["then"]["properties"]["tags"] =
             json!({ "uniqueItems": true });
         assert!(models(&unsupported).is_err());
+    }
+
+    #[test]
+    fn harness_answer_maps_preserve_key_vocabulary_and_property_bound() {
+        let schema = json!({"x-st-integers": "json-safe", "$defs": {
+            "Answers": {
+                "type": "object", "maxProperties": 16,
+                "propertyNames": {"type": "string", "pattern": "^(q([0-9]|1[0-5])|sha256:[0-9a-f]{64})$"},
+                "additionalProperties": {"type": "object", "additionalProperties": false,
+                    "required": ["positions"], "properties": {
+                        "positions": {"type": "array", "maxItems": 64, "uniqueItems": true,
+                            "items": {"type": "integer", "minimum": 0, "maximum": 63}}
+                    }}
+            }
+        }});
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("Object.keys(o).length <= 16"));
+        assert!(generated.contains("Object.keys(o).every(Schema.is("));
+        assert!(generated.contains("Schema.isMaxLength(64)"));
+        assert!(generated.contains("Schema.isUnique()"));
     }
 
     #[test]

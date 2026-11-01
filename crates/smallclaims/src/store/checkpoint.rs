@@ -400,12 +400,22 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
                 .execute(/* sqlite-large-value: allow-for-now lv-hc07a2911d40a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ params![operation, claim.id])?;
         }
         super::events::remove_claim_tx(transaction, &claim.id)?;
+        if authoritative {
+            // What a deleted claim cites, or what cites it, a local cut never needs again.
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h60426679c653 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE citer=?1")?.execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0b4af7f83e06 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_trim_citations WHERE cited=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h22fa37082c14 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+        }
         super::principals::forget_claim_tx(transaction, &claim.id)?;
         // Cached: claims, records and envelopes carry delete triggers, and preparing a statement
         // compiles every trigger program again. Per row that cost several times the delete.
+        // A local cut may drop a claim whose envelope stays: its raw record goes with it, and
+        // the payload keeps the envelope whole for peers. Shared checkpoints drop whole envelopes.
+        if authoritative {
+            transaction.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2943e551c4ae owner=smallclaims::store::checkpoint TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE claim_id=?1")?.execute(/* sqlite-large-value: allow-for-now lv-h2eb3b0d71dfa owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+        }
         transaction
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h62a1eb703826 owner=smallclaims::store::checkpoint TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1")?
-            .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
+            .execute(/* sqlite-large-value: allow-for-now lv-h2851fd201348 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
     }
     for envelope in envelopes {
         if authoritative {
@@ -1121,6 +1131,25 @@ pub fn sealed_records_page_sql() -> String {
     )
 }
 
+/// `sealed_records_page_sql` for the records of one envelope (?1, ?2, ?5), with the cut ?3 and
+/// the seal row ?4.
+pub fn sealed_envelope_records_sql() -> String {
+    let order = super::canonical::components("claims").join(", ");
+    format!(
+        "SELECT {order}, records.writer, records.sequence, records.envelope_hash,
+                records.state, records.position
+         FROM replica_records records CROSS JOIN claims ON claims.id=records.claim_id
+         JOIN batches ON batches.id=claims.batch_id
+         JOIN replica_envelopes envelopes
+           ON envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+             AND envelopes.envelope_hash=records.envelope_hash
+         WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?5
+           AND records.state<>'repaired'
+           AND envelopes.rowid <= ?4
+           AND CAST(envelopes.accepted_at_unix_ms AS INTEGER) < ?3"
+    )
+}
+
 /// One page of `replica_envelopes` in identity order after the key (?2, ?3, ?4), for a seal.
 /// As in `checkpoint_sealed_set_through`: an envelope is before the cut ?1 when it and every
 /// claim admitted from it, less repaired originals, are dated before the cut, and it is at or
@@ -1653,6 +1682,15 @@ impl Store {
         Ok(SealedIdentities { digest, count, seal_rowid: probe.seal_rowid })
     }
 
+    /// Inspect a valid warm memo without sealing batches or starting an identity walk.
+    pub(super) fn checkpoint_cached_sealed_digest(&self, cut_unix_ms: u128) -> Result<Option<String>> {
+        let cut = i64::try_from(cut_unix_ms)?;
+        let memo = self.sealed_identity_memo.lock().unwrap_or_else(PoisonError::into_inner)
+            .as_ref().filter(|memo| memo.cut == cut).cloned();
+        let Some(memo) = memo else { return Ok(None) };
+        Ok(self.seal_probe(cut, None, Some(&memo))?.reuses.then_some(memo.digest))
+    }
+
     /// `checkpoint_sealed_identities`, always walking both identity tables and reading at most
     /// `envelope_page` rows of each per read. It never reuses a digest, so it is also what the
     /// reused digest is checked against.
@@ -1738,6 +1776,8 @@ impl Store {
     /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
     /// between them; one read of the whole set held the WAL pinned for 35 seconds.
     fn sealed_identity_walk(&self, cut: i64, seal_rowid: i64, page: i64) -> Result<(String, usize)> {
+        #[cfg(test)]
+        SEALED_IDENTITY_WALKS.with(|walks| walks.set(walks.get() + 1));
         let identity = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(EnvelopeKey, bool)> {
             Ok((
                 EnvelopeKey {
@@ -1860,7 +1900,9 @@ impl Store {
         } else {
             OpenFlags::SQLITE_OPEN_READ_WRITE
         };
-        let connection = if let Some(vfs) = vfs {
+        let connection = if let Some(admitted) = &self.admitted {
+            admitted.open_connection_with_vfs(flags, vfs.map(super::checkpoint_space::ProofVfs::name))?
+        } else if let Some(vfs) = vfs {
             Connection::open_with_flags_and_vfs(&self.path, flags, vfs.name())?
         } else {
             Connection::open_with_flags(&self.path, flags)?
@@ -2099,6 +2141,15 @@ pub struct CheckpointProofLockForTest(#[allow(dead_code)] super::checkpoint_spac
 pub fn hold_checkpoint_proof_lock_for_test(scratch: &Path) -> Result<CheckpointProofLockForTest> {
     super::checkpoint_space::ProofOwnership::acquire(scratch).map(CheckpointProofLockForTest)
 }
+
+#[cfg(test)]
+thread_local! {
+    static SEALED_IDENTITY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[path = "checkpoint/status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 mod memory_tests {

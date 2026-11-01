@@ -8,15 +8,19 @@ A note for a keyed check (linux-clippy, linux-fleet-compat) covers every tree wi
 note cover another whose result differs. So after the stage's cargo runs, this reads the dep-info file (`.d`) of every unit those runs
 reported in their JSON messages (DIR/GLOB, default clippy-*.jsonl; a unit fresh from a cache is reported too, and its dep-info still
 describes this tree's inputs), keeps the dependencies inside the repository and outside the target directory, and fails on any that no
-input of --check (default linux-clippy) covers (equal, or a parent directory). The last line is always
+input of --check (default linux-clippy) covers (equal, or a parent directory). A workspace build script's reads are not in any dep-info
+file, so the `rerun-if-changed` paths it printed (its `output`, beside the out_dir of each build-script-executed message) are judged the
+same way, relative to its package's directory (from the stage's own cargo metadata). The last line is always
 `dep-info: check=NAME units=N files=M uncovered=K`, which the daily report counts.
 
-The skip policy is named by the caller (--policy), never by this script: scripts/ci-linux runs it only when CI_KEYED_CLIPPY_POLICY
-names the policy, which linux-clippy's own run sets (scripts/ci-clippy-keyed, CI's linux-clippy job). linux-gate runs the same clippy
-stage without it, so linux-gate never depends on the policy file (lane-definition-closure --check holds it to that).
+The skip policy is named by the caller (--policy), never by this script. CI's keyed jobs run it inside their stage (scripts/ci-linux, when
+CI_KEYED_CLIPPY_POLICY or CI_KEYED_FLEET_COMPAT_POLICY names the policy), and the local commands, scripts/ci-clippy-result and
+scripts/ci-fleet-compat-result, run it after the stage. linux-gate runs the same stages without either, so linux-gate never depends on the policy file
+(lane-definition-closure --check holds it to that).
 
---warn reports the same files as warnings and exits 0. linux-clippy is in shadow and no default local run checks it yet, so the
-merge queue would be the first place a failure showed; scripts/ci-linux passes --warn until linux-clippy is a default local check.
+--warn reports the same files as warnings and exits 0. scripts/ci-linux still passes it for CI's linux-fleet-compat job while that check is
+in shadow, though every default local run now checks it without --warn (scripts/ci-fleet-compat-result), as for linux-clippy, whose CI
+check already fails.
 """
 import argparse
 import json
@@ -61,6 +65,39 @@ def dep_info_files(logs, pattern=JSONL):
     return sorted(found)
 
 
+def build_script_reads(logs, pattern, root, target, metadata):
+    """The repository files and directories the workspace's build scripts said they read (cargo:rerun-if-changed=PATH, relative to the
+    package's directory), for every build-script-executed message the stage's cargo runs reported. A dependency outside the workspace is
+    not in the --no-deps metadata, and its paths lie outside the repository anyway. The git metadata a build script watches
+    (fractal-build-stamp's HEAD, index and ref) is not the tree: under .git in a plain checkout such as CI's, outside the repository in
+    a linked worktree, and no input key can hold it."""
+    git_dir = root / '.git'
+    packages = {package['id']: Path(package['manifest_path']).parent for package in metadata.get('packages', ())
+                if isinstance(package, dict) and 'id' in package and 'manifest_path' in package}
+    out = set()
+    for log in sorted(Path(logs).glob(pattern)):
+        for line in log.read_text(errors='replace').splitlines():
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(message, dict) or message.get('reason') != 'build-script-executed':
+                continue
+            package, out_dir = packages.get(message.get('package_id')), message.get('out_dir')
+            output = Path(out_dir).parent / 'output' if package and out_dir else None
+            if not (output and output.is_file()):
+                continue
+            for printed in output.read_text(errors='replace').splitlines():
+                name, sep, value = printed.partition('rerun-if-changed=')
+                if not sep or name not in ('cargo:', 'cargo::'):
+                    continue
+                path = Path(posixpath.normpath(str(package / value)))
+                if path == target or target in path.parents or root not in path.parents or path == git_dir or git_dir in path.parents:
+                    continue
+                out.add(path.relative_to(root).as_posix())
+    return out
+
+
 def dependencies(dep_info, root, target):
     """The repository files one dep-info file lists, relative to the root; generated files under the target directory and anything
     outside the repository (the registry, the Nix store) are not the tree's inputs."""
@@ -90,13 +127,15 @@ def main(argv):
     args = parser.parse_args(argv)
     root = Path(posixpath.normpath(os.path.abspath(args.root)))
     inputs = declared(Path(args.policy).read_text(), args.check)
-    metadata = Path(args.logs) / 'clippy-metadata.json'
-    target = Path(json.loads(metadata.read_text())['target_directory']) if metadata.exists() else root / 'target'
+    metadata_file = Path(args.logs) / 'clippy-metadata.json'
+    metadata = json.loads(metadata_file.read_text()) if metadata_file.exists() else {}
+    target = Path(metadata['target_directory']) if 'target_directory' in metadata else root / 'target'
     target = Path(posixpath.normpath(os.path.abspath(target)))
     units = dep_info_files(args.logs, args.jsonl)
     files = set()
     for dep_info in units:
         files |= dependencies(dep_info, root, target)
+    files |= build_script_reads(args.logs, args.jsonl, root, target, metadata)
     uncovered = sorted(path for path in files if not covered(path, inputs))
     level = 'warning' if args.warn else 'error'
     for path in uncovered:

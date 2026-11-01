@@ -73,6 +73,33 @@ SH = '#!/usr/bin/env bash\n'
 PY = '#!/usr/bin/env python3\n'
 
 
+class ConfigBridge(Fixture):
+    def test_write_targets_only_selected_layout_and_explicit_path_stays_explicit(self):
+        document = json.dumps({'lanes': {'demo': {'argv': ['bash', 'scripts/demo'], 'definition_paths': []}}})
+        self.tree({'scripts/demo': SH, '.st/required-lanes.json': document,
+                   '.fractal/required-lanes.json': document})
+        def run(*args):
+            return subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), '--write', *args],
+                                  capture_output=True, text=True, env=GIT_ENV)
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / '.st/required-lanes.json').read_text(), document)
+        self.assertEqual(json.loads((self.root / '.fractal/required-lanes.json').read_text())['lanes']['demo']['definition_paths'],
+                         ['scripts/demo'])
+        done = run('--lanes', str(self.root / '.st/required-lanes.json'))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads((self.root / '.st/required-lanes.json').read_text())['lanes']['demo']['definition_paths'],
+                         ['scripts/demo'])
+
+    def test_invalid_new_lane_file_does_not_read_or_write_old(self):
+        old = json.dumps({'lanes': {}})
+        self.tree({'.st/required-lanes.json': old, '.fractal/required-lanes.json': '{'})
+        done = subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), '--write'],
+                              capture_output=True, text=True, env=GIT_ENV)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual((self.root / '.st/required-lanes.json').read_text(), old)
+
+
 class ShellForms(Fixture):
     def test_each_way_a_shell_script_runs_or_reads_another(self):
         paths = self.paths(['bash', 'scripts/entry'], {
@@ -274,6 +301,46 @@ class CommandLine(Fixture):
     def run_tool(self, *args):
         return subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), *args], capture_output=True, text=True, env=GIT_ENV)
 
+    def test_config_selectors_resolve_old_new_and_conflicting_checkout_layouts(self):
+        item = '.st/policy.json::checks.demo'
+        document = '{"checks": {"demo": {}}}'
+        self.tree({'.st/policy.json': document})
+        self.assertEqual(ldc.unresolved_ci(ldc.Repo(self.root), [item]), [])
+        self.assertEqual(ldc.unresolved_ci(ldc.Repo(self.root), [item.replace('.st/', '.fractal/', 1)]), [])
+        self.tree({'.st/policy.json': '{', '.fractal/policy.json': document})
+        self.assertEqual(ldc.unresolved_ci(ldc.Repo(self.root), [item]), [])
+        (self.root / '.st/policy.json').unlink()
+        self.tree({})
+        self.assertEqual(ldc.unresolved_ci(ldc.Repo(self.root), [item]), [])
+        self.assertEqual(ldc.unresolved_ci(ldc.Repo(self.root), [item.replace('.st/', '.fractal/', 1)]), [])
+
+    def test_config_selector_preferred_errors_never_use_valid_legacy_selector(self):
+        item = '.st/policy.json::checks.demo'
+        self.tree({'.st/policy.json': '{"checks": {"demo": {}}}', '.fractal/policy.json': '{'})
+        self.assertTrue(ldc.unresolved_ci(ldc.Repo(self.root), [item]))
+        self.tree({'.fractal/policy.json': '{"checks": {}}'})
+        missing = ldc.unresolved_ci(ldc.Repo(self.root), [item])
+        self.assertEqual(missing, [(item, '.fractal/policy.json has no checks.demo')])
+        (self.root / '.fractal/policy.json').unlink()
+        (self.root / '.fractal/policy.json').symlink_to('missing')
+        self.tree({})
+        with self.assertRaises(OSError):
+            ldc.unresolved_ci(ldc.Repo(self.root), [item])
+
+    def test_real_gate_protects_preferred_layout_inputs_but_excludes_base_only_counterparts(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — consume the same literal lists as the production gate.
+        path = '.fractal/evidence-skip-policy.json'
+        closure = self.closure(['bash', 'scripts/demo'], {
+            'scripts/demo': SH + f'cat {path}\ncat .fractal/evidence-keys\n',
+            path: '{}', '.fractal/evidence-keys': 'key',
+            'scripts/ci-evidence-gate': (ROOT / 'scripts/ci-evidence-gate').read_text(),
+        })
+        protected = ldc.protected_files(ldc.Repo(self.root))
+        self.assertIn(path, protected)
+        self.assertNotIn('.fractal/evidence-keys', protected)
+        self.assertEqual(ldc.undeclared_ci(closure, [], [], protected), [path])
+        self.assertEqual(ldc.undeclared_ci(closure, [], [path], protected), [])
+
     def test_check_fails_a_lane_that_reads_a_protected_file_its_ci_inputs_leave_out(self):
         gate = "PROTECTED = ('scripts/judge', '.st/keys', '.github/workflows/fleet.yml')\nBASE_READ = ('.st/keys',)\n"
         self.tree({'scripts/a': SH + 'bash scripts/judge\ncat .st/keys\n', 'scripts/judge': SH, '.st/keys': 'k',
@@ -356,8 +423,21 @@ class CommandLine(Fixture):
 
 
 class CommittedLanes(unittest.TestCase):
+    def test_linux_and_rust_static_script_closures_contain_no_policy_file_literal(self):
+        """Static script-closure isolation only, not hosted workflow dependency isolation."""
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — policy paths come from keyed callers, not these script literals.
+        # As on main, hosted linux-clippy still supplies the policy via CI_KEYED_CLIPPY_POLICY and feeds linux-gate.
+        lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
+        repo = ldc.Repo(ROOT)
+        for name in ('linux-gate', 'rust-tests'):
+            with self.subTest(name):
+                closure = ldc.lane_closure(repo, lanes[name], name)
+                reached = set(closure.files) | set(closure.paths()) | set(closure.read())
+                self.assertNotIn('.st/evidence-skip-policy.json', reached)
+                self.assertNotIn('.fractal/evidence-skip-policy.json', reached)
+
     def test_every_lane_executes_and_declares_only_what_its_definition_paths_cover(self):
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
         repo = ldc.Repo(ROOT)
         for name, entry in sorted(lanes.items()):
             closure = ldc.lane_closure(repo, entry, name)
@@ -369,7 +449,7 @@ class CommittedLanes(unittest.TestCase):
             self.assertEqual(verdict, [], f'lane {name} declares verdict data its definition_paths do not cover')
 
     def test_the_tables_name_lanes_and_paths_that_exist(self):
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
         self.assertLessEqual(set(ldc.EXTRA), set(lanes))
         self.assertLessEqual(set(ldc.VERDICT_DATA) | ldc.KEPT | ldc.SPARSE | ldc.HARNESS_LANES, set(lanes))
         repo = ldc.Repo(ROOT)

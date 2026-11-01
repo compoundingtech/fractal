@@ -2,7 +2,7 @@
 use std::process::Command;
 
 fn version(directory: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::new(test_env!("CARGO_BIN_EXE_st3"))
+    let output = Command::new(test_env!("CARGO_BIN_EXE_fractal"))
         .args(args)
         .current_dir(directory)
         .env_clear()
@@ -99,13 +99,14 @@ fn human_version_keeps_the_embedded_package_version_and_source_revision() {
 
 #[test]
 fn executable_alias_warning_is_one_stderr_line_without_changing_json_stdout() {
-    use std::os::unix::process::CommandExt;
     let root = tempfile::tempdir().unwrap();
     let expected = version(root.path(), &["--version", "--json"]);
-    for name in ["st", "/usr/local/bin/st3", "fractal", "git-other"] {
+    for name in ["st", "st3", "fractal", "git-other"] {
+        let executable = root.path().join(name);
+        std::os::unix::fs::symlink(test_env!("CARGO_BIN_EXE_fractal"), &executable).unwrap();
         for suppressed in [false, true] {
-            let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
-            command.arg0(name).args(["--version", "--json"]).env_clear()
+            let mut command = Command::new(&executable);
+            command.args(["--version", "--json"]).env_clear()
                 .env("HOME", root.path())
                 .env("COMPLETE", "0");
             if suppressed {

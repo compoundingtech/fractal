@@ -53,7 +53,7 @@ class CiLocal(unittest.TestCase):
         self.tmp_root = root / 'short-tmp'
         self.tmp_root.mkdir()
 
-    def run_local(self, *stages, ci_linux=None, **extra):
+    def run_local(self, *stages, ci_linux=None, entry='ci-local', **extra):
         # The stage stub exits with the next code of stage_exits on each call (0 when they run out).
         counter = Path(self.tmp.name) / 'calls'
         counter.write_text('0')
@@ -70,7 +70,7 @@ class CiLocal(unittest.TestCase):
                'ST2_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite', 'FRACTAL_OTELITE_BIN': '/nix/store/x-otelite/bin/otelite',
                'ST3_OTELITE_BIN': '/nix/store/../escape/bin/otelite', 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), **extra}
         self.last_env = env
-        done = subprocess.run(['bash', 'scripts/ci-local', *stages], cwd=self.work, env=env, capture_output=True, text=True,
+        done = subprocess.run(['bash', f'scripts/{entry}', *stages], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(self.umask))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return done, calls
@@ -106,6 +106,23 @@ class CiLocal(unittest.TestCase):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
         self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
+
+    def test_a_compile_in_the_lane_straight_after_a_check_there_succeeds(self):
+        # sccache's client starts the server its socket names when none answers there, and the server keeps the client's TMPDIR for
+        # every compile after. The stage stands in for such a compile: it starts the lane's server unless one runs, recording its TMPDIR.
+        socket = Path(self.tmp.name) / 'sccache-lane-x.sock'
+        compile_ = RECORD + 'if [ -n "${SCCACHE_SERVER_UDS:-}" ] && [ ! -e "$SCCACHE_SERVER_UDS" ]; then echo "$TMPDIR" > "$SCCACHE_SERVER_UDS"; fi\n'
+        done, calls = self.run_local('tests', ci_linux=compile_, SCCACHE_SERVER_UDS=str(socket), SCCACHE_DIR='/lane/cache')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn('SCCACHE_SERVER_UDS', call['env'])
+            self.assertNotIn('SCCACHE_DIR', call['env'])
+        # The seat's next compile in the lane: a server the run started would compile in a TMPDIR the run has removed
+        # ("Failed to create temp dir"); with none, the seat's compile starts the lane's server in its own.
+        self.assertFalse(socket.exists() and not Path(socket.read_text().strip()).is_dir(),
+                         'the lane\'s server was started inside the run and its TMPDIR is gone')
+        self.assertFalse(socket.exists(), 'no server was started inside the run')
 
     def test_the_stages_build_without_debug_info_as_ci_does(self):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
@@ -492,6 +509,48 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         if shutil.which('nice'):
             self.assertEqual(int(Path(f"{self.log}.nice").read_text()), min(os.nice(0) + 10, 19))
+
+    def test_ordinary_clippy_and_fleet_compat_stages_stay_unkeyed(self):
+        # Neither keyed check has a local entry of its own any more: scripts/st-test runs `ci-local clippy` / `ci-local fleet-compat` unkeyed
+        # and scripts/ci-clippy-result / ci-fleet-compat-result check the policy after the stage (docs/keyed-clippy.md). Only CI's keyed
+        # jobs name the policy.
+        for stage in ('clippy', 'fleet-compat'):
+            with self.subTest(stage=stage):
+                done, calls = self.run_local(stage, CLIPPY_BASE_SHA='f' * 40)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                for variable in ('CI_KEYED_CLIPPY_POLICY', 'CI_KEYED_FLEET_COMPAT_POLICY'):
+                    self.assertNotIn(variable, calls[-1]['env'], 'ordinary linux-gate stages stay unkeyed')
+                self.log.unlink()
+
+    def test_keyed_consumer_selects_missing_only_without_running_compiles(self):
+        source = (ROOT / 'scripts/ci-linux').read_text()
+        function = 'keyed_policy() {' + source.split('keyed_policy() {', 1)[1].split('\n}\n', 1)[0] + '\n}\n'
+        def resolve(value='auto:.st/evidence-skip-policy.json'):
+            return subprocess.run(['bash', '-euc', function + '\nkeyed_policy "$CI_KEYED_CLIPPY_POLICY"'], cwd=self.work,
+                                  env=dict(os.environ, CI_KEYED_CLIPPY_POLICY=value), capture_output=True, text=True)
+        old = self.work / '.st/evidence-skip-policy.json'
+        new = self.work / '.fractal/evidence-skip-policy.json'
+        old.parent.mkdir()
+        new.parent.mkdir()
+        old.write_text('{}')
+        self.assertEqual(resolve().stdout.strip(), '.st/evidence-skip-policy.json')
+        new.write_text('{}')
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json')
+        old.unlink()
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json')
+        old.write_text('{}')
+        new.write_text('{')
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json', 'malformed selected file is not bypassed')
+        new.unlink()
+        new.symlink_to('missing')
+        self.assertEqual(resolve().stdout.strip(), '.fractal/evidence-skip-policy.json', 'dangling selected file is not bypassed')
+        new.unlink()
+        new.parent.rmdir()
+        new.parent.symlink_to('.fractal')
+        self.assertNotEqual(resolve().returncode, 0, 'lookup errors must not select legacy')
+        for explicit in ('', '.st/evidence-skip-policy.json', '/custom/policy.json'):
+            done = resolve(explicit)
+            self.assertEqual((done.returncode, done.stdout.rstrip('\n')), (0, explicit))
 
     def test_the_linux_gate_stages_run_in_order_and_clippy_s_base_is_given_or_fetched_never_a_local_ref(self):
         def git(*args, cwd=None):

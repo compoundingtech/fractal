@@ -4,7 +4,7 @@ import { DateTime, Option } from 'effect'
 import * as React from 'react'
 
 import { cleanMessageText } from '../../../../../clients/typescript/fractal-views/conversationView.ts'
-import { ANSWERS, isRequest, personAnswer, report, spaced, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
+import { ANSWERS, askDeadline, isRequest, personAnswer, report, spaced, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
 import { ago } from '../../../../../clients/typescript/fractal-views/time.ts'
 import { Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { AlertButton } from './AlertButton.tsx'
@@ -305,12 +305,20 @@ export const AnswerAlert = ({
     })
   }
   const step = alert.blocked?.step ?? alert.step_run_id?.split('/').pop()
+  const deadline = askDeadline(
+    {
+      deadline_at: alert.deadline_at === undefined ? undefined : DateTime.formatIso(alert.deadline_at),
+      default_answer: alert.default_answer,
+    },
+    now,
+  )
   return (
     <section {...stylex.props(styles.alert)} aria-label={alert.title} data-alert-kind={alert.attention_kind}>
       <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
       <div {...stylex.props(styles.meta)}>
         {KIND_WORDS[alert.attention_kind] ?? 'Alert'} · from {from}
         {step ? ` · step ${step}` : ''} · waited {ago(DateTime.formatIso(alert.requested_at), now)}
+        {deadline ? ` · ${deadline}` : ''}
       </div>
       <Body alert={alert} />
       {choices === null ? (

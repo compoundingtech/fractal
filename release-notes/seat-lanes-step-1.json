@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Seat lanes, step 1: an agent (top-level or in a mission) may declare `capacity cores=N memory=\"SIZE\"`. On a Linux host whose config sets `lanes = \"on\"`, that seat gets a slice of its own, app.slice/app-lanes.slice/app-lanes-<seat>_<digest>.slice, capped with CPUQuota, MemoryMax, MemorySwapMax (a quarter of the memory) and TasksMax; each launch of its harness is a scope in it with OOMPolicy=continue. A job the seat starts as its own unit in the slice ($FRACTAL_LANE_SLICE) outlives a restart of the harness; the slice ends when the seat stops for good. Builds stay inside (BUILDS_SLICE_ACTIVE and a seat-private sccache socket; scripts/st-test runs a check in place only inside builds.slice or a seat's lane slice holding a memory and a CPU limit). Seats without a declaration, and every seat on a host with the switch off, run as before.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, event or replay change; the member record gains an optional field."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "MemberSpec gains optional `capacity` (omitted when absent, so existing records and revisions are unchanged); the install config gains optional `lanes` (on|off)."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The agent declaration accepts a `capacity` child (cores=, memory=), at most once; it is refused with bind-terminal."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "An older member reading a laned record drops the field and runs the seat without a lane. An older CLI refuses a file that declares `capacity`; an older daemon refuses a config that sets `lanes` (deny_unknown_fields), so set it only on hosts that run this build."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing changes until a host sets `lanes = \"on\"` and a seat declares `capacity`; a lane applies at the seat's next start."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Before a host turns lanes on, its admission guard must count only OOM kills outside lanes: oom_kill(user-UID.slice) minus oom_kill(app.slice/app-lanes.slice) (docs/st3/seat-lanes.md, The host guard). Operations has been asked."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Before downgrading a host to a build without lanes, remove `lanes` from its config.toml: an older daemon refuses a config that contains it (deny_unknown_fields) and does not start. To turn lanes off without a downgrade, set `lanes = \"off\"` (or remove it) and restart the daemon; laned seats run without a lane from their next start. A lane left from before (app-lanes-<seat>_<digest>.slice) ends with `systemctl --user stop` and `revert` on it."
+  }
+}
