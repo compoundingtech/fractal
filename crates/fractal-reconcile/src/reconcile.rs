@@ -17148,7 +17148,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         && github_plugin.refill_due(&spec.resource, now_ms())
                                     {
                                         refill_mirror(
-                                            provider.as_ref(), &github_plugin, &observer_subject, &spec,
+                                            &store, provider.as_ref(), &github_plugin, &observer_subject, &spec,
                                             observation.cursor.as_deref(),
                                         ).await;
                                     }
@@ -18847,8 +18847,11 @@ fn mirrored_prior(
 /// new poller's first look reads (the open items, with each open pull request's details), within
 /// the same request budget as the observer's own polls. It records nothing in the graph and
 /// moves no cursor: the observer's own looks keep delivering from where they read to. Each item
-/// is laid over the mirror's row as a recording would lay it.
+/// is laid over the mirror's row as a recording would lay it, with the comments the graph has
+/// recorded on it: a fresh listing does not reach older comments, and a row without them would
+/// take each one for new on the item's next look and hand it out as an event (#4549).
 async fn refill_mirror(
+    store: &Store,
     provider: &dyn ResourceProvider,
     plugin: &github_plugin_store::GithubPluginStore,
     observer: &str,
@@ -18866,9 +18869,25 @@ async fn refill_mirror(
     };
     let filled = async {
         let observation = crate::resource::spend_as(observer.to_owned(), provider.observe(request)).await?;
+        let recorded_comments = store
+            .repository_items(&spec.resource, None)?
+            .into_iter()
+            .filter_map(|item| Some((item.subject, item.facts.get("recent_comments")?.as_array()?.clone())))
+            .collect::<HashMap<_, _>>();
         let mut known = |subject: &str| {
             let number = subject.rsplit('/').next()?.parse::<u64>().ok()?;
-            Some(plugin.item(&spec.resource, number).ok()??["facts"].clone())
+            let mirrored = plugin.item(&spec.resource, number).ok()?.map(|item| item["facts"].clone());
+            let Some(recorded) = recorded_comments.get(subject) else {
+                return mirrored;
+            };
+            let mut facts = mirrored.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+            let comments = crate::resource::merge_recent_comments(
+                facts.get("recent_comments").and_then(Value::as_array).into_iter().flatten(),
+                recorded,
+                Some(crate::resource::RECENT_COMMENTS),
+            );
+            facts["recent_comments"] = Value::Array(comments);
+            Some(facts)
         };
         let items = crate::store::repository_item_facts(&spec.resource, &observation.facts, &mut known)
             .into_iter()
@@ -41228,6 +41247,108 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         assert_eq!(delivered(), comments + 1, "the second comment is delivered");
         poll(plugin.clone(), listing("closed", "Orchid, renamed", &[1, 2]), "c7").await;
         assert_eq!(delivered(), comments + 1, "a mirror behind the graph delivers it nothing twice");
+    }
+
+    /// A mirror refilled from GitHub keeps the comments the graph recorded on each item, which
+    /// a fresh listing does not reach: the next look at an item it filled hands out no event
+    /// for an old comment, and a new comment is still one event (#4549).
+    #[tokio::test]
+    async fn a_refilled_mirror_hands_out_no_event_for_an_old_comment() {
+        /// Answers a look from a cursor with `look`, and the refill's look from none with
+        /// `refill`, a listing that names no comment.
+        struct Answers {
+            look: Value,
+            refill: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for Answers {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                let facts = if request.cursor.is_some() { self.look.clone() } else { self.refill.clone() };
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts,
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "refill-comments",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |number: u64, title: &str, comments: &[u64]| {
+            let mut issue = serde_json::json!({
+                "node_id": format!("I_moss{number}"), "number": number, "state": "open", "title": title,
+                "url": format!("https://github.com/acme/garden/issues/{number}"),
+            });
+            if !comments.is_empty() {
+                issue["comments"] = Value::from(comments.len());
+                issue["recent_comments"] = comments.iter().map(|id| serde_json::json!({
+                    "kind": "comment", "id": id, "author": "fern", "at": format!("2026-10-2{id}T10:00:00Z"),
+                })).collect();
+            }
+            issue
+        };
+        let listing = |issues: Vec<Value>| serde_json::json!({"repository_id": 7, "issues": issues});
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, look: Value, refill: Value, cursor: &str| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_mirror_refill(true)
+            .with_resource_provider(Arc::new(Answers { look, refill, cursor: cursor.to_owned() }));
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            let cursor = cursor.to_owned();
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor");
+            }
+        };
+        let comment_event = |id: u64| store.claims_for(&format!("github-event/repo/issue/2/comment/{id}"), None).unwrap().len();
+
+        // Issue 2's comment 3 is recorded in the graph, by a poller whose mirror is then lost.
+        let first = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let both = listing(vec![issue(1, "Fern", &[]), issue(2, "Moss", &[3])]);
+        poll(first.clone(), both.clone(), both, "c1").await;
+        let commented = listing(vec![issue(2, "Moss", &[3, 4])]);
+        poll(first, commented.clone(), commented, "c2").await;
+        assert_eq!(comment_event(4), 1, "a new comment is one event");
+
+        // A poller with no mirror looks at issue 1 alone, then refills from a listing that names
+        // neither issue's comments.
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let bare = listing(vec![issue(1, "Fern", &[]), issue(2, "Moss", &[])]);
+        poll(plugin.clone(), listing(vec![issue(1, "Fern, renamed", &[])]), bare.clone(), "c3").await;
+        assert!(plugin.filled("resource/repo").unwrap());
+
+        // Its next look sees issue 2 with the comments it already had: none is an event.
+        poll(plugin.clone(), listing(vec![issue(2, "Moss, renamed", &[3, 4])]), bare.clone(), "c4").await;
+        let events = plugin.events("resource/repo", Some(2), 10).unwrap();
+        assert!(events.is_empty(), "an old comment is no event: {events:?}");
+        assert_eq!((comment_event(3), comment_event(4)), (0, 1));
+
+        // A comment written after the refill is one event.
+        poll(plugin.clone(), listing(vec![issue(2, "Moss, renamed", &[3, 4, 5])]), bare, "c5").await;
+        let events = plugin.events("resource/repo", Some(2), 10).unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["subject"], "github-event/repo/issue/2/comment/5");
+        assert_eq!(comment_event(5), 1);
     }
 
     /// Polling moves to a member without the plugin database, between two polls by the real
