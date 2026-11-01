@@ -135,6 +135,11 @@ impl TabBadge {
         }
     }
 
+    fn glyph(self) -> &'static str {
+        let attention = self.attention();
+        if attention.is_empty() { self.activity } else { attention }
+    }
+
     /// Match the shared truncator without allocating a temporary title for width queries.
     fn title(title: &str) -> (&str, bool) {
         use unicode_width::UnicodeWidthChar as _;
@@ -162,19 +167,21 @@ impl TabBadge {
         };
         let (title, truncated) = Self::title(title);
         // Preserve the existing 26-cell title budget independently of status chrome.
-        2 + text::width(self.activity)
+        2 + text::width(self.glyph())
+            + usize::from(!self.glyph().is_empty())
             + text::width(title)
             + usize::from(truncated)
-            + if attention.is_empty() { 0 } else { 2 + count }
+            + count
     }
 
     fn label(self, title: &str, width: usize, counts: bool) -> String {
         if width == 0 {
             return String::new();
         }
-        let activity_width = text::width(self.activity);
-        if !self.activity.is_empty() && width <= activity_width {
-            return text::truncate(self.activity, width);
+        let glyph = self.glyph();
+        let glyph_width = text::width(glyph);
+        if !glyph.is_empty() && width <= glyph_width {
+            return text::truncate(glyph, width);
         }
         let (title, truncated) = Self::title(title);
         let attention = self.attention();
@@ -186,36 +193,34 @@ impl TabBadge {
             0
         };
         let capacity = 2
-            + self.activity.len()
+            + glyph.len()
+            + usize::from(!glyph.is_empty())
             + title.len()
             + if truncated { "…".len() } else { 0 }
-            + if attention.is_empty() {
-                0
-            } else {
-                1 + attention.len() + digits
-            };
+            + digits;
         let mut label = String::with_capacity(capacity);
         label.push(' ');
-        label.push_str(self.activity);
+        label.push_str(glyph);
+        if counts && !attention.is_empty()
+            && let Some(count) = self.alerts.filter(|count| *count > 1)
+        {
+            let _ = write!(label, "{count}");
+        }
+        if !glyph.is_empty() {
+            label.push(' ');
+        }
         label.push_str(title);
         if truncated {
             label.push('…');
         }
-        if !attention.is_empty() {
-            label.push(' ');
-            label.push_str(attention);
-            if counts && let Some(count) = self.alerts.filter(|count| *count > 1) {
-                let _ = write!(label, "{count}");
-            }
-        }
         label.push(' ');
         if text::width(&label) > width {
             use unicode_width::UnicodeWidthChar as _;
-            // Padding may disappear, but truncation never consumes the activity glyph.
-            let (prefix_bytes, prefix_width) = if self.activity.is_empty() {
+            // Padding may disappear, but truncation never consumes the status glyph.
+            let (prefix_bytes, prefix_width) = if glyph.is_empty() {
                 (0, 0)
             } else {
-                (1 + self.activity.len(), 1 + activity_width)
+                (1 + glyph.len(), 1 + glyph_width)
             };
             let room = width - prefix_width;
             let mut end = prefix_bytes;
@@ -2686,27 +2691,20 @@ impl Ui {
             (title, self.tab_badge(tab, pane.as_ref()))
         }).collect();
         self.frame.borrow_mut().glass_strips.push((area, index));
-        // `+` and the narrowest tab worth showing beside it.
-        const ADD: u16 = 3;
-        const NARROWEST: u16 = 4;
-        // A hidden-tab marker takes its count, its arrow, a space and the gap after it.
+        // The add button owns the right edge, even when no tab fits beside it.
+        let plus = area.width.min(3);
+        let plus_x = area.right() - plus;
+        let available = plus_x.saturating_sub(x);
         let marker = if tabs.len() > 1 {
             tabs.len().ilog10() as u16 + 4
         } else {
             0
         };
-        // `+` keeps its place at the end while the tab in front and both markers still have room.
-        let strip_room = area.width.saturating_sub(x - area.x);
-        let plus = if strip_room >= ADD + 2 * marker + 1 + NARROWEST {
-            ADD
-        } else {
-            0
-        };
-        let available = strip_room - plus;
-        let counts = tabs.iter().map(|(title, badge)| badge.width(title, true) + 1)
+        let strip_room = available;
+        let counts = tabs.iter().map(|(title, badge)| badge.width(title, true))
             .sum::<usize>() <= usize::from(available);
-        // Reserve both overflow markers and a tab gap before shortening any label. A selected
-        // tab must never consume the space needed to reach its hidden neighbors.
+        // Reserve both overflow markers before shortening labels. A selected tab must
+        // never consume the space needed to reach its hidden neighbors.
         let label_width = if counts {
             usize::from(available)
         } else {
@@ -2763,9 +2761,7 @@ impl Ui {
         // Reserve only the cells actually painted after the final tab, including its gap.
         let hidden_after = labels.len().saturating_sub(last + 1);
         let mut tail = if hidden_after > 0 {
-            hidden_after.ilog10() as u16 + 4 + plus + u16::from(plus > 0)
-        } else if plus > 0 {
-            1 + plus
+            hidden_after.ilog10() as u16 + 4
         } else {
             0
         };
@@ -2779,8 +2775,7 @@ impl Ui {
             .take(last + 1)
             .skip(first)
             .map(|width| u32::from(*width))
-            .sum::<u32>()
-            + (last - first) as u32;
+            .sum::<u32>();
         let bare = !labels.is_empty()
             && u32::from(before) + tab_cells + u32::from(tail) > u32::from(strip_room);
         if bare {
@@ -2804,7 +2799,7 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, first - 1));
             x += width;
         }
-        let stop = (area.x + area.width).saturating_sub(tail);
+        let stop = plus_x.saturating_sub(tail);
         for (shown, (label, badge)) in labels.iter().enumerate().take(last + 1).skip(first) {
             let needs = badge.needs_person;
             let style = match (shown == group.current, focused) {
@@ -2819,22 +2814,24 @@ impl Ui {
             };
             // A tab wider than the strip (it alone fits nowhere) is cut, not dropped.
             let width = widths[shown].min(stop.saturating_sub(x));
+            if width == 0 { continue; }
             buf.set_stringn(x, area.y, label, width as usize, style);
             // What waits on the person keeps its colour on every tab, the one in front too.
             if let Some(at) = attention_at(label, badge.attention()) {
                 let offset = text::width(&label[..at]) as u16;
                 if offset < width {
+                    let status = label[at..].split(' ').next().unwrap_or(badge.attention());
                     buf.set_stringn(
                         x + offset,
                         area.y,
-                        &label[at..],
-                        usize::from(width - offset),
+                        status,
+                        text::width(status).min(usize::from(width - offset)),
                         style.fg(theme::PERSON),
                     );
                 }
             }
             self.hit(Rect { x, width, ..area }, Hit::GlassTab(index, shown));
-            x += width + 1;
+            x += width;
         }
         if last + 1 < labels.len() && !bare {
             let marker = format!(" {}›", labels.len() - 1 - last);
@@ -2843,24 +2840,19 @@ impl Ui {
             self.hit(Rect { x, width, ..area }, Hit::GlassTabMore(index, last + 1));
             x += width + 1;
         }
-        if !bare && x + 3 <= area.x + area.width {
-            buf.set_stringn(x, area.y, " + ", 3, theme::dim().bg(strip));
-            self.hit(
-                Rect {
-                    x,
-                    width: 3,
-                    ..area
-                },
-                Hit::GlassAdd(index),
-            );
-        }
+        let add = if plus == 3 { " + " } else { "+" };
+        buf.set_stringn(plus_x, area.y, add, usize::from(plus), theme::dim().bg(strip));
+        self.hit(
+            Rect { x: plus_x, width: plus, ..area },
+            Hit::GlassAdd(index),
+        );
         let zoomed = self.glasses.zoomed;
         if zoomed && focused {
             let label = " ⤢ zoomed · ctrl+o ";
             let width = text::width(label) as u16;
-            if x + width < area.x + area.width {
+            if x + width < plus_x {
                 buf.set_stringn(
-                    area.x + area.width - width,
+                    plus_x - width,
                     area.y,
                     label,
                     width as usize,
@@ -4861,7 +4853,7 @@ struct TabWindow {
 
 /// Where a strip shows its tabs, starting from `start`. Following, the tab in front comes on
 /// screen: the strip stays where it is until that tab passes an end, then moves just enough.
-/// Each tab takes its width and a gap; a `marker` for hidden tabs is reserved at each end.
+/// Each tab includes its own padding; hidden-tab markers are reserved at each end.
 fn visible_tabs(
     widths: &[u16],
     current: usize,
@@ -4880,7 +4872,7 @@ fn visible_tabs(
     }
     let current = current.min(count - 1);
     let fits = |first: usize, last: usize| {
-        let tabs: u16 = widths[first..=last].iter().map(|width| width + 1).sum();
+        let tabs: u16 = widths[first..=last].iter().sum();
         let before = if first > 0 { marker } else { 0 };
         let after = if last + 1 < count { marker } else { 0 };
         tabs + before + after <= room
@@ -4904,17 +4896,13 @@ fn visible_tabs(
     TabWindow { first, last, most }
 }
 
-/// Where the attention suffix (` ?2`, ` ◆`) starts in a tab's label, if the label still has it.
+/// Where the leading attention glyph starts, without mistaking title punctuation for status.
 fn attention_at(label: &str, attention: &str) -> Option<usize> {
     if attention.is_empty() {
         return None;
     }
-    let body = label
-        .trim_end_matches(' ')
-        .trim_end_matches(|c: char| c.is_ascii_digit());
-    body.strip_suffix(attention)
-        .filter(|before| before.ends_with(' '))
-        .map(str::len)
+    let body = label.trim_start_matches(' ');
+    body.starts_with(attention).then_some(label.len() - body.len())
 }
 
 /// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
@@ -5448,7 +5436,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_agent_activity_states_keep_attention_on_the_right() {
+    fn tab_badge_agent_activity_states_yield_to_attention() {
         for (state, glyph, attention) in [
             (AgentState::Working, "●", false),
             (AgentState::Compacting, "●", false),
@@ -5474,7 +5462,7 @@ mod tests {
             assert_eq!(badge.activity, glyph, "{state:?}");
             assert_eq!(
                 badge.label("Atlas", 80, true),
-                format!(" {glyph}Atlas{} ", if attention { " ◆" } else { "" }),
+                format!(" {} Atlas ", if attention { "◆" } else { glyph }),
                 "{state:?}"
             );
         }
@@ -5482,15 +5470,15 @@ mod tests {
 
     #[test]
     fn tab_badge_attention_count_rules_and_display_widths() {
-        for (alerts, ask, needs_person, suffix) in [
+        for (alerts, ask, needs_person, attention) in [
             (None, false, false, ""),
             (Some(0), false, false, ""),
-            (Some(0), false, true, " ◆"),
-            (Some(1), false, true, " ◆"),
-            (Some(3), false, true, " ◆3"),
-            (Some(1), true, true, " ?"),
-            (Some(2), true, true, " ?2"),
-            (Some(12), true, true, " ?12"),
+            (Some(0), false, true, "◆"),
+            (Some(1), false, true, "◆"),
+            (Some(3), false, true, "◆3"),
+            (Some(1), true, true, "?"),
+            (Some(2), true, true, "?2"),
+            (Some(12), true, true, "?12"),
         ] {
             for activity in ["", "●", "○", "×", "!", "~"] {
                 let badge = TabBadge {
@@ -5499,9 +5487,10 @@ mod tests {
                     ask,
                     needs_person,
                 };
+                let glyph = if attention.is_empty() { activity } else { attention };
                 assert_eq!(
                     badge.label("Atlas", 80, true),
-                    format!(" {activity}Atlas{suffix} ")
+                    format!(" {glyph}{}Atlas ", if glyph.is_empty() { "" } else { " " })
                 );
                 for title in [
                     "Atlas",
@@ -5533,7 +5522,7 @@ mod tests {
                 (1, activity.to_owned()),
                 (2, format!(" {activity}")),
                 (3, format!(" {activity}…")),
-                (4, format!(" {activity}A…")),
+                (4, format!(" {activity} …")),
             ] {
                 let label = badge.label("Atlas", width, false);
                 assert_eq!(label, expected);
@@ -5562,12 +5551,12 @@ mod tests {
                     if let Hit::GlassTab(0, index) = hit {
                         let tab = &ui.glasses.glass().layout.groups()[0].tabs[*index];
                         let badge = ui.tab_badge(tab, Pane::parse(&tab.pane).as_ref());
-                        if !badge.activity.is_empty() {
+                        if !badge.glyph().is_empty() {
                             let painted = (rect.x..rect.right())
                                 .map(|x| buffer[(x, 0)].symbol())
                                 .collect::<String>();
                             assert!(
-                                painted.contains(badge.activity),
+                                painted.contains(badge.glyph()),
                                 "{width} cells, overflow={overflow}, tab {index}: |{painted}|"
                             );
                         }
@@ -5585,16 +5574,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_badge_strip_snapshot_shows_compact_activity_and_attention_suffixes() {
+    fn tab_badge_strip_snapshot_shows_one_leading_status() {
         let ui = tab_badge_world();
         assert_eq!(
             tab_badge_strip(&ui, 120),
-            "●Atlas ?2 ○Idle ×Stopped Mission ?2 Inbox ?2 +"
+            "?2 Atlas ○ Idle × Stopped ?2 Mission ?2 Inbox +"
         );
     }
 
     #[test]
-    fn tab_badge_merges_projected_attention_and_questions_into_one_suffix() {
+    fn tab_badge_merges_projected_attention_and_questions_into_one_status() {
         for state in [AgentState::NeedsYou, AgentState::NeedsLogin] {
             let mut ui = tab_badge_world();
             let mut next = ui.world.clone();
@@ -5611,20 +5600,20 @@ mod tests {
                 let badge = ui.tab_badge(&tab, Pane::parse(key).as_ref());
                 let wide = badge.label(title, 80, true);
                 assert_eq!(wide.matches('?').count(), 1, "{wide}");
-                assert!(wide.contains(&format!("{title} ?2")), "{wide}");
+                assert!(wide.contains(&format!("?2 {title}")), "{wide}");
                 assert!(!wide.contains('◆'), "{wide}");
                 let compact = badge.label(title, 80, false);
-                assert!(compact.contains(&format!("{title} ? ")), "{compact}");
+                assert!(compact.contains(&format!("? {title}")), "{compact}");
                 assert!(!compact.contains('2'), "{compact}");
             }
         }
     }
 
     #[test]
-    fn tab_badge_narrow_strip_preserves_activity_after_dropping_attention_chrome() {
+    fn tab_badge_narrow_strip_preserves_attention_after_dropping_counts() {
         let ui = tab_badge_world();
         let shown = tab_badge_strip(&ui, 18);
-        assert!(shown.starts_with('●'), "{shown}");
+        assert!(shown.starts_with('?'), "{shown}");
         assert!(!shown.contains("?2"), "{shown}");
         assert!(shown.contains('›'), "hidden tabs remain reachable: {shown}");
     }
@@ -5640,13 +5629,13 @@ mod tests {
         let badge = ui.tab_badge(&tab, pane.as_ref());
         assert_eq!(badge.alerts, Some(0));
         assert!(!badge.ask);
-        assert_eq!(badge.label("Atlas", 28, true), " ●Atlas ");
+        assert_eq!(badge.label("Atlas", 28, true), " ● Atlas ");
         let mut next = ui.world.clone();
         next.attention = Load::Loading;
         ui.set_world(next);
         assert_eq!(
             ui.tab_badge(&tab, pane.as_ref()).label("Atlas", 28, true),
-            " ●Atlas "
+            " ● Atlas "
         );
     }
 
@@ -6155,7 +6144,7 @@ mod tests {
                 .lines()
                 .nth(2)
                 .unwrap()
-                .contains("Atlas Builder ◆"),
+                .contains("◆ Atlas Builder"),
             "it needs the person"
         );
         // Up and Down scroll the agent's pane; they never move to another agent.
@@ -6404,7 +6393,7 @@ mod tests {
 
     #[test]
     fn the_strip_keeps_still_until_the_front_tab_passes_its_end() {
-        let widths = [10u16; 8];
+        let widths = [11u16; 8];
         let window = |current, start, follow, room| {
             let window = visible_tabs(&widths, current, start, follow, 4, room);
             (window.first, window.last)
@@ -6436,6 +6425,75 @@ mod tests {
                 most: 0,
             }
         );
+    }
+
+    #[test]
+    fn selected_tab_keeps_padding_and_person_coloured_leading_count() {
+        let ui = tab_badge_world();
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buffer = Buffer::empty(area);
+        ui.tab_strip(&mut buffer, area, ui.glasses.glass(), 0);
+        let frame = ui.frame.borrow();
+        let rect = frame.hits.iter().find_map(|(rect, hit)| {
+            (*hit == Hit::GlassTab(0, 0)).then_some(*rect)
+        }).unwrap();
+        for x in [rect.x, rect.right() - 1] {
+            assert_eq!(buffer[(x, 0)].symbol(), " ");
+            assert_eq!(buffer[(x, 0)].bg, theme::ACCENT);
+        }
+        for x in [rect.x + 1, rect.x + 2] {
+            assert_eq!(buffer[(x, 0)].fg, theme::PERSON);
+        }
+        assert_eq!(buffer[(rect.x + 4, 0)].fg, theme::CRUST);
+    }
+
+    #[test]
+    fn glyphless_tabs_have_only_their_outer_padding() {
+        let badge = TabBadge::default();
+        for title in ["Inbox", "Item", "+"] {
+            assert_eq!(badge.label(title, 80, true), format!(" {title} "));
+            assert_eq!(badge.width(title, true), text::width(title) + 2);
+        }
+        let badge = TabBadge {
+            activity: "●", needs_person: true, alerts: Some(3),
+            ..TabBadge::default()
+        };
+        assert_eq!(badge.label("Mission", 80, true), " ◆3 Mission ");
+    }
+
+    #[test]
+    fn overflow_keeps_add_pinned_and_mouse_hits_disjoint() {
+        for width in [1, 2, 3, 4, 12, 18, 40] {
+            let mut ui = tab_badge_world();
+            let group = ui.glasses.glass_mut().layout.group_mut(0).unwrap();
+            group.tabs = vec![group.tabs[0].clone(); 30];
+            for last in [false, true] {
+                if last {
+                    for _ in 0..30 {
+                        wheel(&mut ui, MouseEventKind::ScrollRight, 2);
+                        tab_strip_row(&ui, width);
+                    }
+                }
+                let row = tab_strip_row(&ui, width);
+                assert!(row.ends_with('+'), "{width}: |{row}|");
+                let info = ui.frame.borrow();
+                let add = info.hits.iter().find_map(|(rect, hit)| {
+                    (*hit == Hit::GlassAdd(0)).then_some(*rect)
+                }).unwrap();
+                assert_eq!(add.right(), width);
+                assert_eq!(add.width, width.min(3));
+                for (rect, hit) in &info.hits {
+                    if let Hit::GlassTab(0, _) = hit {
+                        assert!(rect.right() <= add.x, "|{row}|");
+                    }
+                }
+                drop(info);
+                let column = if width >= 3 { width - 2 } else { width - 1 };
+                wheel(&mut ui, MouseEventKind::Down(MouseButton::Left), column);
+                assert!(ui.palette_open(), "{width}: |{row}|");
+                press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
+            }
+        }
     }
 
     /// The badge strip's row as drawn, trimmed only at its end so the spacing shows.
@@ -6526,7 +6584,7 @@ mod tests {
                                 .collect::<String>();
                             assert!(rect.width > 0 && rect.right() <= width);
                             assert!(
-                                painted.contains('●'),
+                                painted.contains('?'),
                                 "{count} tabs, {width} cells, current={current}, tab {index}: |{row}|"
                             );
                             active_shown |= *index == current;
@@ -6544,7 +6602,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_strip_add_button_uses_spare_space_after_two_short_tabs() {
+    fn tab_strip_has_two_cell_gaps_and_a_right_pinned_add_button() {
         let mut ui = tab_badge_world();
         ui.world.attention = Load::Ready(Vec::new());
         ui.refresh_tab_statuses();
@@ -6553,7 +6611,7 @@ mod tests {
         group.tabs[0].title = Some("A".into());
         group.tabs[1].title = Some("B".into());
         let row = tab_strip_row(&ui, 14);
-        assert_eq!(row, "  ●A   ○B   +");
+        assert_eq!(row, "  ● A  ○ B  +");
         assert_eq!(strip_markers(&ui), (None, None));
         assert!(ui.frame.borrow().hits.iter().any(|(rect, hit)| {
             matches!(hit, Hit::GlassAdd(0)) && rect.width == 3 && rect.right() <= 14
@@ -6569,7 +6627,7 @@ mod tests {
             group.tabs = vec![group.tabs[0].clone(); count];
             // Establish the transient view once; each case supplies its own initial offset.
             tab_strip_row(&ui, 20);
-            for width in 1..=20 {
+            for width in 5..=20 {
                 for current in 0..count {
                     ui.glasses.glass_mut().layout.group_mut(0).unwrap().current = current;
                     for first in 0..count {
@@ -6596,7 +6654,7 @@ mod tests {
                                         row.chars()
                                             .skip(usize::from(rect.x))
                                             .take(usize::from(rect.width))
-                                            .any(|c| c == '●'),
+                                            .any(|c| c == '?'),
                                         "{count} tabs, {width} cells, first={first}, current={current}, manual={manual}: |{row}|"
                                     );
                                     active_shown |= *tab == current;
