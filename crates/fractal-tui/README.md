@@ -40,11 +40,13 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
+Install the repo's `.#fractal` Nix package and run `FRACTAL_PERSON=person/<your-id> fractal` in a terminal
 with a running Fractal daemon. For source development, use
-`ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
+`FRACTAL_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `FRACTAL_ENDPOINT` can override the discovered Unix socket. When neither person environment variable is set,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Inbox and devices show the right data.
+`ST3_PERSON` and `ST3_ENDPOINT` remain accepted. The Fractal spelling is preferred;
+empty values are ignored. Setting both spellings to unequal non-empty values is an error.
 
 For a laptop without a daemon, run `fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
 single-use code, then run `fractal`. The paired member supplies the person identity. See
@@ -94,6 +96,24 @@ In a conversation, letters type into its message box and commands are chords: `C
 `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `[`/`]` history back/forward, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
+Managed agents show their details beside the terminal by default
+when the **pane** is at least 120 columns wide (not the whole window). The details use
+36 columns plus two columns of separation; shells and unmanaged agents are unchanged.
+The PTY is fitted to the remaining program pane, not hidden under the details. PTY's
+pinned daemon negotiates the per-axis minimum over writable attached clients, so this
+can narrow the harness for everyone attached to that session; read-only viewers do not
+constrain it. Below the breakpoint the details auto-hide and the program regains the width.
+`Ctrl+\` then `i` and conversation `Ctrl+D` toggle the same global visibility for every
+agent and both views. The choice is saved in this device's existing `stui/prefs.json`
+as `agent_details`; an older file defaults to visible. Conversations auto-hide details
+below their existing 90-column threshold instead of replacing the conversation.
+`Ctrl+\` then `d`, or clicking the details, gives them the keys: arrows/PageUp/PageDown
+scroll; `Esc` or `Tab` returns to terminal passthrough. Details links remain clickable.
+The details heading names the focus; no new raw terminal key is intercepted.
+Details focus also blocks program mouse motion and wheel input, and cancels a pending held
+terminal key. If resizing hides the details, focus returns to the program and stays there
+when the pane widens again.
+
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
 conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
 its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
@@ -102,8 +122,8 @@ device that saved the older `terminal_first` keeps attaching. An alert for the a
 of its attached terminal: click it to show it, click an answer to send it, or click
 "open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
 green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
-the full reason and answers needing your words stay in Inbox. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
-answers an alert. When the link to the
+answers needing your words stay in Inbox. Keys go to the terminal (`Ctrl+K` and `Ctrl+\` aside)
+unless details explicitly have focus, so typing never answers an alert. When the link to the
 terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
 it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Inbox cards show
 their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps its list and
@@ -197,8 +217,9 @@ An image is read, decoded and scaled to at most 1600 pixels on a worker; its ter
 encoding is built off the draw path, an image the edge of the pane cuts draws the rows still
 on screen, and its pixels leave memory once it is more than a screen away. An owner that
 cannot be reached says so on the image's line, with the way to try again. `open` shows the
-image in this machine's viewer, or saves it under its name to `ST3_DOWNLOADS`, else the XDG
-download directory, else `~/Downloads`.
+image in this machine's viewer, or saves it under its name to `FRACTAL_DOWNLOADS` (or
+`ST3_DOWNLOADS`), else the XDG download directory, else `~/Downloads`. The same
+non-empty alias conflict rule applies to the download directory.
 
 ## Resource sidebar
 

@@ -590,6 +590,8 @@ impl ExportDaemon {
         }
         command.args(["up", "--node", "otel-test", "--state-dir"])
             .arg(root.join("daemon-state"))
+            // This fixture's process submits the synthetic worker exchanges.
+            .args(["--replication-worker-pid", &std::process::id().to_string()])
             .arg("--socket")
             .arg(&socket)
             .arg("--client-gateway-socket")

@@ -123,9 +123,15 @@ sending either leader key to the program. Enhanced Ctrl+Shift+L is the detached 
 Ctrl+^ (Ctrl+6, 0x1E) opens the recent-place popup when detached, on every terminal type.
 While attached it reaches the program unchanged (for example, Vim's alternate-file key).
 Ctrl+\ then r opens the popup over an attached program. It preselects the previous
-destination; Up/Down changes the selection, Enter opens, and Escape cancels.
-The popup owns input until it closes: paste and mouse input are swallowed rather than sent
-to the child, which receives focus-out followed by focus-in when input returns to it.
+destination; Up/Down changes the selection, Enter opens, Escape cancels, and typing filters.
+Enhanced Ctrl+Tab cycles recent places outside attached programs, not tabs. It commits on
+Control release only after such modifier releases have actually been observed; otherwise
+the same popup requires Enter. Ctrl+Shift+Tab cycles backward. Direct Ctrl+Tab remains
+program input while attached. Tabs keep quiet [ ] and Ctrl+PageUp/PageDown.
+The popup owns input until it closes: the first line of pasted text filters the list, mouse
+input does not reach the child, and the child receives focus-out followed by focus-in when
+input returns to it. Typing or pasting switches hold cycling to explicit Enter/Escape commit.
+Live state/attention labels refresh while the popup is open.
 The selection/reset chords and Shift+PageUp/PageDown stay the terminal UI's, including their
 repeat/release events. In an agent terminal Ctrl+C/D require two presses within two
 seconds; a shell receives them immediately. The existing focused-terminal exception

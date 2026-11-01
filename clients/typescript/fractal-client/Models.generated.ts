@@ -334,6 +334,7 @@ export type AgentResumeParameters = {
 
 export type AgentRetireParameters = {
   agent: Id;
+  expect_revision?: string;
   reason: string;
   successor?: Id;
 };
@@ -1687,6 +1688,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "retire-revision-mismatch"
+  | "retire-incarnation-mismatch"
   | "invalid-custody-successor"
   | "custody-pending"
   | "attention-migrated"
@@ -3425,6 +3428,7 @@ export type TimelineContentBody = {
   attachment_id?: Id;
   blocks?: Array<TimelineBlock>;
   media_type: string;
+  message_id?: string;
   text?: string;
 } & (unknown | unknown);
 

@@ -99,6 +99,8 @@ pub enum ErrorCode {
     IdentityUnknown,
     LifecycleUnavailable,
     RetirementUpgradeRequired,
+    RetireRevisionMismatch,
+    RetireIncarnationMismatch,
     InvalidCustodySuccessor,
     CustodyPending,
     AttentionMigrated,
@@ -2996,6 +2998,9 @@ pub struct TimelineContentBody {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<String>,
+    /// A mailbox message's content names its message, as its message entry does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<TimelineBlock>,
 }
@@ -4377,6 +4382,8 @@ pub struct AgentRetireParameters {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub successor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

@@ -18,6 +18,7 @@ pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
+pub mod task_grants;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -2879,6 +2880,29 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "fault.dismissed",
+            &[
+                "agent",
+                "exec",
+                "pty",
+                "observer",
+                "subscription",
+                "schedule",
+                "daemon",
+                "machine",
+                "step-run",
+                "mission-run",
+                "loop-run",
+                "resource",
+                "checkpoint",
+            ],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("operational"),
+            true,
+            &[],
+        ),
+        (
             "reconcile.fault",
             &[
                 "daemon",
@@ -3515,6 +3539,8 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("retired_by", required_reference_to(&["agent", "person", "daemon"])),
             ("owner_host", required_string()),
             ("declaration", required_string()),
+            ("runtime_incarnation", string()),
+            ("desired_revision", string()),
             ("successor", reference_to(&["agent"])),
             ("transfer", string()),
         ],
@@ -3669,6 +3695,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("failure", string()),
             ("reason", string()),
+        ],
+        "fault.dismissed" => &[
+            ("episode", required_string()),
+            ("reason", required_string()),
         ],
         "reconcile.fault" => &[
             ("scope", required_string()),

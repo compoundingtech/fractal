@@ -85,7 +85,27 @@ Each local observation becomes one OTLP log record in OTLP/HTTP JSON:
 - the record's timestamp is the observation time, and its body holds the fields;
 - its attributes are `st3.subject`, `st3.kind`, `st3.actor`, `st3.incarnation_id` and
   `st3.local_id`;
-- the resource names `service.name = st` and `st3.node`; the scope is `st.observations`.
+- the resource names `service.name = st-daemon` and `st3.node`; the scope is `st.observations`.
+
+This log is the full harness telemetry series. Every `harness.observed`, `harness.usage` and
+`harness.limits` reading lands in the local observation log, including the readings the graph
+keeps local because they change no current value, so the collector receives each one with its
+subject and incarnation. Nothing in the graph depends on that series: the graph keeps each
+seat's current state and usage, and each account's current limits. The same batches also post
+`st_account_limit_used_percent` on `/v1/metrics`, a gauge of the newest reading of each driver,
+account and window (`five_hour` or `weekly`); seat identities appear only in the log records.
+
+Each node also counts the rows it stores into its claims table, written here or received from a
+peer, per kind and writing node: a trigger on claim insert adds to the node-local `claims_stored`
+totals in the same transaction. Deleting claims (local trim, checkpoints) never lowers them, so they
+stay a true storage rate after superseded claims are gone; counting the claims that survive in the
+store would not. An ignored `INSERT OR IGNORE` (a duplicate, or a retired claim refused on
+re-admission) stores and counts nothing; a repair that deletes a claim and inserts it again counts
+it again. The totals are node-local: they are not replicated, not part of any digest, and not in
+backups; a restore stores its claims again, counts them, and starts a new series. The exporter
+sends them as `st_claims_stored_total` and `st_claim_body_bytes_stored_total`, cumulative sums
+labelled `kind` and `writer`, whenever they changed; each series starts when the node first stored
+that kind from that writer.
 
 Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
 the turn ID, model, agent, mission run, and step on the producing node. `local_usage_responses` remembers
@@ -281,6 +301,7 @@ order from the same admitted claims.
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
+| `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
 | `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |

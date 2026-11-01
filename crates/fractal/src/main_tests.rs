@@ -1,6 +1,16 @@
 use super::*;
 
 #[test]
+fn demo_environment_excludes_both_tui_configuration_spellings() {
+    for suffix in ["PERSON", "ENDPOINT", "DOWNLOADS"] {
+        for prefix in ["ST3", "FRACTAL"] {
+            let name = format!("{prefix}_{suffix}");
+            assert!(DEMO_ENVIRONMENT_NAMES.contains(&name.as_str()), "{name} must not leak into the demo");
+        }
+    }
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",
@@ -4535,7 +4545,8 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
     let client = Client::new(Endpoint::Unix(PathBuf::from("/nonexistent/st3.sock")));
     let args = |to: &str| MessageSendArgs {
         to: to.into(),
-        body: "Done.".into(),
+        body: Some("Done.".into()),
+        body_file: None,
         subject: None,
         in_reply_to: Some("message/0123456789abcdef".into()),
         tags: Vec::new(),
@@ -5548,6 +5559,52 @@ fn message_list_requires_one_exact_mailbox_and_explicit_identity_wins() {
     assert!(explicit.archive);
 }
 
+fn parse_body_send(extra: &[&str]) -> Result<MessageSendArgs, clap::Error> {
+    let mut args = vec!["fractal", "conversations", "send", "agent/example", "--from", "agent/sender"];
+    args.extend_from_slice(extra);
+    match Cli::try_parse_from(args)?.command {
+        Command::Conversations { command: MessageCommand::Send(send) } => Ok(send),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn message_body_sources_require_exactly_one() {
+    assert_eq!(parse_body_send(&[]).err().unwrap().kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert_eq!(parse_body_send(&["--body", "text", "--body-file", "file"]).err().unwrap().kind(), clap::error::ErrorKind::ArgumentConflict);
+    for flag in ["--body", "-m"] {
+        let args = parse_body_send(&[flag, "-"]).unwrap();
+        let text = " \n`command` $VAR é\r\n";
+        assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, text.as_bytes()).unwrap(), text);
+    }
+}
+
+#[test]
+fn message_body_file_preserves_text_and_rejects_invalid_utf8() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let path = file.path().to_str().unwrap();
+    let text = " \n`command` $VAR é\r\n";
+    std::fs::write(&file, text).unwrap();
+    let args = parse_body_send(&["--body-file", path]).unwrap();
+    assert_eq!(conversations_cli::read_message_body(args.body, args.body_file, std::io::empty()).unwrap(), text);
+    std::fs::write(&file, [0xff]).unwrap();
+    assert!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).unwrap_err().to_string().contains("UTF-8"));
+    assert!(conversations_cli::read_message_body(Some("-".into()), None, &[0xff][..]).unwrap_err().to_string().contains("UTF-8"));
+}
+
+#[test]
+fn message_body_sources_share_the_byte_limit() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for length in [fractal_daemon::message_body::MAX_BYTES, fractal_daemon::message_body::MAX_BYTES + 1] {
+        let text = "a".repeat(length);
+        let accepted = length == fractal_daemon::message_body::MAX_BYTES;
+        std::fs::write(&file, &text).unwrap();
+        assert_eq!(conversations_cli::read_message_body(None, Some(file.path().into()), std::io::empty()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some("-".into()), None, text.as_bytes()).is_ok(), accepted);
+        assert_eq!(conversations_cli::read_message_body(Some(text), None, std::io::empty()).is_ok(), accepted);
+    }
+}
+
 #[test]
 fn fyi_is_the_silent_kind_on_send_and_reply() {
     let parse = |extra: &[&str]| {
@@ -5991,7 +6048,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     }).unwrap();
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
-        &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
+        &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
@@ -8657,9 +8714,9 @@ fn native_identity_rename_commands_preserve_full_ids_and_fences() {
             | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
             _ => panic!("expected identity rename"),
         };
-        assert_eq!(args.from, "agent/example-old");
-        assert_eq!(args.to, "agent/example-new");
-        assert_eq!(args.actor, "person/robin");
+        assert_eq!(args.from.as_deref(), Some("agent/example-old"));
+        assert_eq!(args.to.as_deref(), Some("agent/example-new"));
+        assert_eq!(args.actor.as_deref(), Some("person/robin"));
         assert_eq!(args.expected_naming_revision.as_deref(), Some("claim/example"));
         assert_eq!(args.expected_declaration, None);
         assert_eq!(args.idempotency_key.as_deref(), Some("example-rename"));
@@ -8690,6 +8747,80 @@ fn native_identity_rename_allows_generated_idempotency_key() {
         panic!("expected identity rename");
     };
     assert_eq!(args.idempotency_key, None);
+}
+
+#[test]
+fn rename_proof_commands_parse_without_mutation_arguments() {
+    for kind in ["agents", "missions"] {
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "export", "agent/example",
+            "--revision", "claim/exact-revision", "--out", "proof.json",
+            "--include-co-batched-claims",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        assert!(args.actor.is_none());
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Export { name, revision, out, include_co_batched_claims },
+        }) = args.command else { panic!("expected proof export") };
+        assert_eq!(name, "agent/example");
+        assert_eq!(revision.as_deref(), Some("claim/exact-revision"));
+        assert_eq!(out, Some(PathBuf::from("proof.json")));
+        assert!(include_co_batched_claims);
+
+        let cli = Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+            "--fleet-anchor", "anchor-key", "--after-revision", "claim/prior",
+        ]).unwrap();
+        let args = match cli.command {
+            Command::Agents { command: AgentsCommand::RenameId(args) }
+            | Command::Missions { command: MissionViewCommand::RenameId(args) } => args,
+            _ => panic!("expected rename proof"),
+        };
+        let Some(IdentityRenameCommand::Proof {
+            command: RenameProofCommand::Verify { file, fleet_anchor, after_revision },
+        }) = args.command else { panic!("expected proof verify") };
+        assert_eq!(file, PathBuf::from("proof.json"));
+        assert_eq!(fleet_anchor, "anchor-key");
+        assert_eq!(after_revision.as_deref(), Some("claim/prior"));
+        assert!(Cli::try_parse_from([
+            "st", kind, "rename-id", "proof", "verify", "proof.json",
+        ]).is_err(), "caller trust anchor is mandatory");
+    }
+}
+
+#[test]
+fn rename_proof_verification_dispatches_before_instance_or_endpoint_resolution() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("malformed.json");
+    std::fs::write(&file, b"not a proof").unwrap();
+    for kind in ["agents", "missions"] {
+        let arguments: Vec<std::ffi::OsString> = [
+            "st", "--instance", "unconfigured-proof-verifier",
+            "--endpoint", "not-a-valid-endpoint",
+            kind, "rename-id", "proof", "verify",
+            file.to_str().unwrap(), "--fleet-anchor", "caller-anchor",
+        ].into_iter().map(Into::into).collect();
+        assert_eq!(offline_rename_proof_arguments(&arguments), Some(ExitCode::from(6)));
+    }
+    let (verdict, code) = rename_proof_verdict(&file, "caller-anchor", None);
+    assert_eq!(code, 6);
+    assert_eq!(verdict["schema"], "fractal.rename-proof-verdict.v1");
+    assert_eq!(verdict["ok"], false);
+    assert_eq!(verdict["error"]["code"], "malformed-bundle");
+    let missing = root.path().join("missing.json");
+    assert_eq!(rename_proof_verdict(&missing, "caller-anchor", None).1, 6);
+}
+
+#[test]
+fn fleet_anchor_show_parses_as_public_read() {
+    let cli = Cli::try_parse_from(["st", "fleet", "anchor", "show"]).unwrap();
+    assert!(matches!(cli.command, Command::Fleet {
+        command: FleetCommand::Anchor { command: FleetAnchorCommand::Show },
+    }));
 }
 
 #[test]

@@ -201,7 +201,8 @@ pub(super) async fn run_attention(
                 client,
                 MessageSendArgs {
                     to,
-                    body,
+                    body: Some(body),
+                    body_file: None,
                     subject: Some(format!("About: {}", item.title)),
                     in_reply_to: None,
                     tags: Vec::new(),

@@ -40,8 +40,11 @@ transport, and rejects a carrier absent from the list. An already-first carrier
 is a no-op, including no service restart. Changes are locked, saved atomically,
 and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
-Installed services restart automatically; otherwise restart both `st3 daemon` and
-`st3 replication-worker` as instructed, including when using `--no-service`.
+Installed services restart automatically. Without services, start
+`fractal replication-worker` first, retain its PID, then start
+`fractal up --replication-worker-pid PID`. On Linux the daemon pins that process
+generation before listening; this option is refused for service-managed daemons. A manual
+worker restart requires restarting the foreground daemon with the new PID.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
 preference and enabled transports unchanged.
@@ -61,6 +64,26 @@ An ended member is not authorized for ordinary replication or owner RPC, even if
 a transport temporarily remains available for leave completion. Published
 endpoints describe routes, not grants or live reachability. This endpoint remains
 a read-only membership projection and does not start or renew leave grace.
+
+On Linux worker-only routes (`/v1/internal/replication/*`, `/v1/internal/seat-freshness`,
+`/v1/internal/seat-snapshot` and `/v1/internal/client-read/forward`) require the
+Unix connector's kernel-observed process generation to match the replication
+worker. Services use the supervisor-observed worker; foreground operation uses
+the explicitly enrolled process. An unrelated unbound process is not a worker.
+Authentication precedes body decoding; unavailable process or supervisor
+evidence fails closed. Re-observation admits a restarted supervised worker
+and revokes its predecessor, including inherited connections.
+
+On macOS these routes retain existing admission and emit `unverified-platform`,
+not an authentication success. The unbound local caller authority gap remains
+open: `LOCAL_PEERPID` and `LOCAL_PEERTOKEN` resolve through a live numeric PID;
+after PID reuse they can attribute a surviving socket to the wrong worker.
+
+This Linux boundary does not protect against same-UID service-manager takeover or
+ptrace of the trusted worker. User-service ownership and process debugging
+remain host trust assumptions; process pinning is not a separate-user sandbox.
+Operator fleet routes retain their existing local authority boundary.
+
 
 Adapters that retain a departing member's transport must instead make their
 decision from one `GET /v1/internal/fleet/leave-state` response:
@@ -1438,22 +1461,25 @@ Each day such a member trims its own due cut (the day before yesterday, as for a
 it captures the set before the cut, plans the drop with the same audited rules and guards a shared
 checkpoint uses, and trims it, with no seal, verification or copy-proof. Its capture stages only
 what judging the kinds it drops reads: the envelopes that hold one of their claims or a claim in the
-same operation, the protections naming those claims, each writer's newest envelope, and the claims
+same operation, the same for every runtime reset and harness diagnostic (`LOCAL_TRIM_CONTEXT_KINDS`:
+the status-history rule judges a seat's harness observations with them, and keeps a transition a
+reset or a restored prompt depends on), the protections naming those claims, each writer's newest envelope, and the claims
 citing the ones it could drop. Citations come from a cache the cut keeps (`local_trim_citations`):
 each cut first reads the claims that arrived since the last, in arrival order, committing each page
 with its cursor, and a cursor it cannot trust rebuilds it. A citer counts only if it is present and
 sealed at the cut, and deleting a claim locally removes its rows. A test shows the cut plans the same
 drop as a capture of the whole store. Only the kinds in
 `LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
-and the trimmed log: today `observer.observed` and `harness.observed`. Everything else is kept, as a protected claim is.
+and the trimmed log: today `observer.observed`, `harness.observed` and `resource.observed`. Everything
+else is kept, as a protected claim is.
 An envelope that holds a kept claim stays whole, with its payload and signatures, so peers can still
 fetch and verify it; a dropped claim inside it loses only this member's own copies (its claim row,
 raw record, signature and verdict rows; its stored position stays, as every position does), its ID goes into the retired ledger, and
 admitting the envelope again restores neither the claim nor its record. Shared checkpoints keep
-envelopes atomic. One audited
-rule stays out because a reader reads the history it drops, which no projection digest covers:
-`resource.observed`'s keeps only the newest observation of a GitHub pull request, and a watch walks
-those observations back to find when the pull request left the merge queue. `harness.observed`
+envelopes atomic. `resource.observed` keeps what its readers walk back through (rules version
+23), such as a pull request's observations back to the newest one outside "open and out of the
+merge queue", which the idle nudge walks to find when it left the queue; the test compares that
+walk, the folded state and the projection between the full and the trimmed log. `harness.observed`
 joined once its rule kept the credential report where a seat's needs-login run begins (rules
 version 24, see #4237). Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything

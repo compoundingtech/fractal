@@ -22,12 +22,22 @@ use crate::replication::InventoryCheckpoint;
 
 /// The kinds a member that trims locally drops, each by its audited rule in
 /// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
-/// same from the full and the trimmed log. A kind joins only with such a test. One audited rule
-/// stays out because a reader reads the history it drops, which no projection digest covers:
-/// `resource.observed`, where a GitHub watch finds when a pull request left the merge queue by
-/// walking its observations back. `harness.observed` joined once its rule kept the credential
+/// same from the full and the trimmed log. A kind joins only with such a test. `resource.observed`
+/// keeps what its readers walk back through, such as a pull request's observations back to the
+/// merge queue (rules version 23). `harness.observed` joined once its rule kept the credential
 /// report where a seat's needs-login run begins (see #4237).
-pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed"];
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "harness.observed", "resource.observed"];
+
+/// The kinds a local cut's capture also stages, because judging a claim of `LOCAL_TRIM_KINDS`
+/// reads them: the status-history rule folds a seat's harness observations with its runtime
+/// resets and harness diagnostics, and keeps a transition a reset or a restored prompt depends
+/// on. They are staged as context and protected like every other kind, never dropped.
+pub const LOCAL_TRIM_CONTEXT_KINDS: &[&str] = &["runtime.observed", "harness.diagnostic"];
+
+/// What a local cut's capture stages: the kinds it drops and the kinds judging them reads.
+pub fn local_trim_capture_kinds() -> Vec<&'static str> {
+    LOCAL_TRIM_KINDS.iter().chain(LOCAL_TRIM_CONTEXT_KINDS).copied().collect()
+}
 
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
@@ -467,7 +477,7 @@ impl Store {
         }
         let _completion = super::checkpoint_completion::Completion::outer();
         // Only what judging the kinds it drops reads: the plan is the same as a full capture's.
-        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(LOCAL_TRIM_KINDS))?;
+        let staged = self.checkpoint_staged_set_scoped(cut, None, &context.scratch, Some(&local_trim_capture_kinds()))?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
         staged.split_envelopes()?;
         // The in-memory reference planner tests builds compare with knows no kind restriction.
@@ -980,7 +990,9 @@ impl Store {
         let delete = crate::profile::span("trim.delete");
         loop {
             if left == Some(0) {
-                // The cut stays `trimming`, and the next day's first step goes on from here.
+                // The cut stays `trimming`, and the next day's first step goes on from here. What
+                // its deletes deferred is rebuilt now, so a deferral outlasts no day's run.
+                self.rebuild_deferred_paced()?;
                 actions.push(CheckpointAction::TrimDeferred {
                     checkpoint: checkpoint.to_owned(),
                     envelopes: deleted_envelopes,
@@ -1100,6 +1112,7 @@ impl Store {
             transaction.commit()?;
         }
         self.replica_rows_changed();
+        self.rebuild_deferred_paced()?;
         actions.push(CheckpointAction::Trimmed {
             checkpoint: checkpoint.to_owned(),
             envelopes: deleted_envelopes,
@@ -1110,6 +1123,30 @@ impl Store {
 }
 
 impl Store {
+    /// Rebuild what this member's trims deferred (the runtime's derived state of the subjects
+    /// they touched), a budget's worth per transaction with a trim's pacing, until none is left.
+    /// It runs when a trim stops and at each checkpoint step, so a crash cannot strand it.
+    pub(crate) fn rebuild_deferred_paced(&self) -> Result<()> {
+        // Most steps have nothing deferred: one read, and no writer.
+        if !self.runtime.deferred_pending(&self.readers.get())? {
+            return Ok(());
+        }
+        let _span = crate::profile::span("trim.rebuild_deferred");
+        loop {
+            let mut connection = self.connection.write_background();
+            let held_since = std::time::Instant::now();
+            let transaction = connection.transaction()?;
+            let more = self.runtime.rebuild_deferred(&transaction, TRIM_CHUNK_BUDGET)?;
+            transaction.commit()?;
+            let held = held_since.elapsed();
+            drop(connection);
+            if !more {
+                return Ok(());
+            }
+            self.pause_trim_chunk(held);
+        }
+    }
+
     /// The claims a local trim may still delete today (`trim_locally_at_most`).
     pub fn local_trim_left_today(&self) -> Result<u64> {
         let deleted = deleted_on(&self.readers.get(), self.trim_day.load(Ordering::Relaxed))?;

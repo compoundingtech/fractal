@@ -2906,7 +2906,7 @@ async fn perform(
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
-            // downloads (ST3_DOWNLOADS or their download directory) where it has none.
+            // downloads (FRACTAL_DOWNLOADS, ST3_DOWNLOADS or their download directory) where it has none.
             let bytes = client.blob(&image.sha256, Some(&image.message)).await?;
             let dir = super::attach::dir()
                 .ok_or_else(|| anyhow::anyhow!("No place to keep the image (HOME is not set)"))?;
@@ -2914,11 +2914,11 @@ async fn perform(
             if super::attach::show(&kept) {
                 return Ok((format!("Opened {}", image.name.as_deref().unwrap_or("the image")), None));
             }
-            let downloads = super::attach::downloads()
+            let downloads = super::attach::downloads()?
                 .ok_or_else(|| anyhow::anyhow!("No place to save the image (HOME is not set)"))?;
             let path = super::attach::save(&downloads, &image, &bytes)?;
             Ok((
-                format!("Saved to {} · ST3_DOWNLOADS chooses where", path.display()),
+                format!("Saved to {} · FRACTAL_DOWNLOADS chooses where (ST3_DOWNLOADS also works)", path.display()),
                 None,
             ))
         }

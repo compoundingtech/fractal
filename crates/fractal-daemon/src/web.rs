@@ -47,7 +47,7 @@ impl Prepared {
         let Some((listener, web)) = self.listener else {
             return std::future::pending().await;
         };
-        let app = crate::api::router(state)
+        let app = crate::api::worker_authenticated(crate::api::router(state), crate::api::worker_observer(None)?)
             .fallback_service(Router::new().fallback(static_asset).with_state(web.clone()))
             .layer(middleware::from_fn_with_state(web, admission));
         axum::serve(listener, app).await?;

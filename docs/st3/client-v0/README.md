@@ -1174,7 +1174,9 @@ time can put a new tool call before an hours-old status. The gateway preserves b
 as source evidence; clients must not re-sort merged entries by sequence alone. `replace` and
 `finalize` also preserve the original append timestamp, so a revision changes content rather
 than moving the entry. A graph delivery header and its content share a timestamp and retain
-their adjacent sequence slots.
+their adjacent sequence slots. The content's body names its message in `message_id`, as the
+header's does, so a client pairs the two by identity; content from an older daemon has no
+`message_id`, and a client pairs it by its slot.
 
 HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
 cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes

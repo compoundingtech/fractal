@@ -448,8 +448,8 @@ pub(super) async fn run_agents(
         AgentsCommand::Retire(args) => {
             let subject = normalize_agent_subject(&args.subject);
             let client = generated_client(endpoint, Some(&args.actor))?;
-            let status = status_for(&cli_client(endpoint), &subject).await?;
-            let token = status
+            let token = status_for(&cli_client(endpoint), &subject)
+                .await?
                 .subjects
                 .first()
                 .and_then(|subject| subject.desired_token.clone())
@@ -466,12 +466,14 @@ pub(super) async fn run_agents(
                     ClientFence {
                         snapshot_id: snapshot,
                         runtime_desired_revision: Some(token),
+                        runtime_incarnation: args.expect_incarnation,
                         ..ClientFence::default()
                     },
                     fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
                         successor: args.successor.map(|value| normalize_agent_subject(&value)),
+                        expect_revision: args.expect_revision,
                     },
                 )
                 .await?;
