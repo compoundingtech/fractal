@@ -680,8 +680,8 @@ pub struct StepSpec {
     pub agent_constraints: BTreeMap<String, Vec<String>>,
     pub timeout_ms: Option<u64>,
     /// The lane the seat working this step holds while it holds it, raised from its own for what
-    /// it names (docs/st3/seat-lanes.md). An older member ignores it and runs the step in the
-    /// seat's own lane.
+    /// it names (docs/st3/seat-lanes.md). Omitted when absent, so an undeclared step hashes as it
+    /// did before the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Raise>,
     pub retry: RetrySpec,
@@ -777,8 +777,8 @@ pub struct MissionSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declarations_kdl: Option<String>,
     /// The lane of each agent this mission and its steps declare that declares none of its own,
-    /// applied when a run materializes them (docs/st3/seat-lanes.md). An older member ignores it
-    /// and runs those agents without a lane.
+    /// applied when a run materializes them (docs/st3/seat-lanes.md). Omitted when absent, so an
+    /// undeclared mission's revision is what an older member computes for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<fractal_runtime::Capacity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

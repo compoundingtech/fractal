@@ -196,9 +196,12 @@ counts it for admission.
 
 The member record gains an optional `capacity` field, omitted when absent, so an undeclared seat's
 stored record and revision do not change. The mission and step records gain one each, omitted when
-absent, so an undeclared mission's revision and its steps' definition hashes do not change. An older
-member ignores both: it materializes a mission's agents without the mission's lane (an agent that
-declares its own keeps it), and a step it delivers runs in its seat's own lane. An older member reading a laned record drops the field
+absent, so an undeclared mission's revision and its steps' definition hashes do not change, and an
+older member accepts it as before. A mission revision that declares a capacity, on the mission or any
+step, is one an older member cannot accept: it checks a replicated revision by hashing the mission as
+it reads it, its reading drops the field, and the hash no longer matches, so it quarantines the claim
+(projection health `stale`) and keeps the mission's earlier revision. Declare capacity on a mission or
+step only once every member runs a build with this change. An older member reading a laned record drops the field
 (the record has no `deny_unknown_fields`) and runs the seat without a lane. An older CLI refuses a
 file that declares `capacity` at apply (unknown child), as for any new declaration. An older daemon
 refuses a config with `lanes` set (`deny_unknown_fields`) and does not start, so set the key only on
