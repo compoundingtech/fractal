@@ -10088,6 +10088,7 @@ fn a_native_prompt_is_an_alert_until_its_harness_or_terminal_says_it_is_gone() {
     store
         .apply_as(&intent, &preview.subject_tokens, "prompt-seat", Some("person/avery"))
         .unwrap();
+    store.question_principal_default.set(store.agent_person("agent/node.worker").unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {
@@ -10318,6 +10319,7 @@ fn a_claude_permission_prompt_is_answered_once_by_its_person_while_it_waits() {
         .apply_as(&intent, &preview.subject_tokens, "answer-seat", Some("person/avery"))
         .unwrap();
     let seat = "agent/node.worker";
+    store.question_principal_default.set(store.agent_person(seat).unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {
@@ -10566,6 +10568,7 @@ fn a_claude_question_is_answered_with_its_choices() {
         .apply_as(&intent, &preview.subject_tokens, "question-seat", Some("person/avery"))
         .unwrap();
     let seat = "agent/node.worker";
+    store.question_principal_default.set(store.agent_person(seat).unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {
@@ -10933,6 +10936,7 @@ fn a_codex_permission_prompt_is_answered_and_records_its_driver() {
         .apply_as(&intent, &preview.subject_tokens, "answer-seat", Some("person/avery"))
         .unwrap();
     let seat = "agent/node.worker";
+    store.question_principal_default.set(store.agent_person(seat).unwrap().unwrap()).unwrap();
     let append = |kind: &str, fields: Value| {
         store
             .append_claim(&ClaimInput {

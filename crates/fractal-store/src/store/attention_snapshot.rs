@@ -204,13 +204,21 @@ impl Store {
             {
                 continue;
             }
-            let Some(owner) = self.agent_person(&seat)? else {
-                continue;
+            let ask = harness["ask"].as_str().unwrap_or("unknown");
+            let owner = if ask == "question" {
+                self.question_principal(&seat)?
+            } else {
+                self.agent_person(&seat)?
+            };
+            let missing_principal = ask == "question" && owner.is_none();
+            let owner = match owner {
+                Some(owner) => owner,
+                None if missing_principal => String::new(),
+                None => continue,
             };
             if person.is_some_and(|person| person != owner) {
                 continue;
             }
-            let ask = harness["ask"].as_str().unwrap_or("unknown");
             let what = match ask {
                 "permission" => "permission",
                 "question" => "an answer",
@@ -221,7 +229,7 @@ impl Store {
                 .as_str()
                 .filter(|reason| !reason.is_empty())
                 .unwrap_or("its terminal shows a prompt");
-            let answerable = answerable(&harness, as_of);
+            let answerable = !missing_principal && answerable(&harness, as_of);
             // The exact call it asks about, as its hook or driver named it for this observation.
             let call = prompt_call(&connection, &seat, &harness)?;
             items.push(AttentionItemView {
@@ -238,12 +246,18 @@ impl Store {
                 variant_id: None,
                 message_id: None,
                 prompt_call: call,
-                answers: prompt_answers(&harness, as_of),
+                answers: if missing_principal { Vec::new() } else { prompt_answers(&harness, as_of) },
                 conversation: Some(seat.clone()),
-                title: format!("{seat} is waiting for {what}"),
+                title: if missing_principal {
+                    format!("{seat} has a human question but no principal")
+                } else {
+                    format!("{seat} is waiting for {what}")
+                },
                 // Codex names what its request asks to do, not the call: that is the pending
                 // request in the seat's conversation.
-                detail: if answerable && harness["driver"] == "codex" {
+                detail: if missing_principal {
+                    "Declare a principal person on this agent or configure the daemon's person to route this pending question. Credential owners, helper bindings, mission requesters and declaration authors do not supply question authority.".into()
+                } else if answerable && harness["driver"] == "codex" {
                     format!(
                         "Codex asks {}; what it would do is the pending request in the seat's conversation. Allow or deny it here, or answer it in the seat's terminal (in Fractal TUI, Ctrl+A then t opens the terminal from the conversation; Enter attaches a detached terminal pane). This alert clears when the prompt is gone, however it was answered.",
                         codex_approval_words(prompt)
@@ -2916,7 +2930,12 @@ impl Store {
     ) -> std::result::Result<ClaimRecord, St3Error> {
         let internal = |error: anyhow::Error| St3Error::new("internal", format!("{error:#}"));
         let now = now_ms();
-        if self.agent_person(seat).map_err(internal)?.as_deref() != Some(actor) {
+        let current = self.newest_harness_observation(seat).map_err(internal)?;
+        let question = current.as_ref().is_some_and(|(claim, _, harness)| {
+            claim == episode && harness["ask"] == "question"
+        });
+        let recipient = if question { self.question_principal(seat) } else { self.agent_person(seat) };
+        if recipient.map_err(internal)?.as_deref() != Some(actor) {
             return Err(St3Error::new(
                 "forbidden",
                 "only the seat's person answers its prompts",
@@ -2934,7 +2953,6 @@ impl Store {
                 "answer allow or deny, or a question's choices as a JSON object of question position to option positions",
             ));
         }
-        let current = self.newest_harness_observation(seat).map_err(internal)?;
         let Some((claim, _, harness)) = current.filter(|(claim, _, _)| claim == episode) else {
             return Err(St3Error::new(
                 "stale-fence",
@@ -3041,7 +3059,7 @@ mod native_prompt_tests {
         let store = Store::open_memory("node").unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let source = format!(
-            "version 2\nagent \"worker\" {{ workspace {:?}; harness \"claude\" {{}} }}\n",
+            "version 2\nagent \"worker\" {{ workspace {:?}; principal \"person/operator\"; harness \"claude\" {{}} }}\n",
             workspace.path().display().to_string()
         );
         let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
@@ -3095,7 +3113,7 @@ mod native_prompt_tests {
         let first = append_harness_history();
         let choice = r#"{"0":[1],"1":[0,2]}"#;
         let answered = store
-            .answer_native_prompt(seat, &first.id, choice, "person/avery")
+            .answer_native_prompt(seat, &first.id, choice, "person/operator")
             .unwrap();
         assert_eq!(answered.body["fields"]["status"], "answer");
         assert_eq!(answered.body["fields"]["reason"], choice);
@@ -3130,7 +3148,7 @@ mod native_prompt_tests {
             "driver":"claude", "incarnation_id":"one"
         }), Some(native_prompt_gone_key(&first.id)));
         store
-            .answer_native_prompt(seat, &restated.id, choice, "person/avery")
+            .answer_native_prompt(seat, &restated.id, choice, "person/operator")
             .unwrap();
         assert_eq!(resolve(gone.store_index), Some(NativePromptState::Gone));
         assert_eq!(resolve(store.index().unwrap()), Some(NativePromptState::Gone));

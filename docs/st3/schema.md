@@ -252,6 +252,27 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 
 A `durable` claim is a fact in the replicated claim log. A `local` claim is an observation kept only in the local observation log of the node that made it, trimmed after that node's retention window. A `latest` claim is an observation kept in that log whose replicated claims are written only when its state changes; each one replaces the previous one for its subject. A `system-local` claim is `local` when the system records it without an actor and replicates when a person or agent writes it as its actor.
 
+## Agent principal grammar
+
+An agent may declare one optional `principal "person/operator"` child. It takes
+exactly one canonical person ID string, with no properties or body; agent IDs,
+malformed person IDs and duplicate principal children are rejected. `principal`
+is not an agent property. The canonical `intent.desired.desired` tree retains
+the child without adding a separate claim field. Omitting it remains valid.
+This grammar declaration is distinct from the accountable-root contract below.
+
+Pending harness observations with `ask="question"` route to the declared
+principal, otherwise to the daemon's configured `person`. Account ownership,
+helper bindings, mission requesters and declaration authors are not question
+authority. If neither principal exists, global attention retains the prompt
+with an empty person and a configuration diagnostic instead of dropping it.
+Only a live declaration and its running incarnation can produce the item;
+republishing its principal invalidates attention. `under` remains non-owning.
+Permission and review prompts retain their existing ownership and answer
+authorization. This routing does not enable answering unsupported harnesses.
+Supported native question answers require the effective principal as answerer.
+Upgrade readers before publishing the child: older readers reject it.
+
 ## Accountable fleet roots
 
 A top-level agent root may declare `accountable "person/NAME"`. Its `intent.desired` body stores the optional `accountable` person reference as well as the canonical KDL child; both must agree. Only that exact person may author the declaration. Agents, missing authors, other people and mission-owned seats are refused on local and replicated admission. Delegated declaration is not supported; it needs a separately approved contract. This fact is for trace attribution only and never changes asks, own-ask authority or directive notes.
