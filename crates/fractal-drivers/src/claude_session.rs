@@ -3086,7 +3086,8 @@ mod tests {
         assert!(observe_hook_event("Stop", &top).is_some());
     }
 
-    /// The measured grant-path sequence from the DQ-H1 capture (2026-08-23, Claude Code 2.1.237): in a
+    /// The measured grant-path sequence from the DQ-H1 capture (2026-08-23, Claude Code 2.1.237,
+    /// [historical capture](https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/05-harness-state/.experiments/2026-08-23-claude-batched-permission.md)): in a
     /// two-call batch where the first call needs permission, execution serializes around the open
     /// prompt, so the event after `PermissionRequest` is the granted call's own `PostToolUse` and
     /// the exit rule clears `blocked` at exactly the right moment. Replayed verbatim so a future

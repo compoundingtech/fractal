@@ -11,6 +11,7 @@ Use these documents for implementation details:
 - [Native runtime invariants](invariants.md) names the current delivery, harness and lifecycle proof obligations.
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
+- [Native driver contracts](native-driver-contracts.md) retains launch, scope, helper, harness-state and context obligations after catalog-runner retirement.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
 - [Accountable fleet roots](accountable-roots.md) defines person-authored trace attribution and its upgrade and rollback requirements.
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.

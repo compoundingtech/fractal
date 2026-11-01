@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The root fractal-legacy-runner package, st2 executable/library and their Nix package/check outputs are removed. Current Fractal CLI, client protocol and stored formats remain. CI now archives the current workspace without the root-only selector; producer/consumer identity remains bound to the same source, run, successful attempt, tools, recipe and file digests. Provider and executor runtime tests continue through checks.wasip2-resource-providers, while checks.provider-components builds their component fixtures; the old st2-prefixed component package aliases are removed."
+    "detail": "The root fractal-legacy-runner package, st2 executable/library and their dedicated Nix build/check outputs are removed. The packages.st2 flake output remains an alias of packages.fractal for at least one release, so an existing .#st2 Nix profile can keep upgrading to the current package. Current Fractal CLI, client protocol and stored formats remain. CI now archives the current workspace without the root-only selector; producer/consumer identity remains bound to the same source, run, successful attempt, tools, recipe and file digests. Provider and executor runtime tests continue through checks.wasip2-resource-providers, while checks.provider-components builds their component fixtures; the old st2-prefixed component package aliases are removed."
   },
   "downtime": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Source or Nix consumers that explicitly selected the legacy root package or st2-prefixed package outputs must select the current Fractal packages or the retained component fixture check. Legacy catalog workflows are retired; this change performs no automatic migration or identity reset. Current Fractal installations need no extra step."
+    "detail": "Source consumers of the legacy root package and consumers of removed st2-prefixed component outputs must select the current Fractal packages or the retained component fixture check. Existing .#st2 profile users can keep upgrading through the one-release alias and should move their selector to .#fractal before the alias is retired. Legacy catalog workflows are retired; this change performs no automatic migration or identity reset. Current Fractal installations need no extra step."
   },
   "recovery": {
     "status": "none",

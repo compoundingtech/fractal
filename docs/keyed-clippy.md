@@ -8,8 +8,8 @@ plan on 2026-10-29.
 
 ## The problem
 
-Clippy and fleet compatibility are covered today only by linux-gate's whole-check note. That note's `inputs` (27 paths in
-`.st/evidence-skip-policy.json`) include `docs/st2`, `docs/st3`, `docs/vrs`, `evals`, `.github` and `scripts`, because the tests
+The original design addressed clippy and fleet compatibility being covered only by linux-gate's whole-check note. That note's `inputs` in
+`.st/evidence-skip-policy.json` include `docs/st3`, `evals`, `.github` and `scripts`, because the tests
 read them. So a docs-only pull request changes linux-gate's input key, and its clippy stage runs again even though no file clippy
 reads has changed. Measured over 32 local runs, clippy's stage has a mean of 1975 s and a median of 1541 s, including its
 build-queue wait. On a warm target its own work is about 390 s (`docs/st3/gate-evidence.md`).
@@ -31,7 +31,7 @@ Its inputs are therefore:
 
 | group | paths |
 |---|---|
-| Rust sources and manifests | every workspace member's directory (`crates/`, the root package's `src`, `tests`, `benches`, `build.rs`), `Cargo.toml`, `Cargo.lock`, `.cargo/` |
+| Rust sources and manifests | every workspace member's directory (`crates/`, `components/`, and `examples/client-tui/`), `Cargo.toml`, `Cargo.lock`, `.cargo/` |
 | toolchain | `flake.lock`, `flake.nix` (nixpkgs' cargo, rustc and clippy in `devShells.default`; there is no `rust-toolchain` file) |
 | lint config | none in files today: no `clippy.toml`, no `[lints]` table, no crate-level `deny`/`warn`. The key must still include `clippy.toml`, `.clippy.toml` and every manifest (already included), so that adding one changes the key |
 | verdict data | `.github/clippy-baseline.json`, `.github/clippy-splits.json` |
@@ -123,7 +123,7 @@ uncovered read before the merge queue sees it; it records `run_command_sha256` (
 (`source_inputs`), so a tree with the same key reuses it. linux-gate keeps its fleet-compat stage while linux-fleet-compat is in shadow.
 `scripts/evidence-verify-test` (`FleetCompatKey`)
 changes each declared input alone and sees the key change, and changes files the stage does not read (a doc, `scripts/st-test`, the
-root package, a crate outside the closure, the messaging baseline) and sees it stay.
+retired root-package path, a crate outside the closure, the messaging baseline) and sees it stay.
 
 ## The risk, and how each key is kept honest
 

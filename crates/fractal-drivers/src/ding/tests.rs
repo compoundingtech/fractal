@@ -2254,6 +2254,8 @@ fn archive_cancels_staged_ownership_without_submit_or_repaste() {
 // -----------------------------------------------------------------------------------------
 // Producer-side event supersede against staged payload ownership.
 //
+// Historical experiment: https://github.com/compoundingtech/fractal/blob/bb51bdcb0cd549b06c298d81c1907a7fd35f0c83/docs/vrs/.experiments/2026-08-20-pipes-event-model-differentiation.md
+//
 // Supersede archives an inbox item from outside DING, possibly while DING owns its payload
 // in a composer. These tests preserve that staged-ownership boundary.
 // -----------------------------------------------------------------------------------------

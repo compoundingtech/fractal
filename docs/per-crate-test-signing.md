@@ -16,9 +16,9 @@ by itself.
    `path` dependency (normal, dev, build, target-specific, `workspace = true` resolved through `[workspace.dependencies]`), workspace
    member or not, transitively. It is computed with `tomllib` from the manifests *of the tree being keyed* (`git show TREE:path`),
    not with `cargo metadata`, so the gate needs no toolchain and no checkout; a policy test compares it with `cargo metadata` for the
-   current tree. A crate whose manifest is the repository root (`fractal-legacy-runner`) contributes its target source dirs
-   (`src`, `tests`, `build.rs`, `benches`), never `.`. Because manifests are inside the keyed paths, an edge added or removed
-   changes the key.
+   current tree. All current workspace members have their own directory; the repository root is a virtual workspace.
+   The key implementation also handles a root-manifest package by contributing only its target source directories, never `.`.
+   Because manifests are inside the keyed paths, an edge added or removed changes the key.
 2. **Global paths** (change them and every crate re-runs): `Cargo.toml`, `Cargo.lock`, **every workspace member's `Cargo.toml`** (the
    tests run on one `--workspace` build, so a feature one member turns on changes a shared dependency's build for all; found in
    skip-ci-sigs-2's read), the `[patch]` paths, `.cargo`, `flake.lock`, the toolchain pin

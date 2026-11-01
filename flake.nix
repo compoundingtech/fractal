@@ -838,6 +838,8 @@
         packages.st3 = st3;
         packages.fractal-web = fractalWeb;
         packages.fractal = fractal;
+        # Preserve existing .#st2 profile upgrades for at least one release.
+        packages.st2 = fractal;
         packages.st-chatgpt = stChatgpt;
         packages.st-fabric-adapter = stFabricAdapter;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
