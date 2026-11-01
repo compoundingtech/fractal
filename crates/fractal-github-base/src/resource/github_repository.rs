@@ -4759,6 +4759,7 @@ mod tests {
         github.route("/repos/acme/garden", json!({"id": 7}));
         github.route("/repos/acme/garden/issues?state=open&per_page=100",
             json!([issue(1, "2026-09-10T00:00:00Z", json!({"node_id": "I_orchid"}))]));
+        github.open_pull_requests(json!([]));
         github.resolved_nodes(json!([{"id": "I_orchid", "state": "OPEN", "number": 1,
             "url": "https://github.com/acme/garden/issues/1"}]));
         let error = crate::resource::github_poll::CUTOFF.scope(2,
