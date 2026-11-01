@@ -7442,6 +7442,44 @@ fn a_graph_read_releases_the_native_delivery_fifo() {
     assert_eq!(fractal_drivers::message::list_dir(&archive).unwrap().len(), 1);
 }
 
+#[test]
+fn projected_inbox_tags_accept_both_families_without_merging() {
+    let root = tempfile::tempdir().unwrap();
+    let inbox = root.path().join("inbox");
+    let archive = root.path().join("archive");
+    for tags in [
+        vec!["st3-message:message/old"],
+        vec!["fractal-message:message/new"],
+        vec![
+            "fractal-message:message/ignored",
+            "st3-message:message/legacy",
+            "st3-message:message/second",
+        ],
+        vec!["unknown-message:message/refused"],
+    ] {
+        let tags = tags.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        fractal_drivers::message::send_to_inbox(&inbox, "requester", None, None, &tags, "body")
+            .unwrap();
+    }
+    let subjects = projected_message_subjects(&inbox, &archive).unwrap();
+    assert_eq!(subjects.len(), 4);
+    assert!(subjects.contains("message/second"));
+    assert!(!subjects.contains("message/ignored"));
+    assert!(!subjects.contains("message/refused"));
+    sync_consumed_projected_messages(
+        &inbox,
+        &archive,
+        &BTreeSet::from(["message/new".into(), "message/ignored".into()]),
+    )
+    .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 1);
+    sync_consumed_projected_messages(&inbox, &archive, &BTreeSet::from(["message/second".into()]))
+        .unwrap();
+    let archived = fractal_drivers::message::list_dir(&archive).unwrap();
+    assert_eq!(archived.len(), 2);
+}
+
 #[tokio::test]
 async fn a_closed_message_missing_from_the_active_page_archives_its_projected_file() {
     use axum::{Json, Router, routing::get};
