@@ -79,12 +79,15 @@ when adopting the script to reuse the existing member key. The production build
 helper and generated launchers remain deployment-owned inputs, not replacements
 for the separate launcher scripts.
 
-Failure attribution reuses a `live-r3-probe/builds/<sha>/build-receipt.json`
-whose `buildIdentity.rev` matches the prepared revision. An immutable probe output
-can remain after a different probe becomes current; rebuilding that output is
-not a compilation failure. Missing receipts still require a real build, and
-mismatched receipts are not accepted. Once a failing prefix is found, the
-integrator ejects that PR and reintegrates later accepted heads before rebuilding.
+Failure attribution builds each probe in a fresh temporary
+`live-r3-probe-*` namespace under `FRACTAL_BUILD_ROOT`. Probe outputs are removed
+after the helper returns; empty snapshot namespaces are also removed, without
+deleting leftover snapshots that might still hold leases. Existing outputs are
+never reused: ignored private/vendor overlays can change without changing the
+commit, and a raw build receipt can exist before host validation finishes.
+A probe passes only when the full build-and-validation helper exits successfully.
+Once a failing prefix is found, the integrator ejects that PR and reintegrates
+later accepted heads before rebuilding.
 Tree-cache identities include the integrator version, so upgrading the attribution
 logic does not replay an older unattributed failure.
 
