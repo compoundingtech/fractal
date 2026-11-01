@@ -1011,6 +1011,7 @@ async fn collection_items_with_windows(
                     // beside the others instead of behind them.
                     drop(admission.take());
                     overlay_agent_resources(&store, &mut items, &at)?;
+                    overlay_seat_admission(&state, &mut items, false);
                     if traced {
                         let path = match (status.is_some(), roster_path, folded.get()) {
                             (true, _, _) => "filtered_full",
@@ -11772,6 +11773,7 @@ mission "differential" state="ready" {
             .map_or(3000, |ms| ms.parse().unwrap()));
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            seat_admission: Default::default(),
             store: Arc::new(Store::open(&database, "bench-host").unwrap()),
             ..test_state(root.path())
         };
@@ -13511,6 +13513,7 @@ mission "differential" state="ready" {
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
         AppState {
+            seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),

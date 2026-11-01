@@ -52,6 +52,61 @@ locator_enum!(TaskLocatorV1 {
     },
 });
 
+fn visit(depth: usize, nodes: &mut usize) -> Result<(), super::TaskManifestError> {
+    *nodes += 1;
+    if depth > 8 || *nodes > 32 {
+        return Err(super::invalid("locator exceeds depth 8 or 32 nodes"));
+    }
+    Ok(())
+}
+
+macro_rules! locator_validation {
+    ($name:ident, $depth:ident, $nodes:ident { $($extra:tt)* }) => {
+        impl $name {
+            pub fn validate(&self) -> Result<(), super::TaskManifestError> {
+                self.validate_at(1, &mut 0)
+            }
+
+            fn validate_at(
+                &self,
+                $depth: usize,
+                $nodes: &mut usize,
+            ) -> Result<(), super::TaskManifestError> {
+                visit($depth, $nodes)?;
+                match self {
+                    Self::Role { name, .. } => super::reveal::bounded_text(name, 512),
+                    Self::Label { value } | Self::Placeholder { value }
+                    | Self::TestId { value } | Self::Text { value } => {
+                        super::reveal::bounded_text(value, 512)
+                    }
+                    Self::Css { selector } => super::reveal::bounded_text(selector, 2048),
+                    Self::Nth { within, index, .. } => {
+                        if !(1..=512).contains(index) {
+                            return Err(super::invalid("nth index must be from 1 through 512"));
+                        }
+                        within.validate_at($depth + 1, $nodes)?;
+                        // The implicit role target is a leaf sibling of `within`.
+                        visit($depth + 1, $nodes)
+                    }
+                    Self::Within { scope, target } => {
+                        scope.validate_at($depth + 1, $nodes)?;
+                        target.validate_at($depth + 1, $nodes)
+                    }
+                    $($extra)*
+                }
+            }
+        }
+    };
+}
+
+locator_validation!(TaskNonFrameLocatorV1, depth, nodes {});
+locator_validation!(TaskLocatorV1, depth, nodes {
+    Self::WithinFrame { frame, target } => {
+        frame.validate_at(depth + 1, nodes)?;
+        target.validate_at(depth + 1, nodes)
+    }
+});
+
 #[cfg(test)]
 mod tests {
     use super::{AriaRole, TaskLocatorV1, TaskNonFrameLocatorV1};

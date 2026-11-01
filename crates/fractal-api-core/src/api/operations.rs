@@ -677,6 +677,7 @@ pub async fn status(
     Query(query): Query<StatusQuery>,
 ) -> Result<Json<StatusResponse>, ApiError> {
     let store = state.store.clone();
+    let admission = state.seat_admission.clone();
     blocking_store(move || {
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
@@ -696,6 +697,9 @@ pub async fn status(
                 query.at_index,
             )
         }?;
+        if !query.history && query.at_index.is_none() {
+            response.seat_admission = Some(admission.snapshot(admission_now()));
+        }
         // Exact schedule reads gain an optional local observation. Keep broad/agent reads and
         // primary-only schedules on their existing path; this is never a persisted projection.
         if query.subject.as_deref().is_some_and(|subject| subject.starts_with("schedule/")) {
@@ -851,5 +855,65 @@ mod legacy_proof_refusal_tests {
         assert_eq!(error.details.len(), 1);
         let check = operational_repair_check(Err(anyhow::anyhow!("unrelated graph error"))).unwrap();
         assert_eq!(check.status, "fail");
+    }
+}
+
+#[cfg(test)]
+mod seat_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fabric_health_does_not_disclose_seat_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        state.seat_admission.state().decision = fractal_runtime::seat_admission::Decision {
+            mode: "enforce".into(), reason: "test pressure".into(),
+            queue: true, observed_at: None,
+        };
+        let queued = "agent/example/private-queued";
+        let replacement = "agent/example/private-replacement";
+        assert!(!state.seat_admission.admit(queued, None, None, false, admission_now()));
+        assert!(state.seat_admission.admit(replacement, None, None, true, admission_now()));
+        assert_eq!(state.seat_admission.snapshot(admission_now())["pendingCount"], 1);
+        let app = crate::api::fabric_router(state);
+        let (status, health) = crate::api::tests::get_request(app, "/v1/health").await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{health}");
+        assert!(health.get("seatAdmission").is_none(), "{health}");
+        let encoded = health.to_string();
+        assert!(!encoded.contains(queued), "{health}");
+        assert!(!encoded.contains(replacement), "{health}");
+    }
+
+    #[tokio::test]
+    async fn current_status_reads_live_admission_but_historical_status_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        state.seat_admission.state().decision.queue = true;
+        assert!(!state.seat_admission.admit("agent/example/queued", None, None, false, admission_now()));
+        for (query, live) in [(json!({}), true), (json!({"history":true}), false),
+            (json!({"at_index":0}), false)] {
+            let Json(response) = status(State(state.clone()), Query(serde_json::from_value(query).unwrap())).await.unwrap();
+            assert_eq!(response.seat_admission.is_some(), live);
+            if let Some(admission) = response.seat_admission {
+                assert_eq!(admission["pendingCount"], 1);
+                assert_eq!(admission["pending"][0]["subject"], "agent/example/queued");
+            }
+        }
+    }
+
+    #[test]
+    fn agent_overlay_uses_live_status_without_persisting_or_overlaying_history() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let before = state.store.index().unwrap();
+        state.seat_admission.state().decision.queue = true;
+        state.seat_admission.admit("agent/example/queued", None, None, false, 100);
+        let mut cards = vec![json!({"id":"agent/example/queued"}), json!({"id":"agent/example/other"})];
+        overlay_seat_admission(&state, &mut cards, true);
+        assert!(cards[0].get("seat_admission").is_none());
+        overlay_seat_admission(&state, &mut cards, false);
+        assert_eq!(cards[0]["seat_admission"]["queuePosition"], 1);
+        assert!(cards[1].get("seat_admission").is_none());
+        assert_eq!(state.store.index().unwrap(), before);
     }
 }
