@@ -6794,7 +6794,12 @@ impl Store {
         // Hand what is pending to the paced job, as a slice that leaves work does. A seal that
         // committed nothing hands off nothing, so idle seals never wake the job.
         if self.seeded_batch_rowid.load(Ordering::Acquire) > sealed_before {
-            self.hand_off_pending_verdicts()?;
+            // The seal has committed: a failed hand-off must not fail it. The next ordinary pass
+            // still judges the claims; the job then wakes when that pass leaves work.
+            self.verdicts_due.store(true, Ordering::Release);
+            if let Err(error) = self.hand_off_pending_verdicts() {
+                eprintln!("st3: sealed claims were not handed to the signature job: {error:#}");
+            }
         }
         Ok(())
     }
