@@ -58,10 +58,10 @@ pub(super) fn cards(
                     })
             });
             let member = child.and_then(|child| child.member.as_ref());
-            if let Some(member) = member {
-                if crate::graph::canonical_child_value(node, "host").is_none() {
-                    inherited_hosts.insert(member.host.clone());
-                }
+            if let Some(member) = member
+                && crate::graph::canonical_child_value(node, "host").is_none()
+            {
+                inherited_hosts.insert(member.host.clone());
             }
             let status = statuses.get(&name).filter(|status| {
                 child.is_some_and(|child| status.desired.as_ref() == Some(&child.desired))
