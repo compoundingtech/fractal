@@ -23,6 +23,9 @@ The directive/subject-note CLI split is not implemented yet. Rename coordination
 is settled: `fractal` and its `st`/`st3` aliases use the same clap CLI, so the
 new top-level command will be available through all three binary names.
 
+Session subjects and the replacement of the note's `session` field by a
+session target (DQ2) are not implemented.
+
 Client regeneration and verification are deferred until dev4 is cleared.
 Run `cargo run -p st3-client-codegen` first, commit the generated output
 separately, then run the codegen `--check` and the notes acceptance checks.
@@ -62,10 +65,9 @@ specified in `docs/st3/schema.md`.
 ```
 note/<author-family>/<author-id...>/<UUIDv7>  subject family "note" (new)
   claim note.set   (StateTransition, Durable, WritePolicy: SubjectEncodedAuthor)
-    target     SubjectReference   families: agent, mission, mission-run, step-run
+    target     SubjectReference   families: agent, session, mission, mission-run, step-run
     text       string | null      nonblank, ≤ 1024 bytes; null = archive
     audience   open enum          known values: "self", "agent"
-    session    string?            incarnation id; only when target is agent/…
     expires_at string?            UTC RFC3339, like the directive note
   actor  = author (person/… or agent/…)
   accepted_at = time
@@ -88,19 +90,18 @@ preserves room for stricter levels later; it does not introduce them now.
 Readers render unrecognized values as a neutral label, never 'Unknown',
 and do not exclude them from agent context on the basis of audience.
 
-Text has no tag field, tag parsing or tag picker. Author, target, optional
-session, timestamps and archived state supply the structure (DQ5).
+Text has no tag field, tag parsing or tag picker. Author, target, timestamps
+and archived state supply the structure (DQ5).
 
 Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 
 ```json
 {
   "id": "note/person/example/0192f3c4-7a1e-7c3a-9b2d-4f5e6a7b8c9d",
-  "target": "agent/compoundingtech/st-notes",
+  "target": "session/agent/example/worker/1234%3A2026-10-14T15%3A57%3A40.016Z",
   "author": "person/example",
   "text": "this agent session should be retired soon",
   "audience": "agent",
-  "session": "1682111:2026-10-14T15:57:40.016Z",
   "created_at": "2026-10-14T16:20:00Z",
   "updated_at": "2026-10-14T16:20:00Z",
   "expires_at": null,
@@ -108,12 +109,76 @@ Wire shape (client-v0, generated into Rust, TypeScript and Swift):
 }
 ```
 
+### Minimal session subject (DQ2)
+
+```
+agent/<agent-id...> ── parent/owner ──► session/agent/<agent-id...>/<incarnation-component>
+                                                 ▲
+                                                 └── note.target
+```
+
+The new repository-owned subject family is `session`, with
+`client_writable=false`. Its id contains the full parent agent subject and
+the agent's existing authoritative `incarnation_id`, not a new UUID or a
+provider-native `session_id`. The final component is the UTF-8 incarnation
+id percent-encoded with uppercase hex, leaving only RFC 3986 unreserved
+bytes (`A-Z a-z 0-9 - . _ ~`) literal. Split at the final slash to recover
+the parent and decode that component exactly once; the encoding preserves
+case and distinguishes literal `%` from an escape. A session has exactly
+one immutable parent/owner agent, encoded in its id.
+
+For example, parent `agent/example/worker` and incarnation
+`1234:2026-10-14T15:57:40.016Z` yield the synthetic target in the wire shape
+above. This is a subject reference derived from an existing runtime identity,
+not another incarnation allocator. Parent and incarnation must match runtime
+evidence at local admission; a client cannot declare a session by naming it.
+Session target read access is the parent agent's read access.
+
+A session target is current only while authoritative runtime state says its
+parent agent is running with that exact incarnation. Matching a retained
+incarnation id without running state is insufficient. It stops being current
+on session end or replacement; its notes do not transfer to another
+incarnation, including a resumed provider session with a new incarnation.
+The reference and note claim history remain addressable after currency ends.
+
+This minimal type provides only identity, parentage and currency for note
+targeting and digest resolution. It adds no session declaration, lifecycle
+claim, start/stop/resume API, transcript, session collection, assignment,
+ownership transfer or other feature. Existing runtime and harness claims
+remain authoritative; no claims beyond `note.set` are introduced here.
+
+#### Runtime identity evidence
+
+Read-only research against fetched `origin/main` at
+`bb51bdcb0cd549b06c298d81c1907a7fd35f0c83` (2026-11-01), after the
+`st3-*` → `fractal-*` crate rename:
+
+- `crates/fractal-schema/src/lib.rs:3761–3774` defines `runtime.observed`
+  with `status`, `runtime_id`, `incarnation_id` and `host`.
+- `crates/fractal/src/main.rs:14662–14679` derives a running PTY incarnation
+  from `pid:created_at`. `crates/fractal-kernel/src/model.rs:183–193`
+  appends `:bound:<binding-id>` for a terminal-bound agent invocation.
+  Therefore the complete authoritative incarnation is opaque; do not
+  reconstruct it from a PID or strip a binding suffix.
+- `crates/fractal-schema/src/lib.rs:3844–3858` records harness
+  `session_id` alongside `agent` and `incarnation_id` in
+  `harness.session-file`. Provider session identity is not runtime currency.
+  `crates/fractal/src/main.rs:17046–17049` treats incarnation replacement
+  or `absent`/`stopped`/`exited`/`vanished` runtime status as ended.
+- The subject registry (`crates/fractal-schema/src/lib.rs:989–1211`) has
+  no harness-session or incarnation family. It does include
+  `assistant/chatgpt[/session/assistant-grant/ID]` (lines 1091–1095), a
+  grant-bound external-assistant audit subject, and `planning-session/ID`
+  (lines 1139–1143), neither of which names an agent runtime incarnation.
+  Blame dates these to 2026-10-11 and 2026-09-05 respectively; registry
+  history since 2026-10-14 adds no harness-session subject to reuse.
+
 ### Write rules
 
 | Actor | May create notes on | May edit or archive |
 |---|---|---|
 | `person/example` | any target it can read | own notes |
-| `agent/<org>/<name>` | itself; mission runs and step runs it is assigned to | own notes |
+| `agent/<org>/<name>` | itself; sessions whose parent is itself; mission runs and step runs it is assigned to | own notes |
 
 The new `SubjectEncodedAuthor` write policy requires the claim actor to equal
 the author encoded in the note subject. This rule is stateless, analogous to
@@ -146,15 +211,15 @@ Publication is gated by a `daemon.started` feature flag
 ### Projection
 
 ```
-subject_notes(note PK, target, author, audience, session, claim_id, head_key)
+subject_notes(note PK, target, author, audience, claim_id, head_key)
   index (target), index (author)
 ```
 
 Built from `claims` with the same trigger, pending/dirty and
 `flush`/`rebuild` structure as `person_directive_notes`. A current note has
-non-null text and no passed expiry. A session-scoped note is current only
-when authoritative runtime state says the target agent is running with that
-incarnation; incarnation-id equality alone is not sufficient.
+non-null text and no passed expiry. A note targeting `session/…` additionally
+requires that session subject to be current under the authoritative
+runtime-state rule above; there is no separate note `session` field.
 
 ## API
 
@@ -176,13 +241,13 @@ previews from it. Agent and mission collection rows have no note fields.
 The collection is the `notes` `Window` variant in `st3-feed`, with `from_id`
 dispatch and a server collection branch in `crates/st3/src/api/client_v0.rs`.
 Expiry requires clock-follow invalidation through `collection_follows_clock`.
-Runtime-state changes invalidate session-scoped note currency.
+Runtime-state changes invalidate currency for notes targeting sessions.
 
 ## CLI
 
 ```
-st note add TARGET TEXT [--session current|ID] [--expires-at T]
-st note ls [TARGET]           # notes on TARGET, or notes by the actor
+st note add TEXT --on TARGET [--session current] [--expires-at T]
+st note ls [--on TARGET]      # notes on TARGET, or notes by the actor
 st note archive NOTE_ID
 st directive set|clear|show    # target: person directive note
 st note                       # deprecated alias for directive show
@@ -199,8 +264,13 @@ coordination with `agent/compoundingtech/fractal-rename` is not a blocker.
 Bare `note` and `note set|clear` keep working as deprecated aliases.
 
 There is no `--for` option or audience default to choose: every note is agent
-context, including notes authored by a person. `--session current` resolves
-the target agent's current incarnation.
+context, including notes authored by a person. `--on session/…` directly
+targets a session subject. `--on agent/… --session current` resolves that
+agent's current authoritative running incarnation and replaces the target
+with its session subject; it does not store a `session` field. The flag is
+valid only with an agent target and fails if there is no current running
+incarnation; it never falls back to an agent-wide note. Explicit session
+targets and this shorthand use the same write rules.
 
 ## Agent context delivery
 
@@ -227,10 +297,13 @@ Existing session-start hooks and `handoff::render` are not the delivery path:
 the hooks emit no context, and handoff skips first incarnations. The digest
 path covers every session start independently of hooks and handoff.
 
-Target resolution: `agent/…` targets resolve to that agent. `mission-run/…`
-and `step-run/…` targets resolve to current step assignees and lease owners.
-`mission/…` targets resolve to agents with an active step in a current run of
-that mission. Recipient resolution is refreshed when assignments change.
+Target resolution: `agent/…` targets resolve to that agent. Current
+`session/…` targets resolve only to their parent agent while that exact
+session runs, so their notes participate in the same digest; they are not
+delivered to a replacement incarnation. `mission-run/…` and `step-run/…`
+targets resolve to current step assignees and lease owners. `mission/…`
+targets resolve to agents with an active step in a current run of that
+mission. Recipient resolution is refreshed when assignments change.
 
 Context block format (bounded to 16 notes, newest first):
 
@@ -297,11 +370,12 @@ A note kind registration includes:
   with `st` and `st3` aliases, so the command lands once for all binary names.
   Coordination with `agent/compoundingtech/fractal-rename` is settled and is
   not a blocker. This CLI split is not implemented yet.
-- **DQ2 Session as target:** No `session` subject family exists; harness
-  sessions appear only as `incarnation_id`/`session_id` fields. This spec uses
-  a `session` field on agent-targeted notes. An alternative is a new
-  `session/…` family. Resolved by whether other features need sessions as
-  first-class subjects.
+- **DQ2 Session as target — resolved (2026-11-01):** Johannes chose sessions
+  as their own subject, not a `session` field on an agent note (Axe Q5
+  request `c88zos`, answer `kpn312`, relayed by Manager in
+  `message/6a5ae12d025284bc`). The minimal `session` family above reuses
+  the owning agent's existing incarnation id and runtime currency; no
+  other session features are implied. This target design is not implemented.
 - **DQ3 Audience choice — resolved (2026-10-15):** No audience choice; every
   note is context for its target's resolved agents. Johannes initially
   selected "only me" but said notes need not be hidden from agents (q1,

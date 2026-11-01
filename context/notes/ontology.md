@@ -1,7 +1,8 @@
 # Notes ontology
 
 Status: Draft. Audience and text terminology reflects Johannes's 2026-10-15
-interview (spec DQ3/DQ5); alignment with `agent/dotfiles/annotations` remains.
+interview (spec DQ3/DQ5); session terminology reflects his 2026-11-01
+decision (DQ2). Alignment with `agent/dotfiles/annotations` remains.
 
 ## Language
 
@@ -10,7 +11,8 @@ interview (spec DQ3/DQ5); alignment with `agent/dotfiles/annotations` remains.
   A note informs. It never assigns work, approves a gate, or grants authority.
   _Avoid_: comment, memo, sticky, annotation (see below).
 - **Target**: The st subject that a note is attached to, for example
-  `agent/<org>/<name>` or `mission/<id>`. A note has exactly one target.
+  `agent/<org>/<name>`, `session/…` or `mission/<id>`. A note has exactly
+  one target.
 - **Author**: The `person/…` or `agent/…` actor encoded in the note id and
   signing its claims. Every claim actor must match this immutable author;
   the author is never a free field.
@@ -18,9 +20,14 @@ interview (spec DQ3/DQ5); alignment with `agent/dotfiles/annotations` remains.
   resolved from its target; there is no audience choice or private-note mode.
 - **Agent context**: Informational notes delivered to resolved agents without
   waking them. Being context does not acknowledge delivery or grant authority.
-- **Session scope**: An optional narrowing of an agent-targeted note to one
-  harness session (incarnation). A session-scoped note stops applying when
-  that session ends.
+- **Session**: One runtime incarnation of a parent/owner agent, addressed
+  as its own subject using that agent's existing incarnation identity.
+  It is current only while authoritative runtime state says the parent
+  is running with that exact incarnation; it is not a provider-native
+  session or a planning session.
+- **Session note**: A note whose target is a session subject, not an
+  agent note with an extra scope field. It is context for the parent agent
+  only while that session is current; it never carries into a replacement.
 - **Archived note**: A note whose author has closed it. The claim history keeps
   it; current views and agent context omit it.
 - **Person directive note**: The existing `person.directive-note-set` record:
@@ -39,9 +46,10 @@ interview (spec DQ3/DQ5); alignment with `agent/dotfiles/annotations` remains.
 ## Structure
 
 ```
-person/… ─┐                  ┌─ agent/<org>/<name> [session scope?]
-          ├─ author ─ note ─ target ─┼─ mission/<id>
-agent/… ──┘                         ├─ mission-run/<id>
+person/… ─┐                         ┌─ agent/<org>/<name>
+          ├─ author ─ note ─ target ─┼─ session/… ─ parent ─ agent/…
+agent/… ──┘                         ├─ mission/<id>
+                                     ├─ mission-run/<id>
                                      └─ step-run/<gen>/<path>
 
 agent provenance ─ target ─ artifact (typed sha256 ref) or st graph ref
