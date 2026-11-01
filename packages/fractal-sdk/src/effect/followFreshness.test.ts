@@ -6,9 +6,11 @@
 import { it as effectIt } from '@effect/vitest'
 import type { CollectionFrame, CollectionSocket } from '@fractal/client'
 import type { CollectionName, ResourceCollectionName, Snapshot } from '@fractal/client'
+import * as Deferred from 'effect/Deferred'
 import * as Effect from 'effect/Effect'
 import * as Fiber from 'effect/Fiber'
 import * as Layer from 'effect/Layer'
+import * as Queue from 'effect/Queue'
 import type * as Scope from 'effect/Scope'
 import * as Stream from 'effect/Stream'
 import * as SubscriptionRef from 'effect/SubscriptionRef'
@@ -224,6 +226,7 @@ const runEffect = (
     readonly conversationSlots?: number | 'advertised'
     readonly setup?: (gateway: FakeGateway) => void
     readonly onDiagnostics?: (event: FractalDiagnostic) => void
+    readonly onFollowSubscribeSent?: () => void
   },
   test: (gateway: FakeGateway) => Effect.Effect<void, never, Fractal | Scope.Scope>,
 ) => {
@@ -235,6 +238,7 @@ const runEffect = (
     ...(options.conversationSlots === undefined ? {} : { conversationSlots: options.conversationSlots }),
     socket: gateway.factory,
     fetch: gateway.fetch,
+    ...(options.onFollowSubscribeSent === undefined ? {} : { onFollowSubscribeSent: options.onFollowSubscribeSent }),
     ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
   }).pipe(Layer.provide(Layer.succeed(FractalPlatform, {
     admission: (budget) => {
@@ -748,26 +752,44 @@ describe('follow freshness', () => {
     ))
 
   effectIt.live('refreshes Live window snapshot evidence without restarting its since clock', () =>
-    runEffect({ maxFollows: 4 }, (gateway) =>
-      Effect.gen(function* () {
-        const fractal = yield* Fractal
-        const roster = yield* mountWindow('agents')
-        gateway.window('agents')
-        yield* settle
-        const first = roster.lastStatus()
-        expect(first).toMatchObject({ _tag: 'Live', snapshot })
-        const updated = { ...snapshot, id: 'snapshot/2', store_index: 2 }
-        gateway.send({
-          kind: 'changes', id: gateway.idOf('agents'), collection: 'agents',
-          upserts: [], removes: [], order: [], has_more: false, snapshot: updated,
-        })
-        yield* settle
-        expect(roster.events.at(-1)).toMatchObject({ _tag: 'Observed', value: { snapshot: updated } })
-        expect(roster.lastStatus()).toEqual({ ...first, snapshot: updated })
-        expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(followKey(windowSpec('agents'))))
-          .toEqual({ ...first, snapshot: updated })
-      }),
-    ))
+    Effect.gen(function* () {
+      const subscribed = yield* Deferred.make<void>()
+      yield* runEffect({
+        maxFollows: 4,
+        onFollowSubscribeSent: () => { Effect.runFork(Deferred.succeed(subscribed, undefined)) },
+      }, (gateway) =>
+        Effect.gen(function* () {
+          // Ingest publishes on timer tasks and Effect streams consume asynchronously.
+          // Await those publications, not a fixed number of event-loop turns.
+          vi.useRealTimers()
+          const fractal = yield* Fractal
+          const spec = windowSpec('agents')
+          const events = yield* Queue.unbounded<FollowEvent<WindowValue>>()
+          const statuses = yield* Queue.unbounded<SyncStatus>()
+          yield* Effect.forkChild(fractal.watch(collectionWindow(spec)).pipe(
+            Stream.runForEach((event) => Queue.offer(events, event)),
+          ))
+          yield* Effect.forkChild(fractal.followSyncStatus(followKey(spec)).pipe(
+            Stream.filter((status) => status._tag === 'Live'),
+            Stream.runForEach((status) => Queue.offer(statuses, status)),
+          ))
+          yield* Deferred.await(subscribed)
+          gateway.window('agents')
+          expect(yield* Queue.take(events)).toMatchObject({ _tag: 'Observed', value: { snapshot } })
+          const first = yield* Queue.take(statuses)
+          expect(first).toMatchObject({ _tag: 'Live', snapshot })
+          const updated = { ...snapshot, id: 'snapshot/2', store_index: 2 }
+          gateway.send({
+            kind: 'changes', id: gateway.idOf('agents'), collection: 'agents',
+            upserts: [], removes: [], order: [], has_more: false, snapshot: updated,
+          })
+          expect(yield* Queue.take(events)).toMatchObject({ _tag: 'Observed', value: { snapshot: updated } })
+          expect(yield* Queue.take(statuses)).toEqual({ ...first, snapshot: updated })
+          expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(followKey(spec)))
+            .toEqual({ ...first, snapshot: updated })
+        }),
+      )
+    }))
 
   it('binds a conversation chunk to the subscribe generation that delivered it', () =>
     run({ maxFollows: 4 }, (gateway) =>

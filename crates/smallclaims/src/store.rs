@@ -39,10 +39,10 @@ use crate::sqlite::{
 mod admitted;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
-mod operation_metadata;
+mod proof;
 pub mod prepared_envelope;
 mod replica_record;
-pub use operation_metadata::OperationMetadata;
+use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
 mod full_inventory_tests;
 #[cfg(test)]
@@ -98,6 +98,7 @@ pub mod projection_digest;
 pub mod repair_ledger;
 pub mod retired;
 pub mod retired_facts;
+pub mod local_trim_citations;
 pub mod runtime;
 mod signature_backfill;
 pub mod transport_observation_index;
@@ -123,7 +124,10 @@ pub use checkpoint_agreement::{
     SealTerms, VerifiedTerms, certificates, checkpoint_build, chosen_certificate, excused_writers,
     first_verifications, newest_seals, participants as checkpoint_participants, stable_checkpoints,
 };
-pub use checkpoint_trim::{CheckpointManifestNeed, TRIM_CHUNK_ENVELOPES, TrimFault};
+pub use checkpoint_trim::{
+    CheckpointManifestNeed, LOCAL_TRIM_CONTEXT_KINDS, LOCAL_TRIM_KINDS, TRIM_CHUNK_ENVELOPES, TrimFault,
+    local_trim_capture_kinds,
+};
 
 /// A committed projection frontier plus optional work inside its current transaction.
 #[derive(Clone, Copy, Debug)]
@@ -843,6 +847,12 @@ pub struct Store {
     pub divergence_capture: std::sync::atomic::AtomicBool,
     /// Whether this member trims on its own (`[trim] local`); see `trim_locally`.
     trim_local: AtomicBool,
+    /// The most claims a local trim deletes in a day (`[trim] daily_claims`); see
+    /// `trim_locally_at_most`.
+    trim_daily_claims: AtomicU64,
+    /// The day, in days since the epoch, that a local trim's deletions count against: each
+    /// checkpoint step sets it from its own clock.
+    pub(crate) trim_day: AtomicU64,
     /// Held while replicated envelopes are admitted; see `validate_replication_backlog`.
     pub admission: Mutex<()>,
     /// Fixed local schema identity, initialized lazily before the first admission pass.
@@ -870,6 +880,9 @@ pub struct Store {
     projection_contention_generation: AtomicU64,
     /// When this process last attempted projection of replicated claims, in Unix milliseconds.
     pub last_replication_projection_unix_ms: AtomicU64,
+    /// For a shard, the default store whose fleet identity and membership it uses: a shard
+    /// holds no fleet claims of its own. See `bind_fleet_authority`.
+    fleet_authority: std::sync::OnceLock<Arc<dyn FleetAuthority>>,
     /// This node's fleet member key. Set, it signs every envelope of this node's writer.
     pub member_key: std::sync::RwLock<Option<Arc<crate::fleet::MemberKey>>>,
     /// The keys this node signs claims with. See `principals`.
@@ -1142,6 +1155,9 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
         })?;
+        install_schema_batch(connection, fresh, |connection| {
+            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb1035261bc59 owner=smallclaims::store TODO=trace-statement-and-value-representation */ local_trim_citations::SCHEMA).map_err(Into::into)
+        })?;
         initialize_fleet_generation(connection)?;
         install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
@@ -1252,9 +1268,12 @@ impl Store {
             replication_sync: Mutex::new(BTreeMap::new()),
             divergence_capture: std::sync::atomic::AtomicBool::new(false),
             trim_local: AtomicBool::new(false),
+            trim_daily_claims: AtomicU64::new(checkpoint_trim::LOCAL_TRIM_DAILY_CLAIMS),
+            trim_day: AtomicU64::new(0),
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
+            fleet_authority: std::sync::OnceLock::new(),
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
@@ -2057,11 +2076,18 @@ pub fn next_replica_sequence(transaction: &Transaction<'_>, origin: &str) -> Res
                  COALESCE((SELECT MAX(replica_sequence) FROM batches WHERE origin=?1), 0),
                  COALESCE((SELECT sequence FROM writer_heads WHERE writer=?1), 0),
                  COALESCE((SELECT MAX(sequence) FROM checkpoint_envelopes WHERE writer=?1), 0),
-                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0),
-                 COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0)
-             ) + 1",
+                 COALESCE((SELECT MAX(sequence) FROM retired_envelopes WHERE writer=?1), 0)
+             ), MAX(0, COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='writer_floor/' || ?1), 0))",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-h2721e765a782 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h1fe81cd46767 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| {
+            let high_water: u64 = row.get(0)?;
+            let floor: u64 = row.get(1)?;
+            let (sequence, _) = crate::writer_chain::writer_continuation(high_water, floor, None::<()>);
+            // SQLite sequences must remain representable as signed integers.
+            i64::try_from(sequence)
+                .map(|sequence| sequence as u64)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, high_water as i64))
+        })
         .map_err(Into::into)
 }
 
@@ -2076,8 +2102,12 @@ pub fn previous_batch_hash(transaction: &Transaction<'_>, origin: &str) -> Resul
                  UNION ALL SELECT sequence, hash FROM writer_heads WHERE writer=?1
              ) ORDER BY sequence DESC LIMIT 1",
         )?
-        .query_row(/* sqlite-large-value: allow-for-now lv-ha390580f8e24 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| row.get(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h6aafdfff5bb3 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [origin], |row| {
+            let hash: String = row.get(0)?;
+            Ok(crate::writer_chain::writer_continuation(0, 0, Some(hash)).1)
+        })
         .optional()
+        .map(|head| head.flatten())
         .map_err(Into::into)
 }
 
@@ -2317,9 +2347,10 @@ impl Store {
         else {
             return Ok(0);
         };
-        let Some(fleet_id) = fleet_meta(&self.readers.get(), "fleet_id")? else {
+        let Some(fleet_id) = self.signing_fleet_id(&self.readers.get())? else {
             return Ok(0);
         };
+        let shard = self.bound_shard()?;
         let target: u64 = self.readers.get().query_row(
             "SELECT COALESCE(MAX(sequence),0) FROM replica_envelopes WHERE writer=?1",
             [&self.origin],
@@ -2350,7 +2381,8 @@ impl Store {
                     (
                         *sequence,
                         hash,
-                        key.sign(&crate::fleet::envelope_signature_message(
+                        key.sign(&crate::fleet::envelope_signature_message_in(
+                            shard.as_deref(),
                             &fleet_id,
                             &self.origin,
                             *sequence,
@@ -2431,6 +2463,9 @@ impl Store {
 
     /// The current fleet membership, folded from admitted `fleet.*` claims.
     pub fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.fleet_membership();
+        }
         // Membership is a function of the fleet claims, their envelopes' signatures and the
         // anchor, and triggers advance `fleet_generation` whenever any of them changes. Fold it
         // when the generation moved, not on every call: folding is hundreds of statements, and
@@ -2464,6 +2499,25 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some((folded_at, membership.clone()));
         Ok(membership)
+    }
+
+    /// Read only already-sealed membership; never seed or judge local batches on a cache miss.
+    pub fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.fleet_membership_sealed();
+        }
+        self.read_snapshot(|_| {
+            let connection = self.readers.get();
+            let current = fleet_generation(&connection)?;
+            if let Some((folded_at, membership)) = self.membership_cache.lock()
+                .unwrap_or_else(PoisonError::into_inner).as_ref()
+                && *folded_at == current
+            {
+                return Ok(membership.clone());
+            }
+            // Do not populate the sealing path's cache with a fold that can omit local batches.
+            fleet_membership_tx(&connection)
+        })
     }
 
     /// Whether transport observations about `peer` belong in the graph. A dial-out member is
@@ -2596,7 +2650,7 @@ impl Store {
         else {
             return Ok(0);
         };
-        let Some(fleet_id) = fleet_meta(transaction, "fleet_id")? else {
+        let Some(fleet_id) = self.signing_fleet_id(transaction)? else {
             return Ok(0);
         };
         let unsigned = prepared_seal::own_unsigned_envelopes(
@@ -2606,9 +2660,11 @@ impl Store {
             after_batch_rowid,
             through_batch_rowid,
         )?;
+        let shard = fleet_meta(transaction, "shard_id")?;
         let now = now_ms().to_string();
         for (sequence, envelope_hash) in &unsigned {
-            let signature = key.sign(&crate::fleet::envelope_signature_message(
+            let signature = key.sign(&crate::fleet::envelope_signature_message_in(
+                shard.as_deref(),
                 &fleet_id,
                 &self.origin,
                 *sequence,
@@ -2701,9 +2757,10 @@ impl Store {
         let Some(key) = fleet_meta(&connection, principals::OWN_NODE_KEY)? else {
             return Ok(false);
         };
-        let Some(fleet_id) = fleet_meta(&connection, "fleet_id")? else {
+        let Some(fleet_id) = self.signing_fleet_id(&connection)? else {
             return Ok(false);
         };
+        let shard = fleet_meta(&connection, "shard_id")?;
         let mut statement = connection.prepare_cached(
             "SELECT signatures.sequence, signatures.envelope_hash, signatures.signature
              FROM replica_records AS records
@@ -2721,7 +2778,7 @@ impl Store {
         for row in rows {
             let (sequence, hash, signature) = row?;
             if VerifiedEnvelopeSignature::verify(
-                &fleet_id, &self.origin, sequence, &hash, &key, &signature,
+                shard.as_deref(), &fleet_id, &self.origin, sequence, &hash, &key, &signature,
             ).is_some() {
                 return Ok(true);
             }
@@ -3117,7 +3174,28 @@ pub fn fleet_admission_hold(
     membership: &crate::fleet::Membership,
     envelope: &ReplicaEnvelope,
 ) -> Result<Option<&'static str>> {
-    match membership.window(&envelope.writer, envelope.sequence) {
+    window_admission_hold(
+        connection,
+        membership.window(&envelope.writer, envelope.sequence),
+        envelope,
+    )
+}
+
+/// `fleet_admission_hold` for an envelope of a named shard; see `Membership::shard_window`.
+pub fn shard_admission_hold(
+    connection: &Connection,
+    membership: &crate::fleet::Membership,
+    envelope: &ReplicaEnvelope,
+) -> Result<Option<&'static str>> {
+    window_admission_hold(connection, membership.shard_window(&envelope.writer), envelope)
+}
+
+fn window_admission_hold(
+    connection: &Connection,
+    window: crate::fleet::Window,
+    envelope: &ReplicaEnvelope,
+) -> Result<Option<&'static str>> {
+    match window {
         crate::fleet::Window::Legacy => Ok(None),
         crate::fleet::Window::Fenced => Ok(Some("fenced")),
         crate::fleet::Window::Keyed(keys) => {
@@ -3190,6 +3268,7 @@ pub fn envelope_carries_fleet_claims(
 #[allow(clippy::too_many_arguments)]
 pub fn store_envelope_signature_tx(
     transaction: &Transaction<'_>,
+    shard: Option<&str>,
     fleet_id: &str,
     writer: &str,
     sequence: u64,
@@ -3199,7 +3278,7 @@ pub fn store_envelope_signature_tx(
     now: &str,
 ) -> Result<usize> {
     let Some(verified) = VerifiedEnvelopeSignature::verify(
-        fleet_id, writer, sequence, envelope_hash, member_key, signature,
+        shard, fleet_id, writer, sequence, envelope_hash, member_key, signature,
     ) else {
         return Ok(0);
     };
@@ -3219,6 +3298,7 @@ struct VerifiedEnvelopeSignature<'a> {
 
 impl<'a> VerifiedEnvelopeSignature<'a> {
     fn verify(
+        shard: Option<&str>,
         fleet_id: &str,
         writer: &'a str,
         sequence: u64,
@@ -3226,8 +3306,13 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
         member_key: &'a str,
         signature: &'a str,
     ) -> Option<Self> {
-        let message =
-            crate::fleet::envelope_signature_message(fleet_id, writer, sequence, envelope_hash);
+        let message = crate::fleet::envelope_signature_message_in(
+            shard,
+            fleet_id,
+            writer,
+            sequence,
+            envelope_hash,
+        );
         crate::fleet::verify_signature(member_key, &message, signature).then_some(Self {
             writer,
             sequence,
@@ -3252,6 +3337,41 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
                 self.signature,
                 now
             ])?)
+    }
+}
+
+/// What a shard reads of the default store it takes its fleet from. A program that owns its
+/// default store elsewhere can hand the shard a weak handle to it.
+pub trait FleetAuthority: Send + Sync {
+    /// The fleet the default store is bound to.
+    fn fleet_id(&self) -> Result<Option<String>>;
+    /// Advances whenever the default store's membership may have changed.
+    fn fleet_generation(&self) -> Result<i64>;
+    fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership>;
+    /// Whether this is a default store that takes its fleet from no other store.
+    fn is_default_store(&self) -> Result<bool>;
+}
+
+impl FleetAuthority for Store {
+    fn fleet_id(&self) -> Result<Option<String>> {
+        self.bound_fleet()
+    }
+
+    fn fleet_generation(&self) -> Result<i64> {
+        fleet_generation(&self.readers.get())
+    }
+
+    fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
+        Store::fleet_membership(self)
+    }
+
+    fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership> {
+        Store::fleet_membership_sealed(self)
+    }
+
+    fn is_default_store(&self) -> Result<bool> {
+        Ok(self.bound_shard()?.is_none() && self.fleet_authority.get().is_none())
     }
 }
 
@@ -6592,6 +6712,41 @@ impl Store {
         fleet_meta(&self.readers.get(), "shard_id")
     }
 
+    /// Give a shard the default store whose fleet it belongs to. A shard holds no fleet claims:
+    /// its envelopes sign for the authority's fleet, and admission checks them against the
+    /// authority's membership, so a member removed there is refused here too. Set once per open.
+    pub fn bind_fleet_authority(&self, authority: Arc<dyn FleetAuthority>) -> Result<()> {
+        anyhow::ensure!(
+            self.bound_shard()?.is_some(),
+            "only a shard takes its fleet from another store"
+        );
+        anyhow::ensure!(
+            authority.is_default_store()?,
+            "a shard's fleet authority must be the default store"
+        );
+        self.fleet_authority
+            .set(authority)
+            .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))
+    }
+
+    /// The fleet this store's envelopes sign for: its authority's, for a shard.
+    fn signing_fleet_id(&self, connection: &Connection) -> Result<Option<String>> {
+        match self.fleet_authority.get() {
+            Some(authority) => authority.fleet_id(),
+            None => fleet_meta(connection, "fleet_id"),
+        }
+    }
+
+    /// The fleet generation admission folded membership at. For a shard it is the authority's,
+    /// read outside this store's writer: a change landing after the check is used by the next
+    /// loan, as one landing after a default store's admission commits is.
+    fn admission_generation(&self, own: &Connection) -> Result<i64> {
+        match self.fleet_authority.get() {
+            Some(authority) => authority.fleet_generation(),
+            None => fleet_generation(own),
+        }
+    }
+
     pub fn replication_inventory(&self) -> Result<ReplicationInventory> {
         Ok(self.replication_snapshot()?.inventory.public())
     }
@@ -7260,6 +7415,7 @@ impl Store {
                     return None;
                 };
                 VerifiedEnvelopeSignature::verify(
+                    input.shard_id.as_deref(),
                     fleet_id,
                     &envelope.writer,
                     envelope.sequence,
@@ -7274,6 +7430,7 @@ impl Store {
             .iter()
             .filter_map(|signature| {
                 VerifiedEnvelopeSignature::verify(
+                    input.shard_id.as_deref(),
                     fleet_id,
                     &signature.writer,
                     signature.sequence,
@@ -7619,6 +7776,12 @@ impl Store {
     fn prepare_admission_membership(&self) -> Result<(i64, crate::fleet::Membership)> {
         #[cfg(test)]
         ADMISSION_MEMBERSHIP_FOLDS.with(|count| count.set(count.get() + 1));
+        if let Some(authority) = self.fleet_authority.get() {
+            // Read the generation first: a membership folded at a later one only makes the
+            // next loan see the generation moved and fold again.
+            let generation = authority.fleet_generation()?;
+            return Ok((generation, authority.fleet_membership()?));
+        }
         let reader = self.readers.get();
         let snapshot = reader.unchecked_transaction()?;
         let generation = fleet_generation(&snapshot)?;
@@ -7770,7 +7933,7 @@ impl Store {
                 let mut pass = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
                 let (prepared_generation, prepared_membership) = membership.as_ref().unwrap();
-                if fleet_generation(&pass)? != *prepared_generation {
+                if self.admission_generation(&pass)? != *prepared_generation {
                     // Foreground authority changes can overtake this loan. Release it and
                     // prepare again without folding history on the writer or using stale roots.
                     drop(pass);
@@ -7805,6 +7968,9 @@ impl Store {
                     }
                     let started = std::time::Instant::now();
                     let hold = match authority {
+                        AdmissionAuthority::Membership if self.fleet_authority.get().is_some() => {
+                            shard_admission_hold(&pass, prepared_membership, envelope)?
+                        }
                         AdmissionAuthority::Membership => {
                             fleet_admission_hold(&pass, prepared_membership, envelope)?
                         }
@@ -8631,7 +8797,9 @@ impl Store {
                     params![peer, error, now_ms().to_string()],
                 )
             }).map_err(anyhow::Error::msg)??;
-            return Ok(true);
+            // A refused route is local route state: while the peer still exchanges with us in
+            // either direction it is no more stale than after a missed exchange.
+            return Ok(!self.peer_recently_up(peer)?);
         }
         // Keep the existing storage and claim vocabulary for mixed-version fleets.
         // Unknown reachability projects as last-seen in current product views.
@@ -8649,29 +8817,7 @@ impl Store {
                 )
             })
             .map_err(anyhow::Error::msg)??;
-        // An inbound exchange is just as good evidence of reachability as an outbound one.
-        // Keep the last success during a short missed-exchange window, so a failed dial on
-        // one side cannot flap a peer that is still exchanging in the other direction.
-        let last_success = self.replication_peer_last_success(peer)?;
-        let recent_exchange =
-            last_success.is_some_and(|last| now_ms().saturating_sub(last) < PEER_UP_MS);
-        if recent_exchange {
-            return Ok(false);
-        }
-        // A peer may also have a fresh up observation without a matching peer-row success
-        // (for example, after a worker restart). Its published status must get the same
-        // missed-exchange grace period or one outbound timeout reverses it immediately. A row
-        // success, once recorded, is the newer evidence: every exchange updates it, while the
-        // observation changes only with the status.
-        let recent_observation = last_success.is_none()
-            && self
-                .latest_claim(&format!("host/{peer}"), Some("transport.observed"))?
-                .filter(|claim| {
-                    claim.origin == self.origin && claim.body["fields"]["status"] == "up"
-                })
-                .and_then(|claim| claim.body["fields"]["last_success_at"].as_u64())
-                .is_some_and(|last| now_ms().saturating_sub(u128::from(last)) < PEER_UP_MS);
-        if recent_observation {
+        if self.peer_recently_up(peer)? {
             return Ok(false);
         }
         if self
@@ -8697,6 +8843,34 @@ impl Store {
             })
             .map_err(anyhow::Error::msg)??;
         Ok(true)
+    }
+
+    /// Whether `peer` exchanged with this member, in either direction, within the missed-exchange
+    /// window, or this member's own up observation of it is that recent.
+    fn peer_recently_up(&self, peer: &str) -> Result<bool> {
+        // An inbound exchange is just as good evidence of reachability as an outbound one.
+        // Keep the last success during a short missed-exchange window, so a failed dial on
+        // one side cannot flap a peer that is still exchanging in the other direction.
+        let last_success = self.replication_peer_last_success(peer)?;
+        let recent_exchange =
+            last_success.is_some_and(|last| now_ms().saturating_sub(last) < PEER_UP_MS);
+        if recent_exchange {
+            return Ok(true);
+        }
+        // A peer may also have a fresh up observation without a matching peer-row success
+        // (for example, after a worker restart). Its published status must get the same
+        // missed-exchange grace period or one outbound timeout reverses it immediately. A row
+        // success, once recorded, is the newer evidence: every exchange updates it, while the
+        // observation changes only with the status.
+        let recent_observation = last_success.is_none()
+            && self
+                .latest_claim(&format!("host/{peer}"), Some("transport.observed"))?
+                .filter(|claim| {
+                    claim.origin == self.origin && claim.body["fields"]["status"] == "up"
+                })
+                .and_then(|claim| claim.body["fields"]["last_success_at"].as_u64())
+                .is_some_and(|last| now_ms().saturating_sub(u128::from(last)) < PEER_UP_MS);
+        Ok(recent_observation)
     }
 
     /// The transport links the fleet currently observes as up, as `(observer, observed)` node
@@ -8957,6 +9131,17 @@ impl Store {
 
     pub fn trims_locally(&self) -> bool {
         self.trim_local.load(Ordering::Relaxed)
+    }
+
+    /// The most claims a member that trims locally deletes in one day, `[trim] daily_claims`. A
+    /// cut that drops more stays `trimming` and goes on where it stopped the next day, before the
+    /// next cut begins, so a large backlog drains over several days rather than in one long trim.
+    pub fn trim_locally_at_most(&self, claims: u64) {
+        self.trim_daily_claims.store(claims, Ordering::Relaxed);
+    }
+
+    pub fn local_trim_daily_claims(&self) -> u64 {
+        self.trim_daily_claims.load(Ordering::Relaxed)
     }
 
     /// Every projection that a peer with the same envelopes projects differently, by peer.

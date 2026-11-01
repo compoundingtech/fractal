@@ -109,6 +109,26 @@ fn signed_current_members_only_and_local_retirement_withdraws_everything() {
 }
 
 #[test]
+fn endpoint_protocol_accepts_both_names_only_for_this_fleet() {
+    for (protocol, accepted) in [
+        ("st3/fleet/test-fleet", true),
+        ("fractal/fleet/test-fleet", true),
+        ("st3/fleet/other-fleet", false),
+        ("fractal/fleet/other-fleet", false),
+        ("other/fleet/test-fleet", false),
+        ("fractal/pty/test-fleet", false),
+    ] {
+        let mut view = view();
+        view.members[1].endpoints[0]["protocol"] = json!(protocol);
+        let result = desired(&view, "own-key", FLEET, &BTreeSet::new());
+        assert_eq!(result.is_ok(), accepted, "{protocol}");
+        if accepted {
+            assert_eq!(result.unwrap(), BTreeSet::from(["peer-node".into()]));
+        }
+    }
+}
+
+#[test]
 fn endpoint_protocol_cannot_inject_non_st_grants() {
     let mut view = view();
     view.members[1].endpoints[0]["protocol"] = json!("exec");

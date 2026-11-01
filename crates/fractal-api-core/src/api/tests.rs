@@ -325,7 +325,7 @@ async fn history_pages_and_detail_do_not_cache_the_whole_claim_log() {
     for number in 0..8 {
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_as_older_build_for_test(&ClaimInput {
                 subject: "daemon/node".into(),
                 kind: "daemon.diagnostic".into(),
                 actor: None,
@@ -968,7 +968,7 @@ fn repeated_agent_list_reads_only_local_frontier_without_rebuilding() {
     client_agent_resources(&state.store, false, "first", index).unwrap();
     let index = state
         .store
-        .append_claim(&ClaimInput {
+        .append_as_older_build_for_test(&ClaimInput {
             subject: "daemon/node".into(),
             kind: "daemon.diagnostic".into(),
             actor: None,
@@ -1620,9 +1620,21 @@ fn message_delivery_does_not_hold_stale_or_restarted_native_decisions() {
     let now = observed.accepted_at_unix_ms;
     assert!(message_delivery_value(&store, to, "staged", now, now).unwrap()["reason"]
         .as_str().unwrap().contains("held"));
-    let stale = message_delivery_value(&store, to, "staged", now, now + 90_001).unwrap();
+    // An unchanged human ask remains current throughout the real heartbeat interval.
+    let freshness = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+    for age in [90_001, 180_000, 300_000, freshness] {
+        for phase in ["sent", "staged"] {
+            let held = message_delivery_value(&store, to, phase, now, now + age).unwrap();
+            assert_eq!(held["state"], "waiting");
+            assert_eq!(held["phase"], phase);
+            assert_eq!(held["age_ms"], json!(age));
+            assert!(held["reason"].as_str().unwrap().contains("held outside the native harness"));
+        }
+    }
+    let stale = message_delivery_value(&store, to, "staged", now, now + freshness + 1).unwrap();
     assert_eq!(stale["state"], "waiting");
-    assert!(!stale["reason"].as_str().unwrap().contains("held"));
+    assert_eq!(stale["phase"], "staged");
+    assert_eq!(stale["reason"], "waiting for native handoff; failed handoffs retry automatically");
 
     let restarted = append("runtime.observed", json!({
         "status": "running", "runtime_id": "hold-runtime", "incarnation_id": "second"
@@ -1851,6 +1863,47 @@ agent "fixture" { workspace "/tmp"; harness "opencode" {} }
     let index = state.store.index().unwrap();
     let resources = client_agent_resources(&state.store, false, "snapshot", index).unwrap();
     assert_eq!(resources[0]["state"], "waiting");
+}
+
+#[tokio::test]
+async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = "version 2\nagent \"fixture\" { workspace \"/tmp\"; command \"true\" }\n";
+    let intent = parse_intent(source, "node").unwrap();
+    let plan = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    state.store.apply(&intent, &plan.subject_tokens, "agent-lane").unwrap();
+    let (desired, _) = state.store.desired_subject_with_writer("agent/node.fixture").unwrap().unwrap();
+    let runtime_id = desired.member.unwrap().runtime_id;
+    let app = router(state);
+    let get = |path: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().method("GET").uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+        }
+    };
+    let (status, body) = get("/v1/agents/lane?agent=node.fixture").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["value"]["agent"], "agent/node.fixture");
+    assert_eq!(body["value"]["runtime_id"], runtime_id.as_str());
+    // The runtime's own name for the seat's slice, the one a launch caps (crate::lane::prepare).
+    let slice = fractal_runtime::seat_slice(&runtime_id);
+    assert_eq!(body["value"]["slice"], slice.as_str());
+    // The lane's own sccache server, as the runtime names it in a laned task's environment, under the
+    // daemon's runtime directory; null without one.
+    let sccache = std::env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| fractal_runtime::lane_sccache_socket(&dir, &slice));
+    assert_eq!(body["value"]["sccache_server_uds"], json!(sccache), "{body}");
+    let (status, body) = get("/v1/agents/lane?agent=node.nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
 
 #[test]
@@ -3448,6 +3501,125 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
     assert_eq!(status, StatusCode::OK, "{again}");
     assert_eq!(first["claim_ids"], again["claim_ids"]);
     assert!(state.store.active_mission_runs().unwrap().is_empty());
+}
+
+/// A seat freshness push names the member it came from; only the replication worker, which runs
+/// in no harness, may record one. A bound harness is refused before the handler, and nothing is
+/// recorded.
+#[tokio::test]
+async fn a_bound_harness_cannot_record_seat_freshness() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let received = crate::peer::ReceivedSeatFreshness {
+        from: "another-member".into(),
+        seats: vec![crate::peer::SeatHeard {
+            agent: "agent/another-member.seat".into(),
+            incarnation_id: "one".into(),
+            heard_at_unix_ms: 1_000,
+        }],
+    };
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(serde_json::to_vec(&received).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let error: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "foreign-agent-actor");
+    assert_eq!(
+        state.store.extension::<crate::store::RelayedFreshness>().heard_at("agent/another-member.seat", "one"),
+        None
+    );
+}
+
+/// Every internal route the daemon registers, from its router's source, so a new one is covered
+/// without editing a list.
+fn internal_routes() -> Vec<String> {
+    let source = /* sqlite-large-value: allow-for-now lv-hcb8b52f10887 owner=fractal_api_core::api::tests TODO=trace-statement-and-value-representation */ include_str!("../api.rs");
+    let mut routes = std::collections::BTreeSet::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("\"/v1/internal/") {
+        let literal = &rest[start + 1..];
+        let end = literal.find('"').unwrap();
+        routes.insert(literal[..end].to_owned());
+        rest = &literal[end..];
+    }
+    routes.insert(crate::peer::CLIENT_READ_FORWARD_PATH.to_owned());
+    routes.insert(crate::peer::SEAT_FRESHNESS_INTERNAL_PATH.to_owned());
+    // Each path parameter (`{id}`, `{shard}`, ...) is given a concrete segment.
+    routes
+        .into_iter()
+        .map(|route| {
+            route
+                .split('/')
+                .map(|segment| if segment.starts_with('{') && segment.ends_with('}') { "example" } else { segment })
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
+}
+
+/// Internal routes now refuse seat callers: a bound harness is refused on every one of them, by
+/// any method, while this node's replication worker and its operator's CLI, which run in no
+/// harness, pass.
+#[tokio::test]
+async fn internal_routes_refuse_seat_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let routes = internal_routes();
+    assert!(routes.len() >= 25, "the router's internal routes were found: {routes:?}");
+    for route in &routes {
+        for method in [axum::http::Method::GET, axum::http::Method::POST] {
+            let request = || {
+                Request::builder()
+                    .method(method.clone())
+                    .uri(route.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            };
+            let refused = guard_bound_request(request(), Some("agent/own"), &state.store).await.unwrap_err();
+            assert_eq!(refused.code, "foreign-agent-actor", "{method} {route}");
+            assert!(
+                guard_bound_request(request(), None, &state.store).await.is_ok(),
+                "{method} {route} serves a caller in no harness"
+            );
+        }
+    }
+}
+
+/// Through the router: a seat is refused on an internal route before its handler runs, the
+/// worker is served, and a seat reads the fleet's status through its public route.
+#[tokio::test]
+async fn a_seat_reads_fleet_views_through_public_routes_only() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let call = |method: &str, route: &str, bound: bool| {
+        let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
+        if bound {
+            request = request.extension(BoundAgent("agent/own".into()));
+        }
+        app.clone().oneshot(request.body(Body::from(if method == "GET" { "" } else { "{}" })).unwrap())
+    };
+    let refused = call("POST", "/v1/internal/replication/receive", true).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap()["code"], "foreign-agent-actor");
+    assert_eq!(call("GET", "/v1/internal/fleet/status", true).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(call("GET", "/v1/internal/fleet/status", false).await.unwrap().status(), StatusCode::OK);
+    for route in ["/v1/fleet/status", "/v1/fleet/membership", "/v1/fleet/admission-residue", "/v1/fleet/invites"] {
+        assert_eq!(call("GET", route, true).await.unwrap().status(), StatusCode::OK, "{route}");
+    }
 }
 
 #[tokio::test]
@@ -7436,10 +7608,8 @@ async fn retired_mailbox_successor_lists_reads_and_closes_as_itself() {
         idempotency_key: Some("custody-api-send".into()),
     }).unwrap();
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    let retirement = state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-api-retire", &[], Some("agent/example/new"),
-    ).unwrap().0;
+    let retirement = state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-api-retire", &[], Some("agent/example/new"), None).unwrap().0;
     let app = router(state.clone());
     let (status, detail) = get_request(app.clone(), "/v1/client/agents/example/old").await;
     assert_eq!(status, StatusCode::OK, "{detail}");
@@ -7484,10 +7654,8 @@ fn retired_agent_cached_card_refolds_custody_once_at_new_cut() {
     let old = before.iter().find(|card| card["id"] == "agent/example/old").unwrap();
     assert!(old.get("mail_custody").is_none());
     let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
-    state.store.retire_agent_with_successor(
-        "agent/example/old", "person/avery", "Rollover", &token, None,
-        "custody-card-retire", &[], Some("agent/example/new"),
-    ).unwrap();
+    state.store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover", &token, None,
+    "custody-card-retire", &[], Some("agent/example/new"), None).unwrap();
     let after_index = state.store.index().unwrap();
     let after = client_agent_resources_cached(&state.store, false, after_index).unwrap();
     let old = after.iter().find(|card| card["id"] == "agent/example/old").unwrap();
@@ -12754,6 +12922,66 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
 }
 
 #[tokio::test]
+async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    owner.store.bind_fleet("fleet/renamed-subject-test").unwrap();
+    let original = "agent/example-subject-original/worker";
+    let renamed = "agent/example-subject-renamed/worker";
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-subject-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "subject-declare").unwrap();
+    roster_fixture_append(&owner.store, original, "runtime.observed", json!({
+        "status":"running", "runtime_id":original, "host":owner.node,
+        "incarnation_id":"subject-incarnation"
+    }));
+    let app = router(owner.clone());
+    let (_, before) = get_request(app.clone(), &format!("/v1/status?subject={original}")).await;
+    assert!(!before["subjects"][0]["actual"].is_null(), "{before}");
+    let (status, receipt) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":original, "to":renamed, "actor":"person/robin",
+        "reason":"Clarify responsibility", "idempotency_key":"subject-rename"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    let (status, after) = get_request(app.clone(), &format!("/v1/status?subject={original}")).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    for field in ["host", "incarnation_id", "runtime_id", "status"] {
+        assert_eq!(after["subjects"][0]["actual"][field], before["subjects"][0]["actual"][field]);
+    }
+    let replica_root = tempfile::tempdir().unwrap();
+    let mut replica = state(replica_root.path());
+    replica.store = Arc::new(Store::open_memory("subject-replica").unwrap());
+    replica.store.bind_fleet("fleet/renamed-subject-test").unwrap();
+    let exchange = owner.store.export_replication_exchange_answering(
+        "fleet/renamed-subject-test", &replica.store.replication_inventory().unwrap(),
+        &replica.store.replication_signature_requests().unwrap(),
+    ).unwrap();
+    replica.store.receive_replication_exchange(owner.store.origin(), "fleet/renamed-subject-test", &exchange).unwrap();
+    replica.store.validate_replication_backlog().unwrap();
+    replica.store.project_replication_backlog().unwrap();
+    for app in [app, router(replica)] {
+        let mut previous_claims = None;
+        for requested in [renamed, original] {
+            let (status, shown) = get_request(app.clone(), &format!("/v1/status?subject={requested}")).await;
+            assert_eq!(status, StatusCode::OK, "{shown}");
+            assert_eq!(shown["subjects"][0]["actual"], after["subjects"][0]["actual"]);
+            let (status, claims) = get_request(app.clone(), &format!("/v1/claims?subject={requested}&order=desc&limit=20")).await;
+            assert_eq!(status, StatusCode::OK, "{claims}");
+            assert!(!claims["claims"].as_array().unwrap().is_empty(), "{claims}");
+            assert!(claims["claims"].as_array().unwrap().iter().any(|claim| claim["kind"] == "runtime.observed"));
+            if let Some(previous) = previous_claims.replace(claims["claims"].clone()) {
+                assert_eq!(previous, claims["claims"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn renamed_agent_rollout_aliases_share_launch_receipt_and_retry_identity() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -13194,4 +13422,315 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     assert_eq!(status, StatusCode::OK, "{resumed}");
     assert_eq!(resumed["cleared"], "fixture stopped again");
     assert_eq!(fault(), None);
+}
+
+#[tokio::test]
+async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let dismiss = |bound: Option<&'static str>, actor: &'static str| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/faults/dismiss")
+            .header("content-type", "application/json");
+        if let Some(agent) = bound {
+            request = request.extension(BoundAgent(agent.into()));
+        }
+        let body = json!({"source":"mission-run/ended","reason":"the run ended","actor":actor});
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            (status, envelope.get("value").cloned().unwrap_or(envelope))
+        }
+    };
+    for (bound, actor, code) in [
+        // A harness never names a person; an ordinary agent acting as itself reaches the store,
+        // which refuses it, and a person reaches the store and finds no such fault.
+        (Some("agent/helper"), "person/avery", "foreign-agent-actor"),
+        (Some("agent/helper"), "agent/helper", "fault-dismiss-forbidden"),
+        (None, "person/avery", "missing-fault"),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = dismiss(bound, actor).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], code, "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before, "{actor}");
+    }
+}
+
+async fn checkpoint_actor_request(
+    app: Router, path: &str, bound: Option<&str>, actor: &str,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(agent) = bound {
+        request = request.extension(BoundAgent(agent.into()));
+    }
+    // Deliberately omit the identity header: the socket binding still governs the body actor.
+    let body = json!({"actor":actor, "reason":"reviewed checkpoint", "writer":"absent-writer"});
+    let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    (status, envelope.get("value").cloned().unwrap_or(envelope))
+}
+
+#[tokio::test]
+async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
+        for actor in ["person/operator", "agent/other"] {
+            let before = state.store.index().unwrap();
+            let (status, refused) = checkpoint_actor_request(
+                app.clone(), path, Some("agent/helper"), actor,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {refused}");
+            assert_eq!(refused["code"], "foreign-agent-actor", "{path}: {refused}");
+            assert_eq!(state.store.index().unwrap(), before, "{path}");
+        }
+        // The binding accepts the seat's own identity; store authorization still applies.
+        let code = if path.ends_with("/resume") {
+            "invalid-checkpoint-resume"
+        } else {
+            "invalid-checkpoint-excusal"
+        };
+        let (status, refused) = checkpoint_actor_request(
+            app.clone(), path, Some("agent/helper"), "agent/helper",
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {refused}");
+        assert_eq!(refused["code"], code, "{path}: {refused}");
+
+        let (status, accepted) = checkpoint_actor_request(
+            app.clone(), path, None, "person/operator",
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {accepted}");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.trim_locally(true).unwrap();
+    *state.store.extension::<crate::store::answers_check::TrimSettings>()
+        .notify.lock().unwrap() = Some("agent/helper".into());
+    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let (status, resumed) = checkpoint_actor_request(
+        app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+}
+
+#[tokio::test]
+async fn renamed_mailbox_custody_and_cursors_share_immutable_identity_on_both_replicas() {
+    const OLD: &str = "agent/example-mail-original/worker";
+    const NEW: &str = "agent/example-mail-renamed/worker";
+    const FLEET: &str = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    owner.store.bind_fleet(FLEET).unwrap();
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-mail-original/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "mail-declare").unwrap();
+    let app = router(owner.clone());
+    let (status, before) = json_request(app.clone(), "/v1/messages", json!({
+        "from":"person/robin","to":OLD,"content":"Before rename","idempotency_key":"mail-before",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    let (status, second_before) = json_request(app.clone(), "/v1/messages", json!({
+        "from":"person/robin","to":OLD,"content":"Also before rename","idempotency_key":"mail-second-before",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{second_before}");
+    let (status, before_page) = get_request(app.clone(), &format!(
+        "/v1/messages/page?to={OLD}&acting_as={OLD}&include_closed=true&limit=1",
+    )).await;
+    assert_eq!(status, StatusCode::OK, "{before_page}");
+    let (status, renamed) = json_request(app.clone(), "/v1/agents/rename-id", json!({
+        "from":OLD,"to":NEW,"actor":"person/robin","reason":"Clarify seat",
+        "idempotency_key":"mail-rename",
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    let (status, continued) = get_request(app.clone(), &format!(
+        "/v1/messages/page?to={NEW}&acting_as={NEW}&include_closed=true&limit=1&cursor={}",
+        urlencoding::encode(before_page["next_cursor"].as_str().unwrap()),
+    )).await;
+    assert_eq!(status, StatusCode::OK, "{continued}");
+    assert_eq!(continued["items"].as_array().unwrap().len(), 1);
+    assert_ne!(continued["items"][0]["subject"], before_page["items"][0]["subject"]);
+    assert!(continued["next_cursor"].is_null());
+    for (index, name) in [OLD, NEW].iter().enumerate() {
+        let (status, sent) = json_request(app.clone(), "/v1/messages", json!({
+            "from":name,"to":name,"content":"After rename","title":"rename-mail",
+            "idempotency_key":format!("mail-after-{index}"),
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{sent}");
+        assert_eq!(sent["recipient_identity"], OLD);
+        assert_eq!(sent["recipient"], NEW);
+        assert_eq!(sent["from"], OLD);
+        assert_eq!(sent["to"], OLD);
+    }
+    let peer_root = tempfile::tempdir().unwrap();
+    let mut peer = state(peer_root.path());
+    peer.store = Arc::new(Store::open_memory("mail-peer").unwrap());
+    // The shared HTTP harness fixes snapshot_host to node; replication uses store.origin().
+    peer.store.bind_fleet(FLEET).unwrap();
+    let exchange = owner.store.export_replication_exchange(
+        FLEET, &peer.store.replication_inventory().unwrap(),
+    ).unwrap();
+    peer.store.receive_replication_exchange(owner.store.origin(), FLEET, &exchange).unwrap();
+    peer.store.validate_replication_backlog().unwrap();
+    peer.store.project_replication_backlog().unwrap();
+    for (replica, state) in [owner, peer].into_iter().enumerate() {
+        let app = router(state);
+        for mailbox in [OLD, NEW] {
+            let (status, messages) = get_request(app.clone(), &format!(
+                "/v1/messages?to={mailbox}&include_closed=true",
+            )).await;
+            assert_eq!(status, StatusCode::OK, "{messages}");
+            assert_eq!(messages.as_array().unwrap().len(), 4);
+            for actor in [OLD, NEW] {
+                let (status, filtered) = get_request(app.clone(), &format!(
+                    "/v1/messages/page?to={mailbox}&from={actor}&acting_as={actor}&subject=rename-mail&include_closed=true",
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{filtered}");
+                assert_eq!(filtered["items"].as_array().unwrap().len(), 2);
+                let (status, first) = get_request(app.clone(), &format!(
+                    "/v1/messages/page?to={mailbox}&acting_as={actor}&include_closed=true&limit=1",
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{first}");
+                let mut subjects = vec![first["items"][0]["subject"].clone()];
+                let mut cursor = first["next_cursor"].as_str().map(str::to_owned);
+                // A cursor is bound to identity, not whichever spelling opened the page.
+                let other_mailbox = if mailbox == OLD { NEW } else { OLD };
+                let other_actor = if actor == OLD { NEW } else { OLD };
+                while let Some(next) = cursor {
+                    let (status, page) = get_request(app.clone(), &format!(
+                        "/v1/messages/page?to={other_mailbox}&acting_as={other_actor}&include_closed=true&limit=1&cursor={}",
+                        urlencoding::encode(&next),
+                    )).await;
+                    assert_eq!(status, StatusCode::OK, "{page}");
+                    subjects.extend(page["items"].as_array().unwrap().iter().map(|item| item["subject"].clone()));
+                    cursor = page["next_cursor"].as_str().map(str::to_owned);
+                }
+                assert_eq!(subjects.len(), 4);
+                assert_eq!(subjects.iter().map(|subject| subject.as_str().unwrap()).collect::<BTreeSet<_>>().len(), 4);
+                let combination = usize::from(mailbox == NEW) * 2 + usize::from(actor == NEW);
+                for lifecycle in ["staged", "delivered", "read", "closed"] {
+                    for subject in subjects.iter().skip(combination).take(1) {
+                        let (status, claim) = json_request(app.clone(), &format!(
+                            "/v1/messages/{}/claims", urlencoding::encode(subject.as_str().unwrap()),
+                        ), json!({
+                            "actor":actor,"lifecycle":lifecycle,
+                            "transport":"codex-app-server","runtime_id":"runtime/rename-mail",
+                            "idempotency_key":format!("mail-{replica}-{mailbox}-{actor}-{subject}-{lifecycle}"),
+                        })).await;
+                        assert_eq!(status, StatusCode::OK, "{claim}");
+                        assert_eq!(claim["actor"], OLD);
+                    }
+                }
+                let (status, closed) = get_request(app.clone(), &format!(
+                    "/v1/messages/page?to={mailbox}&acting_as={actor}",
+                )).await;
+                assert_eq!(status, StatusCode::OK, "{closed}");
+                assert_eq!(closed["items"].as_array().unwrap().len(), 3 - combination);
+            }
+            let (status, denied) = get_request(app.clone(), &format!(
+                "/v1/messages/page?to={mailbox}&acting_as=agent/example-unrelated",
+            )).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+            assert_eq!(denied["code"], "wrong-message-recipient");
+        }
+        for lifecycle in ["read", "closed"] {
+            let (status, denied) = json_request(app.clone(), &format!(
+                "/v1/messages/{}/claims", urlencoding::encode(before["subject"].as_str().unwrap()),
+            ), json!({
+                "actor":"agent/example-unrelated","lifecycle":lifecycle,
+                "idempotency_key":format!("mail-denied-{replica}-{lifecycle}"),
+            })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+            assert_eq!(denied["code"], "wrong-message-recipient");
+        }
+    }
+}
+
+
+#[test]
+fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_runs() {
+    let clock = DoctorClock::new(Duration::from_secs(5), Duration::from_millis(100));
+    let pass = |name: &str| DoctorCheck { name: name.into(), status: "pass".into(), message: String::new() };
+    let slow = clock.checks("slow-check", || {
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![pass("slow-check")])
+    });
+    assert_eq!(slow.len(), 1);
+    assert_eq!((slow[0].name.as_str(), slow[0].status.as_str()), ("slow-check", "timeout"));
+    assert!(slow[0].message.starts_with("did not finish in 0.") && slow[0].message.contains(" s;"), "{}", slow[0].message);
+    // A store read past the deadline is interrupted rather than left to run.
+    let interrupted = clock.checks("interrupted", || {
+        std::thread::sleep(Duration::from_millis(150));
+        smallclaims::read_budget::check().map_err(|error| ApiError::internal(anyhow::anyhow!(error)))?;
+        Ok(vec![pass("interrupted")])
+    });
+    assert_eq!(interrupted[0].status, "timeout");
+    let next = clock.checks("next-check", || Ok(vec![pass("next-check")]));
+    assert_eq!(next[0].status, "pass");
+    // An error fails its own check and nothing else.
+    let failed = clock.checks("failing-check", || Err(ApiError::internal(anyhow::anyhow!("no such table"))));
+    assert_eq!((failed[0].name.as_str(), failed[0].status.as_str()), ("failing-check", "fail"));
+    assert!(failed[0].message.contains("no such table"), "{}", failed[0].message);
+    let checks = [slow, next].concat();
+    assert_eq!(doctor_status(&checks), "fail", "a timed-out check fails the report");
+    assert_eq!(doctor_status(&checks[1..]), "pass");
+}
+
+#[test]
+fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
+    let clock = DoctorClock::new(Duration::from_millis(150), Duration::from_millis(100));
+    let ran = std::cell::Cell::new(0);
+    for _ in 0..2 {
+        clock.checks("slow-check", || {
+            ran.set(ran.get() + 1);
+            std::thread::sleep(Duration::from_millis(110));
+            Ok(Vec::new())
+        });
+    }
+    assert_eq!(ran.get(), 2);
+    let skipped = clock.checks("late-check", || {
+        ran.set(ran.get() + 1);
+        Ok(Vec::new())
+    });
+    assert_eq!(ran.get(), 2, "a check after the total is spent does not run");
+    assert_eq!((skipped[0].status.as_str(), skipped[0].message.as_str()), ("timeout", "not run: doctor's checks used all their time"));
+}
+
+#[tokio::test]
+async fn doctor_reads_what_is_sealed_without_sealing() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/example.sealing".into(), kind: "runtime.observed".into(),
+        actor: Some("agent/example.sealing".into()),
+        fields: BTreeMap::from([("status".into(), json!("running"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let (status, doctor) = get_request(router(state.clone()), "/v1/doctor").await;
+    assert_eq!(status, StatusCode::OK, "{doctor}");
+    let checks = doctor["checks"].as_array().unwrap();
+    let signatures = checks.iter().find(|check| check["name"] == "claim-signatures").unwrap();
+    let message = signatures["message"].as_str().unwrap();
+    assert!(!message.contains(" 0 not yet sealed"), "doctor sealed this node's batches to answer: {message}");
+    assert!(checks.iter().all(|check| check["status"] != "timeout"), "{doctor}");
 }

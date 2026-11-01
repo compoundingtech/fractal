@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import type { Session } from '@fractal/client'
+import type { HarnessQuestion, Session } from '@fractal/client'
 import { Agent as AgentSchema, decodeUnknownSync } from '@fractal/client/schema'
 import { ANCHOR_MS, agent, buildWorld, foldSlice, genericVariants, terminalRecord, terminalRun, wireValues, type RawResource, type Slice, type SyncEvent, type TerminalRecord, type WorldDefinition } from '../src/index.ts'
 import { drawCast } from '../src/kit/cast.ts'
@@ -436,6 +436,23 @@ describe('foundation contracts', () => {
     const details: Slice<'details'> = { ...original.slices.details, timeline: [{ _tag: 'changes', at_ms: 1_000, store: 0, upserts: [session], removes: [] }] }
     expect(decodeSlice(original.id, details)).toEqual([])
     expect(() => foldSlice(details, 1_000)).toThrow('a session upsert has no place in this slice')
+  })
+
+  it('rejects strict-valid harness-question metadata in a roster rather than storing it as future data', () => {
+    const original = base()
+    const member = original.cast.agents[0]!
+    const question: HarnessQuestion = {
+      kind: 'harness-question', id: 'harness-question/00ca25ee5d0da6af852c81a5ee4949df',
+      revision: '1', updated_at: new Date(original.now).toISOString(),
+      agent: member.id, session: member.session, native_id: `sha256:${'a'.repeat(64)}`,
+      runtime_incarnation: 'foundation-incarnation', observed_at: original.now,
+      questions: [{ id: 'q0', options: 2, multi: false, required: true }],
+      resolution: null, answer: { state: 'available' },
+    }
+    const roster: Slice<'roster'> = { ...original.slices.roster, timeline: [{ _tag: 'changes', at_ms: 1_000, store: 0, upserts: [question], removes: [] }] }
+    expect(decodeSlice(original.id, roster)).toEqual([])
+    expect(() => foldSlice(roster, 1_000)).toThrow('a harness-question upsert has no place in this slice')
+    expect(original.slices.roster.state.resources).toBeUndefined()
   })
 
   it('drops discarded unknown declarations when regenerating the empty roster variant', () => {

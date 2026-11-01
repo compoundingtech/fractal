@@ -431,6 +431,18 @@ pub async fn client_agents(
     Extension(snapshot): Extension<ClientSnapshot>,
     Query(query): Query<ClientListQuery>,
 ) -> Result<ClientPageResponse, ApiError> {
+    let history = query.history || query.cursor.is_some();
+    let observation = state.clone();
+    let mut response = client_agents_without_admission(State(state), Extension(snapshot), Query(query)).await?;
+    overlay_seat_admission(&observation, &mut response.1.0.items, history);
+    Ok(response)
+}
+
+async fn client_agents_without_admission(
+    State(state): State<AppState>,
+    Extension(snapshot): Extension<ClientSnapshot>,
+    Query(query): Query<ClientListQuery>,
+) -> Result<ClientPageResponse, ApiError> {
     if query.min_cut.is_some() && query.cursor.is_some() {
         return Err(client_v0::validation("min_cut is only supported on the first agents page"));
     }
@@ -662,7 +674,7 @@ pub async fn client_agents_detail(
     let created_at = snapshot.created_at.clone();
     let snapshot_index = snapshot.store_index;
     let subject = identity.to_owned();
-    let items = blocking_store(move || {
+    let mut items = blocking_store(move || {
         let selected = BTreeSet::from([subject]);
         let mut items = client_agent_resources_selected(
             &store,
@@ -696,6 +708,7 @@ pub async fn client_agents_detail(
         Ok(items)
     })
     .await?;
+    overlay_seat_admission(&state, &mut items, history);
     client_detail(items, "agent", &identity)
 }
 
