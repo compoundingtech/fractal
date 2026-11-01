@@ -133,15 +133,16 @@ const syntaxTheme: Highlights.Theme = {
   name: 'Fractal semantic tokens', appearance: 'dark',
   style: { syntax: {
     comment: '#000001', keyword: '#000002', tag: '#000002', selector: '#000002',
-    string: '#000003', 'diff.plus': '#000003',
+    string: '#000003', 'diff.plus': '#000009',
     number: '#000004', boolean: '#000007', constant: '#000008',
     function: '#000005', type: '#000005', constructor: '#000005',
     'diff.minus': '#000006',
+    title: '#000002', emphasis: '#000005', link_text: '#000003', link_uri: '#000003',
   } },
 }
 const syntaxKinds: Readonly<Record<string, string>> = {
   '#000001': 'comment', '#000002': 'keyword', '#000003': 'string', '#000004': 'number',
-  '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant',
+  '#000005': 'function', '#000006': 'deleted', '#000007': 'boolean', '#000008': 'constant', '#000009': 'inserted',
 }
 let highlightsModule: typeof Highlights | undefined
 let highlightsRequest: Promise<void> | undefined
@@ -180,14 +181,14 @@ export function HighlightedSource({ code, language }: { code: string; language: 
     // Reinsert the exact source gaps, including CRLF and trailing empty lines.
     const gap = code.slice(sourceOffset, token.offset)
     sourceOffset = token.offset + token.content.length
-    return <React.Fragment key={index}>{gap}<span data-syntax-token={token.color === undefined ? undefined : syntaxKinds[token.color]} {...stylex.props(
+    return <React.Fragment key={index}>{gap}{token.color === undefined ? token.content : <span data-syntax-token={syntaxKinds[token.color]} {...stylex.props(
       token.color === '#000001' && styles.syntaxComment,
       token.color === '#000002' && styles.syntaxKeyword,
-      token.color === '#000003' && styles.syntaxString,
+      (token.color === '#000003' || token.color === '#000009') && styles.syntaxString,
       (token.color === '#000004' || token.color === '#000007' || token.color === '#000008') && styles.syntaxLiteral,
       token.color === '#000005' && styles.syntaxFunction,
       token.color === '#000006' && styles.syntaxDeleted,
-    )}>{token.content}</span></React.Fragment>
+    )}>{token.content}</span>}</React.Fragment>
   })}</React.Fragment>)}{code.slice(sourceOffset)}</>
 }
 
