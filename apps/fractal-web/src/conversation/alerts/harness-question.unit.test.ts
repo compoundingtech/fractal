@@ -13,10 +13,10 @@ const call = (extra: Partial<ConversationCall> = {}): ConversationCall => ({
 })
 
 describe('projectHarnessAsks', () => {
-  it('normalizes native null placeholders for optional question and option fields', () => {
+  it.each([null, 'null'])('normalizes native %j placeholders for optional question and option fields', placeholder => {
     expect(projectHarnessAsks([call({ input: { questions: [{
-      id: 'database', question: 'Which database?', multi: null, recommended: null,
-      options: [{ label: 'SQLite', description: null, preview: null }],
+      id: 'database', question: 'Which database?', multi: placeholder, recommended: placeholder,
+      options: [{ label: 'SQLite', description: placeholder, preview: placeholder }],
     }] } })])).toEqual([{
       _tag: 'OmpAsk', callId: 'native-call', title: 'The agent has a question',
       questions: [{ _tag: 'SingleSelect', id: 'database', title: 'Which database?',

@@ -25,24 +25,31 @@ export interface HarnessAsk {
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 
+/** OMP strips both placeholders from optional fields before executing the native ask. */
+const nativeOptional = (value: unknown): unknown => value == null || value === 'null' ? undefined : value
+
 const projectQuestion = (value: unknown): HarnessQuestion | undefined => {
   if (!record(value) || typeof value.id !== 'string' || value.id.length === 0 || typeof value.question !== 'string'
-    || !Array.isArray(value.options) || value.options.length > 64
-    || (value.multi != null && typeof value.multi !== 'boolean')) return undefined
+    || !Array.isArray(value.options) || value.options.length > 64) return undefined
+  const multi = nativeOptional(value.multi)
+  const recommended = nativeOptional(value.recommended)
+  if (multi !== undefined && typeof multi !== 'boolean') return undefined
   const options: HarnessOption[] = []
   for (const [position, option] of value.options.entries()) {
-    if (!record(option) || typeof option.label !== 'string'
-      || (option.description != null && typeof option.description !== 'string')
-      || (option.preview != null && typeof option.preview !== 'string')) return undefined
+    if (!record(option) || typeof option.label !== 'string') return undefined
+    const description = nativeOptional(option.description)
+    const preview = nativeOptional(option.preview)
+    if ((description !== undefined && typeof description !== 'string')
+      || (preview !== undefined && typeof preview !== 'string')) return undefined
     options.push({ position, label: option.label,
-      ...(typeof option.description === 'string' ? { description: option.description } : {}),
-      ...(typeof option.preview === 'string' ? { preview: option.preview } : {}) })
+      ...(typeof description === 'string' ? { description } : {}),
+      ...(typeof preview === 'string' ? { preview } : {}) })
   }
-  if (value.recommended != null && (typeof value.recommended !== 'number' || !Number.isInteger(value.recommended)
-    || value.recommended < 0 || value.recommended >= options.length)) return undefined
+  if (recommended !== undefined && (typeof recommended !== 'number' || !Number.isInteger(recommended)
+    || recommended < 0 || recommended >= options.length)) return undefined
   return {
-    _tag: value.multi === true ? 'MultiSelect' : 'SingleSelect', id: value.id, title: value.question, options,
-    ...(typeof value.recommended === 'number' ? { recommended: value.recommended } : {}),
+    _tag: multi === true ? 'MultiSelect' : 'SingleSelect', id: value.id, title: value.question, options,
+    ...(typeof recommended === 'number' ? { recommended } : {}),
   }
 }
 
