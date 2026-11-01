@@ -44,7 +44,7 @@ seat recipe below supplies the identity automatically.
 
 ```sh
 python3 -I scripts/fractal-discord-bridge run --agent agent/example/discord-test \
-  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock"
+  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/fractal.sock"
 ```
 
 Replace the invented agent subject with the intended existing agent. Paste the
@@ -167,7 +167,7 @@ author, channel, text, reference and nonce when present:
 ```sh
 python3 -I scripts/fractal-discord-bridge status --agent agent/example/discord-test
 python3 -I scripts/fractal-discord-bridge resolve --agent agent/example/discord-test \
-  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock" \
+  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/fractal.sock" \
   --fractal-message message/0123456789abcdef --discord-message 505 --part 0
 ```
 

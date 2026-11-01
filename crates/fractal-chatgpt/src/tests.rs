@@ -11,6 +11,22 @@ fn disconnected_adapter() -> Adapter {
 }
 
 #[test]
+fn adapter_accepts_only_paired_gateway_socket_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let credential = dir.path().join("credential");
+    std::fs::write(&credential, "test-only-token").unwrap();
+    std::fs::set_permissions(&credential, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(Adapter::new(&dir.path().join("fractal-client.sock"), &credential).is_ok());
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+    assert!(Adapter::new(&dir.path().join("st3-client.sock"), &credential).is_ok());
+    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+    for name in ["fractal.sock", "st3.sock", "other.sock", "fractal-client.sock.extra"] {
+        let error = Adapter::new(&dir.path().join(name), &credential).err().unwrap();
+        assert!(error.to_string().contains("only the paired gateway"), "{name}: {error}");
+    }
+}
+
+#[test]
 fn discovery_has_exactly_eleven_closed_tools_and_correct_hints() {
     let expected = [
         ("fractal_alerts_list", true, false, false),
