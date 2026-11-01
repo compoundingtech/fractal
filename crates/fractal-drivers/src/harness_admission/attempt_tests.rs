@@ -193,7 +193,7 @@ fn bounded_redacted_error_chain_and_stderr_survive_read_and_retry() {
     let mut capture = Capture::new("bounded");
     capture.phase("version", Some(Duration::from_secs(5)));
     capture
-        .error(&anyhow::anyhow!("Authorization: Bearer fixture-credential").context("outer error"));
+        .error(&anyhow::anyhow!("Authorization:\nfixture-credential").context("outer error"));
     let diagnostic = capture.finish(Some(&scratch), Driver::Omp);
     assert!(diagnostic.stderr_tail.len() <= 4096);
     assert!(diagnostic.error_chain.len() <= 2048);

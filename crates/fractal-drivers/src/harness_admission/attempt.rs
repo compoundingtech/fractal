@@ -166,6 +166,11 @@ fn sanitize(text: &str, bound: usize) -> String {
         } else {
             line
         });
+        // A credential may continue on the next line (a header, YAML value or PEM block).
+        // Withhold the remainder rather than leaking a continuation without its label.
+        if sensitive {
+            break;
+        }
         if output.len() >= bound {
             break;
         }
