@@ -316,7 +316,7 @@ const build = (ctx: FactoryContext): Slices => {
     timeline: [],
   }
 
-  const objectives: Slice<'objectives'> = { kind: 'objectives', variant: 'default', source, decode: 'strict', loading: false, state: fleetObjectives(ctx, ctx.cast.people), timeline: [] }
+  const objectives: Slice<'objectives'> = { kind: 'objectives', variant: 'default', source, decode: 'strict', loading: false, state: fleetObjectives(ctx.cast.people), timeline: [] }
   return { roster, details, attention, conversation, terminal, sync: { ...liveSync(ctx, { conversation }), variant: 'default', source }, objectives }
 }
 
