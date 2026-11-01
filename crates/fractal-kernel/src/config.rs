@@ -611,8 +611,8 @@ impl Default for Config {
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| state_dir.join("run"));
-        let socket = runtime_dir.join("st3.sock");
-        let client_gateway_socket = runtime_dir.join("st3-client.sock");
+        let socket = runtime_dir.join("fractal.sock");
+        let client_gateway_socket = runtime_dir.join("fractal-client.sock");
         Self {
             node: host_name(),
             access_mode: None,
@@ -812,12 +812,15 @@ impl Config {
     pub fn client_socket(&self) -> PathBuf {
         let published = state_socket(&self.state_dir);
         match env::var_os("XDG_RUNTIME_DIR") {
-            None if self.socket == published => fs::read_link(&self.socket)
-                .ok()
-                .filter(|target| target.is_absolute())
-                .unwrap_or_else(|| self.socket.clone()),
-            Some(runtime) if self.socket == Path::new(&runtime).join("st3.sock") => {
-                fractal_client::runtime_or_published_socket(&self.socket, &published)
+            None if self.socket == published => {
+                let resolved = fractal_client::default_unix_socket(&published, &published);
+                fs::read_link(&resolved)
+                    .ok()
+                    .filter(|target| target.is_absolute())
+                    .unwrap_or(resolved)
+            }
+            Some(runtime) if self.socket == Path::new(&runtime).join("fractal.sock") => {
+                fractal_client::default_unix_socket(&self.socket, &published)
             }
             _ => self.socket.clone(),
         }
@@ -1001,7 +1004,7 @@ impl Config {
 }
 
 fn state_socket(state_dir: &Path) -> PathBuf {
-    state_dir.join("run/st3.sock")
+    state_dir.join("run/fractal.sock")
 }
 
 /// The daemon's Fabric terminal socket, which `st terminals expose-fabric` has Fabric forward
@@ -1674,8 +1677,8 @@ sekrets_profile = "nathan/daemon-gh"
         assert_eq!(config.planner, PlannerSpec::default());
         assert!(config.peer_listen.is_none());
         assert!(config.peers.is_empty());
-        assert!(config.socket.ends_with("st3.sock"));
-        assert!(config.client_gateway_socket.ends_with("st3-client.sock"));
+        assert!(config.socket.ends_with("fractal.sock"));
+        assert!(config.client_gateway_socket.ends_with("fractal-client.sock"));
         assert_ne!(config.socket, config.client_gateway_socket);
     }
 
