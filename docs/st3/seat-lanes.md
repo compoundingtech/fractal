@@ -200,8 +200,12 @@ absent, so an undeclared mission's revision and its steps' definition hashes do 
 older member accepts it as before. A mission revision that declares a capacity, on the mission or any
 step, is one an older member cannot accept: it checks a replicated revision by hashing the mission as
 it reads it, its reading drops the field, and the hash no longer matches, so it quarantines the claim
-(projection health `stale`) and keeps the mission's earlier revision. Declare capacity on a mission or
-step only once every member runs a build with this change. An older member reading a laned record drops the field
+(projection health `stale`) and keeps the mission's earlier revision. So publication holds such a
+revision until every member reads the field: each daemon advertises `mission_capacity=1` on its own
+`daemon.started`, and a new revision that declares capacity is refused (`mission-capacity-unavailable`,
+also shown as a blocker in `apply --dry-run`) while any current member has not, naming that member,
+or while a host replicates to this one from outside the fleet membership. A host with no other member
+publishes at once. A mission without capacity is never held. An older member reading a laned record drops the field
 (the record has no `deny_unknown_fields`) and runs the seat without a lane. An older CLI refuses a
 file that declares `capacity` at apply (unknown child), as for any new declaration. An older daemon
 refuses a config with `lanes` set (`deny_unknown_fields`) and does not start, so set the key only on

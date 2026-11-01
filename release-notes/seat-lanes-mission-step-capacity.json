@@ -11,11 +11,11 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Publication refuses a step capacity below the lane of a seat the same publication declares (an undeclared seat counts at 1 core and 3G), an agentless step with a capacity, and a repeated or malformed capacity on a mission or step. A step's capacity is recorded but not yet applied: its seat keeps its own lane until admission lands."
+    "detail": "Publication refuses a step capacity below the lane of a seat the same publication declares (an undeclared seat counts at 1 core and 3G), an agentless step with a capacity, and a repeated or malformed capacity on a mission or step. A step's capacity is recorded but not yet applied: its seat keeps its own lane until admission lands. Publication refuses a mission revision that declares capacity until every current fleet member advertises mission_capacity."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "An undeclared mission serializes exactly as before, so its revision is unchanged and an older member accepts it. A mission revision that declares capacity on the mission or any step is refused by an older member: it re-hashes a replicated mission.published body after reading it into its own MissionSpec, which drops the field, finds the revision invalid, quarantines the claim (projection health stale) and keeps the earlier revision. Declare capacity on missions and steps only once every member runs this build. An older CLI refuses such a file at apply (unknown child)."
+    "detail": "An undeclared mission serializes exactly as before, so its revision is unchanged and an older member accepts it. An older member would refuse a mission revision that declares capacity on the mission or any step: it re-hashes a replicated mission.published body after reading it into its own MissionSpec, which drops the field, finds the revision invalid and quarantines the claim. So each daemon now advertises features.mission_capacity=1 on daemon.started, and publication (apply, its dry-run plan, and a direct mission.published append) refuses a new revision that declares capacity with mission-capacity-unavailable while any current fleet member has not advertised it, naming the member, or while an unfenced writer outside the membership replicates here. A host with no other member publishes at once. An older CLI refuses such a file at apply (unknown child)."
   },
   "downtime": {
     "status": "none",
