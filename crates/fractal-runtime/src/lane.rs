@@ -19,7 +19,7 @@ pub const CAPACITY_ENV: &str = "FRACTAL_SEAT_CAPACITY";
 /// The older spellings of [`CAPACITY_ENV`], removed with it.
 pub const CAPACITY_ENV_ALIASES: [&str; 2] = ["ST_SEAT_CAPACITY", "ST3_SEAT_CAPACITY"];
 
-const GIB: u64 = 1 << 30;
+pub(crate) const GIB: u64 = 1 << 30;
 const MIB: u64 = 1 << 20;
 /// The smallest memory a lane may declare: below it a harness cannot start.
 const MINIMUM_MEMORY: u64 = 256 * MIB;
@@ -355,13 +355,18 @@ fn request_end(slice: &str) -> bool {
 /// Where `slice` sits in the cgroup tree: under `app-lanes.slice` of the user manager this process
 /// runs in.
 fn slice_cgroup(slice: &str) -> Option<std::path::PathBuf> {
+    Some(app_slice_cgroup()?.join(LANES_SLICE).join(slice))
+}
+
+/// `app.slice` of the user manager this process runs in, where seats' scopes and the lanes sit.
+pub(crate) fn app_slice_cgroup() -> Option<std::path::PathBuf> {
     let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
     let parts: Vec<&str> = own.split('/').filter(|part| !part.is_empty()).collect();
     let manager = parts.iter().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
     let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
     path.extend(&parts[..=manager]);
-    path.extend(["app.slice", LANES_SLICE, slice]);
+    path.push("app.slice");
     Some(path)
 }
 

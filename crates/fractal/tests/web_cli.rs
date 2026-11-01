@@ -8,6 +8,7 @@ fn web(arguments: &[&str]) -> Output {
     Command::new(test_env!("CARGO_BIN_EXE_fractal-unstamped"))
         .args(arguments)
         .env_clear()
+        .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
         .env("HOME", root.path())
         // No browser opener exists here: opening the URL deterministically prints it.
         .env("PATH", root.path())

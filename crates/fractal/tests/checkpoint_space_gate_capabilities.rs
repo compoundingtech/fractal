@@ -11,6 +11,7 @@ fn staged_binary_reports_gate_without_state_and_rejects_extra_arguments() {
     let binary = test_env!("CARGO_BIN_EXE_fractal-unstamped");
     let invoke = |extra: &[&str]| {
         let mut command = Command::new(binary);
+        command.env("FRACTAL_SUPPRESS_DEPRECATION", "1");
         command.arg("--checkpoint-space-gate-capabilities").args(extra);
         command.env("HOME", dir.path());
         command.env("XDG_CONFIG_HOME", dir.path().join("config"));
