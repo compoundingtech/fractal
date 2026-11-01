@@ -372,6 +372,25 @@ mod tests {
         set_status("ready");
         store.acknowledge_work(&work.subject, &acknowledge).unwrap();
         assert_eq!(read().map(|(actor, _)| actor), Some(to.to_owned()));
+        // The progress cites the receipt of the read that was recorded, from its recorded fields.
+        let recorded: String = shard
+            .readers
+            .get()
+            .query_row(
+                "SELECT fields FROM stream_lifecycle WHERE subject=?1 AND kind='message.read' AND actor=?2",
+                params![note, to],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let recorded: BTreeMap<String, Value> = serde_json::from_str(&recorded).unwrap();
+        let receipt = crate::store::messages_shard::lifecycle_receipt("alder", note, "message.read", Some(to), &recorded);
+        let progress = store
+            .claims_for(&work.subject, Some("work.progress"))
+            .unwrap()
+            .into_iter()
+            .find(|claim| claim.body["fields"]["handoff_acknowledged"] == note)
+            .unwrap();
+        assert_eq!(progress.body["evidence"], json!([receipt.id]));
         // A read lost after the acknowledgment committed is recorded by the repeat its error asks for.
         shard.connection.write().execute("DELETE FROM stream_lifecycle WHERE subject=?1", [note]).unwrap();
         assert!(read().is_none());
