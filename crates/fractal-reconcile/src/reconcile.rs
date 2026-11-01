@@ -1647,8 +1647,22 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
     /// install config). Applies to launches after this call.
-    pub fn with_lanes(self, enforced: bool) -> Self {
+    pub fn with_lanes(mut self, enforced: bool) -> Self {
         fractal_runtime::set_lanes_enforced(enforced);
+        self.seat_admission.lanes = enforced
+            .then(fractal_runtime::host::size)
+            .flatten()
+            .map(|size| seat_admission::LaneHost {
+                room: fractal_runtime::host::for_lanes(size),
+                outside: fractal_runtime::host::unlaned_seat_memory,
+            });
+        self
+    }
+
+    /// Admission by fit against a host of the test's choosing, without the process-wide switch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_lane_host(mut self, lanes: Option<seat_admission::LaneHost>) -> Self {
+        self.seat_admission.lanes = lanes;
         self
     }
 
@@ -20603,6 +20617,7 @@ pub mod tests {
     mod schedule_standby_parent;
     pub mod mission_eval_reuse;
     mod mission_capacity_tests;
+    mod lane_admission_tests;
     mod ownership_guard_tests;
     mod pull_request_run_tests;
     mod ready_idle_wake;

@@ -1,5 +1,5 @@
 //! Ephemeral admission diagnostics shared by the planner and live API reads.
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
@@ -14,10 +14,25 @@ pub struct Pending {
     pub since: u64,
 }
 
+/// A laned seat whose lane does not fit its host yet (docs/st3/seat-lanes.md, "Admission by fit").
+#[derive(Clone)]
+pub struct LaneWait {
+    pub subject: String,
+    pub since: u64,
+    pub reason: String,
+    /// In line for room. A lane larger than the host can ever give waits out of line, so it holds
+    /// no one back.
+    pub queued: bool,
+}
+
 pub struct State {
     pub decision: Decision,
     pub pending: VecDeque<Pending>,
     pub replacements: BTreeSet<String>,
+    pub lane_waits: VecDeque<LaneWait>,
+    /// Lanes admitted to start that no observation shows running yet, with when, so two starts in
+    /// one pass cannot both take the same room.
+    pub lane_starts: BTreeMap<String, (crate::Capacity, u64)>,
 }
 
 pub struct Status(Mutex<State>);
@@ -31,6 +46,8 @@ impl Default for Status {
             },
             pending: VecDeque::new(),
             replacements: BTreeSet::new(),
+            lane_waits: VecDeque::new(),
+            lane_starts: BTreeMap::new(),
         }))
     }
 }
@@ -49,11 +66,15 @@ impl Status {
             "oldestPendingAgeSecs": state.pending.front().map_or(0, |p| now.saturating_sub(p.since)),
             "pending": state.pending.iter().enumerate().map(|(index, p)| pending_value(p, index, &state.decision.reason, now)).collect::<Vec<_>>(),
             "replacements": state.replacements,
+            "laneWaits": state.lane_waits.iter().map(|wait| lane_wait_value(&state, wait, now)).collect::<Vec<_>>(),
         })
     }
 
     pub fn subject(&self, subject: &str, now: u64) -> Option<Value> {
         let state = self.state();
+        if let Some(wait) = state.lane_waits.iter().find(|wait| wait.subject == subject) {
+            return Some(lane_wait_value(&state, wait, now));
+        }
         state.pending.iter().enumerate().find(|(_, p)| p.subject == subject)
             .map(|(index, p)| pending_value(p, index, &state.decision.reason, now))
             .or_else(|| state.replacements.contains(subject).then(|| json!({
@@ -82,6 +103,39 @@ impl Status {
     }
 }
 
+impl Status {
+    /// The first seat in line for room, which a later one may not pass.
+    pub fn lane_head(&self) -> Option<String> {
+        self.state().lane_waits.iter().find(|wait| wait.queued).map(|wait| wait.subject.clone())
+    }
+
+    /// Records why `subject` waits for room, keeping its place in line.
+    pub fn lane_wait(&self, subject: &str, reason: String, queued: bool, now: u64) {
+        let mut state = self.state();
+        if let Some(wait) = state.lane_waits.iter_mut().find(|wait| wait.subject == subject) {
+            wait.reason = reason;
+            wait.queued = queued;
+            return;
+        }
+        state.lane_waits.push_back(LaneWait { subject: subject.into(), since: now, reason, queued });
+    }
+
+    /// `subject`'s lane fit and it starts: it leaves the line and holds its room until it is seen
+    /// running.
+    pub fn lane_admitted(&self, subject: &str, capacity: crate::Capacity, now: u64) {
+        let mut state = self.state();
+        state.lane_waits.retain(|wait| wait.subject != subject);
+        state.lane_starts.insert(subject.into(), (capacity, now));
+    }
+}
+
+fn lane_wait_value(state: &State, wait: &LaneWait, now: u64) -> Value {
+    let position = state.lane_waits.iter().filter(|other| other.queued)
+        .position(|other| other.subject == wait.subject);
+    json!({"subject": wait.subject, "pending": true, "queuePosition": position.map(|position| position + 1),
+        "queuedSince": wait.since, "pendingAgeSecs": now.saturating_sub(wait.since), "reason": wait.reason})
+}
+
 fn pending_value(p: &Pending, index: usize, reason: &str, now: u64) -> Value {
     json!({"subject": p.subject, "pending": true, "queuePosition": index + 1,
         "queuedSince": p.since, "pendingAgeSecs": now.saturating_sub(p.since), "reason": reason})
@@ -107,6 +161,26 @@ mod tests {
         assert!(status.admit("second", None, None, false, 21));
         assert_eq!(status.snapshot(21)["pendingCount"], 0);
         assert_eq!(Status::default().snapshot(22)["pendingCount"], 0);
+    }
+
+    #[test]
+    fn a_seat_waiting_for_room_shows_its_reason_and_place_until_its_lane_is_admitted() {
+        let status = Status::default();
+        status.lane_wait("big", "lane 8 cores/23G does not fit".into(), true, 10);
+        status.lane_wait("huge", "lane 64 cores/1T can never fit".into(), false, 11);
+        status.lane_wait("small", "behind big".into(), true, 12);
+        status.lane_wait("big", "lane 8 cores/23G still does not fit".into(), true, 15);
+        assert_eq!(status.lane_head().as_deref(), Some("big"));
+        let big = status.subject("big", 20).unwrap();
+        assert_eq!((big["queuePosition"].as_u64(), big["pendingAgeSecs"].as_u64()), (Some(1), Some(10)));
+        assert_eq!(big["reason"], "lane 8 cores/23G still does not fit");
+        assert_eq!(status.subject("small", 20).unwrap()["queuePosition"], 2);
+        assert!(status.subject("huge", 20).unwrap()["queuePosition"].is_null());
+        assert_eq!(status.snapshot(20)["laneWaits"].as_array().unwrap().len(), 3);
+        status.lane_admitted("big", crate::Capacity { cores: 8, memory: 23 << 30 }, 21);
+        assert_eq!(status.lane_head().as_deref(), Some("small"));
+        assert!(status.subject("big", 21).is_none());
+        assert!(status.state().lane_starts.contains_key("big"));
     }
 
     #[test]
