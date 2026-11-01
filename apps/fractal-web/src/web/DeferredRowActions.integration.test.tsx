@@ -24,6 +24,7 @@ afterEach(async () => {
 it('keeps the roster and action trigger usable while optional controls are deferred', async () => {
   vi.resetModules()
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, character => `\\${character}`) })
   const viewport = { width: 340, height: 800 }
   vi.stubGlobal('ResizeObserver', class {
     constructor(private callback: ResizeObserverCallback) {}
@@ -31,7 +32,7 @@ it('keeps the roster and action trigger usable while optional controls are defer
     unobserve() {}
     disconnect() {}
   })
-  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function () { return DOMRect.fromRect(this.tagName === 'SPAN' ? {} : viewport) })
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) { return DOMRect.fromRect(this.tagName === 'SPAN' ? {} : viewport) })
   Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() })
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   const requested = vi.fn()
