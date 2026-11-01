@@ -314,7 +314,7 @@ fn mixed_builds_keep_signed_unknown_claims_and_project_them_after_upgrade() {
 
 #[test]
 fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade() {
-    for mode in ["registry", "reopen", "recovery"] {
+    for mode in ["current-triggers", "legacy-triggers", "recovery"] {
         let anchor_key = key();
         let receiver_key = key();
         let source = node("source", Some(&anchor_key), Some(&anchor_key));
@@ -326,10 +326,10 @@ fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade(
         receiver.bind_fleet(FLEET).unwrap();
         receiver.pin_fleet_anchor(anchor_key.public()).unwrap();
         receiver.set_member_key(Some(receiver_key.clone())).unwrap();
-        sync(&source, &receiver);
         let mut registry = fractal_schema::registry().clone();
         registry.claims.remove("runtime.observed").unwrap();
         receiver.set_claim_registry(registry);
+        sync(&source, &receiver);
         let claim = source.append_as_older_build_for_test(
             &crate::store::publication_facts_tests_shared::input("runtime.observed", "one"),
         ).unwrap();
@@ -341,7 +341,7 @@ fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade(
             [&claim.id], |row| row.get::<_, String>(0),
         ).unwrap(), "unknown");
 
-        let receiver = if mode != "registry" {
+        if mode != "current-triggers" {
             // Reproduce a persisted pre-fix trigger, not just a fresh schema.
             receiver.connection.write().execute_batch(
                 "DELETE FROM meta WHERE key='publication_pending_conflict_safe_v1';
@@ -371,14 +371,11 @@ fn unknown_runtime_admission_commits_publication_evidence_after_trigger_upgrade(
                     "DELETE FROM meta WHERE key='publication_pending_collision_requeued'", [],
                 ).unwrap();
             }
-            drop(receiver);
-            let upgraded = Store::open(&path, "receiver").unwrap();
-            upgraded.set_member_key(Some(receiver_key)).unwrap();
-            upgraded
-        } else {
-            receiver.set_claim_registry(fractal_schema::registry().clone());
-            receiver
-        };
+        }
+        // A build's registry is immutable; upgrade by reopening the persisted store.
+        drop(receiver);
+        let receiver = Store::open(&path, "receiver").unwrap();
+        receiver.set_member_key(Some(receiver_key)).unwrap();
 
         let admission = receiver.validate_replication_backlog().unwrap();
         assert!(admission.changed);
