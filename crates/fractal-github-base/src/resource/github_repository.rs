@@ -2283,8 +2283,8 @@ mod tests {
         }).await;
         for _ in 0..2 {
             open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
-                Duration::ZERO, "forbidden-pulls/repo", (owner, "repo"), true, true,
-                &BTreeSet::new(), false, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+                Duration::ZERO, "forbidden-pulls/repo", (owner, "repo"), false, true,
+                &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
         }
         let calls = calls.lock();
         assert_eq!(calls.len(), 12, "each query must still read the App and replay with PAT on the second observation");
