@@ -50,6 +50,7 @@ pub mod schedule_active_run_tests;
 #[cfg(test)]
 pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
+pub mod mission_capacity;
 pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
@@ -3074,6 +3075,7 @@ impl Store {
                         serde_json::from_str(&response).map_err(internal)?,local_receipt,idempotency_key);
                 }
                 schedule_standby::validate_publication(transaction, &self.origin, intent)?;
+                mission_capacity::validate_publication(transaction, &self.origin, intent)?;
                 crate::provenance::validate_publication(transaction, intent)?;
                 message_subscriptions::validate(transaction, intent, current_index_tx(transaction).map_err(internal)?)?;
                 let owned_plan = owned.map(|options| owned_sets::plan_tx(transaction, intent, options)).transpose()?;
@@ -10875,6 +10877,11 @@ pub fn append_claim_tx_with_assistant_answer(
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     if kind == fractal_schema::directive_notes::KIND {
         directive_notes::validate_publication(transaction, origin).map_err(anyhow::Error::new)?;
+    }
+    if kind == "mission.published"
+        && let Some(mission) = fields.get("body").and_then(|body| serde_json::from_value::<MissionSpec>(body.clone()).ok())
+    {
+        mission_capacity::validate_mission(transaction, origin, &mission).map_err(anyhow::Error::new)?;
     }
     validate_claim_cardinality(
         transaction,
@@ -18820,7 +18827,7 @@ fn step_hashes(mission: &MissionSpec) -> BTreeMap<String, String> {
 }
 
 fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
-    let value = json!({
+    let mut value = json!({
         "id": mission.id,
         "state": mission.state,
         "inputs": mission.inputs,
@@ -18839,6 +18846,10 @@ fn mission_header_hash(mission: &MissionSpec) -> Result<String, St3Error> {
         "products": mission.products,
         "gates": mission.gates,
     });
+    // Only when declared, so an undeclared mission's header hashes as it did before the field.
+    if let Some(capacity) = mission.capacity {
+        value["capacity"] = json!(capacity);
+    }
     serde_json::to_vec(&value)
         .map(|bytes| hex::encode(Sha256::digest(bytes)))
         .map_err(internal)

@@ -601,3 +601,36 @@ pub fn validate_resource_uri(uri: &str) -> Result<(), St3Error> {
         ))
     }
 }
+
+/// `capacity cores=N memory="SIZE"`: the seat's lane (docs/st3/seat-lanes.md). What it leaves
+/// out is the base lane's.
+pub fn parse_capacity(node: &KdlNode) -> Result<fractal_runtime::Capacity, St3Error> {
+    let (cores, memory) = capacity_properties(node)?;
+    fractal_runtime::Capacity::declared(cores, memory.as_deref())
+        .map_err(|error| St3Error::new("invalid-capacity", format!("{error:#}")))
+}
+
+/// A step's `capacity cores=N memory="SIZE"`: what it raises its seat's lane to while the seat holds
+/// the step. What it leaves out stays the seat's own.
+pub fn parse_step_capacity(node: &KdlNode) -> Result<fractal_runtime::Raise, St3Error> {
+    let (cores, memory) = capacity_properties(node)?;
+    fractal_runtime::Raise::declared(cores, memory.as_deref())
+        .map_err(|error| St3Error::new("invalid-capacity", format!("{error:#}")))
+}
+
+fn capacity_properties(node: &KdlNode) -> Result<(Option<u32>, Option<String>), St3Error> {
+    let invalid = |message: String| St3Error::new("invalid-capacity", message);
+    ensure_only_properties(node, &["cores", "memory"])?;
+    ensure_no_children(node)?;
+    if node.entries().iter().any(|entry| entry.name().is_none()) {
+        return Err(invalid("capacity takes only cores= and memory=".into()));
+    }
+    let cores = match node.get("cores") {
+        None => None,
+        Some(KdlValue::Integer(cores)) => Some(
+            u32::try_from(*cores).map_err(|_| invalid(format!("capacity cores {cores} is out of range")))?,
+        ),
+        Some(_) => return Err(invalid("capacity cores must be a whole number".into())),
+    };
+    Ok((cores, property_string(node, "memory")?))
+}
