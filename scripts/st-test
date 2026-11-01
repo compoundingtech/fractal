@@ -34,9 +34,8 @@ has a megarepo.lock, its members are materialized under repos/ first, with the c
 create it.
 
 evidence-wrap, evidence-sign and evidence-verify come from the accepted base, not from the change under test.
-Commands that call cargo reach the build admission shim on PATH like any other cargo; nothing here knows about
-admission. With --push the signed notes are pushed to REMOTE after they verify, with the identity git uses for REMOTE
-(or EVIDENCE_PUSH_TOKEN if set), as refs/tags/evidence/<tree>/<record> and refs/notes/evidence/<tree>/<record> (see
+Commands that call cargo reach the cargo on PATH (a build host's cargo shim) like any other cargo. With --push the signed
+notes are pushed to REMOTE after they verify, with the identity git uses for REMOTE (or EVIDENCE_PUSH_TOKEN if set), as refs/tags/evidence/<tree>/<record> and refs/notes/evidence/<tree>/<record> (see
 evidence-wrap); whether that identity may create them is a repository rule that has not been confirmed for agent seats.
 On a host that runs the evidence log (scripts/evidence-log.service installed as a systemd user unit), a run with --push then
 asks it to pull at once, without waiting: a pass counts only once the log lists it, so this saves up to one pull interval.
@@ -56,11 +55,10 @@ A run's TMPDIR (and TMP and TEMP), for itself and every check, is a directory of
 ST_TEST_TMP when set), removed when the run ends; --keep keeps it and says where. Each `nix develop` leaves a nix-shell.* directory
 there, with whatever its check's tests wrote. A run that was killed leaves its directory behind, and the next run removes it.
 
-Each check's --time-limit counts only the time it runs: the waits for a host build slot that scripts/ci-local reports as they happen
-(CI_LOCAL_QUEUE_LOG) extend it, up to --queue-limit seconds of waiting in all, so a busy host's queue cannot use up a check's time. A
-scripts/ci-local check's time counts only from ci-local's own start (its `ci-local: stage logs in` line, after its load gate): before it,
-the build admission of its `nix develop` and the dev shell are waiting, which no queue log records, and only SILENCE_LIMIT seconds without
-any output stop it. The note records that wait as the input pre_start_s. The summary row says how long a check waited, and for what.
+Each check's --time-limit counts only the time it runs. A scripts/ci-local check's time counts only from ci-local's own start (its
+`ci-local: stage logs in` line, after its load gate): before it, its `nix develop`, the dev shell and the load gate are waiting, which
+only SILENCE_LIMIT seconds without any output or --queue-limit seconds of waiting in all stop. The note records that wait as the input
+pre_start_s. The summary row says how long a check waited, and for what.
 
 Every run that gets as far as its summary appends one JSON line (version 1: start, end and total seconds, host, tree, the checks, every
 summary row and, when scripts/ci-local printed its stage table, linux-gate's stages) to ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl,
@@ -77,7 +75,6 @@ as flaky_tests).
 import argparse
 import atexit
 import base64
-import calendar
 import codecs
 import concurrent.futures
 import contextlib
@@ -554,7 +551,7 @@ REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_
 
 def run_base_copy(argv):
     """Replace this process with the base's self-contained scripts/st-test, as BASE_SCRIPTS does for the wrapper, signer and verifier.
-    Every seat runs fractal-test from its own branch, so without this, how runs queue for pool trees and build slots (and which commit they
+    Every seat runs fractal-test from its own branch, so without this, how runs queue for pool trees (and which commit they
     sign) stays at whatever the branch last merged, for days, and old branches keep racing while new ones queue. A branch's own runner
     changes are still tested by ci-script-tests (fractal-test-test runs from the tree), and that is what is signed. There is no opt-out.
     This copy runs only when the base's st-test is absent, empty or this file, or this already is the base's copy (ST_TEST_REEXEC).
@@ -585,7 +582,7 @@ def run_base_copy(argv):
 
 def hand_over(handover, argv):
     """Continue a run that was waiting for a pool tree in the base's newer st-test (Handover), in this process: the same pid, so the copy takes
-    the ticket over and keeps the run's place, its start and its name in the host's admission order. The ST_TEST_* settings the seat scrub
+    the ticket over and keeps the run's place and its start in the tree queue. The ST_TEST_* settings the seat scrub
     dropped go along again; the copy this one ran from is removed first, as nothing removes it once this process is replaced."""
     scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
     path = scratch / 'st-test'
@@ -818,13 +815,9 @@ def seat_lane(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
 def governed(argv, name):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
-    memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
+    memory limits.
 
-    No heavy-slot ticket is held for the whole check (`cargo --stage-slot`): the checks' tests run under the test guardian
-    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
-    stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
-    stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+    The recorded command is unchanged: only what starts evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
     A caller already under a build cap runs the check in place: builds.slice and seat lanes require memory and CPU limits;
     gate-slot scopes require a memory limit (`own_cap`). The kernel's limits decide, never a name or an environment variable
@@ -990,70 +983,6 @@ def pool_size():
             raise Failure(f'ST_TEST_TREES={value!r} must be a positive number or "off"')
         return int(value)
     return max(heavy_slots(), 1) + 1
-
-
-# Slot first (2026-10-28, Factory's P0 from the st-test SLO report: on one build host the slowest run waited 42,265 s for one of its trees,
-# while the linux-gate checks of the runs holding them waited 1,000-2,400 s at a time for a build slot). A tree held while its run waits for a
-# build slot is a tree nobody can use, and a tree cannot be given back while a check is at work in it, so the best ticket takes a free tree
-# only when a build started now would get a heavy slot at once. TREE_SLOT_WAIT_LIMIT bounds that wait, as the admission gate bounds its own
-# (MAX_WAIT_SECONDS): past it the tree is taken anyway, so a host whose slots never come free starves no run; it then waits in the tree, as before.
-TREE_SLOT_WAIT_LIMIT = 2700
-
-
-def heavy_tickets_waiting(queue):
-    """How many live heavy tickets wait in the cargo shim's queue directory `queue` (CLASS.RANK.NANOSECONDS.PID). Read only: the files
-    are the shim's, so a dead one is skipped, never removed."""
-    count = 0
-    with contextlib.suppress(OSError):
-        for name in os.listdir(queue):
-            parts = name.split('.')
-            if len(parts) != 4 or parts[0] != 'heavy' or not all(part.isdigit() for part in parts[1:]):
-                continue
-            nanos, pid = int(parts[2]), int(parts[3])
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                continue
-            except PermissionError:
-                pass
-            started = process_started_ns(pid)
-            if started is not None and started > nanos + 2 * 10**9:  # the pid now names a younger process: that waiter is gone
-                continue
-            count += 1
-    return count
-
-
-def build_slot_ready():
-    """(ready, why): whether a heavy build started now would get one of the host's heavy slots at once. The cargo shim's slots are flocks on
-    $XDG_RUNTIME_DIR/cargo-slots/heavyN: a free one is taken and let go at once to see it, and the heavy tickets already waiting there are
-    served first, so this run is ready only while more slots are free than tickets wait, and while the build admission gate (`build-admission
-    check heavy`, as the shim asks it) would admit a heavy build now. A host without the shim's slots, or a gate that cannot be read, is ready."""
-    slots = Path(os.environ.get('XDG_RUNTIME_DIR') or '/tmp') / 'cargo-slots'
-    if not slots.is_dir():
-        return True, 'this host has no build slots'
-    total, free = heavy_slots(), 0
-    for j in range(total):
-        try:
-            with open(slots / f'heavy{j}', 'a') as probe:
-                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)  # let go when the file is closed, before the shim's next look
-                free += 1
-        except BlockingIOError:
-            continue
-        except OSError:
-            return True, 'the build slots cannot be read'
-    waiting = heavy_tickets_waiting(slots / 'queue')
-    if free <= waiting:
-        return False, f'{total - free} of {total} heavy slots busy, {waiting} heavy build(s) waiting for one'
-    gate = os.environ.get('BUILD_ADMISSION_BIN') or str(Path.home() / '.local/bin/build-admission')
-    if os.environ.get('BUILD_ADMISSION') != 'off' and os.access(gate, os.X_OK):
-        try:
-            code = subprocess.run([gate, 'check', 'heavy', 'st-test:tree'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=30).returncode
-        except (OSError, subprocess.TimeoutExpired):
-            code = 2
-        if code == 1:
-            return False, 'the build admission gate would not admit a heavy build now (load or memory)'
-    return True, f'{free} of {total} heavy slots free'
 
 
 def normalise_origin(url):
@@ -1373,16 +1302,14 @@ def handed_ticket(queue):
     return ticket if ours else None
 
 
-def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None):
+def acquire_tree(root, size, rank=None, waits=None, follow=None):
     """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
     Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
     rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees. `size` is the
     pool size or a function giving it, read again on every pass: when the host's heavy slots grow while runs wait, the best ticket takes a new
     tree at once instead of polling only the old ones (with every ticket behind it waiting too).
-    With `slot_ready` (a function giving (ready, why): build_slot_ready, for a run that builds) a free tree is taken only when it says a build
-    could start now, or once TREE_SLOT_WAIT_LIMIT seconds of a free tree left for want of a slot have passed (slot first, above). A waiter that is not first
-    still tries a tree it has seen free for TREE_FREE_FALLBACK_SECONDS (liveness against waiters running different copies of the order). `waits`, a
-    dict, is given the seconds spent: 'tree_wait_s' in all, and 'slot_wait_s' of them while a free tree waited for a build slot.
+    A waiter that is not first still tries a tree it has seen free for TREE_FREE_FALLBACK_SECONDS (liveness against waiters running different
+    copies of the order). `waits`, a dict, is given the seconds spent: 'tree_wait_s'.
     A waiter defers only to tickets of its own QUEUE_RULES or newer. With `follow` (base_copy_follower), called on every pass while no tree is held,
     a run whose base's st-test changed raises Handover to continue in that copy with the same ticket: every waiter follows main's current rules."""
     root.mkdir(parents=True, exist_ok=True)
@@ -1394,12 +1321,11 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
     write_ticket(ticket)
     waited, handing = False, False
     began = time.monotonic() - (time.time_ns() - int(ticket.name.split('.')[1])) / 1e9  # since the ticket was taken, by this copy or the one before
-    slot_waited, slot_seen, slot_told = 0.0, None, False
     free_since = {}  # tree number -> when this waiter first saw it free (not the head's, so only watched)
 
     def taken(n, lock):
         if waits is not None:
-            waits.update(tree_wait_s=round(time.monotonic() - began), slot_wait_s=round(slot_waited))
+            waits.update(tree_wait_s=round(time.monotonic() - began))
         return n, lock
 
     try:
@@ -1412,7 +1338,6 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
             order = tree_queue(queue, time.time_ns(), rules=QUEUE_RULES, own=ticket.name)
             ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
             trees = size() if callable(size) else size
-            free_tree = False
             if ahead == 0:
                 for n in range(trees):
                     lock = open(root / f'tree-{n}.lock', 'w')
@@ -1426,31 +1351,12 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                     except BaseException:
                         lock.close()
                         raise
-                    if slot_ready is None:
-                        return taken(n, lock)
-                    ready, why = slot_ready()
-                    now = time.monotonic()
-                    if slot_seen is not None:
-                        slot_waited += now - slot_seen
-                    if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
-                        if not ready:
-                            print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
-                                  f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
-                        elif slot_told:
-                            print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
-                        return taken(n, lock)
-                    lock.close()
-                    slot_seen, free_tree = now, True
-                    if not slot_told:
-                        slot_told = True
-                        print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
-                              f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
-                    break  # every free tree would wait for the same slot
+                    return taken(n, lock)
             elif trees:
                 # Not the head of this waiter's order. Normally it leaves free trees to the head. But another waiter may run an older or newer copy of this
                 # order and defer to this one while this one defers to it (an old copy's overdue rank-50 ticket and a new copy's rank-3 one), so nobody
                 # would try a free tree. Liveness: a tree seen free for TREE_FREE_FALLBACK_SECONDS that the head has not taken may be tried here; the flock
-                # still decides any contention, and a build waiting for a slot keeps the head's rule (a free tree is taken only when a build could start).
+                # still decides any contention.
                 for n in range(trees):
                     lock = open(root / f'tree-{n}.lock', 'w')
                     try:
@@ -1466,16 +1372,14 @@ def acquire_tree(root, size, rank=None, slot_ready=None, waits=None, follow=None
                         raise
                     now = time.monotonic()
                     seen = free_since.setdefault(n, now)
-                    if now - seen >= TREE_FREE_FALLBACK_SECONDS and (slot_ready is None or slot_ready()[0]):
+                    if now - seen >= TREE_FREE_FALLBACK_SECONDS:
                         print(f'fractal-test: tree-{n} has been free for {round(now - seen)}s and the {ahead} ticket(s) ahead did not take it '
                               f'(TREE_FREE_FALLBACK_SECONDS): trying it', file=sys.stderr, flush=True)
                         return taken(n, lock)
                     lock.close()
-            if not free_tree:
-                slot_seen = None  # only the time a free tree waited for a slot counts toward TREE_SLOT_WAIT_LIMIT
-                if not waited:
-                    print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
-                    waited = True
+            if not waited:
+                print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
+                waited = True
             time.sleep(POOL_WAIT_SECONDS)
     finally:
         if not handing:
@@ -2180,12 +2084,10 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         skips = env_skips_file(scratch, RUST_TESTS)
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
-        environment.pop('BUILD_ADMISSION_CLASS', None)  # it builds: never a light start
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
-        limit = Limit(args.time_limit, Path(scratch) / 'rust-tests.queue', args.queue_limit)
-        environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+        limit = Limit(args.time_limit, args.queue_limit)
         code = run_limited(governed(RUN_TESTS, 'rust-tests'), limit, cwd=directory, env=environment)
         ran_seconds = round(time.monotonic() - started)
         if code not in RUN_COMPLETED or not junit.exists():
@@ -2297,107 +2199,33 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     return rows, failed
 
 
-# scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code and the build
-# queue it waited in), as `printf '%-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss'` prints it after the `ci-local:` prefix; setup has no exit.
+# scripts/ci-local's closing stage table (one line per stage it ran: name, start, end, seconds, and for a stage its exit code), as
+# `printf '%-26s %s  %s  %6ss  exit %s'` prints it after the `ci-local:` prefix; setup has no exit. The build queue column an older
+# ci-local adds after the exit code (`queue: N waits, Ns`, from the retired build slots) is read past.
 CI_LOCAL = 'scripts/ci-local'
 STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+(\d+)s'
-                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
+                        r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+\d+\s+waits,\s+\d+s)?)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
-QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
+QUEUE_LIMIT = 14400  # default --queue-limit: the seconds a ci-local check may wait before ci-local starts, apart from its --time-limit
 LIMIT_POLL = 1.0  # how often a check's limit is read again while it runs
 # scripts/ci-local prints this once its own host-load gate has let it start, before its setup: a ci-local check's --time-limit counts from
-# here. Before it the check waits (build admission for its `nix develop`, the dev shell, ci-local's load gate) and only SILENCE_LIMIT bounds it.
+# here. Before it the check waits (its `nix develop`, the dev shell, ci-local's load gate) and only SILENCE_LIMIT and QUEUE_LIMIT bound it.
 CI_LOCAL_STARTED = b'ci-local: stage logs in '
-SILENCE_LIMIT = 1800  # seconds without any output, before a ci-local check has started, after which it is stopped (a waiting build-admission prints every 60 s)
-
-
-def queue_spans(path, now=None):
-    """[(stage, start, end)]: the build-slot waits scripts/ci-local wrote to `path` (CI_LOCAL_QUEUE_LOG: `wait|slot EPOCH STAGE` lines); a
-    wait not yet ended runs to `now`. A missing or unreadable file has none."""
-    now = time.time() if now is None else now
-    try:
-        lines = Path(path).read_text(errors='replace').splitlines()
-    except OSError:
-        return []
-    waiting, spans = {}, []
-    for line in lines:
-        parts = line.split(' ', 2)
-        if len(parts) != 3:
-            continue
-        kind, at, stage = parts
-        try:
-            at = float(at)
-        except ValueError:
-            continue
-        if kind == 'wait':
-            waiting.setdefault(stage, at)
-        elif kind == 'slot' and stage in waiting:
-            spans.append((stage, waiting.pop(stage), at))
-    return spans + [(stage, start, now) for stage, start in waiting.items()]
-
-
-def merged_spans(spans):
-    """`spans` ((start, end) pairs) as the sorted, disjoint spans of their union."""
-    out = []
-    for start, end in sorted(spans):
-        if end <= start:
-            continue
-        if out and start <= out[-1][1]:
-            out[-1][1] = max(out[-1][1], end)
-        else:
-            out.append([start, end])
-    return out
-
-
-def queued_seconds(path, now=None):
-    """Seconds of the build-slot waits scripts/ci-local wrote to `path` (queue_spans) as the union of their spans, so two stages waiting at
-    the same time count once; a wait not yet ended runs to `now`. A missing or unreadable file is 0."""
-    return sum(end - start for start, end in merged_spans((start, end) for _, start, end in queue_spans(path, now)))
-
-
-def blocked_seconds(path, stages, now=None):
-    """Seconds in which scripts/ci-local held its tree and built nothing: some stage waited for a build slot (the queue log `path`) while no
-    stage was running outside its own waits (the stage spans of its closing table, `stages`, as ci_local_stages reads them). Two stages run at
-    once, so one stage's wait while another builds is not counted. A stage whose times cannot be read counts as not running."""
-    waits = queue_spans(path, now)
-    running = []
-    for stage in stages:
-        try:
-            start, end = (calendar.timegm(time.strptime(stage[key], '%Y-%m-%dT%H:%M:%SZ')) for key in ('start', 'end'))
-        except (KeyError, TypeError, ValueError):
-            continue
-        cursor = start
-        for wait_start, wait_end in merged_spans((a, b) for name, a, b in waits if name == stage['name']):
-            if wait_start > cursor:
-                running.append((cursor, min(wait_start, end)))
-            cursor = max(cursor, wait_end)
-        running.append((cursor, end))
-    waited, ran = merged_spans((a, b) for _, a, b in waits), merged_spans(running)
-    total, i = 0.0, 0
-    for start, end in waited:  # each wait, less the parts in which a stage was running
-        total += end - start
-        while i < len(ran) and ran[i][1] <= start:
-            i += 1
-        j = i
-        while j < len(ran) and ran[j][0] < end:
-            total -= min(end, ran[j][1]) - max(start, ran[j][0])
-            j += 1
-    return total
+SILENCE_LIMIT = 1800  # seconds without any output, before a ci-local check has started, after which it is stopped (a waiting load gate prints every 60 s)
 
 
 class Limit:
-    """A check's time limit that counts only the time it runs: `seconds` of running, plus the build-slot waits read from `queue_log`
-    (queued_seconds), of which at most `queue_limit` seconds in all.
+    """A check's time limit that counts only the time it runs: `seconds` of running.
 
     With `begins_at` (bytes the check prints once it really starts, CI_LOCAL_STARTED) the running time counts only from that output on
-    (`output` is given every chunk the check prints): what comes before it is waiting, admission for its dev shell included, which no
-    queue log records (2026-10-27: a linux-gate spent its whole 7200 s before ci-local started and was stopped with its tests passing). Until
-    then `silence` seconds without any output stop it (`silent` is then True), and so does waiting longer than `queue_limit` in all (`waited_out`):
-    a wedged admission prints every 60 s and is never silent. `pre_start` is the waiting time."""
+    (`output` is given every chunk the check prints): what comes before it is waiting, its dev shell included (2026-10-27: a linux-gate
+    spent its whole 7200 s before ci-local started and was stopped with its tests passing). Until then `silence` seconds without any
+    output stop it (`silent` is then True), and so does waiting longer than `queue_limit` in all (`waited_out`): a waiting load gate
+    prints every 60 s and is never silent. `pre_start` is the waiting time."""
 
-    def __init__(self, seconds, queue_log=None, queue_limit=QUEUE_LIMIT, begins_at=None, silence=None):
-        self.seconds, self.queue_log, self.queue_limit = seconds, queue_log, queue_limit
+    def __init__(self, seconds, queue_limit=QUEUE_LIMIT, begins_at=None, silence=None):
+        self.seconds, self.queue_limit = seconds, queue_limit
         self.started = self.heard = time.monotonic()
         self.begins_at, self.tail, self.pre_start, self.silent, self.waited_out = begins_at, b'', 0.0, False, False
         self.silence = SILENCE_LIMIT if silence is None else silence
@@ -2412,9 +2240,6 @@ class Limit:
             else:
                 self.tail = seen[-len(self.begins_at):]
 
-    def queued(self):
-        return queued_seconds(self.queue_log) if self.queue_log else 0.0
-
     def remaining(self):
         """Seconds left before the check is over its limit (0 or less once it is): running time or waiting time, whichever ends first."""
         if self.begins_at:  # not started yet: silence ends it, and so does a wait past queue_limit
@@ -2422,9 +2247,7 @@ class Limit:
             quiet, waiting = self.silence - (now - self.heard), self.queue_limit - (now - self.started)
             self.silent, self.waited_out = quiet <= 0, waiting <= 0 < quiet
             return min(quiet, waiting)
-        queued = self.queued()
-        ran = time.monotonic() - self.started - queued
-        return min(self.seconds - ran, self.queue_limit - queued)
+        return self.seconds - (time.monotonic() - self.started)
 
     def waiting(self):
         """Seconds the check has waited before it started: so far, while it has not."""
@@ -2456,18 +2279,17 @@ def run_limited(argv, limit, **options):
 
 
 def queue_note(limit):
-    """What the summary row adds about the check's waits before it started and for build slots, or ''."""
-    queued, waited = round(limit.queued()), round(limit.waiting())
+    """What the summary row adds about the check's wait before it started, or ''."""
+    waited = round(limit.waiting())
     notes = ([f'stopped after {limit.silence:g}s without output before ci-local started'] if limit.silent else []) + \
             ([f'stopped after waiting {limit.queue_limit:g}s (--queue-limit) before ci-local started'] if limit.waited_out else []) + \
-            ([f'waited {waited}s before ci-local started (admission, dev shell)'] if waited else []) + \
-            ([f'waited {queued}s for build slots'] if queued else [])
+            ([f'waited {waited}s before ci-local started (dev shell, load gate)'] if waited else [])
     return f'; {", ".join(notes)} (not counted against --time-limit)' if notes else ''
 
 
 def ci_local_stages(path):
     """The stage rows of scripts/ci-local's table in `path` (a check's whole output), in order; [] when it printed none (before #3718) or the
-    file cannot be read. A stage's exit and queue fields are None when the line has none (setup) or they are not numbers."""
+    file cannot be read. A stage's exit is None when the line has none (setup) or it is not a number."""
     def number(value):
         return int(value) if value is not None and re.fullmatch(r'-?\d+', value) else None
     stages = []
@@ -2476,9 +2298,8 @@ def ci_local_stages(path):
             for line in lines:
                 match = STAGE_LINE.fullmatch(line.rstrip('\r\n').split('\r')[-1])
                 if match:
-                    name, start, end, seconds, code, waits, queued = match.groups()
-                    stages.append({'name': name, 'start': start, 'end': end, 'seconds': int(seconds), 'exit': number(code),
-                                   'queue_waits': number(waits), 'queue_s': number(queued)})
+                    name, start, end, seconds, code = match.groups()
+                    stages.append({'name': name, 'start': start, 'end': end, 'seconds': int(seconds), 'exit': number(code)})
     except OSError:
         return []
     return stages
@@ -2626,10 +2447,6 @@ def run_main(argv, cleanup):
         main_started = time.monotonic() - max(0.0, time.time() - float(HANDOVER['started']))
     scrub_git_environment()
     scrub_seat_environment()
-    # The build host's finish-first admission order: every stage of this run carries one run name and start time, so once
-    # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
-    if not (HANDOVER and os.environ.get('ADMISSION_RUN')):  # a handed-over run keeps its place in the host's order too
-        os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
@@ -2640,9 +2457,9 @@ def run_main(argv, cleanup):
     parser.add_argument('--rerun', action='store_true', help='run a check even when this tree already has a passing signature for it')
     parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
     parser.add_argument('--attempt', default='1')
-    parser.add_argument('--time-limit', type=int, default=7200, help='seconds each check may run, not counting its waits for a build slot (default 7200)')
+    parser.add_argument('--time-limit', type=int, default=7200, help='seconds each check may run, not counting a ci-local check\'s wait before ci-local starts (default 7200)')
     parser.add_argument('--queue-limit', type=int, default=QUEUE_LIMIT,
-                        help=f'seconds each check may wait for build slots, apart from --time-limit (default {QUEUE_LIMIT})')
+                        help=f'seconds a ci-local check may wait before ci-local starts, apart from --time-limit (default {QUEUE_LIMIT})')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
     parser.add_argument('--seed', nargs='?', const='', metavar='REF', help='sign the per-crate rust-tests notes of REF (default: the base) instead of HEAD, '
                         'for the crates that lack one, and push them (to origin unless --push says otherwise); with --out, export every selected crate instead: '
@@ -2717,16 +2534,15 @@ def run_main(argv, cleanup):
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
         directory = Path(scratch) / 'tree'
         pool_trees, tree_lock, tree_target, n, merged = pool_size(), None, None, None, None
-        tree_waits, tree_taken, blocked = {}, None, {}  # the tree's waits, when it was taken, and what the build lane waited holding it
+        tree_waits, tree_taken, blocked = {}, None, {}  # the tree's wait, when it was taken, and what the build lane waited holding it
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         try:
             if pool_trees:
                 root = pool_root()
                 target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
-                # The slots can change while the run waits; a free tree is taken only when the run's build could start (slot first).
-                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, slot_ready=build_slot_ready, waits=tree_waits,
-                                            follow=base_copy_follower(args.base))
+                # The pool's size can change while the run waits.
+                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, waits=tree_waits, follow=base_copy_follower(args.base))
                 tree_taken = time.monotonic()
                 # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
                 # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
@@ -2822,12 +2638,6 @@ def run_main(argv, cleanup):
                     environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                     if target and name in BUILDS:
                         environment['CARGO_TARGET_DIR'] = str(target)
-                    # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
-                    # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
-                    if name in BUILDS:
-                        environment.pop('BUILD_ADMISSION_CLASS', None)
-                    else:
-                        environment['BUILD_ADMISSION_CLASS'] = 'light'
                     if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                         # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                         environment['CI_TEST_JUNIT'] = str(gate_report)
@@ -2864,8 +2674,7 @@ def run_main(argv, cleanup):
                         wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                     started = time.monotonic()
                     streams = output is None and CI_LOCAL in LOCAL[name]
-                    limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
-                    environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+                    limit = Limit(args.time_limit, args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
                     if name in STAGE_SIGNED:
                         # The stage runs once: linux-gate's run in this round already ran it, else it runs here alone. Either way the note
                         # records the report reader (LOCAL) and which run made the report (run_command_sha256).
@@ -2900,7 +2709,7 @@ def run_main(argv, cleanup):
                         log = Path(scratch) / f'{name}-output.log'
                         code = streamed(command, log, limit, cwd=directory, env=environment, pre_start=pre_start)
                         stages[:] = ci_local_stages(log)
-                        blocked[name] = (round(limit.waiting()), round(blocked_seconds(limit.queue_log, stages)))
+                        blocked[name] = round(limit.waiting())
                     else:
                         code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
                                            stderr=subprocess.STDOUT if output else None)
@@ -2973,14 +2782,12 @@ def run_main(argv, cleanup):
                 held = {}
                 if tree_taken is not None:
                     # What the run's tree did for it: how long the run waited for it and held it, and how much of that the build lane spent
-                    # blocked in it (before ci-local started: build admission and the dev shell; then every stage waiting for a build slot).
-                    pre, slots = (sum(values) for values in zip(*blocked.values())) if blocked else (0, 0)
-                    held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_slot_wait_s': tree_waits.get('slot_wait_s'),
-                            'tree_held_s': round(time.monotonic() - tree_taken), 'tree_blocked_s': pre + slots, 'tree_pre_start_s': pre,
-                            'tree_slot_blocked_s': slots}
-                    print(f'  tree-{n}: waited {held["tree_wait_s"]}s for it ({held["tree_slot_wait_s"]}s of that free, waiting for a build slot), held it '
-                          f'{held["tree_held_s"]}s, blocked in it {held["tree_blocked_s"]}s ({pre}s before ci-local started: admission, dev shell; '
-                          f'{slots}s with every build stage waiting for a slot)')
+                    # blocked in it (before ci-local started: its dev shell and load gate).
+                    pre = sum(blocked.values())
+                    held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_held_s': round(time.monotonic() - tree_taken),
+                            'tree_blocked_s': pre, 'tree_pre_start_s': pre}
+                    print(f'  tree-{n}: waited {held["tree_wait_s"]}s for it, held it {held["tree_held_s"]}s, blocked in it {pre}s '
+                          f'(before ci-local started: dev shell, load gate)')
                 # One line per run for the time objective (scripts/fractal-test-report): only a run of the whole suite (no --check, no --crate) counts.
                 record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
                             'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,

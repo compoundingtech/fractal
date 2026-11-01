@@ -128,7 +128,7 @@ class QueueSigner(unittest.TestCase):
         return dict(CLEAN, HOME=self.tmp.name, EVIDENCE_QUEUE_CONFIG=str(self.config), EVIDENCE_QUEUE_STATE=str(self.state),
                     EVIDENCE_PRESIGN_CONFIG=str(self.presign), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
                     EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
-                    EVIDENCE_PRESIGN_ADMISSION='/nonexistent', EVIDENCE_QUEUE_PROC=str(self.proc), ST_TEST_POOL_MAX_GB='170', EVIDENCE_QUEUE_GH=str(Path(self.tmp.name) / 'gh'),
+                    EVIDENCE_QUEUE_PROC=str(self.proc), ST_TEST_POOL_MAX_GB='170', EVIDENCE_QUEUE_GH=str(Path(self.tmp.name) / 'gh'),
                     STUB_GH=str(self.gh_data), STUB_LOG=str(self.log), **extra)
 
     def run_signer(self, *args, **extra):

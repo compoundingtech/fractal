@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """scripts/fractal-test against real repositories: the tree it signs (the head), the lag, failures, refusals."""
 import atexit
-import calendar
 import contextlib
 import fcntl
 import hashlib
@@ -47,9 +46,8 @@ LOCAL = dict(st_test.LOCAL)  # the real commands, before a test replaces them
 
 DATE = '2026-10-14T12:00:00Z'
 # Without the caller's state home or runs file: a run records its times under the test's own home, never the developer's.
-# XDG_RUNTIME_DIR is a private one: a run takes a tree only when a build slot is free, and the host's own cargo slots (busy while this
-# suite runs as a check on a build host) are no test's business; a test that wants slots makes its own.
-GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS', 'BUILD_ADMISSION_BIN')},
+# XDG_RUNTIME_DIR is a private one: the host's own session (its bus, which governed() would start scopes through) is no test's business.
+GIT_ENV = dict({k: v for k, v in os.environ.items() if k not in ('GITHUB_ACTIONS', 'CI', 'XDG_STATE_HOME', 'ST_TEST_RUNS', 'CARGO_HEAVY_SLOTS')},
                XDG_RUNTIME_DIR=PRIVATE_TMPDIR, GIT_CONFIG_GLOBAL=str(PRIVATE_GIT_CONFIG), GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C',
                GIT_CONFIG_COUNT='2', GIT_CONFIG_KEY_0='gc.auto', GIT_CONFIG_VALUE_0='0', GIT_CONFIG_KEY_1='maintenance.auto', GIT_CONFIG_VALUE_1='false',
                GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t',
@@ -740,16 +738,6 @@ class StTest(unittest.TestCase):
         result, calls, _ = self.fetches_with_lock_errors(['fatal: unable to access the remote'])
         self.assertEqual((calls, result), (1, 'failure: git fetch failed: fatal: unable to access the remote'))
 
-    def test_a_runs_checks_carry_an_admission_run_of_the_accepted_form_a_new_one_per_run_replacing_the_callers(self):
-        seen = Path(self.tmp.name) / 'admission-run'
-        self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'], extra_env={'ADMISSION_RUN': 'stale@1'})[0], 0)
-        self.commit('b.txt', 'two')
-        self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'])[0], 0)
-        first, second = seen.read_text().split()
-        for value in (first, second):
-            self.assertRegex(value, r'^st-test-[0-9]+@[0-9]{19}$')        # the form build admission accepts: [A-Za-z0-9._-]{1,64}@<start-ns>
-        self.assertNotEqual(first, second)                                 # a caller's stale value is replaced, and each run has its own start
-
     def test_out_resolves_a_nested_relative_directory_and_does_not_import_or_claim_coverage(self):
         self.commit('b.txt', 'two')
         destination = Path(self.tmp.name) / 'exports/nested'
@@ -1121,30 +1109,9 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('timed out', out)
 
-    def test_queued_seconds_is_the_union_of_the_waits_and_an_open_wait_runs_to_now(self):
-        log = Path(self.tmp.name) / 'queue'
-        self.assertEqual(st_test.queued_seconds(log, now=100), 0.0)  # no file yet
-        log.write_text('wait 10 tests\nwait 15 clippy\nslot 20 tests\nslot 30 clippy\njunk\nslot 40 nobody\nwait x tests\nwait 50 tests\n')
-        # tests 10-20 and clippy 15-30 overlap and count once (20 s); tests waits again from 50 and still does at 60 (10 s).
-        self.assertEqual(st_test.queued_seconds(log, now=60), 30.0)
-
-    def test_a_check_s_waits_for_a_build_slot_do_not_count_against_its_time_limit(self):
-        self.commit('b.txt', 'two')
-        wait = 'echo "wait $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 3; echo "slot $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"'
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', wait])
-        self.assertEqual(code, 0, out + err)
-        self.assertRegex(out, r'waited [2-4]s for build slots')
-        # The same, streamed as scripts/ci-local's output is.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', wait, 'scripts/ci-local'])
-        self.assertEqual(code, 0, out + err)
-        # Three seconds spent running, not waiting, are over the limit.
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun', command=['sh', '-c', 'sleep 3'])
-        self.assertEqual(code, 1, out + err)
-        self.assertRegex(out, r'demo +timed out')
-
     def test_a_ci_local_check_s_time_limit_counts_from_when_ci_local_starts(self):
         self.commit('b.txt', 'two')
-        # 100 s of waiting (its dev shell's admission, say) before ci-local starts, then almost nothing: within a 50 s limit. The wait is
+        # 100 s of waiting (its dev shell, say) before ci-local starts, then almost nothing: within a 50 s limit. The wait is
         # simulated (the Limit hears the start line as if it came 100 s after the check began), so no wall clock decides the outcome. And
         # this process takes 2 s to handle that line, as a loaded host may: the wrapper, which reads pre_start_s once the check ended, must
         # still find the wait (2026-10-28: with a plain file it read before this process had written it, and the note said 'none').
@@ -1160,7 +1127,7 @@ class StTest(unittest.TestCase):
             code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50',
                                               command=['sh', '-c', 'echo "ci-local: stage logs in /x"', 'scripts/ci-local'])
         self.assertEqual(code, 0, out + err)
-        waited = re.search(r'waited (\d+)s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)', out)
+        waited = re.search(r'waited (\d+)s before ci-local started \(dev shell, load gate\) \(not counted against --time-limit\)', out)
         self.assertIsNotNone(waited, out)
         self.assertGreaterEqual(int(waited.group(1)), 100)
         statement, = self.statements()
@@ -1182,7 +1149,7 @@ class StTest(unittest.TestCase):
 
     def test_a_ci_local_check_that_waits_past_its_queue_limit_before_it_starts_is_stopped_even_while_it_prints(self):
         self.commit('b.txt', 'two')
-        chatty = 'while true; do echo still waiting for admission; sleep 0.2; done'  # never silent, never starts
+        chatty = 'while true; do echo still waiting; sleep 0.2; done'  # never silent, never starts
         started = time.monotonic()
         with mock.patch.object(st_test, 'SILENCE_LIMIT', 600):
             code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', '--queue-limit', '1',
@@ -1197,15 +1164,6 @@ class StTest(unittest.TestCase):
         marker = 'echo "' + st_test.CI_LOCAL_STARTED.decode()
         self.assertIn(marker, source)
         self.assertLess(source.index('waiting: load1'), source.index(marker))  # ci-local's own load wait comes before it: waiting, not running
-
-    def test_the_waits_for_a_build_slot_have_a_limit_of_their_own(self):
-        self.commit('b.txt', 'two')
-        wait = 'echo "wait $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 30'
-        started = time.monotonic()
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', '--queue-limit', '2', command=['sh', '-c', wait])
-        self.assertEqual(code, 1, out + err)
-        self.assertRegex(out, r'demo +timed out')
-        self.assertLess(time.monotonic() - started, 25)
 
     def test_behind_counts_the_bases_commits_the_branch_lacks_and_is_none_when_it_cannot_tell(self):
         self.commit('b.txt', 'feature work')
@@ -2364,16 +2322,6 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'CARGO_INCREMENTAL': '1'})[0], 0)
         self.assertEqual(seen.read_text().split(), ['0', '1'])
 
-    def test_a_check_that_builds_nothing_starts_as_light_and_a_build_never_does(self):
-        self.commit('b.txt', 'two')
-        seen = Path(self.tmp.name) / 'seen'
-        command = ['sh', '-c', f'echo "${{BUILD_ADMISSION_CLASS:-unset}}" >> {seen}']
-        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
-            code, out, err = self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'BUILD_ADMISSION_CLASS': 'light'})
-        self.assertEqual(code, 0, err)
-        self.assertEqual(seen.read_text().split(), ['light', 'unset'])
-
     def test_a_heavy_run_says_how_big_its_target_ended(self):
         self.commit('b.txt', 'two')
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
@@ -2690,10 +2638,10 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         record, = self.runs()
         self.assertEqual(sorted(record), sorted(['v', 'started', 'ended', 'total_s', 'host', 'tree', 'commit', 'base', 'behind', 'full', 'top_up', 'checks',
-                                                 'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s', 'tree_slot_wait_s',
-                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s', 'tree_slot_blocked_s']))
+                                                 'pool_tree', 'warm', 'parallel', 'rows', 'exit', 'stages', 'tree_wait_s',
+                                                 'tree_held_s', 'tree_blocked_s', 'tree_pre_start_s']))
         # Its tree: free at once, and nothing that waited in it (no check here runs scripts/ci-local).
-        self.assertEqual((record['tree_wait_s'], record['tree_slot_wait_s'], record['tree_blocked_s']), (0, 0, 0))
+        self.assertEqual((record['tree_wait_s'], record['tree_blocked_s']), (0, 0))
         self.assertLessEqual(record['tree_held_s'], record['total_s'])
         for field in ('started', 'ended'):
             self.assertRegex(record[field], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
@@ -2750,33 +2698,34 @@ class StTest(unittest.TestCase):
             'ci-local: running tests',
             'ci-local:   stage                      start                 end                   seconds',
             'ci-local:   setup                      2026-10-23T10:00:00Z  2026-10-23T10:01:10Z      70s',
-            'ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0   queue: 2 waits, 31s',
-            'ci-local:   clippy                     2026-10-23T10:09:30Z  2026-10-23T10:11:00Z      90s  exit 101 queue: 0 waits, 0s\r',
+            'ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0',
+            'ci-local:   clippy                     2026-10-23T10:09:30Z  2026-10-23T10:11:00Z      90s  exit 101 queue: 0 waits, 0s\r',  # an older ci-local's
             'test result: ok. 2026-10-23T10:00:00Z  2026-10-23T10:01:10Z 70s',
         ]) + '\n')
         self.assertEqual(st_test.ci_local_stages(log), [
-            {'name': 'setup', 'start': '2026-10-23T10:00:00Z', 'end': '2026-10-23T10:01:10Z', 'seconds': 70, 'exit': None, 'queue_waits': None, 'queue_s': None},
-            {'name': 'tests', 'start': '2026-10-23T10:01:10Z', 'end': '2026-10-23T10:09:30Z', 'seconds': 500, 'exit': 0, 'queue_waits': 2, 'queue_s': 31},
-            {'name': 'clippy', 'start': '2026-10-23T10:09:30Z', 'end': '2026-10-23T10:11:00Z', 'seconds': 90, 'exit': 101, 'queue_waits': 0, 'queue_s': 0}])
-        # The printf the table comes from, as #3718 writes it, reads back the same.
-        row = subprocess.run(['printf', 'ci-local:   %-26s %s  %s  %6ss  exit %-3s queue: %s waits, %ss\n', 'fleet-compat', '2026-10-23T10:11:00Z',
-                              '2026-10-23T10:12:00Z', '60', '1', '3', '12'], capture_output=True, text=True).stdout
+            {'name': 'setup', 'start': '2026-10-23T10:00:00Z', 'end': '2026-10-23T10:01:10Z', 'seconds': 70, 'exit': None},
+            {'name': 'tests', 'start': '2026-10-23T10:01:10Z', 'end': '2026-10-23T10:09:30Z', 'seconds': 500, 'exit': 0},
+            {'name': 'clippy', 'start': '2026-10-23T10:09:30Z', 'end': '2026-10-23T10:11:00Z', 'seconds': 90, 'exit': 101}])
+        # The printf the table comes from, as scripts/ci-local writes it, reads back the same.
+        printf = re.search(r"printf '(%-26s [^']*)'", (ROOT / 'scripts/ci-local').read_text()).group(1)
+        row = subprocess.run(['printf', f'ci-local:   {printf}', 'fleet-compat', '2026-10-23T10:11:00Z', '2026-10-23T10:12:00Z', '60', '1'],
+                             capture_output=True, text=True).stdout
         log.write_text('noise\n' + row)
         self.assertEqual(st_test.ci_local_stages(log), [{'name': 'fleet-compat', 'start': '2026-10-23T10:11:00Z', 'end': '2026-10-23T10:12:00Z',
-                                                         'seconds': 60, 'exit': 1, 'queue_waits': 3, 'queue_s': 12}])
+                                                         'seconds': 60, 'exit': 1}])
         self.assertEqual(st_test.ci_local_stages(Path(self.tmp.name) / 'missing.log'), [])
 
     def test_a_check_that_runs_ci_local_still_prints_as_it_goes_and_its_stages_and_warmth_are_recorded(self):
         self.commit('b.txt', 'two')
         table = ('echo gate output; echo "ci-local:   setup                      2026-10-23T10:00:00Z  2026-10-23T10:01:10Z      70s"; '
-                 'echo "ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0   queue: 2 waits, 31s" >&2')
+                 'echo "ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0" >&2')
         command = ['sh', '-c', table, 'scripts/ci-local']  # its LOCAL command runs scripts/ci-local, as linux-gate's does
         env = {'ST_EVIDENCE_GOVERN': 'off'}
         with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
             code, out, err = self.run_st_test(command=command, extra_env=env)
             self.assertEqual(code, 0, out + err)
             self.assertLess(out.index('gate output'), out.index('fractal-test: tree'))  # streamed to the terminal, before the summary
-            self.assertIn('queue: 2 waits, 31s', out)  # stderr too, as one stream
+            self.assertIn('500s  exit 0', out)  # stderr too, as one stream
             record, = self.runs()
             self.assertEqual([(stage['name'], stage['seconds'], stage['exit']) for stage in record['stages']], [('setup', 70, None), ('tests', 500, 0)])
             self.assertIs(record['warm'], False, 'a fresh target')
@@ -2789,28 +2738,24 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertEqual(self.runs()[-1]['stages'], [])
 
-    def test_a_run_that_builds_takes_its_tree_only_with_a_build_slot_free_and_records_what_it_waited_in_it(self):
+    def test_a_run_that_builds_takes_a_free_tree_at_once_whatever_the_host_s_build_slots_and_records_what_it_waited_in_it(self):
         self.commit('b.txt', 'two')
         run = Path(self.tmp.name) / 'run'
         (run / 'cargo-slots/queue').mkdir(parents=True)
-        holder = open(run / 'cargo-slots/heavy0', 'w')                         # another build holds the host's one heavy slot
+        holder = open(run / 'cargo-slots/heavy0', 'w')                         # a host's cargo shim still holds its one heavy slot
         fcntl.flock(holder, fcntl.LOCK_EX)
         self.addCleanup(holder.close)
-        # ci-local's queue log: its tests stage waited 30 s for a slot with nothing else running, and its table.
-        script = ('printf "wait 1792749670 tests\\nslot 1792749700 tests\\n" >> "$CI_LOCAL_QUEUE_LOG"; echo "ci-local: stage logs in x"; '
-                  'echo "ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0   queue: 1 waits, 30s"')
+        script = ('echo "ci-local: stage logs in x"; '
+                  'echo "ci-local:   tests                      2026-10-23T10:01:10Z  2026-10-23T10:09:30Z     500s  exit 0"')
         command = ['sh', '-c', script, 'scripts/ci-local']
-        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'TREE_SLOT_WAIT_LIMIT', 1), \
-                mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05):
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})), mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05):
             code, out, err = self.run_st_test(command=command, extra_env={'ST_EVIDENCE_GOVERN': 'off', 'XDG_RUNTIME_DIR': str(run)})
         self.assertEqual(code, 0, out + err)
-        self.assertIn('tree-0 is free, but a build started now would wait for a slot (1 of 1 heavy slots busy', err)
-        self.assertIn('taking tree-0 after', err)                               # the slot never came free: the limit, then the tree
+        self.assertNotIn('slot', err)                                           # no slot is waited for, the tree is taken at once
         record = self.runs()[-1]
-        self.assertGreaterEqual(record['tree_slot_wait_s'], 1)
-        self.assertGreaterEqual(record['tree_wait_s'], record['tree_slot_wait_s'])
-        self.assertEqual((record['tree_slot_blocked_s'], record['tree_blocked_s'] - record['tree_pre_start_s']), (30, 30))
-        self.assertRegex(out, r'tree-0: waited \d+s for it \(\d+s of that free, waiting for a build slot\), held it \d+s, blocked in it \d+s')
+        self.assertEqual(record['tree_wait_s'], 0)
+        self.assertEqual(record['tree_blocked_s'], record['tree_pre_start_s'])
+        self.assertRegex(out, r'tree-0: waited \d+s for it, held it \d+s, blocked in it \d+s \(before ci-local started: dev shell, load gate\)')
 
     def test_a_streamed_check_keeps_the_time_limit_and_is_not_held_by_what_it_left_behind(self):
         self.commit('b.txt', 'two')
@@ -3054,22 +2999,6 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(len(got), 1)
         got[0][1].close()
 
-    def test_the_fallback_waits_for_a_build_slot_like_the_head_does(self):
-        queue = self.root / 'queue'
-        queue.mkdir(parents=True)
-        st_test.write_ticket(queue / f'003.{time.time_ns():019d}.{os.getpid()}')  # a waiter of this copy's rules
-        ready = [False]
-        got = []
-        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
-            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=lambda: (ready[0], 'no slot'))), daemon=True)
-            worse.start()
-            time.sleep(2.5)
-            self.assertEqual(got, [])                                           # free for longer than the fallback time, but a build would wait for a slot
-            ready[0] = True
-            worse.join(8)
-        self.assertEqual(len(got), 1)
-        got[0][1].close()
-
     def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
         self.root.mkdir(parents=True)
         holder = open(self.root / 'tree-0.lock', 'w')
@@ -3182,119 +3111,6 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(n, 0)
         self.assertIsNotNone(left.poll())
         self.assertIn('terminating 1 orphan process', said.getvalue())
-
-    def test_a_free_tree_is_left_while_no_build_slot_is_free_and_taken_once_one_is(self):
-        self.root.mkdir(parents=True)
-        free, asked, waits, got = [False], [], {}, []
-
-        def slot_ready():
-            asked.append(time.monotonic())
-            return free[0], 'test: 1 of 1 heavy slots busy'
-
-        said = io.StringIO()
-        with contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50, slot_ready=slot_ready, waits=waits)))
-            waiter.start()
-            time.sleep(0.6)
-            self.assertEqual(got, [])                                           # both trees are free, but its build would wait for a slot
-            for n in range(2):                                                  # and it holds neither while it waits (only for its look)
-                with open(self.root / f'tree-{n}.lock', 'w') as probe:
-                    for _ in range(100):
-                        try:
-                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            break
-                        except BlockingIOError:
-                            time.sleep(0.01)
-                    else:
-                        self.fail(f'tree-{n} stayed held while its waiter waited for a slot')
-                    fcntl.flock(probe, fcntl.LOCK_UN)
-            self.assertGreater(len(asked), 2, 'it looks again on every pass')
-            free[0] = True
-            waiter.join(5)
-        n, lock = got[0]
-        lock.close()
-        self.assertEqual(n, 0)
-        self.assertGreaterEqual(waits['slot_wait_s'], 0)
-        self.assertLessEqual(waits['slot_wait_s'], waits['tree_wait_s'] + 1)
-        self.assertEqual(said.getvalue().count('waiting for one without holding a tree'), 1)  # said once, not on every look
-        self.assertIn('a build slot is free', said.getvalue())
-
-    def test_a_free_tree_is_taken_anyway_once_it_has_waited_the_slot_limit_and_a_tree_in_use_does_not_count(self):
-        self.root.mkdir(parents=True)
-        holder = open(self.root / 'tree-0.lock', 'w')
-        fcntl.flock(holder, fcntl.LOCK_EX)
-        got, waits, said = [], {}, io.StringIO()
-        with mock.patch.object(st_test, 'TREE_SLOT_WAIT_LIMIT', 0.5), contextlib.redirect_stderr(said):
-            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, waits=waits,
-                                                                                     slot_ready=lambda: (False, 'test: never'))))
-            waiter.start()
-            time.sleep(1.0)                                                     # twice the limit, but its only tree was in use
-            self.assertEqual(got, [])
-            holder.close()
-            waiter.join(5)
-        n, lock = got[0]
-        lock.close()
-        self.assertEqual(n, 0)
-        self.assertIn('taking tree-0 after', said.getvalue())                   # slow, never starved
-        self.assertGreaterEqual(waits['tree_wait_s'], 1)
-        self.assertLess(waits['slot_wait_s'], waits['tree_wait_s'])             # only the time the free tree waited counts
-
-    def test_a_build_slot_is_ready_only_while_more_heavy_slots_are_free_than_heavy_tickets_wait_and_the_gate_admits(self):
-        run = Path(self.tmp.name) / 'run'
-        slots = run / 'cargo-slots'
-        home = Path(self.tmp.name) / 'home'
-        (home / '.config').mkdir(parents=True)
-        (home / '.config/cargo-heavy-slots').write_text('1\n')
-        environment = {'HOME': str(home), 'XDG_RUNTIME_DIR': str(run), 'PATH': os.environ['PATH']}
-        with mock.patch.dict(os.environ, environment, clear=True):
-            self.assertEqual(st_test.build_slot_ready()[0], True)               # no shim on this host: nothing to wait for
-            (slots / 'queue').mkdir(parents=True)
-            self.assertEqual(st_test.build_slot_ready(), (True, '1 of 1 heavy slots free'))
-            holder = open(slots / 'heavy0', 'w')                               # a build holds the one heavy slot
-            fcntl.flock(holder, fcntl.LOCK_EX)
-            ready, why = st_test.build_slot_ready()
-            self.assertEqual((ready, why), (False, '1 of 1 heavy slots busy, 0 heavy build(s) waiting for one'))
-            holder.close()
-            sleeper = subprocess.Popen(['sleep', '60'])
-            self.addCleanup(sleeper.wait)
-            self.addCleanup(sleeper.kill)
-            ticket = slots / 'queue' / f'heavy.050.{time.time_ns():019d}.{sleeper.pid}'
-            ticket.touch()                                                      # a heavy build waits there: the free slot is its
-            self.assertEqual(st_test.build_slot_ready(), (False, '0 of 1 heavy slots busy, 1 heavy build(s) waiting for one'))
-            with mock.patch.dict(os.environ, {'CARGO_HEAVY_SLOTS': '2'}):
-                self.assertEqual(st_test.build_slot_ready()[0], True)           # two free, one waiting
-            (slots / 'queue' / f'heavy.050.{time.time_ns():019d}.999999999').touch()  # a dead waiter is skipped
-            (slots / 'queue' / f'general.050.{time.time_ns():019d}.{sleeper.pid}').touch()  # and a light one does not count
-            sleeper.kill()
-            sleeper.wait()
-            self.assertEqual(st_test.build_slot_ready()[0], True)
-            self.assertEqual(len(os.listdir(slots / 'queue')), 3, "the shim's tickets are read, never removed")
-            gate = Path(self.tmp.name) / 'build-admission'
-            gate.write_text('#!/bin/sh\n[ "$1 $2" = "check heavy" ] || exit 9\nexit "$GATE_EXIT"\n')
-            gate.chmod(0o755)
-            with mock.patch.dict(os.environ, {'BUILD_ADMISSION_BIN': str(gate), 'GATE_EXIT': '1'}):
-                self.assertEqual(st_test.build_slot_ready(), (False, 'the build admission gate would not admit a heavy build now (load or memory)'))
-            with mock.patch.dict(os.environ, {'BUILD_ADMISSION_BIN': str(gate), 'GATE_EXIT': '2'}):
-                self.assertEqual(st_test.build_slot_ready()[0], True)           # a gate that cannot read the host stops nothing, as in the shim
-            with mock.patch.dict(os.environ, {'BUILD_ADMISSION_BIN': str(gate), 'GATE_EXIT': '0'}):
-                self.assertEqual(st_test.build_slot_ready()[0], True)
-
-    def test_blocked_is_the_time_a_stage_waited_for_a_slot_while_no_stage_ran(self):
-        log = Path(self.tmp.name) / 'linux-gate.queue'
-        t0 = calendar.timegm(time.strptime('2026-10-28T10:00:00Z', '%Y-%m-%dT%H:%M:%SZ'))
-        at = lambda seconds: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t0 + seconds))
-        stages = [{'name': 'setup', 'start': at(-60), 'end': at(0)},
-                  {'name': 'tests', 'start': at(0), 'end': at(400)},
-                  {'name': 'clippy', 'start': at(0), 'end': at(200)},
-                  {'name': 'odd', 'start': None, 'end': None}]
-        # Both wait 0-40 (blocked); clippy waits on to 100 while tests runs (not blocked); tests waits 300-360 after clippy ended (blocked).
-        log.write_text(''.join(f'{kind} {t0 + seconds} {stage}\n' for kind, seconds, stage in
-                               (('wait', 0, 'clippy'), ('wait', 0, 'tests'), ('slot', 40, 'tests'), ('slot', 100, 'clippy'),
-                                ('wait', 300, 'tests'), ('slot', 360, 'tests'))))
-        self.assertEqual(st_test.blocked_seconds(log, stages), 100)
-        self.assertEqual(st_test.queued_seconds(log), 160)                      # the union of the waits, as before
-        self.assertEqual(st_test.blocked_seconds(log, []), 160)                 # no stage times: every wait counts
-        self.assertEqual(st_test.blocked_seconds(Path(self.tmp.name) / 'missing', stages), 0)
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
         self.root.mkdir(parents=True)

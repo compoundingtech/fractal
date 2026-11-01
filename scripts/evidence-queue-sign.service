@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-# builds.slice: with every other build on the signing host; the run's test binaries run outside build admission.
+# builds.slice: with every other build on the signing host, the run's test binaries included.
 Slice=builds.slice
 Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
 # The environment is minimal on purpose: it runs queued code with the host's signing key within reach, so it carries no secret
