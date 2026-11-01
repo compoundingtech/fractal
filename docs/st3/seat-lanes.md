@@ -48,7 +48,8 @@ held to the same rule when the step is about to be delivered.
 A step that raises its seat's lane is delivered only once the raised lane fits the seat's host, as a
 seat's start is: until then it is `blocked` with a reason that starts `step lane`, names the room
 (`step lane 2 cores/16.0G for agent/… does not fit: 12.0G free of the 54.0G this host gives lanes …`),
-and is tried again on every pass and at least every 30 seconds. Once delivered, the seat's live
+and is tried again on every pass and at least every 30 seconds. The figures in the reason are the
+ones from when it was first held; they are not rewritten on each try. Once delivered, the seat's live
 slice is raised (`systemctl --user set-property --runtime`) while the seat holds the step, ready for
 it or claimed, and set back to the seat's own lane when it no longer does; admission counts the seat
 at the raised lane meanwhile. Its cores come back at once, but its memory only once the lane holds
