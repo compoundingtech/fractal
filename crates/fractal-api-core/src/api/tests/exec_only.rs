@@ -37,7 +37,14 @@ fn exec_only_card_running_children_and_refresh() {
     // The stale parent absent receipt is deliberately left untouched throughout.
     store.append_claim(&ClaimInput {
         subject: "agent/example/workers".into(), kind: "runtime.observed".into(), actor: None,
-        fields: serde_json::from_value(json!({"status":"absent"})).unwrap(),
+        fields: serde_json::from_value(json!({"status":"absent", "runtime_id":"old-primary",
+            "incarnation_id":"old-primary", "restarting_from":"old-primary"})).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/example/workers".into(), kind: "harness.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"state":"idle", "driver":"omp",
+            "incarnation_id":"old-primary"})).unwrap(),
         evidence: Vec::new(), expected_subject: None, idempotency_key: None,
     }).unwrap();
     assert_eq!(exec_card(store)["state"], "waiting");
@@ -50,6 +57,8 @@ fn exec_only_card_running_children_and_refresh() {
     assert_eq!(card["workspace"], "/work/project");
     assert!(card["driver"].is_null());
     assert!(card["harness_state"].is_null());
+    assert!(card["incarnation_id"].is_null());
+    assert!(card["current_session_id"].is_null());
     assert!(store.desired_subjects_named(&["agent/example/workers".into()]).unwrap()[0].member.is_none());
     observe_exec_card(store, "second", "failed");
     assert_eq!(exec_card(store)["state"], "failed", "a running sibling cannot mask failure");

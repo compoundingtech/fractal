@@ -3743,9 +3743,11 @@ fn client_agent_cards_presented(
             let mailbox_fault = mailbox_faults.as_ref().and_then(|faults| faults.get(&subject.subject));
             let fault = member_fault.or(mailbox_fault)
                 .or_else(|| stop_deferral_faults.get(&subject.subject));
+            let exec_card = exec_cards.get(&subject.subject);
             let fields = subject
                 .actual
                 .as_ref()
+                .filter(|_| exec_card.is_none())
                 .map(|actual| actual.get("fields").unwrap_or(actual));
             let observed = fields
                 .and_then(|fields| fields.get("status"))
@@ -3837,7 +3839,6 @@ fn client_agent_cards_presented(
                 _ if subject.desired.is_some() => "desired",
                 _ => "stopped",
             };
-            let exec_card = exec_cards.get(&subject.subject);
             let state = exec_card.map_or(state, |card| card.state);
             // When a seat that has no running session began waiting for one.
             let launch_since_ms = (matches!(state, "desired" | "starting")
@@ -3948,7 +3949,9 @@ fn client_agent_cards_presented(
                 .and_then(|state| state.suspend_operation_id.as_deref())
                 .map(|request| crate::suspension::completed_suspend_at(store, request, snapshot_index))
                 .transpose()?.flatten();
-            let end_reason = end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at);
+            let end_reason = if exec_card.is_some() { None } else {
+                end_reason::project(&subject, terminal_harness.as_ref(), original_suspend.as_ref().or(suspension.as_ref()), desired_claim.as_ref(), parked, retired_subjects.contains(&subject.subject), &updated_at)
+            };
             let name = crate::model::effective_agent_name(
                 &subject.subject, subject.desired.as_ref(),
             ).to_owned();
